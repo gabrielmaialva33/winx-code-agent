@@ -20,7 +20,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Database
-rusqlite = { version = "0.34.0", features = ["bundled"] }
+rusqlite = { version = "0.35.0", features = ["bundled"] }
 
 # OpenAI
 async-openai = "0.28.1"
