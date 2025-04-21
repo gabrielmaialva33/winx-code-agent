@@ -40,7 +40,7 @@ serde_json = "1.0"
 
 # HTTP client and date/time handling
 chrono = { version = "0.4", features = ["serde"] }
-clap = { version = "4.4", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
 
 
 # For file operations and diff/edit
