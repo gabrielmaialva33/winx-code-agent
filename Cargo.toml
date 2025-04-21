@@ -54,5 +54,5 @@ tempfile = "3.19.1"
 lazy_static = "1.4.0"
 rayon = "1.10.0"
 async-trait = "0.1.88"
-defer = "0.1"
+defer = "0.2"
 walkdir = "2.4.0"  # For recursive directory traversal
