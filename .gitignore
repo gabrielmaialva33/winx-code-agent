@@ -1,0 +1,11 @@
+/target
+**/*.rs.bk
+Cargo.lock
+.idea/
+.vscode/
+.DS_Store
+*.pdb
+**/__pycache__/
+.cargo/
+/debug/
+/release/
