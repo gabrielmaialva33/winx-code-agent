@@ -1,60 +1,109 @@
 use crate::bash::{expand_user, generate_chat_id, Console, FileWhitelistData, SimpleConsole};
+use crate::error::{WinxError, WinxResult};
 use crate::types::Mode;
-use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
 
+/// The current state of the bash process
 pub enum BashStateStatus {
+    /// The bash process is ready to accept commands
     Repl,
+
+    /// The bash process is running a command
     Pending(DateTime<Utc>),
 }
 
+/// The mode of the bash process
 pub enum BashMode {
+    /// Normal mode with full access
     NormalMode,
+
+    /// Restricted mode with limited access
     RestrictedMode,
 }
 
+/// Type of allowed commands
 pub enum AllowedCommandsType {
+    /// All commands are allowed
     All,
+
+    /// No commands are allowed
     None,
 }
 
+/// Type of allowed globs
 pub enum AllowedGlobsType {
+    /// All globs are allowed
     All,
+
+    /// Only specific globs are allowed
     Specific(Vec<String>),
 }
 
+/// Configuration for bash commands
 pub struct BashCommandMode {
+    /// The bash mode
     pub bash_mode: BashMode,
+
+    /// The type of allowed commands
     pub allowed_commands: AllowedCommandsType,
 }
 
+/// Configuration for file editing
 pub struct FileEditMode {
+    /// The allowed globs for file editing
     pub allowed_globs: AllowedGlobsType,
 }
 
+/// Configuration for writing empty files
 pub struct WriteIfEmptyMode {
+    /// The allowed globs for writing empty files
     pub allowed_globs: AllowedGlobsType,
 }
 
+/// The state of the bash process
 pub struct BashState {
+    /// The console for output
     pub console: Box<dyn Console>,
+
+    /// The current working directory
     pub cwd: String,
+
+    /// The workspace root directory
     pub workspace_root: String,
+
+    /// The bash command mode configuration
     pub bash_command_mode: BashCommandMode,
+
+    /// The file edit mode configuration
     pub file_edit_mode: FileEditMode,
+
+    /// The write if empty mode configuration
     pub write_if_empty_mode: WriteIfEmptyMode,
+
+    /// The current mode
     pub mode: Mode,
+
+    /// Files that are whitelisted for overwriting
     pub whitelist_for_overwrite: HashMap<String, FileWhitelistData>,
+
+    /// The current chat ID
     pub current_chat_id: String,
+
+    /// The bash process
     pub shell_process: Option<Child>,
+
+    /// The current state of the bash process
     pub state: BashStateStatus,
+
+    /// The last command executed
     pub last_command: String,
+
+    /// The pending output from the last command
     pub pending_output: String,
 }
 
@@ -63,6 +112,7 @@ const PROMPT_CONST: &str = "wcgw ";
 const PROMPT_STATEMENT: &str = "export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND= PS1='wcgw'' '";
 
 impl BashState {
+    /// Create a new BashState
     pub fn new(
         console: Box<dyn Console>,
         working_dir: &str,
@@ -71,9 +121,12 @@ impl BashState {
         write_if_empty_mode: Option<WriteIfEmptyMode>,
         mode: Option<Mode>,
         chat_id: Option<String>,
-    ) -> Result<Self> {
+    ) -> WinxResult<Self> {
         let cwd = if working_dir.is_empty() {
-            std::env::current_dir()?.to_string_lossy().to_string()
+            std::env::current_dir()
+                .map_err(|e| WinxError::Io(e))?
+                .to_string_lossy()
+                .to_string()
         } else {
             working_dir.to_string()
         };
@@ -115,12 +168,13 @@ impl BashState {
         Ok(state)
     }
 
-    pub fn init_shell(&mut self) -> Result<()> {
+    /// Initialize the bash shell
+    pub fn init_shell(&mut self) -> WinxResult<()> {
         self.state = BashStateStatus::Repl;
         self.last_command = String::new();
 
         // Create the working directory if it doesn't exist
-        fs::create_dir_all(&self.cwd)?;
+        fs::create_dir_all(&self.cwd).map_err(|e| WinxError::Io(e))?;
 
         // Start a new bash process
         let restricted_flag = match self.bash_command_mode.bash_mode {
@@ -142,11 +196,12 @@ impl BashState {
             .env("PROMPT_COMMAND", "")
             .env("GIT_PAGER", "cat")
             .env("PAGER", "cat")
-            .spawn()?;
+            .spawn()
+            .map_err(|e| WinxError::Io(e))?;
 
         // Set PS1 to a constant value for easier parsing
         if let Some(ref mut stdin) = shell_process.stdin {
-            writeln!(stdin, "{}", PROMPT_STATEMENT)?;
+            writeln!(stdin, "{}", PROMPT_STATEMENT).map_err(|e| WinxError::Io(e))?;
         }
 
         self.shell_process = Some(shell_process);
@@ -154,10 +209,11 @@ impl BashState {
         Ok(())
     }
 
-    pub fn execute_command(&mut self, cmd: &str) -> Result<String> {
+    /// Execute a command in the bash shell
+    pub fn execute_command(&mut self, cmd: &str) -> WinxResult<String> {
         if let Some(ref mut process) = self.shell_process {
             if let Some(ref mut stdin) = process.stdin {
-                writeln!(stdin, "{}", cmd)?;
+                writeln!(stdin, "{}", cmd).map_err(|e| WinxError::Io(e))?;
                 self.last_command = cmd.to_string();
             }
 
@@ -170,7 +226,7 @@ impl BashState {
                 match stdout.read_to_string(&mut output) {
                     Ok(_) => (),
                     Err(e) => {
-                        return Err(anyhow!("Failed to read stdout: {}", e));
+                        return Err(WinxError::Io(e));
                     }
                 }
             }
@@ -181,15 +237,16 @@ impl BashState {
             return Ok(output);
         }
 
-        Err(anyhow!("Shell process not initialized"))
+        Err(WinxError::ShellNotInitialized)
     }
 
+    /// Add files to the whitelist for overwriting
     pub fn add_to_whitelist_for_overwrite(
         &mut self,
         file_paths_with_ranges: HashMap<String, Vec<(usize, usize)>>,
-    ) -> Result<()> {
+    ) -> WinxResult<()> {
         for (file_path, ranges) in file_paths_with_ranges {
-            let file_content = fs::read(&file_path)?;
+            let file_content = fs::read(&file_path).map_err(|e| WinxError::Io(e))?;
             let file_hash = format!("{:x}", Sha256::digest(&file_content));
             let total_lines = file_content.iter().filter(|&&b| b == b'\n').count() + 1;
 
@@ -210,6 +267,7 @@ impl BashState {
         Ok(())
     }
 
+    /// Get the status of the bash shell
     pub fn get_status(&self) -> String {
         let mut status = "\n\n---\n\n".to_string();
 
@@ -234,7 +292,8 @@ impl BashState {
         status.trim_end().to_string()
     }
 
-    pub fn update_cwd(&mut self) -> Result<String> {
+    /// Update the current working directory
+    pub fn update_cwd(&mut self) -> WinxResult<String> {
         let output = self.execute_command("pwd")?;
         let current_dir = output.trim().to_string();
         self.cwd = current_dir.clone();

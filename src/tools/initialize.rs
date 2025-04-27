@@ -1,19 +1,37 @@
+//! Initialize tool implementation
+//!
+//! This module contains the implementation of the Initialize tool, which is used
+//! to set up the bash environment with a specified workspace path and mode.
+
 use crate::bash::{
     expand_user, AllowedCommandsType, AllowedGlobsType, BashCommandMode, BashMode, BashState,
     Context, FileEditMode, SimpleConsole, WriteIfEmptyMode,
 };
+use crate::error::{WinxError, WinxResult};
 use crate::types::{AllowedCommands, AllowedGlobs, Initialize, InitializeType, Mode};
-use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
-pub async fn initialize_tool(ctx: &Context, init: &Initialize) -> Result<String> {
+/// Initialize a bash environment with the given parameters
+///
+/// This function sets up a bash environment with the specified workspace path and mode.
+/// It can be used to initialize a new environment or to modify an existing one.
+///
+/// # Arguments
+///
+/// * `ctx` - The context containing the bash state
+/// * `init` - The initialization parameters
+///
+/// # Returns
+///
+/// A result containing a string with information about the initialization
+pub async fn initialize_tool(ctx: &Context, init: &Initialize) -> WinxResult<String> {
     let workspace_path = expand_user(&init.any_workspace_path);
 
     // Ensure the workspace path exists
     if !workspace_path.is_empty() {
         if let Some(parent) = Path::new(&workspace_path).parent() {
-            fs::create_dir_all(parent)?;
+            fs::create_dir_all(parent).map_err(|e| WinxError::Io(e))?;
         }
     }
 
@@ -113,11 +131,15 @@ pub async fn initialize_tool(ctx: &Context, init: &Initialize) -> Result<String>
                 Some(write_if_empty_mode),
                 Some(init.mode_name.clone()),
                 Some(chat_id),
-            )?;
+            )
+            .map_err(|e| WinxError::ServiceInitialization(e.to_string()))?;
 
             // Replace the current bash state with the new one
             {
-                let mut state = ctx.bash_state.lock().unwrap();
+                let mut state = ctx
+                    .bash_state
+                    .lock()
+                    .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
                 *state = bash_state;
             }
 
@@ -174,7 +196,10 @@ pub async fn initialize_tool(ctx: &Context, init: &Initialize) -> Result<String>
             }
 
             // Add chat ID
-            let state = ctx.bash_state.lock().unwrap();
+            let state = ctx
+                .bash_state
+                .lock()
+                .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
             output.push_str(&format!(
                 "\n---\n\nUse chat_id={} for all winx tool calls which take that.\n",
                 state.current_chat_id
@@ -185,22 +210,35 @@ pub async fn initialize_tool(ctx: &Context, init: &Initialize) -> Result<String>
         }
         InitializeType::UserAskedModeChange => {
             // Change the mode of the existing bash state
-            let mut state = ctx.bash_state.lock().unwrap();
+            let mut state = ctx
+                .bash_state
+                .lock()
+                .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
             state.mode = init.mode_name.clone();
             output.push_str(&format!("Mode changed to {:?}\n", init.mode_name));
         }
         InitializeType::ResetShell => {
             // Reset the shell
-            let mut state = ctx.bash_state.lock().unwrap();
-            state.init_shell()?;
+            let mut state = ctx
+                .bash_state
+                .lock()
+                .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
+            state
+                .init_shell()
+                .map_err(|e| WinxError::ServiceInitialization(e.to_string()))?;
             output.push_str("Shell reset successful\n");
         }
         InitializeType::UserAskedChangeWorkspace => {
             // Change the workspace
-            let mut state = ctx.bash_state.lock().unwrap();
+            let mut state = ctx
+                .bash_state
+                .lock()
+                .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
             state.cwd = workspace_path.clone();
             state.workspace_root = workspace_path;
-            state.init_shell()?;
+            state
+                .init_shell()
+                .map_err(|e| WinxError::ServiceInitialization(e.to_string()))?;
             output.push_str(&format!("Workspace changed to {}\n", state.cwd));
         }
     }

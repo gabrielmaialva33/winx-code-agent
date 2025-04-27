@@ -1,6 +1,7 @@
-use crate::bash::Context;
-use crate::types::*;
-use anyhow::Result;
+//! Tool implementations for Winx
+//!
+//! This module contains implementations of the various tools that Winx provides,
+//! such as initializing the environment and executing bash commands.
 
 pub mod bash_command;
 pub mod initialize;

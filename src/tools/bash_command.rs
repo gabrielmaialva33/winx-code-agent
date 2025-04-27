@@ -1,8 +1,14 @@
+//! BashCommand tool implementation
+//!
+//! This module contains the implementation of the BashCommand tool, which is used
+//! to execute commands in the bash environment.
+
 use crate::bash::{AllowedCommandsType, BashStateStatus, Context};
+use crate::error::{WinxError, WinxResult};
 use crate::types::{BashAction, BashCommand, Special};
-use anyhow::{anyhow, Result};
 use chrono::Utc;
 
+/// Error message for when a command is already running
 const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can't run multiple shell sessions, likely a previous program hasn't exited. 
 1. Get its output using status check.
 2. Use `send_ascii` or `send_specials` to give inputs to the running program OR
@@ -10,12 +16,31 @@ const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can
 4. Interrupt and run the process in background by re-running it using screen
 ";
 
-pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<String> {
+/// Execute a bash command in the given context
+///
+/// This function executes a bash command in the given context, handling various
+/// types of commands such as regular commands, status checks, sending text, etc.
+///
+/// # Arguments
+///
+/// * `ctx` - The context containing the bash state
+/// * `cmd` - The bash command to execute
+///
+/// # Returns
+///
+/// A result containing a string with the output of the command
+pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> WinxResult<String> {
     // Check if the chat ID matches
     {
-        let state = ctx.bash_state.lock().unwrap();
+        let state = ctx
+            .bash_state
+            .lock()
+            .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
         if cmd.chat_id != state.current_chat_id {
-            return Err(anyhow!("Error: No saved bash state found for chat ID {}. Please initialize first with this ID.", cmd.chat_id));
+            return Err(WinxError::ChatIdMismatch(format!(
+                "No saved bash state found for chat ID {}. Please initialize first with this ID.",
+                cmd.chat_id
+            )));
         }
     }
 
@@ -24,10 +49,13 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
         BashAction::Command(command) => {
             // Check if commands are allowed
             {
-                let state = ctx.bash_state.lock().unwrap();
+                let state = ctx
+                    .bash_state
+                    .lock()
+                    .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
                 match state.bash_command_mode.allowed_commands {
                     AllowedCommandsType::None => {
-                        return Err(anyhow!("Error: BashCommand not allowed in current mode"));
+                        return Err(WinxError::CommandsNotAllowed);
                     }
                     _ => {}
                 }
@@ -35,7 +63,7 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
                 // Check if the shell is ready to accept commands
                 match state.state {
                     BashStateStatus::Pending(_) => {
-                        return Err(anyhow!(WAITING_INPUT_MESSAGE));
+                        return Err(WinxError::CommandAlreadyRunning);
                     }
                     _ => {}
                 }
@@ -47,19 +75,28 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
 
             // Update the state
             {
-                let mut state = ctx.bash_state.lock().unwrap();
+                let mut state = ctx
+                    .bash_state
+                    .lock()
+                    .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
                 state.state = BashStateStatus::Pending(Utc::now());
             }
 
             // Execute the command
             let output = {
-                let mut state = ctx.bash_state.lock().unwrap();
+                let mut state = ctx
+                    .bash_state
+                    .lock()
+                    .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
                 state.execute_command(cmd_str)?
             };
 
             // Update the state again
             {
-                let mut state = ctx.bash_state.lock().unwrap();
+                let mut state = ctx
+                    .bash_state
+                    .lock()
+                    .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
                 state.state = BashStateStatus::Repl;
                 // Attempt to update the current working directory
                 let _ = state.update_cwd();
@@ -67,7 +104,10 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
 
             // Add status information
             let status = {
-                let state = ctx.bash_state.lock().unwrap();
+                let state = ctx
+                    .bash_state
+                    .lock()
+                    .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
                 state.get_status()
             };
 
@@ -76,7 +116,10 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
         BashAction::StatusCheck(_) => {
             // Check the status of the current command
             let status = {
-                let state = ctx.bash_state.lock().unwrap();
+                let state = ctx
+                    .bash_state
+                    .lock()
+                    .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
                 match state.state {
                     BashStateStatus::Pending(_) => {
                         format!("Command is still running\n{}", state.get_status())
@@ -92,13 +135,18 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
         BashAction::SendText(send_text) => {
             // Send text to the current command
             if send_text.send_text.is_empty() {
-                return Err(anyhow!("Failure: send_text cannot be empty"));
+                return Err(WinxError::BashCommand(
+                    "send_text cannot be empty".to_string(),
+                ));
             }
 
             state_print(ctx, &format!("Interact text: {}", send_text.send_text));
 
             // In a real implementation, we would send the text to the process
-            let mut state = ctx.bash_state.lock().unwrap();
+            let mut state = ctx
+                .bash_state
+                .lock()
+                .map_err(|_| WinxError::Unknown("Failed to lock bash state".to_string()))?;
             state.execute_command(&send_text.send_text)?;
 
             Ok(format!("Text sent: {}", send_text.send_text))
@@ -106,7 +154,9 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
         BashAction::SendSpecials(send_specials) => {
             // Send special keys to the current command
             if send_specials.send_specials.is_empty() {
-                return Err(anyhow!("Failure: send_specials cannot be empty"));
+                return Err(WinxError::BashCommand(
+                    "send_specials cannot be empty".to_string(),
+                ));
             }
 
             state_print(
@@ -150,7 +200,9 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
         BashAction::SendAscii(send_ascii) => {
             // Send ASCII characters to the current command
             if send_ascii.send_ascii.is_empty() {
-                return Err(anyhow!("Failure: send_ascii cannot be empty"));
+                return Err(WinxError::BashCommand(
+                    "send_ascii cannot be empty".to_string(),
+                ));
             }
 
             state_print(
@@ -166,7 +218,14 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
     }
 }
 
+/// Print a message to the console using the bash state
+///
+/// # Arguments
+///
+/// * `ctx` - The context containing the bash state
+/// * `message` - The message to print
 fn state_print(ctx: &Context, message: &str) {
-    let state = ctx.bash_state.lock().unwrap();
-    state.console.print(message);
+    if let Ok(state) = ctx.bash_state.lock() {
+        state.console.print(message);
+    }
 }

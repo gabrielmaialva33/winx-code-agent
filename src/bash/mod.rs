@@ -1,5 +1,5 @@
-use crate::types::{AllowedCommands, AllowedGlobs, Mode};
-use anyhow::{anyhow, Result};
+use crate::error::{WinxError, WinxResult};
+use crate::types::Mode;
 use chrono::{DateTime, Utc};
 use rand::Rng;
 use sha2::{Digest, Sha256};
@@ -13,13 +13,16 @@ use std::sync::{Arc, Mutex};
 pub mod state;
 pub use state::*;
 
-// Console trait to log messages
+/// Console trait to log messages
 pub trait Console: Send + Sync {
+    /// Print a message to the console
     fn print(&self, msg: &str);
+
+    /// Log a message to the console
     fn log(&self, msg: &str);
 }
 
-// Simple console implementation that logs to stdout
+/// Simple console implementation that logs to stdout
 pub struct SimpleConsole;
 
 impl Console for SimpleConsole {
@@ -32,15 +35,21 @@ impl Console for SimpleConsole {
     }
 }
 
-// FileWhitelistData struct to track file access
+/// FileWhitelistData struct to track file access
 #[derive(Debug, Clone)]
 pub struct FileWhitelistData {
+    /// The hash of the file contents
     pub file_hash: String,
+
+    /// The ranges of lines that have been read
     pub line_ranges_read: Vec<(usize, usize)>,
+
+    /// The total number of lines in the file
     pub total_lines: usize,
 }
 
 impl FileWhitelistData {
+    /// Create a new FileWhitelistData instance
     pub fn new(
         file_hash: String,
         line_ranges_read: Vec<(usize, usize)>,
@@ -53,6 +62,7 @@ impl FileWhitelistData {
         }
     }
 
+    /// Calculate the percentage of the file that has been read
     pub fn get_percentage_read(&self) -> f64 {
         if self.total_lines == 0 {
             return 100.0;
@@ -68,10 +78,12 @@ impl FileWhitelistData {
         (lines_read.len() as f64 / self.total_lines as f64) * 100.0
     }
 
+    /// Check if enough of the file has been read (>=99%)
     pub fn is_read_enough(&self) -> bool {
         self.get_percentage_read() >= 99.0
     }
 
+    /// Get ranges of lines that haven't been read yet
     pub fn get_unread_ranges(&self) -> Vec<(usize, usize)> {
         if self.total_lines == 0 {
             return vec![];
@@ -105,22 +117,26 @@ impl FileWhitelistData {
         unread_ranges
     }
 
+    /// Add a new range of lines that have been read
     pub fn add_range(&mut self, start: usize, end: usize) {
         self.line_ranges_read.push((start, end));
     }
 }
 
-// Helper functions
+/// Generate a random chat ID
 pub fn generate_chat_id() -> String {
-    format!("i{}", rand::thread_rng().gen_range(1000..=9999))
+    let mut rng = rand::rng();
+    format!("i{}", rng.random_range(1000..=9999))
 }
 
-// Implement a context struct to pass around bash state
+/// Context struct to pass around bash state
 pub struct Context {
+    /// The bash state
     pub bash_state: Arc<Mutex<BashState>>,
 }
 
 impl Context {
+    /// Create a new Context with the given BashState
     pub fn new(bash_state: BashState) -> Self {
         Self {
             bash_state: Arc::new(Mutex::new(bash_state)),
@@ -128,7 +144,7 @@ impl Context {
     }
 }
 
-// Helper function to expand ~ in paths
+/// Expand ~ in paths to the user's home directory
 pub fn expand_user(path: &str) -> String {
     if path.starts_with("~") {
         if let Some(home_dir) = home::home_dir() {

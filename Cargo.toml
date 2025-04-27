@@ -17,3 +17,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 schemars = "0.8"
 home = "0.5"
 sha2 = "0.10"
+thiserror = "2.0.12"
