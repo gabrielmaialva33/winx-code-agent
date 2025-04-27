@@ -17,7 +17,7 @@ pub enum WinxError {
     BashStateLockError(String),
 
     /// Error when the bash state is not initialized
-    #[error("Bash state not initialized, call with type=first_call first")]
+    #[error("Bash state not initialized, call Initialize first with type=first_call")]
     BashStateNotInitialized,
 
     /// Error when a command fails to execute
@@ -47,6 +47,26 @@ pub enum WinxError {
     /// Error when serializing data
     #[error("Serialization error: {0}")]
     SerializationError(String),
+
+    /// Error in the search/replace format
+    #[error("Search/replace syntax error: {0}")]
+    SearchReplaceSyntaxError(String),
+
+    /// Error when search block is not found in content
+    #[error("Search block not found in content: {0}")]
+    SearchBlockNotFound(String),
+
+    /// Error when JSON parsing fails
+    #[error("Invalid JSON: {0}")]
+    JsonParseError(String),
+
+    /// Error when a file is too large for operation
+    #[error("File {path} is too large: {size} bytes (max {max_size})")]
+    FileTooLarge {
+        path: PathBuf,
+        size: u64,
+        max_size: u64,
+    },
 
     /// IO error
     #[error("IO error: {0}")]
@@ -120,6 +140,18 @@ impl Clone for WinxError {
             },
             Self::DeserializationError(msg) => Self::DeserializationError(msg.clone()),
             Self::SerializationError(msg) => Self::SerializationError(msg.clone()),
+            Self::SearchReplaceSyntaxError(msg) => Self::SearchReplaceSyntaxError(msg.clone()),
+            Self::SearchBlockNotFound(msg) => Self::SearchBlockNotFound(msg.clone()),
+            Self::JsonParseError(msg) => Self::JsonParseError(msg.clone()),
+            Self::FileTooLarge {
+                path,
+                size,
+                max_size,
+            } => Self::FileTooLarge {
+                path: path.clone(),
+                size: *size,
+                max_size: *max_size,
+            },
             Self::IoError(err) => Self::IoError(std::io::Error::new(err.kind(), err.to_string())),
         }
     }

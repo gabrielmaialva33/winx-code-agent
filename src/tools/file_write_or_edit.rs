@@ -33,10 +33,104 @@ fn replace_marker() -> Regex {
 /// Maximum file size to read
 const MAX_FILE_SIZE: u64 = 10_000_000; // 10MB
 
+/// Helper struct for search/replace operations
+#[derive(Debug)]
+struct SearchReplaceHelper {
+    /// The original content
+    original_content: String,
+    /// The search/replace blocks
+    blocks: Vec<(String, String)>,
+    /// Debugging information
+    debug_info: Vec<String>,
+}
+
+impl SearchReplaceHelper {
+    /// Create a new instance from content and search/replace blocks
+    fn new(original_content: String, blocks: Vec<(String, String)>) -> Self {
+        Self {
+            original_content,
+            blocks,
+            debug_info: Vec::new(),
+        }
+    }
+
+    /// Apply the search/replace blocks to the original content
+    fn apply(mut self) -> Result<String> {
+        let mut content = self.original_content.clone();
+
+        // Apply each block sequentially
+        for (i, (search, replace)) in self.blocks.iter().enumerate() {
+            if !content.contains(search) {
+                // Collect debugging information
+                self.debug_info
+                    .push(format!("Block {} not found in content", i + 1));
+
+                // Try to find approximate matches
+                let suggestion = self
+                    .find_closest_match(search, &content)
+                    .unwrap_or_default();
+
+                return Err(WinxError::SearchBlockNotFound(format!(
+                    "Search block not found in content:\n```\n{}\n```\n\n{}\n\nThis might be due to mismatched whitespace, line endings, or the block doesn't exist exactly as specified. Consider using percentage_to_change > 50 to replace the entire file instead.",
+                    search.trim(), suggestion
+                )));
+            }
+
+            content = content.replace(search, replace);
+        }
+
+        Ok(content)
+    }
+
+    /// Find the closest match for a search block
+    fn find_closest_match(&self, search: &str, content: &str) -> Option<String> {
+        // Simple heuristic: check if the search block without whitespace is present
+        let search_no_whitespace = search.replace(" ", "").replace("\n", "").replace("\t", "");
+        let content_no_whitespace = content.replace(" ", "").replace("\n", "").replace("\t", "");
+
+        if content_no_whitespace.contains(&search_no_whitespace) {
+            return Some("Suggestion: Your search block might have different whitespace or line endings than the content.".to_string());
+        }
+
+        // Check if a substring of the search block is present (for approximate matches)
+        let search_lines: Vec<&str> = search.lines().collect();
+        if search_lines.len() > 1 {
+            for line in search_lines {
+                if line.trim().len() > 10 && content.contains(line.trim()) {
+                    return Some(format!(
+                        "Suggestion: Found one line of your search block in the content: '{}...'",
+                        &line.trim()[..20.min(line.trim().len())]
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+}
+
 /// Error raised during search/replace block parsing
 #[derive(Debug, thiserror::Error)]
 #[error("Search/Replace Syntax Error: {0}")]
 struct SearchReplaceSyntaxError(String);
+
+impl SearchReplaceSyntaxError {
+    /// Create a new error with a detailed explanation and example
+    fn with_help_text(message: impl Into<String>) -> Self {
+        let msg = message.into();
+        Self(format!(
+            "{}\n---\n\nMake sure blocks are in correct sequence, and the markers are in separate lines:\n\n<<<<<<< SEARCH\n example old\n=======\n example new\n>>>>>>> REPLACE",
+            msg
+        ))
+    }
+}
+
+/// Convert internal SearchReplaceSyntaxError to WinxError
+impl From<SearchReplaceSyntaxError> for WinxError {
+    fn from(err: SearchReplaceSyntaxError) -> Self {
+        WinxError::SearchReplaceSyntaxError(err.0)
+    }
+}
 
 /// Check if the content is an edit (search/replace blocks) or full content
 ///
@@ -123,6 +217,13 @@ fn get_context_for_errors(file_content: &str, error_line: usize) -> String {
 fn parse_search_replace_blocks(
     content: &str,
 ) -> std::result::Result<Vec<(String, String)>, SearchReplaceSyntaxError> {
+    // Check for empty content first
+    if content.trim().is_empty() {
+        return Err(SearchReplaceSyntaxError::with_help_text(
+            "No search/replace blocks found in empty content",
+        ));
+    }
+
     let lines: Vec<&str> = content.lines().collect();
     let mut blocks = Vec::new();
 
@@ -136,7 +237,7 @@ fn parse_search_replace_blocks(
             // Read the search block
             while i < lines.len() && !divider_marker().is_match(lines[i]) {
                 if search_marker().is_match(lines[i]) || replace_marker().is_match(lines[i]) {
-                    return Err(SearchReplaceSyntaxError(format!(
+                    return Err(SearchReplaceSyntaxError::with_help_text(format!(
                         "Line {}: Found stray marker in SEARCH block: {}",
                         i + 1,
                         lines[i]
@@ -147,15 +248,25 @@ fn parse_search_replace_blocks(
             }
 
             if i >= lines.len() {
-                return Err(SearchReplaceSyntaxError(format!(
+                return Err(SearchReplaceSyntaxError::with_help_text(format!(
                     "Line {}: Unclosed SEARCH block - missing ======= marker",
                     line_num
                 )));
             }
 
             if search_block.is_empty() {
-                return Err(SearchReplaceSyntaxError(format!(
-                    "Line {}: SEARCH block cannot be empty",
+                return Err(SearchReplaceSyntaxError::with_help_text(format!(
+                    "Line {}: SEARCH block cannot be empty. You must include content to search for between the SEARCH and ======= markers",
+                    line_num
+                )));
+            }
+
+            // Check for whitespace-only search blocks
+            let search_string = search_block.join("\n");
+            let search_content = search_string.trim();
+            if search_content.is_empty() {
+                return Err(SearchReplaceSyntaxError::with_help_text(format!(
+                    "Line {}: SEARCH block contains only whitespace. You must include non-whitespace content to search for",
                     line_num
                 )));
             }
@@ -166,7 +277,7 @@ fn parse_search_replace_blocks(
             // Read the replace block
             while i < lines.len() && !replace_marker().is_match(lines[i]) {
                 if search_marker().is_match(lines[i]) || divider_marker().is_match(lines[i]) {
-                    return Err(SearchReplaceSyntaxError(format!(
+                    return Err(SearchReplaceSyntaxError::with_help_text(format!(
                         "Line {}: Found stray marker in REPLACE block: {}",
                         i + 1,
                         lines[i]
@@ -177,7 +288,7 @@ fn parse_search_replace_blocks(
             }
 
             if i >= lines.len() {
-                return Err(SearchReplaceSyntaxError(format!(
+                return Err(SearchReplaceSyntaxError::with_help_text(format!(
                     "Line {}: Unclosed block - missing REPLACE marker",
                     line_num
                 )));
@@ -188,7 +299,7 @@ fn parse_search_replace_blocks(
             blocks.push((search_block.join("\n"), replace_block.join("\n")));
         } else {
             if replace_marker().is_match(lines[i]) || divider_marker().is_match(lines[i]) {
-                return Err(SearchReplaceSyntaxError(format!(
+                return Err(SearchReplaceSyntaxError::with_help_text(format!(
                     "Line {}: Found stray marker outside block: {}",
                     i + 1,
                     lines[i]
@@ -199,7 +310,7 @@ fn parse_search_replace_blocks(
     }
 
     if blocks.is_empty() {
-        return Err(SearchReplaceSyntaxError(
+        return Err(SearchReplaceSyntaxError::with_help_text(
             "No valid search replace blocks found, ensure your SEARCH/REPLACE blocks are formatted correctly".to_string()
         ));
     }
@@ -222,22 +333,13 @@ fn parse_search_replace_blocks(
 fn apply_search_replace_blocks(
     blocks: Vec<(String, String)>,
     original_content: String,
-) -> std::result::Result<String, SearchReplaceSyntaxError> {
-    let mut content = original_content;
+) -> Result<String> {
+    // Create a helper and apply the blocks
+    let helper = SearchReplaceHelper::new(original_content, blocks);
 
-    // Apply each block sequentially
-    for (search, replace) in blocks {
-        if !content.contains(&search) {
-            return Err(SearchReplaceSyntaxError(format!(
-                "Search block not found in content:\n```\n{}\n```",
-                search
-            )));
-        }
-
-        content = content.replace(&search, &replace);
-    }
-
-    Ok(content)
+    // The helper does the actual work and provides better error messages
+    helper.apply()
+    // We don't need to log here as the error is already logged at the call site
 }
 
 /// Write content to a file
@@ -462,37 +564,56 @@ pub async fn handle_tool_call(
         if !file_path_obj.exists() {
             return Err(WinxError::FileAccessError {
                 path: file_path_obj.to_path_buf(),
-                message: "File does not exist, cannot perform search/replace edit".to_string(),
+                message: "File does not exist, cannot perform search/replace edit. Use percentage_to_change > 50 to create a new file.".to_string(),
             });
         }
 
         // Get file metadata
-        let metadata = fs::metadata(file_path_obj).context("Failed to get file metadata")?;
+        let metadata = match fs::metadata(file_path_obj) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!("Failed to get file metadata: {}", e);
+                return Err(WinxError::FileAccessError {
+                    path: file_path_obj.to_path_buf(),
+                    message: format!(
+                        "Failed to get file metadata: {}. Check file permissions.",
+                        e
+                    ),
+                });
+            }
+        };
 
         // Check file size
         if metadata.len() > MAX_FILE_SIZE {
-            return Err(WinxError::FileAccessError {
+            return Err(WinxError::FileTooLarge {
                 path: file_path_obj.to_path_buf(),
-                message: format!(
-                    "File is too large: {} bytes (max {})",
-                    metadata.len(),
-                    MAX_FILE_SIZE
-                ),
+                size: metadata.len(),
+                max_size: MAX_FILE_SIZE,
             });
         }
 
         // Read the file content
-        let original_content = fs::read_to_string(file_path_obj)
-            .context("Failed to read file for search/replace edit")?;
+        let original_content = match fs::read_to_string(file_path_obj) {
+            Ok(content) => content,
+            Err(e) => {
+                tracing::error!("Failed to read file for search/replace edit: {}", e);
+                return Err(WinxError::FileAccessError {
+                    path: file_path_obj.to_path_buf(),
+                    message: format!("Failed to read file: {}. The file might be binary or have encoding issues.", e),
+                });
+            }
+        };
 
         // Parse search/replace blocks
         let blocks = match parse_search_replace_blocks(content) {
-            Ok(blocks) => blocks,
+            Ok(blocks) => {
+                tracing::info!("Successfully parsed {} search/replace blocks", blocks.len());
+                blocks
+            }
             Err(e) => {
-                return Err(WinxError::ArgumentParseError(format!(
-                    "Error parsing search/replace blocks: {}",
-                    e
-                )));
+                tracing::error!("Error parsing search/replace blocks: {}", e);
+                // Convert the error directly using From implementation
+                return Err(e.into());
             }
         };
 
@@ -500,10 +621,13 @@ pub async fn handle_tool_call(
         let new_content = match apply_search_replace_blocks(blocks, original_content) {
             Ok(content) => content,
             Err(e) => {
-                return Err(WinxError::ArgumentParseError(format!(
-                    "Error applying search/replace blocks: {}",
+                // Only log the error once at this level and avoid duplicating in error message
+                tracing::error!(
+                    "Error applying search/replace blocks for file {}: {}",
+                    file_path_obj.display(),
                     e
-                )));
+                );
+                return Err(e);
             }
         };
 

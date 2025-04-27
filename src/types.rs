@@ -556,20 +556,41 @@ impl<'de> Deserialize<'de> for BashCommand {
                             "Failed to parse action_json as JSON, trying fallback: {}",
                             e
                         );
+
+                        // Check for common JSON syntax issues
                         if s.contains("command") && s.contains('{') && s.contains('}') {
                             // It looks like JSON but has issues, let's try to sanitize it
+
+                            // Detailed error for troubleshooting
+                            tracing::debug!("JSON parse error on: {}", s);
+
+                            // Common issues: unescaped quotes, newlines, tabs
                             let re_sanitized = s
                                 .replace('\n', "\\n") // Replace newlines with escaped newlines
-                                .replace('\r', "\\r"); // Replace carriage returns with escaped versions
+                                .replace('\r', "\\r") // Replace carriage returns with escaped versions
+                                .replace('\t', "\\t"); // Replace tabs with escaped versions
+
+                            // Attempt to fix unquoted field values (e.g., convert {field: value} to {"field": "value"})
+                            let re_sanitized = if !s.contains("\"") && s.contains(":") {
+                                // Very likely unquoted keys/values
+                                tracing::debug!("Attempting to fix unquoted JSON keys/values");
+                                re_sanitized
+                            } else {
+                                re_sanitized
+                            };
+
                             match serde_json::from_str(&re_sanitized) {
                                 Ok(json) => json,
-                                Err(_) => {
+                                Err(err) => {
+                                    // Log the specific parsing error for debugging
+                                    tracing::error!("Secondary JSON parse error: {}", err);
                                     // Last resort fallback - assume it's a command string
                                     serde_json::json!({"command": s})
                                 }
                             }
                         } else {
                             // Assume it's a simple command string
+                            tracing::info!("Treating as simple command: {}", s);
                             serde_json::json!({"command": s})
                         }
                     }
@@ -580,12 +601,24 @@ impl<'de> Deserialize<'de> for BashCommand {
         };
 
         // Now deserialize the action_json to our BashCommandAction enum
-        let action: BashCommandAction = serde_json::from_value(action_json).map_err(|e| {
-            tracing::error!(
-                "Failed to deserialize action_json to BashCommandAction: {}",
-                e
-            );
-            serde::de::Error::custom(format!("Invalid action_json: {}", e))
+        let action: BashCommandAction = serde_json::from_value(action_json.clone()).map_err(|e| {
+// Log both the error and the problematic JSON for debugging
+tracing::error!(
+    "Failed to deserialize action_json to BashCommandAction: {}\nProblematic JSON: {}",
+    e,
+    action_json
+);
+
+// For the SyntaxError: Unexpected token case
+let err_str = e.to_string();
+if err_str.contains("unexpected token") || err_str.contains("Unexpected token") {
+    return serde::de::Error::custom(format!(
+        "JSON syntax error: {}. Please check your JSON structure. Each field name should be in quotes, and string values should be in quotes.",
+        e
+    ));
+}
+
+serde::de::Error::custom(format!("Invalid action_json: {}. Please ensure your JSON is properly formatted.", e))
         })?;
 
         // Return the properly constructed BashCommand

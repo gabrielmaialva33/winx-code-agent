@@ -265,6 +265,21 @@ impl WinxService {
         // Log the args to debug what was received
         debug!("FileWriteOrEdit tool received args: {:?}", args);
 
+        // Log JSON serialization for improved error diagnosis
+        match serde_json::to_string(&args) {
+            Ok(json) => debug!("FileWriteOrEdit args as JSON: {}", json),
+            Err(e) => {
+                tracing::error!("Failed to serialize FileWriteOrEdit args to JSON: {}", e);
+                // For syntax errors, return a helpful error message
+                if e.is_syntax() {
+                    return Err(McpError::internal_error(
+                        format!("JSON syntax error in FileWriteOrEdit arguments: {}. Please check your tool argument format.", e),
+                        None
+                    ));
+                }
+            }
+        }
+
         // Call the implementation and measure execution time
         match file_write_or_edit::handle_tool_call(&self.bash_state, args).await {
             Ok(result) => {
@@ -295,6 +310,29 @@ impl WinxService {
                     }
                     WinxError::CommandNotAllowed(_) => {
                         format!("{}\nTry a different mode or check permissions.", err)
+                    }
+                    WinxError::SearchReplaceSyntaxError(msg) => {
+                        // Keep the message format consistent and avoid redundancy
+                        format!("Search/replace syntax error: {}", msg)
+                    }
+                    WinxError::SearchBlockNotFound(msg) => {
+                        // Since the message already contains the full error details,
+                        // avoid adding redundant prefixes
+                        msg.to_string()
+                    }
+                    WinxError::FileTooLarge {
+                        path,
+                        size,
+                        max_size,
+                    } => {
+                        format!("File {} is too large: {} bytes (max {}). Try splitting the file or using a different approach.", 
+                            path.display(), size, max_size)
+                    }
+                    WinxError::ArgumentParseError(msg) => {
+                        format!(
+                            "Failed to parse arguments: {}\nPlease check your input format.",
+                            msg
+                        )
                     }
                     _ => format!(
                         "Error writing or editing file: {}\n\n\
