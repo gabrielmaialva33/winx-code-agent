@@ -1,5 +1,5 @@
 use schemars::JsonSchema;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use tracing;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq)]
