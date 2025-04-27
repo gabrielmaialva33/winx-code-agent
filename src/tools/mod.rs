@@ -9,7 +9,6 @@ pub mod initialize;
 
 use anyhow::Result;
 use rmcp::{model::*, tool, Error as McpError, ServerHandler};
-use serde_json;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
@@ -17,6 +16,7 @@ use crate::errors::WinxError;
 use crate::state::bash_state::BashState;
 
 /// Version of the MCP protocol implemented by this service
+#[allow(dead_code)]
 const MCP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2024_11_05;
 
 /// Main service implementation for Winx
@@ -47,6 +47,7 @@ impl WinxService {
     /// # Returns
     ///
     /// A Result containing a MutexGuard for the bash state
+    #[allow(dead_code)]
     fn lock_bash_state(&self) -> crate::errors::Result<std::sync::MutexGuard<Option<BashState>>> {
         self.bash_state
             .lock()

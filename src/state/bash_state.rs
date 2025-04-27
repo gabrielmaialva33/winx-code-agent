@@ -20,7 +20,9 @@ pub struct FileWhitelistData {
     pub total_lines: usize,
 }
 
+#[allow(dead_code)]
 impl FileWhitelistData {
+    #[allow(dead_code)]
     pub fn new(
         file_hash: String,
         line_ranges_read: Vec<(usize, usize)>,
@@ -34,11 +36,13 @@ impl FileWhitelistData {
     }
 
     /// Checks if enough of the file has been read (at least 99%)
+    #[allow(dead_code)]
     pub fn is_read_enough(&self) -> bool {
         self.get_percentage_read() >= 99.0
     }
 
     /// Calculates what percentage of the file has been read
+    #[allow(dead_code)]
     pub fn get_percentage_read(&self) -> f64 {
         if self.total_lines == 0 {
             return 100.0;
@@ -55,6 +59,7 @@ impl FileWhitelistData {
     }
 
     /// Returns the ranges of lines that have not been read yet
+    #[allow(dead_code)]
     pub fn get_unread_ranges(&self) -> Vec<(usize, usize)> {
         if self.total_lines == 0 {
             return vec![];
@@ -89,6 +94,7 @@ impl FileWhitelistData {
     }
 
     /// Adds a range of lines to the list of lines that have been read
+    #[allow(dead_code)]
     pub fn add_range(&mut self, start: usize, end: usize) {
         self.line_ranges_read.push((start, end));
     }
@@ -105,10 +111,12 @@ pub struct BashState {
     pub bash_command_mode: BashCommandMode,
     pub file_edit_mode: FileEditMode,
     pub write_if_empty_mode: WriteIfEmptyMode,
+    #[allow(dead_code)]
     pub whitelist_for_overwrite: HashMap<String, FileWhitelistData>,
 }
 
 /// BashContext wraps a BashState and provides access to it
+#[allow(dead_code)]
 pub struct BashContext {
     pub bash_state: BashState,
 }
@@ -167,6 +175,7 @@ impl BashState {
     }
 
     /// Adds file paths with line ranges to the whitelist for overwrite
+    #[allow(dead_code)]
     pub fn add_to_whitelist_for_overwrite(
         &mut self,
         file_paths_with_ranges: HashMap<String, Vec<(usize, usize)>>,
@@ -193,6 +202,7 @@ impl BashState {
     }
 
     /// Executes a command in the current working directory
+    #[allow(dead_code)]
     pub fn execute_command(&self, command: &str) -> Result<String> {
         let output = Command::new("sh")
             .arg("-c")
@@ -216,6 +226,7 @@ impl BashState {
 }
 
 /// Generates a SHA256 hash of the provided data
+#[allow(dead_code)]
 fn sha256_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
@@ -224,6 +235,6 @@ fn sha256_hash(data: &[u8]) -> String {
 
 /// Generates a random 4-digit chat ID with 'i' prefix
 pub fn generate_chat_id() -> String {
-    let mut rng = rand::thread_rng(); // Deprecated in newer rand versions, but keeping for simplicity
-    format!("i{}", rng.gen_range(1000..10000)) // Deprecated in newer rand versions, but keeping for simplicity
+    let mut rng = rand::rng();
+    format!("i{}", rng.random_range(1000..10000))
 }

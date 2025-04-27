@@ -67,7 +67,7 @@ pub fn run_json_tests() -> Vec<String> {
 
     // Add test for the format similar to what caused the error
     // Note: The original format wasn't valid JSON, so we're creating a similar but valid JSON version
-    let error_format = r#"{
+    let _error_format = r#"{
         "any_workspace_path": "/Users/gabrielmaia/Documents/mcp/winx", 
         "chat_id": "", 
         "code_writer_config": "null", 
@@ -124,7 +124,7 @@ pub fn run_json_tests() -> Vec<String> {
     // using the exact format from the error message
     let error_test_result = {
         // The exact format that caused the error
-        let raw_args = r#"{"any_workspace_path": String("/Users/gabrielmaia/Documents/mcp/winx"), "chat_id": String(""), "code_writer_config": String("null"), "initial_files_to_read": Array [], "mode_name": String("wcgw"), "task_id_to_resume": Null, "type": Null}"#;
+        let _raw_args = r#"{"any_workspace_path": String("/Users/gabrielmaia/Documents/mcp/winx"), "chat_id": String(""), "code_writer_config": String("null"), "initial_files_to_read": Array [], "mode_name": String("wcgw"), "task_id_to_resume": Null, "type": Null}"#;
 
         // Create a properly formatted JSON
         let proper_json = serde_json::json!({

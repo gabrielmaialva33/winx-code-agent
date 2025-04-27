@@ -104,8 +104,8 @@ async fn main() -> Result<()> {
     }
 
     // Set up cleanup for graceful shutdown
-    let term_signal = tokio::signal::ctrl_c();
-    tokio::pin!(term_signal);
+    // We initialize but don't use this signal since server handles its own shutdown
+    let _term_signal = tokio::signal::ctrl_c();
 
     // Show example JSON format in debug mode
     if config.debug {

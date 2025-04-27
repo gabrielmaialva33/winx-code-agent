@@ -1,6 +1,5 @@
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize, Serializer};
-use tracing;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -57,7 +56,7 @@ impl JsonSchema for ModeName {
         "ModeName".to_string()
     }
 
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
         let mut schema = schemars::schema::SchemaObject::default();
         schema.metadata().description = Some("The mode name for initialization".to_string());
         let enum_values = vec![
@@ -70,21 +69,12 @@ impl JsonSchema for ModeName {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq, Default)]
 pub struct CodeWriterConfig {
     #[serde(default)]
     pub allowed_globs: AllowedGlobs,
     #[serde(default)]
     pub allowed_commands: AllowedCommands,
-}
-
-impl Default for CodeWriterConfig {
-    fn default() -> Self {
-        Self {
-            allowed_globs: AllowedGlobs::default(),
-            allowed_commands: AllowedCommands::default(),
-        }
-    }
 }
 
 impl CodeWriterConfig {
@@ -121,6 +111,7 @@ impl Default for AllowedGlobs {
 }
 
 impl AllowedGlobs {
+    #[allow(dead_code)]
     pub fn is_allowed(&self, glob: &str) -> bool {
         match self {
             AllowedGlobs::All(s) if s == "all" => true,
@@ -144,6 +135,7 @@ impl Default for AllowedCommands {
 }
 
 impl AllowedCommands {
+    #[allow(dead_code)]
     pub fn is_allowed(&self, command: &str) -> bool {
         match self {
             AllowedCommands::All(s) if s == "all" => true,
@@ -257,7 +249,7 @@ impl JsonSchema for Modes {
         "Modes".to_string()
     }
 
-    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
         let mut schema = schemars::schema::SchemaObject::default();
         schema.metadata().description = Some("Internal representation of modes".to_string());
         let enum_values = vec![

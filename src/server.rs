@@ -10,18 +10,12 @@ use crate::errors::{Result, WinxError};
 use crate::tools;
 
 /// Configuration for the server
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct ServerConfig {
     /// Whether to use a simulated environment for testing
+    #[allow(dead_code)]
     pub simulation_mode: bool,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            simulation_mode: false,
-        }
-    }
 }
 
 /// Runs the MCP server using the stdio transport
@@ -96,6 +90,7 @@ pub async fn run_server() -> Result<()> {
 /// # Returns
 ///
 /// Returns a Result indicating whether the server ran successfully.
+#[allow(dead_code)]
 pub async fn run_server_with_config(config: ServerConfig) -> Result<()> {
     tracing::info!("Starting server with custom configuration: {:?}", config);
 

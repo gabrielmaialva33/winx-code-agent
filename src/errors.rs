@@ -49,6 +49,7 @@ pub enum WinxError {
 pub type Result<T> = std::result::Result<T, WinxError>;
 
 /// Extension trait to convert anyhow errors to WinxError
+#[allow(dead_code)]
 pub trait AnyhowErrorExt {
     /// Convert the error to a WinxError
     fn to_winx_error(self, default_message: &str) -> WinxError;
