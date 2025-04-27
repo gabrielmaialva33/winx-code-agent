@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::fs;
-use std::path::{Path, PathBuf};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 /// Gets a simple directory structure representation for the workspace path
 pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error> {
@@ -44,7 +44,8 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
         }
 
         // Skip hidden directories and common large directories
-        let dir_name = dir_path.file_name()
+        let dir_name = dir_path
+            .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
@@ -52,8 +53,9 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
             continue;
         }
 
-        if ["node_modules", "target", "venv", "dist", "__pycache__"]
-            .contains(&dir_name.as_str()) && depth > 0 {
+        if ["node_modules", "target", "venv", "dist", "__pycache__"].contains(&dir_name.as_str())
+            && depth > 0
+        {
             writeln!(output, "{}  {}", "  ".repeat(indent), dir_name)?;
             writeln!(output, "{}    ...", "  ".repeat(indent))?;
             continue;
@@ -82,7 +84,8 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
                             let file_name = path.file_name().unwrap_or_default().to_string_lossy();
 
                             // Skip hidden files except at root
-                            if file_name.starts_with(".") && depth > 0 && file_name != ".gitignore" {
+                            if file_name.starts_with(".") && depth > 0 && file_name != ".gitignore"
+                            {
                                 continue;
                             }
 
@@ -108,7 +111,9 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
                 // Add subdirectories to the queue
                 if depth < max_depth {
                     dirs.sort_by(|a, b| {
-                        a.file_name().unwrap_or_default().cmp(&b.file_name().unwrap_or_default())
+                        a.file_name()
+                            .unwrap_or_default()
+                            .cmp(&b.file_name().unwrap_or_default())
                     });
 
                     for dir in dirs {
@@ -117,7 +122,11 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
                 }
             }
             Err(_) => {
-                writeln!(output, "{}    <error reading directory>", "  ".repeat(indent))?;
+                writeln!(
+                    output,
+                    "{}    <error reading directory>",
+                    "  ".repeat(indent)
+                )?;
             }
         }
     }
@@ -160,18 +169,18 @@ pub fn get_git_info(path: &Path) -> Option<String> {
     let mut info = String::new();
     info.push_str("Git Repository Information:\n");
     info.push_str(&format!("  Root: {}\n", git_root));
-    
+
     if let Some(branch) = current_branch {
         info.push_str(&format!("  Branch: {}\n", branch));
     }
-    
+
     if let Some(hash) = last_commit_hash {
         info.push_str(&format!("  Last commit: {}", hash));
-        
+
         if let Some(msg) = last_commit_msg {
             info.push_str(&format!(" - {}", msg));
         }
-        
+
         info.push('\n');
     }
 

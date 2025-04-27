@@ -14,7 +14,7 @@ use crate::types::{
     InitializeType, ModeName, Modes, WriteIfEmptyMode,
 };
 use crate::utils::path::{ensure_directory_exists, expand_user};
-use crate::utils::repo::{get_repo_context, get_git_info};
+use crate::utils::repo::{get_git_info, get_repo_context};
 
 /// Converts ModeName to the internal Modes enum
 ///
@@ -514,7 +514,7 @@ pub async fn handle_tool_call(
 
     response.push_str(&current_state);
     response.push_str(&repo_context);
-    
+
     // Add git info if available
     if !git_info.is_empty() {
         response.push_str(&git_info);
