@@ -37,12 +37,22 @@ pub async fn run_server() -> Result<()> {
 
     // Initialize the Winx service
     tracing::debug!("Initializing server...");
-    let service = tools::WinxService::new()
-        .serve(stdio())
-        .await
-        .map_err(|e| {
-            WinxError::ShellInitializationError(format!("Failed to start MCP service: {}", e))
-        })?;
+
+    // Use a timeout for server initialization to avoid hanging
+    let service_future = tools::WinxService::new().serve(stdio());
+    let service = tokio::time::timeout(
+        std::time::Duration::from_secs(30), // 30 second timeout
+        service_future,
+    )
+    .await
+    .map_err(|_| {
+        WinxError::ShellInitializationError(
+            "Server initialization timed out after 30 seconds".to_string(),
+        )
+    })?
+    .map_err(|e| {
+        WinxError::ShellInitializationError(format!("Failed to start MCP service: {}", e))
+    })?;
 
     // Log successful startup
     let startup_duration = start_time.elapsed();

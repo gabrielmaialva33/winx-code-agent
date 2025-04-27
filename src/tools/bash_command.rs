@@ -380,6 +380,14 @@ pub async fn handle_tool_call(
 ) -> Result<String> {
     info!("BashCommand tool called with: {:?}", bash_command);
 
+    // Check if chat_id is empty - handle this case first
+    if bash_command.chat_id.is_empty() {
+        error!("Empty chat_id provided in BashCommand");
+        return Err(WinxError::ChatIdMismatch(
+            "Error: No saved bash state found for chat ID \"\". Please initialize first with this ID.".to_string()
+        ));
+    }
+
     // We need to extract all the data we need from the bash state before awaiting
     // to avoid holding the MutexGuard across await points
 
@@ -416,8 +424,8 @@ pub async fn handle_tool_call(
             current_chat_id, bash_command.chat_id
         );
         return Err(WinxError::ChatIdMismatch(format!(
-            "Chat ID mismatch. Expected: {}, Got: {}. Please use the correct chat ID or initialize with a new session.",
-            current_chat_id, bash_command.chat_id
+            "Error: No saved bash state found for chat ID \"{}\". Please initialize first with this ID.",
+            bash_command.chat_id
         )));
     }
 

@@ -373,6 +373,8 @@ pub struct BashCommand {
     pub wait_for_seconds: Option<f32>,
 
     /// The chat ID for this session
+    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_string_or_null")]
     pub chat_id: String,
 }
 
