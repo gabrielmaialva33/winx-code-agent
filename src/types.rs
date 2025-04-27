@@ -1,5 +1,5 @@
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize, Serializer, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use tracing;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq)]
@@ -43,7 +43,10 @@ impl<'de> Deserialize<'de> for ModeName {
             "wcgw" => Ok(ModeName::Wcgw),
             "architect" => Ok(ModeName::Architect),
             "code_writer" | "code_write" | "code-writer" => Ok(ModeName::CodeWriter),
-            _ => Err(serde::de::Error::custom(format!("Unknown mode name: {}", s))),
+            _ => Err(serde::de::Error::custom(format!(
+                "Unknown mode name: {}",
+                s
+            ))),
         }
     }
 }
@@ -219,7 +222,7 @@ where
                 Ok(config) => {
                     tracing::debug!("Successfully parsed CodeWriterConfig: {:?}", config);
                     Ok(Some(config))
-                },
+                }
                 Err(e) => {
                     // Log the error and the value for debugging
                     tracing::error!("Failed to parse CodeWriterConfig: {}. Value: {}", e, value);
