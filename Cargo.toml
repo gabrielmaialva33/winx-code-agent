@@ -2,7 +2,8 @@
 name = "winx"
 version = "0.1.0"
 edition = "2021"
-description = "A Rust implementation of WCGW (bash command execution and initialization)"
+description = "Rust implementation of WCGW using MCP"
+authors = ["Gabriel Maia"]
 
 [dependencies]
 rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", branch = "main", features = ["server", "transport-io"] }
@@ -18,3 +19,6 @@ schemars = "0.8"
 home = "0.5"
 sha2 = "0.10"
 thiserror = "2.0.12"
+async-trait = "0.1"
+dirs = "5.0"
+env_logger = "0.10"
