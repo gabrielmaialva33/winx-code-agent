@@ -5,6 +5,7 @@
 //!
 //! The `WinxService` struct is the main entry point for all tool calls.
 
+pub mod bash_command;
 pub mod initialize;
 
 use anyhow::Result;
@@ -107,6 +108,75 @@ impl WinxService {
                     Please try again with a valid workspace path.",
                     err
                 );
+
+                Err(McpError::internal_error(error_message, None))
+            }
+        }
+    }
+
+    /// Execute a shell command
+    ///
+    /// This tool executes a command in the shell environment and returns the result.
+    /// It can also be used to check the status of a running command or send input.
+    #[tool(description = "
+- Execute a bash command. This is stateful (beware with subsequent calls).
+- Status of the command and the current working directory will always be returned at the end.
+- The first or the last line might be `(...truncated)` if the output is too long.
+- Always run `pwd` if you get any file or directory not found error to make sure you're not lost.
+- Run long running commands in background using screen instead of \"&\".
+- Do not use 'cat' to read files, use ReadFiles tool instead
+- In order to check status of previous command, use `status_check` with empty command argument.
+- Only command is allowed to run at a time. You need to wait for any previous command to finish before running a new one.
+- Programs don't hang easily, so most likely explanation for no output is usually that the program is still running, and you need to check status again.
+- Do not send Ctrl-c before checking for status till 10 minutes or whatever is appropriate for the program to finish.
+")]
+    async fn bash_command(
+        &self,
+        #[tool(aggr)] args: crate::types::BashCommand,
+    ) -> Result<CallToolResult, McpError> {
+        // Start timing for performance monitoring
+        let start_time = std::time::Instant::now();
+
+        // Log the args to debug what was received
+        debug!("BashCommand tool received args: {:?}", args);
+
+        // Log JSON serialization for debugging
+        match serde_json::to_string(&args) {
+            Ok(json) => debug!("Args as JSON: {}", json),
+            Err(e) => tracing::error!("Failed to serialize args to JSON: {}", e),
+        }
+
+        // Call the implementation and measure execution time
+        match bash_command::handle_tool_call(&self.bash_state, args).await {
+            Ok(result) => {
+                let elapsed = start_time.elapsed();
+                info!("BashCommand tool completed successfully in {:.2?}", elapsed);
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            Err(err) => {
+                tracing::error!("BashCommand tool error: {}", err);
+
+                // Provide a user-friendly error message based on error type
+                let error_message = match &err {
+                    WinxError::BashStateNotInitialized => {
+                        "Shell environment not initialized. Please call Initialize first."
+                            .to_string()
+                    }
+                    WinxError::ChatIdMismatch(_) => {
+                        format!(
+                            "{}\nPlease use the chat_id provided by the Initialize tool.",
+                            err
+                        )
+                    }
+                    WinxError::CommandNotAllowed(_) => {
+                        format!("{}\nTry a different command or change the mode.", err)
+                    }
+                    _ => format!(
+                        "Error executing command: {}\n\n\
+                        This might be due to issues with the command syntax or permissions.",
+                        err
+                    ),
+                };
 
                 Err(McpError::internal_error(error_message, None))
             }

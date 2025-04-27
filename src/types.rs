@@ -1,12 +1,35 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Type of shell environment initialization
+///
+/// This enum represents the different ways the Initialize tool can be called,
+/// depending on the current state of the conversation and what the user is requesting.
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum InitializeType {
+    /// Initial call at the start of a conversation
+    ///
+    /// This should be used for the first Initialize call in a conversation.
+    /// It sets up a new shell environment with the specified parameters.
     FirstCall,
+
+    /// User requested to change the mode
+    ///
+    /// This should be used when the user asks to switch between modes
+    /// (e.g., from "wcgw" to "architect" or "code_writer").
     UserAskedModeChange,
+
+    /// Reset the shell environment due to issues
+    ///
+    /// This should be used when the shell environment appears to be in a bad state
+    /// and needs to be reset to continue properly.
     ResetShell,
+
+    /// User requested to change the workspace
+    ///
+    /// This should be used when the user asks to switch to a different
+    /// workspace or project directory during the conversation.
     UserAskedChangeWorkspace,
 }
 
@@ -145,22 +168,65 @@ impl AllowedCommands {
     }
 }
 
+/// Parameters for initializing the shell environment
+///
+/// This struct represents the parameters needed to initialize or update the shell environment.
+/// It is used by the Initialize tool, which must be called before any other shell tools.
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone)]
 pub struct Initialize {
+    /// Initialization type, indicating the purpose of the call
+    ///
+    /// - `FirstCall`: Initial setup for a new conversation
+    /// - `UserAskedModeChange`: User requested to change the mode during a conversation
+    /// - `ResetShell`: Reset the shell if it's not working properly
+    /// - `UserAskedChangeWorkspace`: User requested to change the workspace during a conversation
     #[serde(rename = "type")]
     #[serde(default = "default_init_type")]
     pub init_type: InitializeType,
+
+    /// Path to the workspace directory or file
+    ///
+    /// This can be an absolute path or a path relative to the current directory.
+    /// If it's a file, the parent directory will be used as the workspace.
+    /// If it doesn't exist and is an absolute path, it will be created.
+    /// If it's a relative path and doesn't exist, an error will be returned.
     pub any_workspace_path: String,
+
+    /// List of files to read initially
+    ///
+    /// These files can be absolute paths or paths relative to the workspace.
+    /// They will be read and their contents provided in the response.
     #[serde(default)]
     pub initial_files_to_read: Vec<String>,
+
+    /// ID of a task to resume
+    ///
+    /// If provided during a first_call, the task with this ID will be resumed.
+    /// This allows continuing a conversation from a previous session.
     #[serde(default = "String::new")]
     #[serde(deserialize_with = "deserialize_string_or_null")]
     pub task_id_to_resume: String,
+
+    /// Mode name for the shell environment
+    ///
+    /// - `wcgw`: Full permissions (default)
+    /// - `architect`: Restricted permissions, read-only
+    /// - `code_writer`: Custom permissions for code writing
     #[serde(default = "default_mode_name")]
     pub mode_name: ModeName,
+
+    /// ID of the chat session
+    ///
+    /// If not provided for a first_call, a new ID will be generated.
+    /// This ID must be included in all subsequent tool calls.
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_string_or_null")]
     pub chat_id: String,
+
+    /// Configuration for code_writer mode
+    ///
+    /// Only used when mode_name is "code_writer".
+    /// Specifies allowed commands and file globs for writing/editing.
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_code_writer_config")]
     pub code_writer_config: Option<CodeWriterConfig>,
@@ -260,6 +326,59 @@ impl JsonSchema for Modes {
         schema.enum_values = Some(enum_values);
         schema.into()
     }
+}
+
+/// Special key types for shell interaction
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SpecialKey {
+    Enter,
+    KeyUp,
+    KeyDown,
+    KeyLeft,
+    KeyRight,
+    CtrlC,
+    CtrlD,
+}
+
+/// Types of actions that can be performed with the BashCommand tool
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", content = "content")]
+pub enum BashCommandAction {
+    /// Execute a shell command
+    #[serde(rename = "command")]
+    Command { command: String },
+
+    /// Check the status of a running command
+    #[serde(rename = "status_check")]
+    StatusCheck { status_check: bool },
+
+    /// Send text to a running command
+    #[serde(rename = "send_text")]
+    SendText { send_text: String },
+
+    /// Send special keys to a running command
+    #[serde(rename = "send_specials")]
+    SendSpecials { send_specials: Vec<SpecialKey> },
+
+    /// Send ASCII characters to a running command
+    #[serde(rename = "send_ascii")]
+    SendAscii { send_ascii: Vec<u8> },
+}
+
+/// Parameters for the BashCommand tool
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct BashCommand {
+    /// The action to perform (command, status check, etc.)
+    pub action_json: BashCommandAction,
+
+    /// Optional timeout in seconds to wait for command completion
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wait_for_seconds: Option<f32>,
+
+    /// The chat ID for this session
+    pub chat_id: String,
 }
 
 // Bash command mode
