@@ -362,7 +362,7 @@ pub enum BashCommandAction {
 }
 
 /// Parameters for the BashCommand tool
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BashCommand {
     /// The action to perform (command, status check, etc.)
     pub action_json: BashCommandAction,
@@ -374,8 +374,58 @@ pub struct BashCommand {
 
     /// The chat ID for this session
     #[serde(default)]
-    #[serde(deserialize_with = "deserialize_string_or_null")]
     pub chat_id: String,
+}
+
+// Custom deserialization for BashCommand to handle string-encoded action_json
+impl<'de> Deserialize<'de> for BashCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Define an intermediate struct with the same fields but different types
+        #[derive(Deserialize)]
+        struct BashCommandHelper {
+            action_json: serde_json::Value,
+            #[serde(default)]
+            wait_for_seconds: Option<f32>,
+            #[serde(default)]
+            #[serde(deserialize_with = "deserialize_string_or_null")]
+            chat_id: String,
+        }
+
+        // Deserialize to the helper struct first
+        let helper = BashCommandHelper::deserialize(deserializer)?;
+
+        // Process action_json which could be a string or an object
+        let action_json = match helper.action_json {
+            serde_json::Value::String(s) => {
+                // If it's a string, try to parse it as JSON
+                serde_json::from_str(&s).map_err(|e| {
+                    tracing::error!("Failed to parse action_json string as JSON: {}", e);
+                    serde::de::Error::custom(format!("Invalid action_json: {}", e))
+                })?
+            }
+            // If it's already an object or other JSON value, use it directly
+            value => value,
+        };
+
+        // Now deserialize the action_json to our BashCommandAction enum
+        let action: BashCommandAction = serde_json::from_value(action_json).map_err(|e| {
+            tracing::error!(
+                "Failed to deserialize action_json to BashCommandAction: {}",
+                e
+            );
+            serde::de::Error::custom(format!("Invalid action_json: {}", e))
+        })?;
+
+        // Return the properly constructed BashCommand
+        Ok(BashCommand {
+            action_json: action,
+            wait_for_seconds: helper.wait_for_seconds,
+            chat_id: helper.chat_id,
+        })
+    }
 }
 
 // Bash command mode
