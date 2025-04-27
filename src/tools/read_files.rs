@@ -17,6 +17,16 @@ use crate::state::bash_state::BashState;
 use crate::types::ReadFiles;
 use crate::utils::path::expand_user;
 
+/// Type alias for file reading result
+///
+/// Contains:
+/// - The file content as a string
+/// - Whether the content was truncated due to token limit
+/// - The token count of the content
+/// - The canonicalized file path
+/// - The effective line range that was read
+type FileReadResult = (String, bool, usize, String, (usize, usize));
+
 /// Maximum amount of data to read from a file to prevent memory issues
 const MAX_FILE_SIZE: u64 = 10_000_000; // 10MB
 
@@ -77,7 +87,7 @@ fn read_file(
     show_line_numbers: bool,
     start_line_num: Option<usize>,
     end_line_num: Option<usize>,
-) -> Result<(String, bool, usize, String, (usize, usize))> {
+) -> Result<FileReadResult> {
     debug!("Reading file: {}", file_path);
 
     // Expand the path

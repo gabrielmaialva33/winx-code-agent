@@ -6,6 +6,7 @@
 //! The `WinxService` struct is the main entry point for all tool calls.
 
 pub mod bash_command;
+pub mod file_write_or_edit;
 pub mod initialize;
 pub mod read_files;
 
@@ -230,6 +231,72 @@ impl WinxService {
                     _ => format!(
                         "Error reading files: {}\n\n\
                         This might be due to issues with file paths or permissions.",
+                        err
+                    ),
+                };
+
+                Err(McpError::internal_error(error_message, None))
+            }
+        }
+    }
+
+    /// Write or edit a file
+    ///
+    /// This tool writes new content to a file or edits an existing file using
+    /// search and replace blocks. It can handle full file content or partial edits.
+    #[tool(description = "
+- Writes or edits a file based on the percentage of changes.
+- Use absolute path only (~ allowed).
+- percentage_to_change is calculated as number of existing lines that will have some diff divided by total existing lines.
+- First write down percentage of lines that need to be replaced in the file (between 0-100) in percentage_to_change
+- percentage_to_change should be low if mostly new code is to be added. It should be high if a lot of things are to be replaced.
+- If percentage_to_change > 50, provide full file content in file_content_or_search_replace_blocks
+- If percentage_to_change <= 50, file_content_or_search_replace_blocks should be search/replace blocks.
+")]
+    async fn file_write_or_edit(
+        &self,
+        #[tool(aggr)] args: crate::types::FileWriteOrEdit,
+    ) -> Result<CallToolResult, McpError> {
+        // Start timing for performance monitoring
+        let start_time = std::time::Instant::now();
+
+        // Log the args to debug what was received
+        debug!("FileWriteOrEdit tool received args: {:?}", args);
+
+        // Call the implementation and measure execution time
+        match file_write_or_edit::handle_tool_call(&self.bash_state, args).await {
+            Ok(result) => {
+                let elapsed = start_time.elapsed();
+                info!(
+                    "FileWriteOrEdit tool completed successfully in {:.2?}",
+                    elapsed
+                );
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            Err(err) => {
+                tracing::error!("FileWriteOrEdit tool error: {}", err);
+
+                // Provide a user-friendly error message based on error type
+                let error_message = match &err {
+                    WinxError::BashStateNotInitialized => {
+                        "Shell environment not initialized. Please call Initialize first."
+                            .to_string()
+                    }
+                    WinxError::ChatIdMismatch(_) => {
+                        format!(
+                            "{}\nPlease use the chat_id provided by the Initialize tool.",
+                            err
+                        )
+                    }
+                    WinxError::FileAccessError { path, message } => {
+                        format!("File access error for {}: {}", path.display(), message)
+                    }
+                    WinxError::CommandNotAllowed(_) => {
+                        format!("{}\nTry a different mode or check permissions.", err)
+                    }
+                    _ => format!(
+                        "Error writing or editing file: {}\n\n\
+                        This might be due to issues with file permissions or the file path.",
                         err
                     ),
                 };

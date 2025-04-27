@@ -552,7 +552,10 @@ impl<'de> Deserialize<'de> for BashCommand {
                     Err(e) => {
                         // If strict JSON parsing fails, try to be more lenient
                         // For commands containing literal newlines, just wrap the string in a command object
-                        tracing::warn!("Failed to parse action_json as JSON, trying fallback: {}", e);
+                        tracing::warn!(
+                            "Failed to parse action_json as JSON, trying fallback: {}",
+                            e
+                        );
                         if s.contains("command") && s.contains('{') && s.contains('}') {
                             // It looks like JSON but has issues, let's try to sanitize it
                             let re_sanitized = s
@@ -617,4 +620,39 @@ pub struct FileEditMode {
 #[derive(Debug, Clone, JsonSchema, PartialEq)]
 pub struct WriteIfEmptyMode {
     pub allowed_globs: AllowedGlobs,
+}
+
+/// Parameters for the FileWriteOrEdit tool
+///
+/// This struct represents the parameters needed to write or edit a file
+/// with optional search/replace blocks for partial edits.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileWriteOrEdit {
+    /// Path to the file to write or edit
+    ///
+    /// This must be an absolute path (~ allowed).
+    pub file_path: String,
+
+    /// Percentage of the file that will be changed
+    ///
+    /// If > 50%, the content is treated as the entire file content.
+    /// If <= 50%, the content is treated as search/replace blocks.
+    pub percentage_to_change: u32,
+
+    /// Content for the file or search/replace blocks
+    ///
+    /// If percentage_to_change > 50%, this is the entire file content.
+    /// If percentage_to_change <= 50%, this contains search/replace blocks
+    /// in the format:
+    /// ```
+    /// <<<<<<< SEARCH
+    /// old content to find
+    /// =======
+    /// new content to replace with
+    /// >>>>>>> REPLACE
+    /// ```
+    pub file_content_or_search_replace_blocks: String,
+
+    /// The chat ID for this session
+    pub chat_id: String,
 }
