@@ -18,7 +18,6 @@ use crate::types::{BashCommand, BashCommandAction, SpecialKey};
 /// Maximum output length to prevent excessive responses
 const MAX_OUTPUT_LENGTH: usize = 100_000;
 
-
 /// Process simple command execution for a bash command
 ///
 /// This handles command execution, truncating output if necessary, and

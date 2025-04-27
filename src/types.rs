@@ -343,26 +343,21 @@ pub enum SpecialKey {
 
 /// Types of actions that can be performed with the BashCommand tool
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(tag = "type", content = "content")]
+#[serde(untagged)]
 pub enum BashCommandAction {
     /// Execute a shell command
-    #[serde(rename = "command")]
     Command { command: String },
 
     /// Check the status of a running command
-    #[serde(rename = "status_check")]
     StatusCheck { status_check: bool },
 
     /// Send text to a running command
-    #[serde(rename = "send_text")]
     SendText { send_text: String },
 
     /// Send special keys to a running command
-    #[serde(rename = "send_specials")]
     SendSpecials { send_specials: Vec<SpecialKey> },
 
     /// Send ASCII characters to a running command
-    #[serde(rename = "send_ascii")]
     SendAscii { send_ascii: Vec<u8> },
 }
 
