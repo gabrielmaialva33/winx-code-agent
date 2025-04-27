@@ -44,15 +44,15 @@ pub async fn run_server() -> Result<()> {
         std::time::Duration::from_secs(30), // 30 second timeout
         service_future,
     )
-    .await
-    .map_err(|_| {
-        WinxError::ShellInitializationError(
-            "Server initialization timed out after 30 seconds".to_string(),
-        )
-    })?
-    .map_err(|e| {
-        WinxError::ShellInitializationError(format!("Failed to start MCP service: {}", e))
-    })?;
+        .await
+        .map_err(|_| {
+            WinxError::ShellInitializationError(
+                "Server initialization timed out after 30 seconds".to_string(),
+            )
+        })?
+        .map_err(|e| {
+            WinxError::ShellInitializationError(format!("Failed to start MCP service: {}", e))
+        })?;
 
     // Log successful startup
     let startup_duration = start_time.elapsed();

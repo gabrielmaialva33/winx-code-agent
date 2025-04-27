@@ -7,6 +7,7 @@
 
 pub mod bash_command;
 pub mod initialize;
+pub mod read_files;
 
 use anyhow::Result;
 use rmcp::{model::*, tool, Error as McpError, ServerHandler};
@@ -174,6 +175,61 @@ impl WinxService {
                     _ => format!(
                         "Error executing command: {}\n\n\
                         This might be due to issues with the command syntax or permissions.",
+                        err
+                    ),
+                };
+
+                Err(McpError::internal_error(error_message, None))
+            }
+        }
+    }
+
+    /// Read files
+    ///
+    /// This tool reads one or more files and returns their contents, with
+    /// optional line numbers and line range filtering.
+    #[tool(description = "
+- Read full file content of one or more files.
+- Provide absolute paths only (~ allowed)
+- Only if the task requires line numbers understanding:
+    - You may populate \"show_line_numbers_reason\" with your reason, by default null/empty means no line numbers are shown.
+    - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10` 
+")]
+    async fn read_files(
+        &self,
+        #[tool(aggr)] args: crate::types::ReadFiles,
+    ) -> Result<CallToolResult, McpError> {
+        // Start timing for performance monitoring
+        let start_time = std::time::Instant::now();
+
+        // Log the args to debug what was received
+        debug!("ReadFiles tool received args: {:?}", args);
+
+        // We'll handle line range parsing in the implementation
+        debug!("After parsing line ranges: {:?}", args);
+
+        // Call the implementation and measure execution time
+        match read_files::handle_tool_call(&self.bash_state, args).await {
+            Ok(result) => {
+                let elapsed = start_time.elapsed();
+                info!("ReadFiles tool completed successfully in {:.2?}", elapsed);
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            Err(err) => {
+                tracing::error!("ReadFiles tool error: {}", err);
+
+                // Provide a user-friendly error message based on error type
+                let error_message = match &err {
+                    WinxError::BashStateNotInitialized => {
+                        "Shell environment not initialized. Please call Initialize first."
+                            .to_string()
+                    }
+                    WinxError::FileAccessError { path, message } => {
+                        format!("File access error for {}: {}", path.display(), message)
+                    }
+                    _ => format!(
+                        "Error reading files: {}\n\n\
+                        This might be due to issues with file paths or permissions.",
                         err
                     ),
                 };

@@ -341,6 +341,149 @@ pub enum SpecialKey {
     CtrlD,
 }
 
+/// Parameters for the ReadFiles tool
+///
+/// This struct represents the parameters needed to read one or more files,
+/// optionally with line numbers and line range filtering.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReadFiles {
+    /// List of file paths to read
+    ///
+    /// These can be absolute paths or paths relative to the current working directory.
+    /// They can also include line range specifications for filtering.
+    pub file_paths: Vec<String>,
+
+    /// Optional reason to show line numbers
+    ///
+    /// If provided and non-empty, line numbers will be shown in the output.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_line_numbers_reason: Option<String>,
+
+    /// Optional maximum number of tokens to include
+    ///
+    /// If provided, the output will be truncated to fit within this limit.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+
+    /// Optional start line numbers for each file
+    ///
+    /// Vector of optional start line numbers corresponding to each file path.
+    /// If provided, only lines from this number (1-indexed) will be included.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub start_line_nums: Vec<Option<usize>>,
+
+    /// Optional end line numbers for each file
+    ///
+    /// Vector of optional end line numbers corresponding to each file path.
+    /// If provided, only lines up to and including this number will be included.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub end_line_nums: Vec<Option<usize>>,
+}
+
+impl ReadFiles {
+    /// Checks if line numbers should be shown
+    ///
+    /// Line numbers are shown if show_line_numbers_reason is Some and non-empty
+    pub fn show_line_numbers(&self) -> bool {
+        self.show_line_numbers_reason
+            .as_ref()
+            .map(|reason| !reason.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Parses file paths for line ranges
+    ///
+    /// This method extracts line range specifications from file paths and updates
+    /// the start_line_nums and end_line_nums vectors accordingly.
+    ///
+    /// File paths can include line range specifications like:
+    /// - file.py:10      (specific line)
+    /// - file.py:10-20   (line range)
+    /// - file.py:10-     (from line 10 to end)
+    /// - file.py:-20     (from start to line 20)
+    pub fn parse_line_ranges(&mut self) {
+        // Initialize vectors if they're empty
+        if self.start_line_nums.is_empty() {
+            self.start_line_nums = vec![None; self.file_paths.len()];
+        }
+        if self.end_line_nums.is_empty() {
+            self.end_line_nums = vec![None; self.file_paths.len()];
+        }
+
+        // Create new file_paths list without line ranges
+        let mut clean_file_paths = Vec::new();
+
+        for (i, file_path) in self.file_paths.iter().enumerate() {
+            let mut start_line_num = None;
+            let mut end_line_num = None;
+            let mut path_part = file_path.clone();
+
+            // Check if the path ends with a line range pattern
+            if file_path.contains(':') {
+                let parts: Vec<&str> = file_path.rsplitn(2, ':').collect();
+                if parts.len() == 2 {
+                    let potential_path = parts[1];
+                    let line_spec = parts[0];
+
+                    // Check if it's a valid line range format
+                    if let Ok(line_num) = line_spec.parse::<usize>() {
+                        // Format: file.py:10
+                        start_line_num = Some(line_num);
+                        end_line_num = Some(line_num);
+                        path_part = potential_path.to_string();
+                    } else if line_spec.contains('-') {
+                        // Could be file.py:10-20, file.py:10-, or file.py:-20
+                        let line_parts: Vec<&str> = line_spec.split('-').collect();
+
+                        if line_parts[0].is_empty() && !line_parts[1].is_empty() {
+                            // Format: file.py:-20
+                            if let Ok(end) = line_parts[1].parse::<usize>() {
+                                end_line_num = Some(end);
+                                path_part = potential_path.to_string();
+                            }
+                        } else if !line_parts[0].is_empty() {
+                            // Format: file.py:10-20 or file.py:10-
+                            if let Ok(start) = line_parts[0].parse::<usize>() {
+                                start_line_num = Some(start);
+
+                                if !line_parts[1].is_empty() {
+                                    // file.py:10-20
+                                    if let Ok(end) = line_parts[1].parse::<usize>() {
+                                        end_line_num = Some(end);
+                                    }
+                                }
+                                path_part = potential_path.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Update start and end line numbers
+            if i < self.start_line_nums.len() {
+                self.start_line_nums[i] = start_line_num;
+            } else {
+                self.start_line_nums.push(start_line_num);
+            }
+
+            if i < self.end_line_nums.len() {
+                self.end_line_nums[i] = end_line_num;
+            } else {
+                self.end_line_nums.push(end_line_num);
+            }
+
+            clean_file_paths.push(path_part);
+        }
+
+        // Update file_paths with clean paths
+        self.file_paths = clean_file_paths;
+    }
+}
+
 /// Types of actions that can be performed with the BashCommand tool
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
