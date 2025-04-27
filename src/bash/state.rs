@@ -1,4 +1,4 @@
-use crate::bash::{Console, FileWhitelistData, SimpleConsole, expand_user, generate_chat_id};
+use crate::bash::{expand_user, generate_chat_id, Console, FileWhitelistData, SimpleConsole};
 use crate::types::Mode;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -118,7 +118,7 @@ impl BashState {
     pub fn init_shell(&mut self) -> Result<()> {
         self.state = BashStateStatus::Repl;
         self.last_command = String::new();
-        
+
         // Create the working directory if it doesn't exist
         fs::create_dir_all(&self.cwd)?;
 
@@ -132,7 +132,7 @@ impl BashState {
         if !restricted_flag.is_empty() {
             cmd.arg(restricted_flag);
         }
-        
+
         let mut shell_process = cmd
             .current_dir(&self.cwd)
             .stdin(Stdio::piped())
@@ -177,14 +177,17 @@ impl BashState {
 
             // Update the state
             self.state = BashStateStatus::Repl;
-            
+
             return Ok(output);
         }
 
         Err(anyhow!("Shell process not initialized"))
     }
 
-    pub fn add_to_whitelist_for_overwrite(&mut self, file_paths_with_ranges: HashMap<String, Vec<(usize, usize)>>) -> Result<()> {
+    pub fn add_to_whitelist_for_overwrite(
+        &mut self,
+        file_paths_with_ranges: HashMap<String, Vec<(usize, usize)>>,
+    ) -> Result<()> {
         for (file_path, ranges) in file_paths_with_ranges {
             let file_content = fs::read(&file_path)?;
             let file_hash = format!("{:x}", Sha256::digest(&file_content));
@@ -209,15 +212,18 @@ impl BashState {
 
     pub fn get_status(&self) -> String {
         let mut status = "\n\n---\n\n".to_string();
-        
+
         match self.state {
             BashStateStatus::Pending(timestamp) => {
                 let now = Utc::now();
                 let duration = now.signed_duration_since(timestamp);
                 status.push_str(&format!("status = still running\n"));
-                status.push_str(&format!("running for = {} seconds\n", duration.num_seconds()));
+                status.push_str(&format!(
+                    "running for = {} seconds\n",
+                    duration.num_seconds()
+                ));
                 status.push_str(&format!("cwd = {}\n", self.cwd));
-            },
+            }
             BashStateStatus::Repl => {
                 // In a real implementation, we would check for background jobs here
                 status.push_str("status = process exited\n");

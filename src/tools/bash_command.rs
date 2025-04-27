@@ -1,5 +1,5 @@
-use crate::bash::{BashStateStatus, AllowedCommandsType, Context};
-use crate::types::{BashCommand, BashAction, Special};
+use crate::bash::{AllowedCommandsType, BashStateStatus, Context};
+use crate::types::{BashAction, BashCommand, Special};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 
@@ -28,7 +28,7 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
                 match state.bash_command_mode.allowed_commands {
                     AllowedCommandsType::None => {
                         return Err(anyhow!("Error: BashCommand not allowed in current mode"));
-                    },
+                    }
                     _ => {}
                 }
 
@@ -36,7 +36,7 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
                 match state.state {
                     BashStateStatus::Pending(_) => {
                         return Err(anyhow!(WAITING_INPUT_MESSAGE));
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -44,7 +44,7 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
             // Execute the command
             let cmd_str = &command.command;
             state_print(ctx, &format!("$ {}", cmd_str));
-            
+
             // Update the state
             {
                 let mut state = ctx.bash_state.lock().unwrap();
@@ -72,7 +72,7 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
             };
 
             Ok(format!("{}{}", output, status))
-        },
+        }
         BashAction::StatusCheck(_) => {
             // Check the status of the current command
             let status = {
@@ -80,7 +80,7 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
                 match state.state {
                     BashStateStatus::Pending(_) => {
                         format!("Command is still running\n{}", state.get_status())
-                    },
+                    }
                     BashStateStatus::Repl => {
                         format!("No command is running\n{}", state.get_status())
                     }
@@ -88,7 +88,7 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
             };
 
             Ok(status)
-        },
+        }
         BashAction::SendText(send_text) => {
             // Send text to the current command
             if send_text.send_text.is_empty() {
@@ -96,64 +96,73 @@ pub async fn bash_command_tool(ctx: &Context, cmd: &BashCommand) -> Result<Strin
             }
 
             state_print(ctx, &format!("Interact text: {}", send_text.send_text));
-            
+
             // In a real implementation, we would send the text to the process
             let mut state = ctx.bash_state.lock().unwrap();
             state.execute_command(&send_text.send_text)?;
 
             Ok(format!("Text sent: {}", send_text.send_text))
-        },
+        }
         BashAction::SendSpecials(send_specials) => {
             // Send special keys to the current command
             if send_specials.send_specials.is_empty() {
                 return Err(anyhow!("Failure: send_specials cannot be empty"));
             }
 
-            state_print(ctx, &format!("Sending special sequence: {:?}", send_specials.send_specials));
-            
+            state_print(
+                ctx,
+                &format!(
+                    "Sending special sequence: {:?}",
+                    send_specials.send_specials
+                ),
+            );
+
             // In a real implementation, we would send the special keys to the process
             let mut output = String::new();
             for special in &send_specials.send_specials {
                 match special {
                     Special::Enter => {
                         output.push_str("Enter key sent\n");
-                    },
+                    }
                     Special::KeyUp => {
                         output.push_str("Up arrow key sent\n");
-                    },
+                    }
                     Special::KeyDown => {
                         output.push_str("Down arrow key sent\n");
-                    },
+                    }
                     Special::KeyLeft => {
                         output.push_str("Left arrow key sent\n");
-                    },
+                    }
                     Special::KeyRight => {
                         output.push_str("Right arrow key sent\n");
-                    },
+                    }
                     Special::CtrlC => {
                         output.push_str("Ctrl+C sent\n");
-                    },
+                    }
                     Special::CtrlD => {
                         output.push_str("Ctrl+D sent\n");
-                    },
+                    }
                 }
             }
 
             Ok(output)
-        },
+        }
         BashAction::SendAscii(send_ascii) => {
             // Send ASCII characters to the current command
             if send_ascii.send_ascii.is_empty() {
                 return Err(anyhow!("Failure: send_ascii cannot be empty"));
             }
 
-            state_print(ctx, &format!("Sending ASCII sequence: {:?}", send_ascii.send_ascii));
-            
+            state_print(
+                ctx,
+                &format!("Sending ASCII sequence: {:?}", send_ascii.send_ascii),
+            );
+
             // In a real implementation, we would send the ASCII characters to the process
             let chars: String = send_ascii.send_ascii.iter().map(|&b| b as char).collect();
 
             Ok(format!("ASCII characters sent: {}", chars))
-        },
+        }
     }
 }
 

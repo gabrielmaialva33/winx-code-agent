@@ -1,13 +1,13 @@
-use crate::types::{Mode, AllowedGlobs, AllowedCommands};
+use crate::types::{AllowedCommands, AllowedGlobs, Mode};
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 
 pub mod state;
@@ -41,7 +41,11 @@ pub struct FileWhitelistData {
 }
 
 impl FileWhitelistData {
-    pub fn new(file_hash: String, line_ranges_read: Vec<(usize, usize)>, total_lines: usize) -> Self {
+    pub fn new(
+        file_hash: String,
+        line_ranges_read: Vec<(usize, usize)>,
+        total_lines: usize,
+    ) -> Self {
         Self {
             file_hash,
             line_ranges_read,
