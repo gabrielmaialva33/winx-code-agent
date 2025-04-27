@@ -405,6 +405,7 @@ impl ReadFiles {
     /// - file.py:10-20   (line range)
     /// - file.py:10-     (from line 10 to end)
     /// - file.py:-20     (from start to line 20)
+    #[allow(dead_code)]
     pub fn parse_line_ranges(&mut self) {
         // Initialize vectors if they're empty
         if self.start_line_nums.is_empty() {
@@ -543,11 +544,33 @@ impl<'de> Deserialize<'de> for BashCommand {
         // Process action_json which could be a string or an object
         let action_json = match helper.action_json {
             serde_json::Value::String(s) => {
-                // If it's a string, try to parse it as JSON
-                serde_json::from_str(&s).map_err(|e| {
-                    tracing::error!("Failed to parse action_json string as JSON: {}", e);
-                    serde::de::Error::custom(format!("Invalid action_json: {}", e))
-                })?
+                // If it's a string, normalize newlines and try to parse it as JSON
+                // Replace literal newlines with space to avoid JSON parsing errors
+                let sanitized = s.replace('\n', " ");
+                match serde_json::from_str(&sanitized) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        // If strict JSON parsing fails, try to be more lenient
+                        // For commands containing literal newlines, just wrap the string in a command object
+                        tracing::warn!("Failed to parse action_json as JSON, trying fallback: {}", e);
+                        if s.contains("command") && s.contains('{') && s.contains('}') {
+                            // It looks like JSON but has issues, let's try to sanitize it
+                            let re_sanitized = s
+                                .replace('\n', "\\n") // Replace newlines with escaped newlines
+                                .replace('\r', "\\r"); // Replace carriage returns with escaped versions
+                            match serde_json::from_str(&re_sanitized) {
+                                Ok(json) => json,
+                                Err(_) => {
+                                    // Last resort fallback - assume it's a command string
+                                    serde_json::json!({"command": s})
+                                }
+                            }
+                        } else {
+                            // Assume it's a simple command string
+                            serde_json::json!({"command": s})
+                        }
+                    }
+                }
             }
             // If it's already an object or other JSON value, use it directly
             value => value,
