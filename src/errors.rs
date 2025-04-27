@@ -17,7 +17,7 @@ pub enum WinxError {
     BashStateLockError(String),
 
     /// Error when the bash state is not initialized
-    #[error("Bash state not initialized, call Initialize first with type=first_call")]
+    #[error("Bash state not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path.")]
     BashStateNotInitialized,
 
     /// Error when a command fails to execute

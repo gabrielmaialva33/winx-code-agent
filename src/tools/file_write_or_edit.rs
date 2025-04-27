@@ -390,7 +390,7 @@ fn check_can_overwrite(file_path: &str, bash_state: &BashState) -> Result<()> {
     if !bash_state.whitelist_for_overwrite.contains_key(file_path) {
         return Err(WinxError::FileAccessError {
             path: PathBuf::from(file_path),
-            message: "You need to read the file at least once before it can be overwritten"
+            message: "You need to read the file at least once before it can be overwritten. Use the ReadFiles tool with this file path first."
                 .to_string(),
         });
     }
@@ -404,7 +404,7 @@ fn check_can_overwrite(file_path: &str, bash_state: &BashState) -> Result<()> {
     if curr_hash != whitelist_data.file_hash {
         return Err(WinxError::FileAccessError {
             path: PathBuf::from(file_path),
-            message: "The file has changed since it was last read".to_string(),
+            message: "The file has changed since it was last read. Use the ReadFiles tool to read the current version before modifying.".to_string(),
         });
     }
 
@@ -420,7 +420,7 @@ fn check_can_overwrite(file_path: &str, bash_state: &BashState) -> Result<()> {
         return Err(WinxError::FileAccessError {
             path: PathBuf::from(file_path),
             message: format!(
-                "You need to read more of the file before it can be overwritten. Unread line ranges: {}",
+                "You need to read more of the file before it can be overwritten. Unread line ranges: {}. Use the ReadFiles tool with line range specifications to read these sections.",
                 ranges_str
             ),
         });

@@ -106,12 +106,29 @@ impl WinxService {
                 tracing::error!("Initialize tool error: {}", err);
 
                 // Provide a more user-friendly error message based on error type
-                let error_message = format!(
-                    "Error initializing shell environment: {}\n\n\
-                    This might be due to issues with workspace path or permissions.\n\
-                    Please try again with a valid workspace path.",
-                    err
-                );
+                let error_message = match &err {
+                    WinxError::WorkspacePathError(msg) => {
+                        format!(
+                            "Workspace path error: {}\n\n\
+                            Please provide a valid absolute path to a directory or file.\n\
+                            If the directory doesn't exist, it will be created for absolute paths.",
+                            msg
+                        )
+                    }
+                    WinxError::BashStateLockError(msg) => {
+                        format!(
+                            "Failed to access bash state: {}\n\n\
+                            This is likely a temporary issue. Please try again.",
+                            msg
+                        )
+                    }
+                    _ => format!(
+                        "Error initializing shell environment: {}\n\n\
+                        This might be due to issues with workspace path or permissions.\n\
+                        Please try again with a valid workspace path.",
+                        err
+                    ),
+                };
 
                 Err(McpError::internal_error(error_message, None))
             }
@@ -163,21 +180,30 @@ impl WinxService {
                 // Provide a user-friendly error message based on error type
                 let error_message = match &err {
                     WinxError::BashStateNotInitialized => {
-                        "Shell environment not initialized. Please call Initialize first."
+                        "Shell environment not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path."
                             .to_string()
                     }
                     WinxError::ChatIdMismatch(_) => {
                         format!(
-                            "{}\nPlease use the chat_id provided by the Initialize tool.",
+                            "{}\nPlease use the chat_id provided by the Initialize tool. This value must be included in all subsequent tool calls.",
                             err
                         )
                     }
                     WinxError::CommandNotAllowed(_) => {
-                        format!("{}\nTry a different command or change the mode.", err)
+                        format!("{}\nTry a different command or change the mode using Initialize with type=\"user_asked_mode_change\".", err)
+                    }
+                    WinxError::CommandExecutionError(msg) => {
+                        if msg.contains("command not found") {
+                            format!("Command not found: {}. Please check if the command is installed and in the PATH.", msg)
+                        } else if msg.contains("permission denied") {
+                            format!("Permission denied executing command: {}. Check file permissions.", msg)
+                        } else {
+                            format!("Error executing command: {}. Check command syntax and parameters.", msg)
+                        }
                     }
                     _ => format!(
                         "Error executing command: {}\n\n\
-                        This might be due to issues with the command syntax or permissions.",
+                        This might be due to issues with the command syntax or permissions. Try running a simpler command first to verify the shell is working.",
                         err
                     ),
                 };
@@ -224,15 +250,15 @@ impl WinxService {
                 // Provide a user-friendly error message based on error type
                 let error_message = match &err {
                     WinxError::BashStateNotInitialized => {
-                        "Shell environment not initialized. Please call Initialize first."
+                        "Shell environment not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path."
                             .to_string()
                     }
                     WinxError::FileAccessError { path, message } => {
-                        format!("File access error for {}: {}", path.display(), message)
+                        format!("File access error for {}: {}. Please verify the file exists, has the correct path and permissions.", path.display(), message)
                     }
                     _ => format!(
                         "Error reading files: {}\n\n\
-                        This might be due to issues with file paths or permissions.",
+                        This might be due to issues with file paths or permissions. Make sure to use absolute paths and check that files exist.",
                         err
                     ),
                 };
@@ -296,7 +322,7 @@ impl WinxService {
                 // Provide a user-friendly error message based on error type
                 let error_message = match &err {
                     WinxError::BashStateNotInitialized => {
-                        "Shell environment not initialized. Please call Initialize first."
+                        "Shell environment not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path."
                             .to_string()
                     }
                     WinxError::ChatIdMismatch(_) => {
@@ -306,7 +332,16 @@ impl WinxService {
                         )
                     }
                     WinxError::FileAccessError { path, message } => {
-                        format!("File access error for {}: {}", path.display(), message)
+                        // Make error message more user-friendly and actionable
+                        if message.contains("read the file at least once") {
+                            format!("File access error for {}: {}. Please use ReadFiles tool to read this file first before attempting to modify it.", path.display(), message)
+                        } else if message.contains("has changed since") {
+                            format!("File access error for {}: {}. Please read the file again with ReadFiles before modifying it.", path.display(), message)
+                        } else if message.contains("read more of the file") {
+                            format!("File access error for {}: {}. Please use ReadFiles to read the remaining unread portions of this file.", path.display(), message)
+                        } else {
+                            format!("File access error for {}: {}", path.display(), message)
+                        }
                     }
                     WinxError::CommandNotAllowed(_) => {
                         format!("{}\nTry a different mode or check permissions.", err)
@@ -377,15 +412,15 @@ Saves provided description and file contents of all the relevant file paths or g
                 // Provide a user-friendly error message based on error type
                 let error_message = match &err {
                     WinxError::BashStateNotInitialized => {
-                        "Shell environment not initialized. Please call Initialize first."
+                        "Shell environment not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path."
                             .to_string()
                     }
                     WinxError::FileAccessError { path, message } => {
-                        format!("File access error for {}: {}", path.display(), message)
+                        format!("File access error for {}: {}. Please verify the file exists and you have read permissions.", path.display(), message)
                     }
                     _ => format!(
                         "Error saving context: {}\n\n\
-                        This might be due to issues with file paths or globs.",
+                        This might be due to issues with file paths or globs. Make sure all paths are valid and accessible.",
                         err
                     ),
                 };
@@ -425,15 +460,15 @@ Saves provided description and file contents of all the relevant file paths or g
                 // Provide a user-friendly error message based on error type
                 let error_message = match &err {
                     WinxError::BashStateNotInitialized => {
-                        "Shell environment not initialized. Please call Initialize first."
+                        "Shell environment not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path."
                             .to_string()
                     }
                     WinxError::FileAccessError { path, message } => {
-                        format!("File access error for {}: {}", path.display(), message)
+                        format!("File access error for {}: {}. Verify the file exists and is a valid image format.", path.display(), message)
                     }
                     _ => format!(
                         "Error reading image: {}\n\n\
-                        This might be due to issues with the file path or format.",
+                        This might be due to issues with the file path or format. Make sure the file is a valid image (jpg, png, gif, etc.) and you have read permissions.",
                         err
                     ),
                 };

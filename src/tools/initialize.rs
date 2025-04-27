@@ -157,7 +157,7 @@ pub async fn handle_tool_call(
     if workspace_path_str.is_empty() {
         warn!("Empty workspace path provided");
         return Err(WinxError::WorkspacePathError(
-            "Workspace path cannot be empty".to_string(),
+            "Workspace path cannot be empty. Please provide a valid absolute or relative path to a directory or file.".to_string(),
         ));
     }
 
@@ -188,7 +188,7 @@ pub async fn handle_tool_call(
                 .parent()
                 .ok_or_else(|| {
                     WinxError::WorkspacePathError(
-                        "Could not determine parent directory of file".to_string(),
+                        "Could not determine parent directory of the specified file. Please provide a file path that has a valid parent directory.".to_string(),
                     )
                 })?
                 .to_path_buf();
@@ -216,7 +216,7 @@ pub async fn handle_tool_call(
                 workspace_path
             );
             return Err(WinxError::WorkspacePathError(format!(
-                "Path exists but is neither file nor directory: {:?}",
+                "Path exists but is neither file nor directory: {:?}. Please provide a valid file or directory path.",
                 workspace_path
             )));
         }
@@ -236,7 +236,7 @@ pub async fn handle_tool_call(
                 }
                 Err(err) => {
                     return Err(WinxError::WorkspacePathError(format!(
-                        "Failed to create workspace directory: {}",
+                        "Failed to create workspace directory: {}. Please check permissions and ensure the parent directories exist or provide an existing directory path.",
                         err
                     )));
                 }
