@@ -113,7 +113,7 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
                     dirs.sort_by(|a, b| {
                         a.file_name()
                             .unwrap_or_default()
-                            .cmp(&b.file_name().unwrap_or_default())
+                            .cmp(b.file_name().unwrap_or_default())
                     });
 
                     for dir in dirs {
