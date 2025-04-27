@@ -105,7 +105,7 @@ impl WinxService {
             Err(err) => {
                 tracing::error!("Initialize tool error: {}", err);
 
-                // Provide a more user-friendly error message based on error type
+                // Format error as "GOT EXCEPTION" message
                 let error_message = match &err {
                     WinxError::WorkspacePathError(msg) => {
                         format!(
@@ -130,7 +130,12 @@ impl WinxService {
                     ),
                 };
 
-                Err(McpError::internal_error(error_message, None))
+                // Return as successful response with GOT EXCEPTION prefix
+                let exception_message =
+                    format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+                Ok(CallToolResult::success(vec![Content::text(
+                    exception_message,
+                )]))
             }
         }
     }
@@ -208,7 +213,12 @@ impl WinxService {
                     ),
                 };
 
-                Err(McpError::internal_error(error_message, None))
+                // Return as successful response with GOT EXCEPTION prefix
+                let exception_message =
+                    format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+                Ok(CallToolResult::success(vec![Content::text(
+                    exception_message,
+                )]))
             }
         }
     }
@@ -263,7 +273,12 @@ impl WinxService {
                     ),
                 };
 
-                Err(McpError::internal_error(error_message, None))
+                // Return as successful response with GOT EXCEPTION prefix
+                let exception_message =
+                    format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+                Ok(CallToolResult::success(vec![Content::text(
+                    exception_message,
+                )]))
             }
         }
     }
@@ -298,10 +313,13 @@ impl WinxService {
                 tracing::error!("Failed to serialize FileWriteOrEdit args to JSON: {}", e);
                 // For syntax errors, return a helpful error message
                 if e.is_syntax() {
-                    return Err(McpError::internal_error(
-                        format!("JSON syntax error in FileWriteOrEdit arguments: {}. Please check your tool argument format.", e),
-                        None
-                    ));
+                    // Format JSON error as "GOT EXCEPTION" message
+                    let error_message = format!("JSON syntax error in FileWriteOrEdit arguments: {}. Please check your tool argument format.", e);
+                    let exception_message =
+                        format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        exception_message,
+                    )]));
                 }
             }
         }
@@ -376,7 +394,12 @@ impl WinxService {
                     ),
                 };
 
-                Err(McpError::internal_error(error_message, None))
+                // Return as successful response with GOT EXCEPTION prefix
+                let exception_message =
+                    format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+                Ok(CallToolResult::success(vec![Content::text(
+                    exception_message,
+                )]))
             }
         }
     }
@@ -425,7 +448,12 @@ Saves provided description and file contents of all the relevant file paths or g
                     ),
                 };
 
-                Err(McpError::internal_error(error_message, None))
+                // Return as successful response with GOT EXCEPTION prefix
+                let exception_message =
+                    format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+                Ok(CallToolResult::success(vec![Content::text(
+                    exception_message,
+                )]))
             }
         }
     }
@@ -473,7 +501,12 @@ Saves provided description and file contents of all the relevant file paths or g
                     ),
                 };
 
-                Err(McpError::internal_error(error_message, None))
+                // Return as successful response with GOT EXCEPTION prefix
+                let exception_message =
+                    format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+                Ok(CallToolResult::success(vec![Content::text(
+                    exception_message,
+                )]))
             }
         }
     }
