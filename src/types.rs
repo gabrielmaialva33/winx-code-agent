@@ -656,3 +656,34 @@ pub struct FileWriteOrEdit {
     /// The chat ID for this session
     pub chat_id: String,
 }
+
+/// Parameters for the ContextSave tool
+///
+/// This struct represents the parameters needed to save context information
+/// about a task, including file contents from specified globs.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ContextSave {
+    /// Unique identifier for the task
+    ///
+    /// This should be a unique string that identifies the task. It can be
+    /// a random 3-word identifier or a user-provided value.
+    pub id: String,
+
+    /// Root path of the project
+    ///
+    /// This should be an absolute path to the project root. If empty, no
+    /// project root will be used.
+    pub project_root_path: String,
+
+    /// Description of the task
+    ///
+    /// This should contain a detailed description of the task, including
+    /// relevant context, problems, and objectives.
+    pub description: String,
+
+    /// List of file glob patterns
+    ///
+    /// These glob patterns identify the files that should be included in
+    /// the saved context. Patterns can be absolute or relative to the project root.
+    pub relevant_file_globs: Vec<String>,
+}

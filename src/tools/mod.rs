@@ -6,6 +6,7 @@
 //! The `WinxService` struct is the main entry point for all tool calls.
 
 pub mod bash_command;
+pub mod context_save;
 pub mod file_write_or_edit;
 pub mod initialize;
 pub mod read_files;
@@ -297,6 +298,55 @@ impl WinxService {
                     _ => format!(
                         "Error writing or editing file: {}\n\n\
                         This might be due to issues with file permissions or the file path.",
+                        err
+                    ),
+                };
+
+                Err(McpError::internal_error(error_message, None))
+            }
+        }
+    }
+
+    /// Save context information about a task
+    ///
+    /// This tool saves the description and contents of files matching the
+    /// provided glob patterns to a file for knowledge transfer.
+    #[tool(description = "
+Saves provided description and file contents of all the relevant file paths or globs in a single text file.
+- Provide random 3 word unqiue id or whatever user provided.
+- Leave project path as empty string if no project path")]
+    async fn context_save(
+        &self,
+        #[tool(aggr)] args: crate::types::ContextSave,
+    ) -> Result<CallToolResult, McpError> {
+        // Start timing for performance monitoring
+        let start_time = std::time::Instant::now();
+
+        // Log the args to debug what was received
+        debug!("ContextSave tool received args: {:?}", args);
+
+        // Call the implementation and measure execution time
+        match context_save::handle_tool_call(&self.bash_state, args).await {
+            Ok(result) => {
+                let elapsed = start_time.elapsed();
+                info!("ContextSave tool completed successfully in {:.2?}", elapsed);
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            Err(err) => {
+                tracing::error!("ContextSave tool error: {}", err);
+
+                // Provide a user-friendly error message based on error type
+                let error_message = match &err {
+                    WinxError::BashStateNotInitialized => {
+                        "Shell environment not initialized. Please call Initialize first."
+                            .to_string()
+                    }
+                    WinxError::FileAccessError { path, message } => {
+                        format!("File access error for {}: {}", path.display(), message)
+                    }
+                    _ => format!(
+                        "Error saving context: {}\n\n\
+                        This might be due to issues with file paths or globs.",
                         err
                     ),
                 };
