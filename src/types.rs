@@ -1,5 +1,6 @@
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, Serializer, Deserializer};
+use tracing;
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -10,13 +11,60 @@ pub enum InitializeType {
     UserAskedChangeWorkspace,
 }
 
-#[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ModeName {
     Wcgw,
     Architect,
-    #[serde(alias = "code_write", alias = "code-writer")]
     CodeWriter,
+}
+
+// Custom serializer implementation to ensure values are properly quoted in JSON
+impl Serialize for ModeName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            ModeName::Wcgw => serializer.serialize_str("wcgw"),
+            ModeName::Architect => serializer.serialize_str("architect"),
+            ModeName::CodeWriter => serializer.serialize_str("code_writer"),
+        }
+    }
+}
+
+// Custom deserializer to support multiple aliases
+impl<'de> Deserialize<'de> for ModeName {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "wcgw" => Ok(ModeName::Wcgw),
+            "architect" => Ok(ModeName::Architect),
+            "code_writer" | "code_write" | "code-writer" => Ok(ModeName::CodeWriter),
+            _ => Err(serde::de::Error::custom(format!("Unknown mode name: {}", s))),
+        }
+    }
+}
+
+// Implement schema generation for JSON schema since we removed the derive
+impl JsonSchema for ModeName {
+    fn schema_name() -> String {
+        "ModeName".to_string()
+    }
+
+    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        let mut schema = schemars::schema::SchemaObject::default();
+        schema.metadata().description = Some("The mode name for initialization".to_string());
+        let enum_values = vec![
+            serde_json::Value::String("wcgw".to_string()),
+            serde_json::Value::String("architect".to_string()),
+            serde_json::Value::String("code_writer".to_string()),
+        ];
+        schema.enum_values = Some(enum_values);
+        schema.into()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, JsonSchema, Clone, PartialEq)]
@@ -167,9 +215,16 @@ where
         serde_json::Value::String(s) if s == "null" => Ok(None),
         // Otherwise try to parse it as CodeWriterConfig
         _ => {
-            match serde_json::from_value::<CodeWriterConfig>(value) {
-                Ok(config) => Ok(Some(config)),
-                Err(_) => Ok(None), // Fall back to None on parse error
+            match serde_json::from_value::<CodeWriterConfig>(value.clone()) {
+                Ok(config) => {
+                    tracing::debug!("Successfully parsed CodeWriterConfig: {:?}", config);
+                    Ok(Some(config))
+                },
+                Err(e) => {
+                    // Log the error and the value for debugging
+                    tracing::error!("Failed to parse CodeWriterConfig: {}. Value: {}", e, value);
+                    Ok(None) // Fall back to None on parse error
+                }
             }
         }
     }
@@ -186,11 +241,30 @@ fn default_init_type() -> InitializeType {
 }
 
 // Mode types
-#[derive(Debug, Clone, Copy, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Modes {
     Wcgw,
     Architect,
     CodeWriter,
+}
+
+// Implement schema generation for Modes
+impl JsonSchema for Modes {
+    fn schema_name() -> String {
+        "Modes".to_string()
+    }
+
+    fn json_schema(gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
+        let mut schema = schemars::schema::SchemaObject::default();
+        schema.metadata().description = Some("Internal representation of modes".to_string());
+        let enum_values = vec![
+            serde_json::Value::String("wcgw".to_string()),
+            serde_json::Value::String("architect".to_string()),
+            serde_json::Value::String("code_writer".to_string()),
+        ];
+        schema.enum_values = Some(enum_values);
+        schema.into()
+    }
 }
 
 // Bash command mode

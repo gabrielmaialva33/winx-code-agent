@@ -70,7 +70,15 @@ pub async fn handle_tool_call(
     // Log full initialization parameters for debugging
     tracing::info!("Initialize tool called with:");
     tracing::info!("  type: {:?}", initialize.init_type);
-    tracing::info!("  mode_name: {:?}", initialize.mode_name);
+    
+    // Log mode_name with more details to debug serialization issues
+    let mode_name_str = match initialize.mode_name {
+        ModeName::Wcgw => "wcgw",
+        ModeName::Architect => "architect",
+        ModeName::CodeWriter => "code_writer",
+    };
+    tracing::info!("  mode_name: {} ({:?})", mode_name_str, initialize.mode_name);
+    
     tracing::info!("  workspace_path: {}", initialize.any_workspace_path);
     tracing::info!("  chat_id: {}", initialize.chat_id);
     tracing::info!("  code_writer_config: {:?}", initialize.code_writer_config);
@@ -149,29 +157,39 @@ pub async fn handle_tool_call(
     let mut file_edit_mode;
     let mut write_if_empty_mode;
 
-    if mode == Modes::CodeWriter && initialize.code_writer_config.is_some() {
-        // Use the provided code_writer_config
-        let config = initialize.code_writer_config.as_ref().unwrap();
+    if mode == Modes::CodeWriter {
+        // Check if code_writer_config is provided
+        if initialize.code_writer_config.is_some() {
+            // Use the provided code_writer_config
+            let config = initialize.code_writer_config.as_ref().unwrap();
+            tracing::info!("Using provided CodeWriter config: {:?}", config);
 
-        // Update relative globs to absolute paths if needed
-        let folder_to_start_str = folder_to_start.to_string_lossy().to_string();
-        let mut config_clone = config.clone();
-        config_clone.update_relative_globs(&folder_to_start_str);
+            // Update relative globs to absolute paths if needed
+            let folder_to_start_str = folder_to_start.to_string_lossy().to_string();
+            let mut config_clone = config.clone();
+            config_clone.update_relative_globs(&folder_to_start_str);
 
-        bash_command_mode = BashCommandMode {
-            bash_mode: BashMode::NormalMode,
-            allowed_commands: config_clone.allowed_commands.clone(),
-        };
+            bash_command_mode = BashCommandMode {
+                bash_mode: BashMode::NormalMode,
+                allowed_commands: config_clone.allowed_commands.clone(),
+            };
 
-        file_edit_mode = FileEditMode {
-            allowed_globs: config_clone.allowed_globs.clone(),
-        };
+            file_edit_mode = FileEditMode {
+                allowed_globs: config_clone.allowed_globs.clone(),
+            };
 
-        write_if_empty_mode = WriteIfEmptyMode {
-            allowed_globs: config_clone.allowed_globs.clone(),
-        };
+            write_if_empty_mode = WriteIfEmptyMode {
+                allowed_globs: config_clone.allowed_globs.clone(),
+            };
 
-        response.push_str(&format!("Using custom CodeWriter configuration\n"));
+            response.push_str(&format!("Using custom CodeWriter configuration\n"));
+        } else {
+            tracing::warn!("CodeWriter mode specified but no config provided, using defaults");
+            response.push_str("CodeWriter mode specified but no config provided, using defaults\n");
+            
+            // Use default code writer mode configuration
+            (bash_command_mode, file_edit_mode, write_if_empty_mode) = mode_to_state(&mode);
+        }
     } else {
         // Use default mode configuration
         (bash_command_mode, file_edit_mode, write_if_empty_mode) = mode_to_state(&mode);
