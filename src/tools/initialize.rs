@@ -14,6 +14,7 @@ use crate::types::{
     InitializeType, ModeName, Modes, WriteIfEmptyMode,
 };
 use crate::utils::path::{ensure_directory_exists, expand_user};
+use crate::utils::repo::{get_repo_context, get_git_info};
 
 /// Converts ModeName to the internal Modes enum
 ///
@@ -458,6 +459,35 @@ pub async fn handle_tool_call(
         }
     }
 
+    // Get repository context information if available
+    let repo_context = if folder_to_start.exists() {
+        match get_repo_context(&folder_to_start) {
+            Ok((context, _)) => {
+                debug!("Successfully generated repository context");
+                format!("\n---\n{}\n", context)
+            }
+            Err(e) => {
+                warn!("Failed to generate repository context: {}", e);
+                String::new()
+            }
+        }
+    } else {
+        String::new()
+    };
+
+    // Try to get Git info if available
+    let git_info = if folder_to_start.exists() {
+        match get_git_info(&folder_to_start) {
+            Some(info) => {
+                debug!("Successfully retrieved Git information");
+                format!("\n{}\n", info)
+            }
+            None => String::new(),
+        }
+    } else {
+        String::new()
+    };
+
     // Build and add environment information
     let current_state = if let Some(ref bash_state) = *bash_state_guard {
         // Get home directory with proper error handling
@@ -471,7 +501,7 @@ pub async fn handle_tool_call(
         debug!("Adding environment information to response");
 
         format!(
-            "\nEnvironment:\nSystem: {}\nMachine: {}\nInitialized in directory (also cwd): {:?}\nUser home directory: {}\n",
+            "\n# Environment\nSystem: {}\nMachine: {}\nInitialized in directory (also cwd): {:?}\nUser home directory: {}\n",
             std::env::consts::OS,
             std::env::consts::ARCH,
             bash_state.cwd,
@@ -483,6 +513,12 @@ pub async fn handle_tool_call(
     };
 
     response.push_str(&current_state);
+    response.push_str(&repo_context);
+    
+    // Add git info if available
+    if !git_info.is_empty() {
+        response.push_str(&git_info);
+    }
 
     // Add chat ID instruction
     if let Some(ref bash_state) = *bash_state_guard {
