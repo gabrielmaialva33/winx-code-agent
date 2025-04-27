@@ -687,3 +687,14 @@ pub struct ContextSave {
     /// the saved context. Patterns can be absolute or relative to the project root.
     pub relevant_file_globs: Vec<String>,
 }
+
+/// Parameters for the ReadImage tool
+///
+/// This struct represents the parameters needed to read an image file.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ReadImage {
+    /// Path to the image file to read
+    ///
+    /// This can be an absolute path or a path relative to the current working directory.
+    pub file_path: String,
+}

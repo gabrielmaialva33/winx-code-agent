@@ -10,6 +10,7 @@ pub mod context_save;
 pub mod file_write_or_edit;
 pub mod initialize;
 pub mod read_files;
+pub mod read_image;
 
 use anyhow::Result;
 use rmcp::{model::*, tool, Error as McpError, ServerHandler};
@@ -347,6 +348,54 @@ Saves provided description and file contents of all the relevant file paths or g
                     _ => format!(
                         "Error saving context: {}\n\n\
                         This might be due to issues with file paths or globs.",
+                        err
+                    ),
+                };
+
+                Err(McpError::internal_error(error_message, None))
+            }
+        }
+    }
+
+    /// Read an image file
+    ///
+    /// This tool reads an image file and returns its contents as base64-encoded
+    /// data with the appropriate MIME type.
+    #[tool(description = "Read an image from the shell.")]
+    async fn read_image(
+        &self,
+        #[tool(aggr)] args: crate::types::ReadImage,
+    ) -> Result<CallToolResult, McpError> {
+        // Start timing for performance monitoring
+        let start_time = std::time::Instant::now();
+
+        // Log the args to debug what was received
+        debug!("ReadImage tool received args: {:?}", args);
+
+        // Call the implementation and measure execution time
+        match read_image::handle_tool_call(&self.bash_state, args).await {
+            Ok((media_type, data)) => {
+                let elapsed = start_time.elapsed();
+                info!("ReadImage tool completed successfully in {:.2?}", elapsed);
+                Ok(CallToolResult::success(vec![Content::image(
+                    data, media_type,
+                )]))
+            }
+            Err(err) => {
+                tracing::error!("ReadImage tool error: {}", err);
+
+                // Provide a user-friendly error message based on error type
+                let error_message = match &err {
+                    WinxError::BashStateNotInitialized => {
+                        "Shell environment not initialized. Please call Initialize first."
+                            .to_string()
+                    }
+                    WinxError::FileAccessError { path, message } => {
+                        format!("File access error for {}: {}", path.display(), message)
+                    }
+                    _ => format!(
+                        "Error reading image: {}\n\n\
+                        This might be due to issues with the file path or format.",
                         err
                     ),
                 };
