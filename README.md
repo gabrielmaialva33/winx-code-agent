@@ -60,7 +60,7 @@ Winx is a Rust reimplementation of [WCGW](https://github.com/rusiaaman/wcgw), pr
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/gabrielmaialva33/winx.git && cd winx
+git clone https://github.com/gabrielmaialva33/winx-code-agent.git && cd winx
 ```
 
 ### 2. Build the Project
@@ -80,7 +80,7 @@ cargo build --release
 cargo run
 
 # Or directly
-./target/release/winx
+./target/release/winx-code-agent
 ```
 
 ---
@@ -95,7 +95,7 @@ Winx is designed to work seamlessly with Claude via the MCP interface:
    {
      "mcpServers": {
        "winx": {
-         "command": "/path/to/winx",
+         "command": "/path/to/winx-code-agent",
          "args": [],
          "env": {
            "RUST_LOG": "info"
@@ -219,7 +219,7 @@ context_save(
 
 If you need help or have any questions about Winx, feel free to reach out via the following channels:
 
-- [GitHub Issues](https://github.com/gabrielmaialva33/winx/issues/new?assignees=&labels=question&title=support%3A+):
+- [GitHub Issues](https://github.com/gabrielmaialva33/winx-code-agent/issues/new?assignees=&labels=question&title=support%3A+):
   Open a support issue on GitHub.
 - Email: gabrielmaialva33@gmail.com
 
