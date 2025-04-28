@@ -53,15 +53,15 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build release binary
-        run: cargo build --release --bin winx_openai
+        run: cargo build --release
 
       - name: Rename binary
         shell: bash
         run: |
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp target/release/winx_openai.exe ${{ matrix.artifact_name }}
+            cp target/release/winx-code-agent.exe ${{ matrix.artifact_name }}
           else
-            cp target/release/winx_openai ${{ matrix.artifact_name }}
+            cp target/release/winx-code-agent ${{ matrix.artifact_name }}
           fi
 
       - name: Upload release asset
