@@ -13,6 +13,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
+use crate::state::terminal::render_terminal_output;
 use crate::types::{BashCommand, BashCommandAction, SpecialKey};
 
 /// Maximum output length to prevent excessive responses
@@ -21,7 +22,8 @@ const MAX_OUTPUT_LENGTH: usize = 100_000;
 /// Process simple command execution for a bash command
 ///
 /// This handles command execution, truncating output if necessary, and
-/// providing status information.
+/// providing status information. Uses terminal emulation for better output
+/// rendering.
 ///
 /// # Arguments
 ///
@@ -54,7 +56,16 @@ async fn execute_simple_command(command: &str, cwd: &Path, timeout: Option<f32>)
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    let mut result = format!("{}{}", stdout, stderr);
+    let raw_result = format!("{}{}", stdout, stderr);
+
+    // Use terminal emulation to render the output
+    let mut result = raw_result.clone();
+    if !raw_result.is_empty() {
+        let rendered_lines = render_terminal_output(&raw_result);
+        if !rendered_lines.is_empty() {
+            result = rendered_lines.join("\n");
+        }
+    }
 
     // Truncate if too long
     if result.len() > MAX_OUTPUT_LENGTH {
@@ -173,7 +184,8 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
 /// Check the status of a running command in a screen session
 ///
 /// This retrieves the current output from a screen session and returns it
-/// with status information.
+/// with status information. Uses terminal emulation for better output
+/// rendering.
 ///
 /// # Arguments
 ///
@@ -221,7 +233,16 @@ async fn check_screen_status(screen_name: &str, cwd: &Path) -> Result<String> {
         .output()
         .context("Failed to capture screen output")?;
 
-    let mut output = String::from_utf8_lossy(&capture.stdout).to_string();
+    let raw_output = String::from_utf8_lossy(&capture.stdout).to_string();
+
+    // Use terminal emulation to render the output
+    let mut output = raw_output.clone();
+    if !raw_output.is_empty() {
+        let rendered_lines = render_terminal_output(&raw_output);
+        if !rendered_lines.is_empty() {
+            output = rendered_lines.join("\n");
+        }
+    }
 
     // Truncate if too long
     if output.len() > MAX_OUTPUT_LENGTH {
@@ -255,6 +276,7 @@ async fn check_screen_status(screen_name: &str, cwd: &Path) -> Result<String> {
 /// Handle sending input to a running command in a screen session
 ///
 /// This sends text or special keys to a running screen session.
+/// Uses terminal emulation for better output rendering.
 ///
 /// # Arguments
 ///
@@ -315,6 +337,9 @@ async fn send_to_screen(input: &str, screen_name: &str, is_special: bool) -> Res
         )));
     }
 
+    // Give a small delay to allow the screen session to process the input
+    sleep(Duration::from_millis(100)).await;
+
     // Capture current output from screen session
     let capture_cmd = format!(
         "screen -S {} -X hardcopy /tmp/screen_capture.txt && cat /tmp/screen_capture.txt",
@@ -327,7 +352,16 @@ async fn send_to_screen(input: &str, screen_name: &str, is_special: bool) -> Res
         .output()
         .context("Failed to capture screen output")?;
 
-    let mut output = String::from_utf8_lossy(&capture.stdout).to_string();
+    let raw_output = String::from_utf8_lossy(&capture.stdout).to_string();
+
+    // Use terminal emulation to render the output
+    let mut output = raw_output.clone();
+    if !raw_output.is_empty() {
+        let rendered_lines = render_terminal_output(&raw_output);
+        if !rendered_lines.is_empty() {
+            output = rendered_lines.join("\n");
+        }
+    }
 
     // Truncate if too long
     if output.len() > MAX_OUTPUT_LENGTH {

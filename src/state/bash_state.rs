@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 
+use crate::state::terminal::TerminalEmulator;
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
 };
@@ -100,6 +102,52 @@ impl FileWhitelistData {
     }
 }
 
+/// Terminal state for tracking command output between calls
+#[derive(Debug, Clone)]
+pub struct TerminalState {
+    /// Last command that was executed
+    #[allow(dead_code)]
+    pub last_command: String,
+    /// Last pending output, used for incremental updates
+    #[allow(dead_code)]
+    pub last_pending_output: String,
+    /// Flag indicating if a command is currently running
+    #[allow(dead_code)]
+    pub command_running: bool,
+    /// Terminal emulator for processing output
+    #[allow(dead_code)]
+    pub terminal_emulator: Arc<Mutex<TerminalEmulator>>,
+}
+
+impl TerminalState {
+    /// Creates a new terminal state
+    pub fn new() -> Self {
+        Self {
+            last_command: String::new(),
+            last_pending_output: String::new(),
+            command_running: false,
+            terminal_emulator: Arc::new(Mutex::new(TerminalEmulator::new(160))),
+        }
+    }
+
+    /// Process new output with the terminal emulator
+    #[allow(dead_code)]
+    pub fn process_output(&mut self, output: &str) -> String {
+        // Update the last pending output
+        self.last_pending_output = output.to_string();
+
+        // Process the output with the terminal emulator
+        if let Ok(mut emulator) = self.terminal_emulator.lock() {
+            emulator.process(output);
+            let display = emulator.display();
+            display.join("\n")
+        } else {
+            // Fallback if we can't lock the emulator
+            output.to_string()
+        }
+    }
+}
+
 /// The BashState struct holds the state of a bash session, including
 /// the current working directory, workspace root, and various modes.
 #[derive(Debug, Clone)]
@@ -113,6 +161,9 @@ pub struct BashState {
     pub write_if_empty_mode: WriteIfEmptyMode,
     #[allow(dead_code)]
     pub whitelist_for_overwrite: HashMap<String, FileWhitelistData>,
+    /// Terminal state for tracking command output
+    #[allow(dead_code)]
+    pub terminal_state: TerminalState,
 }
 
 /// BashContext wraps a BashState and provides access to it
@@ -145,6 +196,7 @@ impl BashState {
             file_edit_mode,
             write_if_empty_mode,
             whitelist_for_overwrite: HashMap::new(),
+            terminal_state: TerminalState::new(),
         }
     }
 
