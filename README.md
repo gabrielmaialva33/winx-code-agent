@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat&logo=appveyor" alt="License" />
   <img src="https://img.shields.io/github/languages/count/gabrielmaialva33/winx-code-agent?style=flat&logo=appveyor" alt="GitHub language count" >
   <img src="https://img.shields.io/github/repo-size/gabrielmaialva33/winx-code-agent?style=flat&logo=appveyor" alt="Repository size" >
-  <a href="https://github.com/gabrielmaialva33/winx-code-agent/commits/master">
+  <a href="https://github.com/gabrielmaialva33/winx-code-agent/commits/main">
     <img src="https://img.shields.io/github/last-commit/gabrielmaialva33/winx-code-agent?style=flat&logo=appveyor" alt="Last Commit" >
   </a>
   <img src="https://img.shields.io/badge/made%20by-Maia-15c3d6?style=flat&logo=appveyor" alt="Made by Maia" >
@@ -24,7 +24,9 @@
 
 ## 📖 Overview
 
-Winx is a Rust reimplementation of [WCGW](https://github.com/rusiaaman/wcgw), providing shell execution and file management capabilities for LLM code agents. Designed for high performance and reliability, Winx integrates with Claude and other LLMs via the Model Context Protocol (MCP).
+Winx is a Rust reimplementation of [WCGW](https://github.com/rusiaaman/wcgw), providing shell execution and file
+management capabilities for LLM code agents. Designed for high performance and reliability, Winx integrates with Claude
+and other LLMs via the Model Context Protocol (MCP).
 
 ## 🌟 Features
 
@@ -228,7 +230,8 @@ If you need help or have any questions about Winx, feel free to reach out via th
 ## 🙏 Special Thanks
 
 A huge thank you to [rusiaaman](https://github.com/rusiaaman) for the inspiring work
-on [WCGW](https://github.com/rusiaaman/wcgw), which served as the primary inspiration for this project. Winx reimplements WCGW's features in Rust for enhanced performance and reliability.
+on [WCGW](https://github.com/rusiaaman/wcgw), which served as the primary inspiration for this project. Winx
+reimplements WCGW's features in Rust for enhanced performance and reliability.
 
 ---
 
