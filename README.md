@@ -12,10 +12,10 @@
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat&logo=rust" alt="Language" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat&logo=appveyor" alt="License" />
-  <img src="https://img.shields.io/github/languages/count/gabrielmaialva33/winx?style=flat&logo=appveyor" alt="GitHub language count" >
-  <img src="https://img.shields.io/github/repo-size/gabrielmaialva33/winx?style=flat&logo=appveyor" alt="Repository size" >
-  <a href="https://github.com/gabrielmaialva33/winx/commits/master">
-    <img src="https://img.shields.io/github/last-commit/gabrielmaialva33/winx?style=flat&logo=appveyor" alt="Last Commit" >
+  <img src="https://img.shields.io/github/languages/count/gabrielmaialva33/winx-code-agent?style=flat&logo=appveyor" alt="GitHub language count" >
+  <img src="https://img.shields.io/github/repo-size/gabrielmaialva33/winx-code-agent?style=flat&logo=appveyor" alt="Repository size" >
+  <a href="https://github.com/gabrielmaialva33/winx-code-agent/commits/master">
+    <img src="https://img.shields.io/github/last-commit/gabrielmaialva33/winx-code-agent?style=flat&logo=appveyor" alt="Last Commit" >
   </a>
   <img src="https://img.shields.io/badge/made%20by-Maia-15c3d6?style=flat&logo=appveyor" alt="Made by Maia" >
 </p>
