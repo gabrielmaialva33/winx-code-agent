@@ -1,8 +1,8 @@
 [package]
-name = "winx"
+name = "winx-code-agent"
 version = "0.1.2"
 edition = "2021"
-description = "Rust implementation of WCGW using MCP"
+description = "Shell and coding agent for Claude Desktop"
 authors = ["Gabriel Maia <gabrielmaialva33@gmail.com>"]
 
 [dependencies]
