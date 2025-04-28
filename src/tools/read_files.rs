@@ -5,16 +5,19 @@
 //! line range filtering.
 
 use anyhow::Context as AnyhowContext;
+use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use tokio::task;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
 use crate::types::ReadFiles;
+use crate::utils::mmap::{read_file_optimized, read_file_to_string};
 use crate::utils::path::expand_user;
 
 /// Type alias for file reading result
@@ -28,7 +31,7 @@ use crate::utils::path::expand_user;
 type FileReadResult = (String, bool, usize, String, (usize, usize));
 
 /// Maximum amount of data to read from a file to prevent memory issues
-const MAX_FILE_SIZE: u64 = 10_000_000; // 10MB
+const MAX_FILE_SIZE: u64 = 50_000_000; // Increased to 50MB
 
 /// Format a line range specification for display
 ///
@@ -133,33 +136,32 @@ fn read_file(
         });
     }
 
-    // Read file content
-    let content = fs::read_to_string(&path).map_err(|e| WinxError::FileAccessError {
-        path: path.clone(),
-        message: format!("Error reading file: {}", e),
-    })?;
+    // Read file content using optimized reader
+    let content = read_file_to_string(&path, MAX_FILE_SIZE)?;
 
-    // Split into lines, ensuring we capture an empty line at the end if needed
-    let mut all_lines: Vec<&str> = content.lines().collect();
-    if content.ends_with('\n') {
-        all_lines.push("");
-    }
+    // Use more efficient line handling with better memory characteristics
+    let lines: Vec<&str> = content.lines().collect();
+    let total_lines = lines.len() + if content.ends_with('\n') { 1 } else { 0 };
 
-    let total_lines = all_lines.len();
-
-    // Apply line range filtering
-    let start_idx = start_line_num.map_or(0, |n| n.saturating_sub(1).min(total_lines));
-    let end_idx = end_line_num.map_or(total_lines, |n| n.min(total_lines));
+    // Apply line range filtering with bounds checking
+    let start_idx = start_line_num.map_or(0, |n| n.saturating_sub(1).min(lines.len()));
+    let end_idx = end_line_num.map_or(lines.len(), |n| n.min(lines.len()));
 
     // Effective line numbers for tracking (1-indexed)
     let effective_start = start_line_num.unwrap_or(1);
     let mut effective_end = end_line_num.unwrap_or(total_lines);
 
-    // Extract the requested lines
-    let filtered_lines = &all_lines[start_idx..end_idx];
+    // Extract the requested lines - allocate with capacity for better performance
+    let filtered_lines = &lines[start_idx..end_idx];
+
+    // Pre-calculate the approximate size needed for the result
+    let approx_size = filtered_lines
+        .iter()
+        .map(|line| line.len() + 1)
+        .sum::<usize>();
+    let mut result_content = String::with_capacity(approx_size);
 
     // Create content string with or without line numbers
-    let mut result_content = String::new();
     if show_line_numbers {
         for (i, line) in filtered_lines.iter().enumerate() {
             let line_num = start_idx + i + 1; // Convert to 1-indexed
@@ -178,14 +180,25 @@ fn read_file(
 
     // Handle token limiting if specified
     if let Some(max_tokens) = max_tokens {
-        // NOTE: We're not actually counting tokens here since we don't have the encoder
-        // Just using character count as a rough approximation
+        // Using character count as a rough approximation of tokens
         tokens_count = result_content.len();
 
         if tokens_count > max_tokens {
-            // Simple truncation at character boundary
-            // In a real implementation, truncate at token boundary using encoder
-            result_content = result_content.chars().take(max_tokens).collect();
+            // Use an efficient truncation strategy for large strings
+            let mut char_count = 0;
+            let mut truncation_point = 0;
+
+            for (idx, _) in result_content.char_indices() {
+                char_count += 1;
+                if char_count > max_tokens {
+                    truncation_point = idx;
+                    break;
+                }
+            }
+
+            if truncation_point > 0 {
+                result_content.truncate(truncation_point);
+            }
 
             // Count how many lines we kept after truncation
             let line_count = result_content.matches('\n').count();
@@ -204,12 +217,12 @@ fn read_file(
         }
     }
 
-    // Get canonicalized path string
-    let canon_path = path
-        .canonicalize()
-        .unwrap_or(path.clone())
-        .to_string_lossy()
-        .to_string();
+    // Get canonicalized path string - does this asynchronously to avoid blocking
+    let path_clone = path.clone();
+    let canon_path = match path.canonicalize() {
+        Ok(canon) => canon.to_string_lossy().to_string(),
+        Err(_) => path_clone.to_string_lossy().to_string(),
+    };
 
     Ok((
         result_content,
@@ -244,8 +257,7 @@ pub async fn handle_tool_call(
 ) -> Result<String> {
     info!("ReadFiles tool called with: {:?}", read_files);
 
-    // We need to extract data from the bash state before awaiting
-    // to avoid holding the MutexGuard across await points
+    // Extract data from the bash state before any async operations
     let cwd: PathBuf;
 
     // Lock bash state to extract data
@@ -267,18 +279,20 @@ pub async fn handle_tool_call(
         cwd = bash_state.cwd.clone();
     }
 
-    let mut message = String::new();
-    let mut file_ranges_dict: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-    let mut remaining_tokens = read_files.max_tokens;
+    // Process file paths and line ranges
+    // Create a vector of file reading parameters for parallel processing
+    let mut file_params = Vec::with_capacity(read_files.file_paths.len());
+    let show_line_numbers = read_files.show_line_numbers();
+    let max_tokens_per_file = read_files.max_tokens;
 
-    // Process each file path, parsing line ranges if needed
+    // Prepare file parameters
     for (i, file_path) in read_files.file_paths.iter().enumerate() {
-        // Parse path for line ranges - this applies the same logic as ReadFiles.parse_line_ranges()
+        // Parse path for line ranges
         let mut start_line_num = read_files.start_line_nums.get(i).copied().unwrap_or(None);
         let mut end_line_num = read_files.end_line_nums.get(i).copied().unwrap_or(None);
         let mut clean_path = file_path.clone();
 
-        // Check if the path contains a line range specification
+        // Extract line range from path if present
         if file_path.contains(':') {
             let parts: Vec<&str> = file_path.rsplitn(2, ':').collect();
             if parts.len() == 2 {
@@ -319,15 +333,84 @@ pub async fn handle_tool_call(
             }
         }
 
-        // Try to read the file
-        match read_file(
-            &clean_path,
-            remaining_tokens,
-            &cwd,
-            read_files.show_line_numbers(),
-            start_line_num,
-            end_line_num,
-        ) {
+        // Store file params for parallel processing
+        file_params.push((clean_path, file_path.clone(), start_line_num, end_line_num));
+    }
+
+    // Build a structure to hold results
+    struct FileReadInfo {
+        original_path: String,
+        result: Result<FileReadResult>,
+    }
+
+    // Process files in parallel using tokio tasks for I/O bound operations
+    let mut file_read_tasks = Vec::with_capacity(file_params.len());
+
+    // Clone all file parameters outside the closure to avoid lifetime issues
+    let cloned_params = file_params;
+
+    // Limit parallel file reading to avoid overwhelming the system
+    // Typically processors have 8-32 cores, so 8 is a reasonable default
+    const MAX_PARALLEL_READS: usize = 8;
+    let chunk_size = (cloned_params.len() + MAX_PARALLEL_READS - 1) / MAX_PARALLEL_READS.max(1);
+
+    // Process files in chunks
+    for chunk in cloned_params.chunks(chunk_size.max(1)) {
+        let chunk_tasks = chunk
+            .iter()
+            .map(
+                |(clean_path, original_path, start_line_num, end_line_num)| {
+                    let clean_path = clean_path.clone();
+                    let original_path = original_path.clone();
+                    let cwd = cwd.clone();
+                    let start = *start_line_num;
+                    let end = *end_line_num;
+
+                    task::spawn_blocking(move || {
+                        let result = read_file(
+                            &clean_path,
+                            max_tokens_per_file,
+                            &cwd,
+                            show_line_numbers,
+                            start,
+                            end,
+                        );
+
+                        FileReadInfo {
+                            original_path,
+                            result,
+                        }
+                    })
+                },
+            )
+            .collect::<Vec<_>>();
+
+        // Wait for this chunk to complete
+        for task in chunk_tasks {
+            file_read_tasks.push(task.await.unwrap_or_else(|e| FileReadInfo {
+                original_path: "unknown".to_string(),
+                result: Err(WinxError::CommandExecutionError(format!(
+                    "Task panicked: {}",
+                    e
+                ))),
+            }));
+        }
+    }
+
+    // Process results
+    let mut message = String::new();
+    let mut file_ranges_dict: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    let mut remaining_tokens = max_tokens_per_file;
+    let mut should_stop = false;
+
+    for (i, file_info) in file_read_tasks.into_iter().enumerate() {
+        if should_stop {
+            continue;
+        }
+
+        let file_path = &file_info.original_path;
+
+        match file_info.result {
             Ok((content, file_truncated, tokens_used, canon_path, line_range)) => {
                 // Update tokens used (if limiting)
                 if let Some(max_tokens) = remaining_tokens {
@@ -346,6 +429,16 @@ pub async fn handle_tool_call(
                 }
 
                 // Add content to message
+                let start_line_num = if i < cloned_params.len() {
+                    cloned_params[i].2
+                } else {
+                    None
+                };
+                let end_line_num = if i < cloned_params.len() {
+                    cloned_params[i].3
+                } else {
+                    None
+                };
                 let range_formatted = range_format(start_line_num, end_line_num);
                 message.push_str(&format!(
                     "\n{}{}\n```\n{}\n",
@@ -354,6 +447,8 @@ pub async fn handle_tool_call(
 
                 // Check if we need to stop due to truncation or token limit
                 if file_truncated || remaining_tokens == Some(0) {
+                    should_stop = true;
+
                     // Mention files we're not reading if any remain
                     let remaining_files: Vec<String> =
                         read_files.file_paths.iter().skip(i + 1).cloned().collect();
@@ -363,7 +458,6 @@ pub async fn handle_tool_call(
                             remaining_files.join(", ")
                         ));
                     }
-                    break;
                 } else {
                     message.push_str("```");
                 }
@@ -376,54 +470,55 @@ pub async fn handle_tool_call(
         }
     }
 
-    // Track file accesses in whitelist for later editing
-    // Note: In a real implementation, this would update the BashState whitelist_for_overwrite
-    // but we need to refactor that to either:
-    // 1. Return the updated hashmap from this function, or
-    // 2. Create an async update method that can be called without holding the lock
-
-    // Build the whitelist data for file paths
+    // Update whitelist data in bash state
     let whitelist_data: HashMap<String, Vec<(usize, usize)>> = file_ranges_dict.clone();
 
-    // Add a transaction to update the bash state with the whitelist data
-    // This would typically need to run without blocking the async function
+    // Process file hashes in parallel for better performance
+    let hash_results: Vec<_> = whitelist_data
+        .par_iter()
+        .filter_map(|(file_path, ranges)| {
+            match read_file_optimized(Path::new(file_path), MAX_FILE_SIZE) {
+                Ok(file_content) => {
+                    // Calculate file hash
+                    let mut hasher = Sha256::new();
+                    hasher.update(&file_content);
+                    let file_hash = format!("{:x}", hasher.finalize());
+
+                    // Calculate total lines in file
+                    let total_lines = file_content.iter().filter(|&c| *c == b'\n').count() + 1;
+
+                    Some((file_path.clone(), file_hash, ranges.clone(), total_lines))
+                }
+                Err(_) => None,
+            }
+        })
+        .collect();
+
+    // Update the bash state with the computed hashes
     tokio::task::spawn_blocking({
         let bash_state_arc = Arc::clone(bash_state_arc);
-        let whitelist_data = whitelist_data.clone();
         move || {
             if let Ok(mut bash_state_guard) = bash_state_arc.lock() {
                 if let Some(bash_state) = bash_state_guard.as_mut() {
-                    for (file_path, ranges) in whitelist_data {
-                        // Read file content to calculate hash
-                        if let Ok(file_content) = fs::read(&file_path) {
-                            // Calculate file hash
-                            let mut hasher = Sha256::new();
-                            hasher.update(&file_content);
-                            let file_hash = format!("{:x}", hasher.finalize());
-
-                            // Calculate total lines in file
-                            let total_lines =
-                                file_content.iter().filter(|&&c| c == b'\n').count() + 1;
-
-                            // Add or update the whitelist entry
-                            if let Some(existing) =
-                                bash_state.whitelist_for_overwrite.get_mut(&file_path)
-                            {
-                                existing.file_hash = file_hash;
-                                existing.total_lines = total_lines;
-                                for range in ranges {
-                                    existing.add_range(range.0, range.1);
-                                }
-                            } else {
-                                bash_state.whitelist_for_overwrite.insert(
-                                    file_path,
-                                    crate::state::bash_state::FileWhitelistData::new(
-                                        file_hash,
-                                        ranges,
-                                        total_lines,
-                                    ),
-                                );
+                    for (file_path, file_hash, ranges, total_lines) in &hash_results {
+                        // Add or update the whitelist entry
+                        if let Some(existing) =
+                            bash_state.whitelist_for_overwrite.get_mut(file_path)
+                        {
+                            existing.file_hash = file_hash.clone();
+                            existing.total_lines = *total_lines;
+                            for range in ranges {
+                                existing.add_range(range.0, range.1);
                             }
+                        } else {
+                            bash_state.whitelist_for_overwrite.insert(
+                                file_path.clone(),
+                                crate::state::bash_state::FileWhitelistData::new(
+                                    file_hash.clone(),
+                                    ranges.clone(),
+                                    *total_lines,
+                                ),
+                            );
                         }
                     }
                 }

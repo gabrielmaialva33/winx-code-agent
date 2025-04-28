@@ -1,3 +1,4 @@
+pub mod mmap;
 pub mod path;
 pub mod repo;
 

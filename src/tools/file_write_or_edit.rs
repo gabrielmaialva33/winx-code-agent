@@ -7,7 +7,7 @@ use anyhow::Context as AnyhowContext;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::task;
@@ -17,21 +17,35 @@ use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, FileWhitelistData};
 use crate::types::FileWriteOrEdit;
 use crate::utils::path::expand_user;
+// We'll be using this in future improvements
+#[allow(unused_imports)]
+use crate::utils::mmap::read_file_to_string;
 
 // Regex patterns for search/replace blocks
-// Create these just once when needed
-fn search_marker() -> Regex {
-    Regex::new(r"^<<<<<<+\s*SEARCH\s*$").unwrap()
+// Create these with caching to improve performance
+fn search_marker() -> &'static Regex {
+    lazy_static::lazy_static! {
+        static ref REGEX: Regex = Regex::new(r"^<<<<<<+\s*SEARCH\s*$").unwrap();
+    }
+    &REGEX
 }
-fn divider_marker() -> Regex {
-    Regex::new(r"^======*\s*$").unwrap()
+
+fn divider_marker() -> &'static Regex {
+    lazy_static::lazy_static! {
+        static ref REGEX: Regex = Regex::new(r"^======*\s*$").unwrap();
+    }
+    &REGEX
 }
-fn replace_marker() -> Regex {
-    Regex::new(r"^>>>>>>+\s*REPLACE\s*$").unwrap()
+
+fn replace_marker() -> &'static Regex {
+    lazy_static::lazy_static! {
+        static ref REGEX: Regex = Regex::new(r"^>>>>>>+\s*REPLACE\s*$").unwrap();
+    }
+    &REGEX
 }
 
 /// Maximum file size to read
-const MAX_FILE_SIZE: u64 = 10_000_000; // 10MB
+const MAX_FILE_SIZE: u64 = 50_000_000; // Increased to 50MB
 
 /// Helper struct for search/replace operations
 #[derive(Debug)]
@@ -342,9 +356,10 @@ fn apply_search_replace_blocks(
     // We don't need to log here as the error is already logged at the call site
 }
 
-/// Write content to a file
+/// Write content to a file with optimized buffering
 ///
-/// This function writes content to a file, creating parent directories if needed.
+/// This function writes content to a file using a buffered writer for better performance,
+/// creating parent directories if needed.
 ///
 /// # Arguments
 ///
@@ -360,10 +375,34 @@ fn write_to_file(path: &Path, content: &str) -> Result<()> {
         fs::create_dir_all(parent).context("Failed to create parent directories")?;
     }
 
-    // Write the content to the file
-    let mut file = fs::File::create(path).context("Failed to create file")?;
-    file.write_all(content.as_bytes())
-        .context("Failed to write to file")?;
+    // Calculate an appropriate buffer size based on content length
+    // Min 64KB, max 8MB buffer
+    let buffer_size = content.len().clamp(64 * 1024, 8 * 1024 * 1024);
+
+    // Use a buffered writer for performance
+    let file = fs::File::create(path).context("Failed to create file")?;
+    let mut writer = BufWriter::with_capacity(buffer_size, file);
+
+    // Write content in chunks for large files to avoid excessive memory usage
+    let content_bytes = content.as_bytes();
+    const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
+
+    if content_bytes.len() > CHUNK_SIZE * 10 {
+        // For very large content, write in chunks
+        for chunk in content_bytes.chunks(CHUNK_SIZE) {
+            writer
+                .write_all(chunk)
+                .context("Failed to write chunk to file")?;
+        }
+    } else {
+        // For smaller content, write all at once
+        writer
+            .write_all(content_bytes)
+            .context("Failed to write to file")?;
+    }
+
+    // Ensure data is flushed to disk
+    writer.flush().context("Failed to flush data to file")?;
 
     Ok(())
 }
