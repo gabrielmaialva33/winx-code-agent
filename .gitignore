@@ -9,3 +9,5 @@ Cargo.lock
 .cargo/
 /debug/
 /release/
+
+**/.claude/settings.local.json
