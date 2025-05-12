@@ -1,6 +1,7 @@
 pub mod file_cache;
 pub mod mmap;
 pub mod path;
+pub mod path_analyzer;
 pub mod repo;
 
 use crate::types::Initialize;
