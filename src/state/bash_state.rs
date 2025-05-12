@@ -19,6 +19,8 @@ use crate::state::terminal::{
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
 };
+use crate::utils::error_predictor::SharedErrorPredictor;
+use crate::utils::pattern_analyzer::SharedPatternAnalyzer;
 
 /// FileWhitelistData tracks information about files that have been read
 /// and can be edited or overwritten
@@ -275,6 +277,12 @@ pub struct BashState {
     pub terminal_state: TerminalState,
     /// Interactive bash process
     pub interactive_bash: Arc<Mutex<Option<InteractiveBash>>>,
+    /// Pattern analyzer for intelligent command suggestions
+    pub pattern_analyzer: SharedPatternAnalyzer,
+    /// Error predictor for error prevention
+    pub error_predictor: SharedErrorPredictor,
+    /// Flag indicating if this state has been initialized
+    pub initialized: bool,
 }
 
 /// BashContext wraps a BashState and provides access to it
@@ -793,6 +801,9 @@ impl BashState {
             whitelist_for_overwrite: HashMap::new(),
             terminal_state: TerminalState::new(),
             interactive_bash: Arc::new(Mutex::new(None)),
+            pattern_analyzer: SharedPatternAnalyzer::new(),
+            error_predictor: SharedErrorPredictor::new(),
+            initialized: false,
         }
     }
 
@@ -1201,6 +1212,18 @@ impl BashState {
             "{}\n\n---\n\n{}\ncwd = {}\n",
             rendered_output, status_line, current_cwd
         );
+
+        // Record command in pattern analyzer for future suggestions
+        if !command.trim().is_empty() && command != "status_check" {
+            // Don't record status checks or empty commands
+            if let Err(e) = self
+                .pattern_analyzer
+                .record_command(command, &current_cwd)
+                .await
+            {
+                warn!("Failed to record command in pattern analyzer: {}", e);
+            }
+        }
 
         Ok(final_result)
     }
