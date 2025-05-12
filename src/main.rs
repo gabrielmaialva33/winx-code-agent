@@ -36,6 +36,8 @@ struct Config {
     version: bool,
     /// Run JSON parsing tests
     test_json: bool,
+    /// Enable debug mode with enhanced error reporting
+    debug_mode: bool,
 }
 
 impl Config {
@@ -47,6 +49,7 @@ impl Config {
             debug: args.iter().any(|arg| arg == "--debug"),
             version: args.iter().any(|arg| arg == "--version" || arg == "-V"),
             test_json: args.iter().any(|arg| arg == "--test-json"),
+            debug_mode: args.iter().any(|arg| arg == "--debug-mode"),
         }
     }
 
@@ -121,7 +124,13 @@ async fn main() -> Result<()> {
     // Run server with proper error handling
     tracing::info!("Starting MCP server...");
 
-    match server::run_server().await {
+    // If in debug mode, pass that to the server configuration
+    let server_config = server::ServerConfig {
+        simulation_mode: false,
+        debug_mode: config.debug_mode,
+    };
+
+    match server::run_server_with_config(server_config).await {
         Ok(_) => {
             tracing::info!("Server shutting down normally");
             Ok(())
