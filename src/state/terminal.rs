@@ -173,6 +173,7 @@ impl Screen {
     }
 
     /// Put a character at the current cursor position and advance the cursor
+    #[allow(clippy::too_many_arguments)]
     pub fn put_char(
         &mut self,
         c: char,
@@ -1087,11 +1088,14 @@ impl TerminalEmulator {
     }
 }
 
+/// Type definition for cache entries to simplify complex types
+type CacheEntryMap = HashMap<String, (Vec<String>, Instant)>;
+
 /// Caching system for terminal output rendering
 #[derive(Debug, Clone)]
 struct TerminalCache {
     /// Cache entries mapping text content to rendered output
-    entries: Arc<RwLock<HashMap<String, (Vec<String>, Instant)>>>,
+    entries: Arc<RwLock<CacheEntryMap>>,
     /// Maximum number of entries in the cache
     max_entries: usize,
     /// Time-to-live for cache entries in seconds
