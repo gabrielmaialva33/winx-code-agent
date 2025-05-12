@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use std::time::Instant;
+use tracing::{debug, warn};
 use vte::{Parser, Perform};
 
 /// Maximum number of lines to keep in the screen buffer
