@@ -479,7 +479,7 @@ fn sanitize_filename(input: &str) -> String {
         result = format!(
             "{}-{}",
             &result[0..45],
-            rand::rng().random_range(1000..9999).to_string()
+            rand::rng().random_range(1000..9999)
         );
     }
 
