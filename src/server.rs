@@ -8,14 +8,15 @@ use rmcp::{transport::stdio, ServiceExt};
 
 use crate::errors::{Result, WinxError};
 use crate::tools;
+use std::time::SystemTime;
 
 /// Configuration for the server
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct ServerConfig {
     /// Whether to use a simulated environment for testing
-    #[allow(dead_code)]
     pub simulation_mode: bool,
+    /// Enable debug mode with enhanced error reporting
+    pub debug_mode: bool,
 }
 
 /// Runs the MCP server using the stdio transport
@@ -32,14 +33,79 @@ pub struct ServerConfig {
 ///
 /// Returns an error if the server fails to start or encounters an error during operation.
 pub async fn run_server() -> Result<()> {
-    // Measure startup time
+    // Use default configuration
+    run_server_with_config(ServerConfig::default()).await
+}
+
+/// Initializes the server with a custom configuration
+///
+/// This is a more flexible version of run_server that allows customizing the server behavior.
+///
+/// # Arguments
+///
+/// * `config` - The server configuration
+///
+/// # Returns
+///
+/// Returns a Result indicating whether the server ran successfully.
+pub async fn run_server_with_config(config: ServerConfig) -> Result<()> {
+    tracing::info!("Starting server with custom configuration: {:?}", config);
+
+    if config.simulation_mode {
+        tracing::warn!("Running in simulation mode - some features may be limited");
+        // In a real implementation, you would use a different service implementation
+        // or mock certain components
+    }
+
+    if config.debug_mode {
+        tracing::info!("Running in debug mode - enhanced error reporting enabled");
+
+        // Enable stack traces for errors
+        std::env::set_var("RUST_BACKTRACE", "1");
+
+        // Create a debug log file
+        let _debug_log = std::fs::File::create("winx_debug.log").map_err(|e| {
+            WinxError::ShellInitializationError(format!("Failed to create debug log: {}", e))
+        })?;
+
+        // Log system information
+        let sys_info = format!(
+            "System Info:\n\
+            - OS: {}\n\
+            - Arch: {}\n\
+            - Version: {}\n\
+            - Debug Mode: {}\n\
+            - Simulation Mode: {}\n\
+            - Rust Version: {}\n\
+            - Time: {}\n",
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            env!("CARGO_PKG_VERSION"),
+            config.debug_mode,
+            config.simulation_mode,
+            "unknown",
+            format!("{:?}", SystemTime::now()),
+        );
+
+        // Log to console and file
+        tracing::info!("Debug System Info:\n{}", sys_info);
+
+        if let Err(e) = std::fs::write("winx_debug_info.txt", sys_info) {
+            tracing::warn!("Failed to write debug info to file: {}", e);
+        }
+    }
+
+    // Use timeout for the server startup
     let start_time = std::time::Instant::now();
 
     // Initialize the Winx service
     tracing::debug!("Initializing server...");
 
+    // Create service with debug mode if enabled
+    let service = tools::WinxService::new();
+
     // Use a timeout for server initialization to avoid hanging
-    let service_future = tools::WinxService::new().serve(stdio());
+    let service_future = service.serve(stdio());
     let service = tokio::time::timeout(
         std::time::Duration::from_secs(30), // 30 second timeout
         service_future,
@@ -62,11 +128,36 @@ pub async fn run_server() -> Result<()> {
     );
 
     // Create a task to periodically report the server status
-    let status_reporter = tokio::spawn(async {
+    let status_reporter = tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // 5 minutes
         loop {
             interval.tick().await;
-            tracing::debug!("Server is running (periodic status report)");
+
+            // Add more detailed status in debug mode
+            if config.debug_mode {
+                let mem_usage = match std::process::Command::new("ps")
+                    .args(["o", "rss=", "-p", &std::process::id().to_string()])
+                    .output()
+                {
+                    Ok(output) => {
+                        let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                        if let Ok(kb) = output_str.parse::<u64>() {
+                            format!("{:.2} MB", kb as f64 / 1024.0)
+                        } else {
+                            "Unknown".to_string()
+                        }
+                    }
+                    Err(_) => "Unknown".to_string(),
+                };
+
+                tracing::debug!(
+                    "Server is running (periodic status report) - Memory usage: {}, Uptime: {:.2?}",
+                    mem_usage,
+                    start_time.elapsed()
+                );
+            } else {
+                tracing::debug!("Server is running (periodic status report)");
+            }
         }
     });
 
@@ -81,34 +172,24 @@ pub async fn run_server() -> Result<()> {
         Err(e) => {
             // Cancel the status reporter
             status_reporter.abort();
+
+            // More detailed error reporting in debug mode
+            if config.debug_mode {
+                tracing::error!("Server error details: {:?}", e);
+
+                // Try to log error details to file
+                if let Err(log_err) = std::fs::write(
+                    "winx_error_log.txt",
+                    format!("Error time: {:?}\nError: {:?}\n", SystemTime::now(), e),
+                ) {
+                    tracing::warn!("Failed to write error log: {}", log_err);
+                }
+            }
+
             Err(WinxError::ShellInitializationError(format!(
                 "Server error: {}",
                 e
             )))
         }
     }
-}
-
-/// Initializes the server with a custom configuration
-///
-/// This is a more flexible version of run_server that allows customizing the server behavior.
-///
-/// # Arguments
-///
-/// * `config` - The server configuration
-///
-/// # Returns
-///
-/// Returns a Result indicating whether the server ran successfully.
-#[allow(dead_code)]
-pub async fn run_server_with_config(config: ServerConfig) -> Result<()> {
-    tracing::info!("Starting server with custom configuration: {:?}", config);
-
-    if config.simulation_mode {
-        tracing::warn!("Running in simulation mode - some features may be limited");
-        // In a real implementation, you would use a different service implementation
-        // or mock certain components
-    }
-
-    run_server().await
 }
