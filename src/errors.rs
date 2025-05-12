@@ -185,7 +185,7 @@ pub fn with_suggestion(error: WinxError, suggestion: &str) -> WinxError {
     }
 }
 
-/// Recovery options for errors
+/// Advanced error recovery and suggestion options
 pub struct ErrorRecovery;
 
 impl ErrorRecovery {
@@ -229,6 +229,95 @@ impl ErrorRecovery {
     pub fn null_value(field: &str) -> WinxError {
         WinxError::NullValueError {
             field: field.to_string(),
+        }
+    }
+
+    /// Retry an operation with exponential backoff
+    pub async fn retry<T, F, Fut>(
+        operation: F,
+        max_retries: usize,
+        initial_delay_ms: u64,
+        context: &str,
+    ) -> Result<T>
+    where
+        F: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let mut delay_ms = initial_delay_ms;
+        let mut attempt = 0;
+
+        loop {
+            match operation().await {
+                Ok(value) => return Ok(value),
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= max_retries {
+                        tracing::error!(
+                            "Retry failed after {} attempts in context '{}': {}",
+                            attempt,
+                            context,
+                            e
+                        );
+                        return Err(e);
+                    }
+
+                    tracing::warn!(
+                        "Attempt {} failed in context '{}': {}. Retrying in {}ms...",
+                        attempt,
+                        context,
+                        e,
+                        delay_ms
+                    );
+
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
+
+                    // Exponential backoff with jitter
+                    delay_ms =
+                        ((delay_ms as f64) * 1.5 * (0.8 + 0.4 * rand::random::<f64>())) as u64;
+                }
+            }
+        }
+    }
+
+    /// Try to recover from common file system errors
+    pub fn recover_fs_error(err: &WinxError) -> Option<String> {
+        match err {
+            WinxError::FileAccessError { path, message } => {
+                if message.contains("No such file or directory") {
+                    Some(format!(
+                        "The file '{}' does not exist. Consider creating it first.",
+                        path.display()
+                    ))
+                } else if message.contains("Permission denied") {
+                    Some(format!("Permission denied for file '{}'. Check file permissions or use sudo if appropriate.", path.display()))
+                } else if message.contains("Is a directory") {
+                    Some(format!(
+                        "'{}' is a directory, not a file. Specify a file path instead.",
+                        path.display()
+                    ))
+                } else {
+                    None
+                }
+            }
+            WinxError::FileWriteError { path, message } => {
+                if message.contains("No space left on device") {
+                    Some(format!("No space left on device while writing to '{}'. Free up disk space and try again.", path.display()))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if an error is potentially recoverable
+    pub fn is_recoverable(err: &WinxError) -> bool {
+        match err {
+            WinxError::BashStateLockError(_) => true,
+            WinxError::FileAccessError { .. } => true,
+            WinxError::CommandExecutionError(msg) if msg.contains("timed out") => true,
+            WinxError::RecoverableSuggestionError { .. } => true,
+            _ => false,
         }
     }
 }
