@@ -412,15 +412,18 @@ impl<'de> Deserialize<'de> for ReadFiles {
         let helper = ReadFilesHelper::deserialize(deserializer)?;
 
         // Validate that file_paths is provided and non-empty
-        let file_paths = match helper.file_paths {
-            Some(paths) if !paths.is_empty() => paths,
-            Some(_) => return Err(serde::de::Error::custom(
-                "file_paths must not be empty. Please provide at least one file path to read."
-            )),
-            None => return Err(serde::de::Error::custom(
-                "file_paths is required. Please provide a list of file paths to read."
-            )),
-        };
+        let file_paths =
+            match helper.file_paths {
+                Some(paths) if !paths.is_empty() => paths,
+                Some(_) => return Err(serde::de::Error::custom(
+                    "file_paths must not be empty. Please provide at least one file path to read.",
+                )),
+                None => {
+                    return Err(serde::de::Error::custom(
+                        "file_paths is required. Please provide a list of file paths to read.",
+                    ))
+                }
+            };
 
         // Return the properly constructed ReadFiles
         Ok(ReadFiles {
