@@ -7,7 +7,7 @@ use anyhow::Context as AnyhowContext;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::fs;
-use std::io::Write;
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::task;
@@ -17,21 +17,33 @@ use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, FileWhitelistData};
 use crate::types::FileWriteOrEdit;
 use crate::utils::path::expand_user;
+// Already importing utils module indirectly through usages in the code
 
 // Regex patterns for search/replace blocks
-// Create these just once when needed
-fn search_marker() -> Regex {
-    Regex::new(r"^<<<<<<+\s*SEARCH\s*$").unwrap()
+// Create these with caching to improve performance
+fn search_marker() -> &'static Regex {
+    lazy_static::lazy_static! {
+        static ref REGEX: Regex = Regex::new(r"^<<<<<<+\s*SEARCH\s*$").unwrap();
+    }
+    &REGEX
 }
-fn divider_marker() -> Regex {
-    Regex::new(r"^======*\s*$").unwrap()
+
+fn divider_marker() -> &'static Regex {
+    lazy_static::lazy_static! {
+        static ref REGEX: Regex = Regex::new(r"^======*\s*$").unwrap();
+    }
+    &REGEX
 }
-fn replace_marker() -> Regex {
-    Regex::new(r"^>>>>>>+\s*REPLACE\s*$").unwrap()
+
+fn replace_marker() -> &'static Regex {
+    lazy_static::lazy_static! {
+        static ref REGEX: Regex = Regex::new(r"^>>>>>>+\s*REPLACE\s*$").unwrap();
+    }
+    &REGEX
 }
 
 /// Maximum file size to read
-const MAX_FILE_SIZE: u64 = 10_000_000; // 10MB
+const MAX_FILE_SIZE: u64 = 50_000_000; // Increased to 50MB
 
 /// Helper struct for search/replace operations
 #[derive(Debug)]
@@ -42,6 +54,10 @@ struct SearchReplaceHelper {
     blocks: Vec<(String, String)>,
     /// Debugging information
     debug_info: Vec<String>,
+    /// Fuzzy match threshold (0.0-1.0)
+    fuzzy_threshold: f64,
+    /// Maximum number of suggestions to provide
+    max_suggestions: usize,
 }
 
 impl SearchReplaceHelper {
@@ -51,6 +67,24 @@ impl SearchReplaceHelper {
             original_content,
             blocks,
             debug_info: Vec::new(),
+            fuzzy_threshold: 0.7, // Default threshold for fuzzy matching
+            max_suggestions: 3,   // Default maximum number of suggestions
+        }
+    }
+
+    /// Create a new instance with custom fuzzy matching parameters
+    fn new_with_fuzzy_options(
+        original_content: String,
+        blocks: Vec<(String, String)>,
+        threshold: f64,
+        max_suggestions: usize,
+    ) -> Self {
+        Self {
+            original_content,
+            blocks,
+            debug_info: Vec::new(),
+            fuzzy_threshold: threshold.clamp(0.0, 1.0),
+            max_suggestions,
         }
     }
 
@@ -58,54 +92,223 @@ impl SearchReplaceHelper {
     fn apply(mut self) -> Result<String> {
         let mut content = self.original_content.clone();
 
+        // Track successful replacements for detailed reporting
+        let mut _success_count = 0;
+        let total_blocks = self.blocks.len();
+
         // Apply each block sequentially
         for (i, (search, replace)) in self.blocks.iter().enumerate() {
-            if !content.contains(search) {
-                // Collect debugging information
-                self.debug_info
-                    .push(format!("Block {} not found in content", i + 1));
+            // Check for exact match first
+            if content.contains(search) {
+                let count_before = content.matches(search).count();
+                content = content.replace(search, replace);
+                let _count_after = content.matches(replace).count();
 
-                // Try to find approximate matches
-                let suggestion = self
-                    .find_closest_match(search, &content)
-                    .unwrap_or_default();
+                self.debug_info.push(format!(
+                    "Block {} successfully replaced {} occurrences",
+                    i + 1,
+                    count_before
+                ));
 
-                return Err(WinxError::SearchBlockNotFound(format!(
-                    "Search block not found in content:\n```\n{}\n```\n\n{}\n\nThis might be due to mismatched whitespace, line endings, or the block doesn't exist exactly as specified. Consider using percentage_to_change > 50 to replace the entire file instead.",
-                    search.trim(), suggestion
-                )));
+                _success_count += 1;
+                continue;
             }
 
-            content = content.replace(search, replace);
+            // If we reach here, the search block wasn't found
+
+            // Collect debugging information
+            self.debug_info
+                .push(format!("Block {} not found in content", i + 1));
+
+            // Try to find approximate matches
+            let suggestion = self
+                .find_closest_match(search, &content)
+                .unwrap_or_else(|| {
+                    "No close matches found. The content might be completely different or the search pattern is too specific.".to_string()
+                });
+
+            // Create a more detailed error message
+            let error_message = format!(
+                "Search block {} of {} not found in content:\n```\n{}\n```\n\n{}\n\nThis might be due to:\n- Mismatched whitespace or line endings\n- Different indentation or formatting\n- The code has been significantly changed\n- Case sensitivity differences\n\nConsider using percentage_to_change > 50 to replace the entire file instead.",
+                i + 1, total_blocks, search.trim(), suggestion
+            );
+
+            return Err(WinxError::SearchBlockNotFound(error_message));
         }
 
         Ok(content)
     }
 
-    /// Find the closest match for a search block
+    /// Find the closest match for a search block using various matching strategies
     fn find_closest_match(&self, search: &str, content: &str) -> Option<String> {
-        // Simple heuristic: check if the search block without whitespace is present
+        let mut suggestions = Vec::new();
+
+        // Strategy 1: Check for whitespace/line ending differences
         let search_no_whitespace = search.replace(" ", "").replace("\n", "").replace("\t", "");
         let content_no_whitespace = content.replace(" ", "").replace("\n", "").replace("\t", "");
 
         if content_no_whitespace.contains(&search_no_whitespace) {
-            return Some("Suggestion: Your search block might have different whitespace or line endings than the content.".to_string());
+            suggestions.push("Your search block might have different whitespace or line endings than the content. Try normalizing whitespace.".to_string());
         }
 
-        // Check if a substring of the search block is present (for approximate matches)
+        // Strategy 2: Line-by-line matching
         let search_lines: Vec<&str> = search.lines().collect();
         if search_lines.len() > 1 {
-            for line in search_lines {
-                if line.trim().len() > 10 && content.contains(line.trim()) {
-                    return Some(format!(
-                        "Suggestion: Found one line of your search block in the content: '{}...'",
-                        &line.trim()[..20.min(line.trim().len())]
-                    ));
+            let mut matching_lines = Vec::new();
+
+            for (i, line) in search_lines.iter().enumerate() {
+                let trimmed = line.trim();
+                if trimmed.len() > 10 && content.contains(trimmed) {
+                    let preview = if trimmed.len() > 30 {
+                        format!("{}...", &trimmed[..30])
+                    } else {
+                        trimmed.to_string()
+                    };
+                    matching_lines.push((i + 1, preview));
+                }
+            }
+
+            if !matching_lines.is_empty() {
+                // Show up to 3 matching lines
+                let matches_display = matching_lines
+                    .iter()
+                    .take(3)
+                    .map(|(line_num, preview)| format!("Line {}: {}", line_num, preview))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                let total = matching_lines.len();
+                let shown = total.min(3);
+
+                let message = if total > shown {
+                    format!(
+                        "Found {} matching lines in your search block (showing {}):\n{}",
+                        total, shown, matches_display
+                    )
+                } else {
+                    format!(
+                        "Found {} matching lines in your search block:\n{}",
+                        total, matches_display
+                    )
+                };
+
+                suggestions.push(message);
+            }
+        }
+
+        // Strategy 3: Longest common substring detection
+        if let Some(common) = self.find_longest_common_substring(search, content) {
+            if common.len() >= 20 {
+                // Only show substantial matches
+                let preview = if common.len() > 40 {
+                    format!("{}...", &common[..40])
+                } else {
+                    common.clone()
+                };
+
+                suggestions.push(format!(
+                    "Found a matching section of {} characters: '{}'",
+                    common.len(),
+                    preview
+                ));
+            }
+        }
+
+        // Strategy 4: Check for case sensitivity issues
+        let search_lower = search.to_lowercase();
+        let content_lower = content.to_lowercase();
+
+        if !content.contains(search) && content_lower.contains(&search_lower) {
+            suggestions.push(
+                "The search block appears to be case-sensitive. Check capitalization.".to_string(),
+            );
+        }
+
+        // Return aggregated suggestions
+        if !suggestions.is_empty() {
+            let filtered_suggestions = suggestions
+                .into_iter()
+                .take(self.max_suggestions)
+                .collect::<Vec<_>>()
+                .join("\n\n");
+
+            return Some(format!("Suggestions:\n{}", filtered_suggestions));
+        }
+
+        None
+    }
+
+    /// Find the longest common substring between two strings
+    fn find_longest_common_substring(&self, s1: &str, s2: &str) -> Option<String> {
+        // For very large strings, we'll use a simplified approach to avoid performance issues
+        if s1.len() > 10000 || s2.len() > 10000 {
+            return self.find_longest_common_substring_simplified(s1, s2);
+        }
+
+        let s1_chars: Vec<char> = s1.chars().collect();
+        let s2_chars: Vec<char> = s2.chars().collect();
+
+        let m = s1_chars.len();
+        let n = s2_chars.len();
+
+        // Early return for empty strings
+        if m == 0 || n == 0 {
+            return None;
+        }
+
+        let mut dp = vec![vec![0; n + 1]; m + 1];
+        let mut max_length = 0;
+        let mut end_pos = 0;
+
+        for i in 1..=m {
+            for j in 1..=n {
+                if s1_chars[i - 1] == s2_chars[j - 1] {
+                    dp[i][j] = dp[i - 1][j - 1] + 1;
+
+                    if dp[i][j] > max_length {
+                        max_length = dp[i][j];
+                        end_pos = i;
+                    }
                 }
             }
         }
 
-        None
+        if max_length > 0 {
+            let start_pos = end_pos - max_length;
+            Some(s1_chars[start_pos..end_pos].iter().collect())
+        } else {
+            None
+        }
+    }
+
+    /// Simplified version for large strings that uses a sliding window approach
+    fn find_longest_common_substring_simplified(&self, s1: &str, s2: &str) -> Option<String> {
+        // Use a minimum length to avoid noise
+        let min_length = 20;
+        let mut best_match = None;
+        let mut best_length = min_length - 1;
+
+        // Try with different window sizes to find a reasonable match quickly
+        for window_size in [50, 40, 30, 20].iter() {
+            let s1_chars: Vec<char> = s1.chars().collect();
+
+            // Use a sliding window over s1
+            for i in 0..=s1_chars.len().saturating_sub(*window_size) {
+                let window: String = s1_chars[i..i + window_size].iter().collect();
+
+                if s2.contains(&window) && window_size > &best_length {
+                    best_match = Some(window);
+                    best_length = *window_size;
+                    break; // Found a match at this window size
+                }
+            }
+
+            if best_match.is_some() {
+                break; // We already found a match, no need to try smaller windows
+            }
+        }
+
+        best_match
     }
 }
 
@@ -326,6 +529,8 @@ fn parse_search_replace_blocks(
 ///
 /// * `blocks` - Vector of (search, replace) tuples
 /// * `original_content` - The original content to modify
+/// * `fuzzy_threshold` - Optional threshold for fuzzy matching (0.0-1.0)
+/// * `max_suggestions` - Optional maximum number of suggestions to provide
 ///
 /// # Returns
 ///
@@ -333,18 +538,25 @@ fn parse_search_replace_blocks(
 fn apply_search_replace_blocks(
     blocks: Vec<(String, String)>,
     original_content: String,
+    fuzzy_threshold: Option<f64>,
+    max_suggestions: Option<usize>,
 ) -> Result<String> {
-    // Create a helper and apply the blocks
-    let helper = SearchReplaceHelper::new(original_content, blocks);
+    // Create a helper with optional custom fuzzy matching parameters
+    let helper = if let (Some(threshold), Some(max_sugg)) = (fuzzy_threshold, max_suggestions) {
+        SearchReplaceHelper::new_with_fuzzy_options(original_content, blocks, threshold, max_sugg)
+    } else {
+        SearchReplaceHelper::new(original_content, blocks)
+    };
 
     // The helper does the actual work and provides better error messages
     helper.apply()
     // We don't need to log here as the error is already logged at the call site
 }
 
-/// Write content to a file
+/// Write content to a file with optimized buffering
 ///
-/// This function writes content to a file, creating parent directories if needed.
+/// This function writes content to a file using a buffered writer for better performance,
+/// creating parent directories if needed.
 ///
 /// # Arguments
 ///
@@ -360,10 +572,34 @@ fn write_to_file(path: &Path, content: &str) -> Result<()> {
         fs::create_dir_all(parent).context("Failed to create parent directories")?;
     }
 
-    // Write the content to the file
-    let mut file = fs::File::create(path).context("Failed to create file")?;
-    file.write_all(content.as_bytes())
-        .context("Failed to write to file")?;
+    // Calculate an appropriate buffer size based on content length
+    // Min 64KB, max 8MB buffer
+    let buffer_size = content.len().clamp(64 * 1024, 8 * 1024 * 1024);
+
+    // Use a buffered writer for performance
+    let file = fs::File::create(path).context("Failed to create file")?;
+    let mut writer = BufWriter::with_capacity(buffer_size, file);
+
+    // Write content in chunks for large files to avoid excessive memory usage
+    let content_bytes = content.as_bytes();
+    const CHUNK_SIZE: usize = 1024 * 1024; // 1MB chunks
+
+    if content_bytes.len() > CHUNK_SIZE * 10 {
+        // For very large content, write in chunks
+        for chunk in content_bytes.chunks(CHUNK_SIZE) {
+            writer
+                .write_all(chunk)
+                .context("Failed to write chunk to file")?;
+        }
+    } else {
+        // For smaller content, write all at once
+        writer
+            .write_all(content_bytes)
+            .context("Failed to write to file")?;
+    }
+
+    // Ensure data is flushed to disk
+    writer.flush().context("Failed to flush data to file")?;
 
     Ok(())
 }
@@ -617,8 +853,8 @@ pub async fn handle_tool_call(
             }
         };
 
-        // Apply search/replace blocks
-        let new_content = match apply_search_replace_blocks(blocks, original_content) {
+        // Apply search/replace blocks with default fuzzy matching parameters
+        let new_content = match apply_search_replace_blocks(blocks, original_content, None, None) {
             Ok(content) => content,
             Err(e) => {
                 // Only log the error once at this level and avoid duplicating in error message
@@ -627,13 +863,43 @@ pub async fn handle_tool_call(
                     file_path_obj.display(),
                     e
                 );
+
+                // Record the failed edit attempt in the FileCache
+                if let Ok(()) =
+                    crate::utils::file_cache::FileCache::global().record_file_edit(file_path_obj)
+                {
+                    debug!(
+                        "Recorded failed edit in file cache for {}",
+                        file_path_obj.display()
+                    );
+                }
+
                 return Err(e);
             }
         };
 
         // Write the new content to the file
-        write_to_file(file_path_obj, &new_content)
-            .context("Failed to write edited content to file")?;
+        if let Err(e) = write_to_file(file_path_obj, &new_content) {
+            error!(
+                "Failed to write edited content to file {}: {}",
+                file_path_obj.display(),
+                e
+            );
+            return Err(WinxError::FileWriteError {
+                path: file_path_obj.to_path_buf(),
+                message: format!("Failed to write file: {}", e),
+            });
+        }
+
+        // Record the successful edit in FileCache
+        if let Ok(()) =
+            crate::utils::file_cache::FileCache::global().record_file_edit(file_path_obj)
+        {
+            debug!(
+                "Recorded successful edit in file cache for {}",
+                file_path_obj.display()
+            );
+        }
 
         // Count lines for tracking
         let total_lines = new_content.lines().count();
@@ -680,7 +946,27 @@ pub async fn handle_tool_call(
         let file_path_obj = Path::new(&file_path);
 
         // Write the content to the file
-        write_to_file(file_path_obj, content).context("Failed to write content to file")?;
+        if let Err(e) = write_to_file(file_path_obj, content) {
+            error!(
+                "Failed to write content to file {}: {}",
+                file_path_obj.display(),
+                e
+            );
+            return Err(WinxError::FileWriteError {
+                path: file_path_obj.to_path_buf(),
+                message: format!("Failed to write file: {}", e),
+            });
+        }
+
+        // Record the write operation in FileCache
+        if let Ok(()) =
+            crate::utils::file_cache::FileCache::global().record_file_write(file_path_obj)
+        {
+            debug!(
+                "Recorded file write in file cache for {}",
+                file_path_obj.display()
+            );
+        }
 
         // Count lines for tracking
         let total_lines = content.lines().count();

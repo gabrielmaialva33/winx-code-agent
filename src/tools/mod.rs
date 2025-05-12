@@ -230,9 +230,10 @@ impl WinxService {
     #[tool(description = "
 - Read full file content of one or more files.
 - Provide absolute paths only (~ allowed)
+- REQUIRED FIELD: file_paths - A list of file paths to read (cannot be empty)
 - Only if the task requires line numbers understanding:
     - You may populate \"show_line_numbers_reason\" with your reason, by default null/empty means no line numbers are shown.
-    - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10` 
+    - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10`
 ")]
     async fn read_files(
         &self,
@@ -244,8 +245,38 @@ impl WinxService {
         // Log the args to debug what was received
         debug!("ReadFiles tool received args: {:?}", args);
 
+        // Log JSON serialization for improved error diagnosis
+        match serde_json::to_string(&args) {
+            Ok(json) => debug!("ReadFiles args as JSON: {}", json),
+            Err(e) => {
+                tracing::error!("Failed to serialize ReadFiles args to JSON: {}", e);
+                // For syntax errors, return a helpful error message
+                if e.is_syntax() {
+                    // Format JSON error as "GOT EXCEPTION" message
+                    let error_message = format!("JSON syntax error in ReadFiles arguments: {}. Please check your tool argument format.", e);
+                    let exception_message =
+                        format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        exception_message,
+                    )]));
+                }
+            }
+        }
+
+        // Validate file_paths is not empty (this should be handled by the deserializer, but double-check)
+        if args.file_paths.is_empty() {
+            tracing::error!("ReadFiles called with empty file_paths");
+            let error_message =
+                "file_paths cannot be empty. Please provide at least one file path to read.";
+            let exception_message =
+                format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+            return Ok(CallToolResult::success(vec![Content::text(
+                exception_message,
+            )]));
+        }
+
         // We'll handle line range parsing in the implementation
-        debug!("After parsing line ranges: {:?}", args);
+        debug!("Processing files with args: {:?}", args);
 
         // Call the implementation and measure execution time
         match read_files::handle_tool_call(&self.bash_state, args).await {

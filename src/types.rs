@@ -345,7 +345,7 @@ pub enum SpecialKey {
 ///
 /// This struct represents the parameters needed to read one or more files,
 /// optionally with line numbers and line range filtering.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReadFiles {
     /// List of file paths to read
     ///
@@ -382,6 +382,58 @@ pub struct ReadFiles {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub end_line_nums: Vec<Option<usize>>,
+}
+
+// Custom deserializer for ReadFiles to ensure file_paths is provided
+impl<'de> Deserialize<'de> for ReadFiles {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // This struct mirrors ReadFiles but allows using serde defaults
+        #[derive(Deserialize)]
+        struct ReadFilesHelper {
+            file_paths: Option<Vec<String>>,
+
+            #[serde(default)]
+            show_line_numbers_reason: Option<String>,
+
+            #[serde(default)]
+            max_tokens: Option<usize>,
+
+            #[serde(default)]
+            start_line_nums: Vec<Option<usize>>,
+
+            #[serde(default)]
+            end_line_nums: Vec<Option<usize>>,
+        }
+
+        // Deserialize to helper struct first
+        let helper = ReadFilesHelper::deserialize(deserializer)?;
+
+        // Validate that file_paths is provided and non-empty
+        let file_paths =
+            match helper.file_paths {
+                Some(paths) if !paths.is_empty() => paths,
+                Some(_) => return Err(serde::de::Error::custom(
+                    "file_paths must not be empty. Please provide at least one file path to read.",
+                )),
+                None => {
+                    return Err(serde::de::Error::custom(
+                        "file_paths is required. Please provide a list of file paths to read.",
+                    ))
+                }
+            };
+
+        // Return the properly constructed ReadFiles
+        Ok(ReadFiles {
+            file_paths,
+            show_line_numbers_reason: helper.show_line_numbers_reason,
+            max_tokens: helper.max_tokens,
+            start_line_nums: helper.start_line_nums,
+            end_line_nums: helper.end_line_nums,
+        })
+    }
 }
 
 impl ReadFiles {
