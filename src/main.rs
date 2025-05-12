@@ -1,4 +1,7 @@
 //! # Winx - Rust implementation of WCGW using MCP
+
+// Allow dead code throughout the project since it's a library with unused functions for future use
+#![allow(dead_code)]
 //!
 //! Winx is a shell execution and file management service that provides
 //! functionality similar to WCGW (What Could Go Wrong) but implemented in Rust.
