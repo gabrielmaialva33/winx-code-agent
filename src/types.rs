@@ -842,3 +842,113 @@ pub struct ReadImage {
     /// This can be an absolute path or a path relative to the current working directory.
     pub file_path: String,
 }
+
+/// Parameters for the CommandSuggestions tool
+///
+/// This struct represents the parameters needed to get command suggestions
+/// based on context and partial input.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CommandSuggestions {
+    /// Partial command to get suggestions for (can be empty)
+    ///
+    /// This is the partial command that the user has already typed. Suggestions
+    /// will be filtered to match this prefix. If empty, all relevant suggestions
+    /// will be returned based on context.
+    #[serde(default)]
+    pub partial_command: String,
+
+    /// Optional directory context
+    ///
+    /// If provided, suggestions will be tailored to commands commonly used
+    /// in this directory.
+    #[serde(default)]
+    pub current_dir: Option<String>,
+
+    /// Optional previous command
+    ///
+    /// If provided, suggestions will include commands that commonly follow
+    /// the specified command.
+    #[serde(default)]
+    pub last_command: Option<String>,
+
+    /// Maximum number of suggestions to return
+    ///
+    /// Limits the number of suggestions returned. Default is 5.
+    #[serde(default = "default_max_suggestions")]
+    pub max_suggestions: usize,
+
+    /// Whether to include command explanations
+    ///
+    /// If true, each suggestion will include a brief explanation.
+    #[serde(default)]
+    pub include_explanations: bool,
+}
+
+/// Default value for max_suggestions
+fn default_max_suggestions() -> usize {
+    5
+}
+
+/// Parameters for the CodeAnalyzer tool
+///
+/// This struct represents the parameters needed to analyze a code file
+/// for issues, suggestions, and complexity metrics.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CodeAnalysis {
+    /// Path to the file to analyze
+    ///
+    /// This can be an absolute path or a path relative to the current working directory.
+    pub file_path: String,
+
+    /// Programming language to use for analysis (optional)
+    ///
+    /// If not provided, the language will be detected automatically from the file extension.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
+
+    /// Depth of analysis to perform
+    ///
+    /// Valid values: "quick", "normal", "deep"
+    /// Default is "normal" if not specified.
+    #[serde(default = "default_analysis_depth")]
+    pub analysis_depth: String,
+
+    /// Whether to include complexity metrics in the analysis
+    ///
+    /// If true, complexity metrics like cyclomatic complexity will be calculated.
+    #[serde(default)]
+    pub include_complexity: bool,
+
+    /// Whether to include improvement suggestions
+    ///
+    /// If true, the analysis will include suggestions for improving the code.
+    #[serde(default = "default_true")]
+    pub include_suggestions: bool,
+
+    /// Whether to show code snippets for issues
+    ///
+    /// If true, the analysis will include code snippets for each issue.
+    #[serde(default)]
+    pub show_code_snippets: bool,
+
+    /// Whether to analyze imports and dependencies
+    ///
+    /// If true, the analysis will include information about imports and dependencies.
+    #[serde(default)]
+    pub analyze_dependencies: bool,
+
+    /// The chat ID for this session
+    #[serde(default)]
+    pub chat_id: String,
+}
+
+/// Default analysis depth
+fn default_analysis_depth() -> String {
+    "normal".to_string()
+}
+
+/// Default true value
+fn default_true() -> bool {
+    true
+}
