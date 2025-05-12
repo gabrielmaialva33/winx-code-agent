@@ -1022,7 +1022,7 @@ pub async fn handle_tool_call(
             expanded_path
         } else {
             // Use current working directory if path is relative
-            cwd.join(&expanded_path).to_string_lossy().to_string()
+            cwd.join(&expanded_path).to_string_lossy().into_owned()
         };
 
         // Check if file path is allowed
@@ -1037,12 +1037,65 @@ pub async fn handle_tool_call(
     // Process based on content type (full content or search/replace blocks)
     let content = &file_write_or_edit.file_content_or_search_replace_blocks;
 
+    // Use error predictor to check for potential issues
+    let operation = if Path::new(&file_path).exists() {
+        "edit"
+    } else {
+        "write"
+    };
+    let mut potential_errors = Vec::new();
+
+    // Get a mutex guard for the BashState
+    let mut bash_state_guard = bash_state_arc
+        .lock()
+        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+
+    if let Some(bash_state) = bash_state_guard.as_mut() {
+        // Predict potential errors for this file operation
+        match bash_state
+            .error_predictor
+            .predict_file_errors(&file_path, operation)
+        {
+            Ok(predictions) => {
+                // Filter predictions with high confidence
+                for prediction in predictions {
+                    if prediction.confidence > 0.8 {
+                        debug!("High confidence error prediction: {:?}", prediction);
+                        potential_errors.push(prediction);
+                    }
+                }
+            }
+            Err(e) => {
+                // Just log the error but continue execution
+                warn!("Error prediction failed: {}", e);
+            }
+        }
+    }
+
+    // Release the lock before continuing with file operations
+    drop(bash_state_guard);
+
     // Get the original content if file exists (for diff and incremental updates)
     let original_content = if Path::new(&file_path).exists() {
         fs::read_to_string(&file_path).ok()
     } else {
         None
     };
+
+    // Add warnings for predicted errors
+    let mut warnings = String::new();
+    if !potential_errors.is_empty() {
+        warnings.push_str("Potential issues with this file operation:\n");
+
+        for error in &potential_errors {
+            warnings.push_str(&format!("- {}: {}\n", error.error_type, error.prevention));
+        }
+
+        // Add advice
+        warnings.push_str(
+            "\nProceeding with the operation, but be aware of these potential issues.\n\n",
+        );
+    }
 
     // Determine if this is an edit or a full file write
     let is_edit_operation = is_edit(content, file_write_or_edit.percentage_to_change);
@@ -1170,6 +1223,29 @@ pub async fn handle_tool_call(
                 file_path_obj.display(),
                 e
             );
+
+            // Record the error for future prediction
+            let bash_state_guard = bash_state_arc.lock().ok();
+            if let Some(guard) = bash_state_guard {
+                if let Some(bash_state) = guard.as_ref() {
+                    if let Err(record_err) = bash_state.error_predictor.record_error(
+                        "file_write",
+                        &format!("Failed to write file: {}", e),
+                        None,
+                        Some(&file_path),
+                        Some(
+                            &file_path_obj
+                                .parent()
+                                .unwrap_or_else(|| Path::new("."))
+                                .to_string_lossy()
+                                .to_string(),
+                        ),
+                    ) {
+                        warn!("Failed to record error for prediction: {}", record_err);
+                    }
+                }
+            }
+
             return Err(WinxError::FileWriteError {
                 path: file_path_obj.to_path_buf(),
                 message: format!("Failed to write file: {}", e),

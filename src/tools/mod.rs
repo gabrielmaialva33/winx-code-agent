@@ -6,6 +6,8 @@
 //! The `WinxService` struct is the main entry point for all tool calls.
 
 pub mod bash_command;
+pub mod code_analyzer;
+pub mod command_suggestions;
 pub mod context_save;
 pub mod file_write_or_edit;
 pub mod initialize;
@@ -32,6 +34,10 @@ const MCP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2024_11_05;
 pub struct WinxService {
     /// Shared state for the bash shell environment
     bash_state: Arc<Mutex<Option<BashState>>>,
+    /// Version information for the service
+    version: String,
+    /// Startup timestamp
+    start_time: std::time::Instant,
 }
 
 impl WinxService {
@@ -44,7 +50,27 @@ impl WinxService {
         info!("Creating new WinxService instance");
         Self {
             bash_state: Arc::new(Mutex::new(None)),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            start_time: std::time::Instant::now(),
         }
+    }
+
+    /// Get the uptime of the service
+    ///
+    /// # Returns
+    ///
+    /// The duration since the service was started
+    pub fn uptime(&self) -> std::time::Duration {
+        self.start_time.elapsed()
+    }
+
+    /// Get the version of the service
+    ///
+    /// # Returns
+    ///
+    /// The version string of the service
+    pub fn version(&self) -> &str {
+        &self.version
     }
 
     /// Get a reference to the bash state, locking the mutex
@@ -540,6 +566,245 @@ Saves provided description and file contents of all the relevant file paths or g
                 )]))
             }
         }
+    }
+
+    /// Analyze code for issues and suggestions
+    ///
+    /// This tool analyzes a code file for issues, suggestions, and complexity metrics.
+    #[tool(description = "
+Analyze code for issues, suggestions, and complexity metrics.
+- Identifies potential bugs, security issues, and code smells
+- Provides suggestions for code improvement
+- Calculates complexity metrics
+- Supports multiple programming languages
+- Helps maintain high code quality and prevent bugs
+")]
+    async fn code_analyzer(
+        &self,
+        #[tool(aggr)] args: crate::types::CodeAnalysis,
+    ) -> Result<CallToolResult, McpError> {
+        // Start timing for performance monitoring
+        let start_time = std::time::Instant::now();
+
+        // Log the call for debugging
+        debug!("CodeAnalyzer tool call with args: {:?}", args);
+
+        // Convert to internal parameter type
+        let params = crate::tools::code_analyzer::CodeAnalysisParams {
+            file_path: args.file_path,
+            language: args.language,
+            analysis_depth: args.analysis_depth,
+            include_complexity: args.include_complexity,
+            include_suggestions: args.include_suggestions,
+            show_code_snippets: args.show_code_snippets,
+            analyze_dependencies: args.analyze_dependencies,
+            chat_id: args.chat_id,
+        };
+
+        // Call the implementation and measure execution time
+        match code_analyzer::handle_tool_call(&self.bash_state, params).await {
+            Ok(result) => {
+                let elapsed = start_time.elapsed();
+                info!(
+                    "CodeAnalyzer tool completed successfully in {:.2?}",
+                    elapsed
+                );
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            Err(err) => {
+                tracing::error!("CodeAnalyzer tool error: {}", err);
+
+                // Create a user-friendly error message
+                let error_message = match &err {
+                    WinxError::BashStateNotInitialized => {
+                        "Shell environment not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path."
+                            .to_string()
+                    }
+                    WinxError::FileAccessError { path, message } => {
+                        format!("File access error for {}: {}. Please verify the file exists and has the correct path and permissions.", path.display(), message)
+                    }
+                    WinxError::ChatIdMismatch(_) => {
+                        format!(
+                            "{}\nPlease use the chat_id provided by the Initialize tool.",
+                            err
+                        )
+                    }
+                    _ => format!(
+                        "Error analyzing code: {}\n\n\
+                        This might be due to issues with the file or the analysis engine.",
+                        err
+                    ),
+                };
+
+                // Return as successful response with GOT EXCEPTION prefix
+                let exception_message =
+                    format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+                Ok(CallToolResult::success(vec![Content::text(
+                    exception_message,
+                )]))
+            }
+        }
+    }
+
+    /// Get intelligent command suggestions
+    ///
+    /// This tool provides command suggestions based on command history,
+    /// context, and patterns observed in previous usage.
+    #[tool(description = "
+Get intelligent command suggestions based on command history and context.
+- Provides command suggestions based on partial input and command history
+- Learns from your command usage patterns over time
+- Can provide explanations of suggested commands
+- Tailors suggestions to the current working directory and previous commands
+")]
+    async fn command_suggestions(
+        &self,
+        #[tool(aggr)] args: crate::types::CommandSuggestions,
+    ) -> Result<CallToolResult, McpError> {
+        // Start timing for performance monitoring
+        let start_time = std::time::Instant::now();
+
+        // Log the call for debugging
+        debug!("CommandSuggestions tool call with args: {:?}", args);
+
+        // Call the implementation and measure execution time
+        match command_suggestions::handle_tool_call(&self.bash_state, args).await {
+            Ok(result) => {
+                let elapsed = start_time.elapsed();
+                info!(
+                    "CommandSuggestions tool completed successfully in {:.2?}",
+                    elapsed
+                );
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            Err(err) => {
+                tracing::error!("CommandSuggestions tool error: {}", err);
+
+                // Create a user-friendly error message
+                let error_message = match &err {
+                    WinxError::BashStateNotInitialized => {
+                        "Shell environment not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path."
+                            .to_string()
+                    }
+                    WinxError::BashStateLockError(msg) => {
+                        format!("Failed to access bash state: {}. This is likely a temporary issue. Please try again.", msg)
+                    }
+                    _ => format!(
+                        "Error getting command suggestions: {}\n\n\
+                        This might be due to an issue with the pattern analyzer.",
+                        err
+                    ),
+                };
+
+                // Return as successful response with GOT EXCEPTION prefix
+                let exception_message =
+                    format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+                Ok(CallToolResult::success(vec![Content::text(
+                    exception_message,
+                )]))
+            }
+        }
+    }
+
+    /// Get agent status
+    ///
+    /// This tool returns information about the agent's current status,
+    /// including uptime, version, and resource usage.
+    #[tool(description = "
+Get status information about the Winx agent.
+- Returns uptime, version, and resource usage information
+- No parameters required
+")]
+    async fn agent_status(&self) -> Result<CallToolResult, McpError> {
+        // Start timing for performance monitoring
+        let start_time = std::time::Instant::now();
+
+        // Measure approximate memory usage
+        let memory_usage = match std::process::Command::new("ps")
+            .args(["o", "rss=", "-p", &std::process::id().to_string()])
+            .output()
+        {
+            Ok(output) => {
+                let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if let Ok(kb) = output_str.parse::<u64>() {
+                    format!("{:.2} MB", kb as f64 / 1024.0)
+                } else {
+                    "Unknown".to_string()
+                }
+            }
+            Err(_) => "Unknown".to_string(),
+        };
+
+        // Get number of active sessions
+        let active_sessions = {
+            let bash_state_guard = self.bash_state.lock().map_err(|e| {
+                McpError::internal_error(format!("Failed to lock bash state: {}", e), None)
+            })?;
+
+            match &*bash_state_guard {
+                Some(_) => 1,
+                None => 0,
+            }
+        };
+
+        // Get system load if available
+        let system_load = match std::fs::read_to_string("/proc/loadavg") {
+            Ok(load_str) => {
+                let parts: Vec<&str> = load_str.split_whitespace().take(3).collect();
+                if parts.len() >= 3 {
+                    format!("{} {} {}", parts[0], parts[1], parts[2])
+                } else {
+                    "Unknown".to_string()
+                }
+            }
+            Err(_) => {
+                // Try using uptime for macOS/BSD
+                match std::process::Command::new("uptime").output() {
+                    Ok(output) => {
+                        let output_str = String::from_utf8_lossy(&output.stdout);
+                        if let Some(load_part) = output_str.split("load average:").nth(1) {
+                            load_part.trim().to_string()
+                        } else {
+                            "Unknown".to_string()
+                        }
+                    }
+                    Err(_) => "Unknown".to_string(),
+                }
+            }
+        };
+
+        // Get current working directory
+        let cwd = match std::env::current_dir() {
+            Ok(path) => path.to_string_lossy().to_string(),
+            Err(_) => "Unknown".to_string(),
+        };
+
+        // Format the status report
+        let status_report = format!(
+            "## Winx Agent Status\n\n\
+            - **Version**: {}\n\
+            - **Uptime**: {:.2?}\n\
+            - **Memory Usage**: {}\n\
+            - **System Load**: {}\n\
+            - **Active Sessions**: {}\n\
+            - **Working Directory**: {}\n\
+            - **MCP Protocol**: {}\n\n\
+            Status check completed in {:.2?}",
+            self.version(),
+            self.uptime(),
+            memory_usage,
+            system_load,
+            active_sessions,
+            cwd,
+            format!("{:?}", MCP_PROTOCOL_VERSION),
+            start_time.elapsed()
+        );
+
+        info!(
+            "AgentStatus tool completed successfully in {:.2?}",
+            start_time.elapsed()
+        );
+        Ok(CallToolResult::success(vec![Content::text(status_report)]))
     }
 }
 

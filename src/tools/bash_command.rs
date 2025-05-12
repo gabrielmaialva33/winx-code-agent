@@ -87,7 +87,7 @@ async fn execute_simple_command(command: &str, cwd: &Path, timeout: Option<f32>)
 
     // Get current working directory
     let current_dir = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "Unknown".to_string());
 
     debug!("Command executed in {:.2?}", elapsed);
@@ -178,7 +178,7 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
 
     // Get current working directory
     let current_dir = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
+        .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "Unknown".to_string());
 
     Ok(format!(
@@ -1346,6 +1346,24 @@ async fn execute_interactive_command(
         return check_command_status(bash_state).await;
     }
 
+    // Check for potential errors using the error predictor
+    let mut potential_errors = Vec::new();
+    match bash_state.error_predictor.predict_command_errors(command) {
+        Ok(predictions) => {
+            // Filter predictions with high confidence
+            for prediction in predictions {
+                if prediction.confidence > 0.8 {
+                    debug!("High confidence error prediction: {:?}", prediction);
+                    potential_errors.push(prediction);
+                }
+            }
+        }
+        Err(e) => {
+            // Just log the error but continue execution
+            warn!("Error prediction failed: {}", e);
+        }
+    }
+
     // Check if the command is a known background or long-running command that benefits from screen
     let needs_background = command.contains("watch ")
         || command.contains("top ")
@@ -1389,6 +1407,28 @@ async fn execute_interactive_command(
         }
     }
 
+    // Add warnings for predicted errors
+    if !potential_errors.is_empty() {
+        // Format the warnings
+        let mut warnings = String::new();
+        warnings.push_str("\nPotential issues with this command:\n");
+
+        for error in &potential_errors {
+            warnings.push_str(&format!("- {}: {}\n", error.error_type, error.prevention));
+        }
+
+        // Add advice
+        warnings.push_str("\nProceeding with execution, but be aware of these potential issues.\n");
+
+        // Execute the command
+        let result = bash_state
+            .execute_interactive(command, timeout.unwrap_or(0.0))
+            .await?;
+
+        // Add the warnings to the output
+        return Ok(result.replace("---\n\n", &format!("{}---\n\n", warnings)));
+    }
+
     // For normal commands, use execute_interactive with improved timeout handling
     let effective_timeout = match timeout {
         Some(t) => {
@@ -1412,6 +1452,15 @@ async fn execute_interactive_command(
             }
         }
     };
+
+    // Record this command for pattern analysis
+    if let Err(e) = bash_state
+        .pattern_analyzer
+        .record_command(command, bash_state.cwd.to_string_lossy().as_ref())
+        .await
+    {
+        warn!("Failed to record command for pattern analysis: {}", e);
+    }
 
     // Execute the command with enriched error handling
     match bash_state

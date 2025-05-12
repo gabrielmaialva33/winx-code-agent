@@ -310,6 +310,7 @@ pub async fn handle_tool_call(
             new_bash_state.bash_command_mode = bash_command_mode;
             new_bash_state.file_edit_mode = file_edit_mode;
             new_bash_state.write_if_empty_mode = write_if_empty_mode;
+            new_bash_state.initialized = true;
 
             if folder_to_start.exists() {
                 debug!("Setting working directory to: {:?}", folder_to_start);
