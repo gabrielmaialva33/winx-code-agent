@@ -384,12 +384,32 @@ pub struct ReadFiles {
     pub end_line_nums: Vec<Option<usize>>,
 }
 
-// Custom deserializer for ReadFiles to ensure file_paths is provided
+// Custom deserializer for ReadFiles to ensure file_paths is provided and handle null values
 impl<'de> Deserialize<'de> for ReadFiles {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
+        // We use Value to handle various forms of input including null/undefined values
+        let input = serde_json::Value::deserialize(deserializer)?;
+
+        // Detailed logging to help debug deserialization issues
+        tracing::debug!("Deserializing ReadFiles from: {}", input);
+
+        // Check if we have a valid object
+        if !input.is_object() {
+            // Special error for null/undefined
+            if input.is_null() {
+                return Err(serde::de::Error::custom(
+                    "Cannot convert null to ReadFiles object. Please provide a valid object with file_paths field."
+                ));
+            }
+            return Err(serde::de::Error::custom(format!(
+                "Expected object, got {}",
+                input
+            )));
+        }
+
         // This struct mirrors ReadFiles but allows using serde defaults
         #[derive(Deserialize)]
         struct ReadFilesHelper {
@@ -408,13 +428,36 @@ impl<'de> Deserialize<'de> for ReadFiles {
             end_line_nums: Vec<Option<usize>>,
         }
 
-        // Deserialize to helper struct first
-        let helper = ReadFilesHelper::deserialize(deserializer)?;
+        // Try to convert our validated input to the helper struct
+        let helper: ReadFilesHelper = match serde_json::from_value(input.clone()) {
+            Ok(h) => h,
+            Err(e) => {
+                // Provide detailed error message for common issues
+                if e.to_string().contains("null") || e.to_string().contains("undefined") {
+                    return Err(serde::de::Error::custom(
+                        "Cannot convert null or undefined value in ReadFiles. Please check the file_paths field."
+                    ));
+                }
+                return Err(serde::de::Error::custom(format!(
+                    "Failed to parse ReadFiles parameters: {} - Input was: {}",
+                    e, input
+                )));
+            }
+        };
 
         // Validate that file_paths is provided and non-empty
         let file_paths =
             match helper.file_paths {
-                Some(paths) if !paths.is_empty() => paths,
+                Some(paths) if !paths.is_empty() => {
+                    // Check for null/empty values in the paths array
+                    let has_empty = paths.iter().any(|p| p.trim().is_empty());
+                    if has_empty {
+                        return Err(serde::de::Error::custom(
+                            "file_paths array contains empty strings. Each path must be non-empty.",
+                        ));
+                    }
+                    paths
+                }
                 Some(_) => return Err(serde::de::Error::custom(
                     "file_paths must not be empty. Please provide at least one file path to read.",
                 )),
@@ -740,6 +783,22 @@ pub struct FileWriteOrEdit {
 
     /// The chat ID for this session
     pub chat_id: String,
+
+    /// Fuzzy match threshold (0.0-1.0) - higher requires more similarity
+    #[serde(default)]
+    pub fuzzy_threshold: Option<f64>,
+
+    /// Maximum number of fuzzy match suggestions to provide
+    #[serde(default)]
+    pub max_suggestions: Option<usize>,
+
+    /// Whether to automatically apply fuzzy fixes when confidence is high
+    #[serde(default)]
+    pub auto_apply_fuzzy: Option<bool>,
+
+    /// Whether to show diff output for the changes
+    #[serde(default)]
+    pub show_diff: Option<bool>,
 }
 
 /// Parameters for the ContextSave tool
