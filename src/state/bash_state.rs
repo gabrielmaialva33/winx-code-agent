@@ -218,7 +218,7 @@ impl TerminalState {
 
     /// Smart truncate the terminal output if it gets too large
     pub fn smart_truncate(&mut self, max_size: usize) {
-        if let Ok(mut screen) = self.terminal_emulator.lock() {
+        if let Ok(screen) = self.terminal_emulator.lock() {
             if let Ok(mut screen_guard) = screen.get_screen().lock() {
                 screen_guard.smart_truncate(max_size);
             }
