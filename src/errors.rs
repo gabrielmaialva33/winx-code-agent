@@ -68,6 +68,14 @@ pub enum WinxError {
         max_size: u64,
     },
 
+    /// Error when writing to a file
+    #[error("Failed to write file {path}: {message}")]
+    FileWriteError { path: PathBuf, message: String },
+
+    /// Error loading data
+    #[error("Failed to load data: {0}")]
+    DataLoadingError(String),
+
     /// IO error
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -152,6 +160,11 @@ impl Clone for WinxError {
                 size: *size,
                 max_size: *max_size,
             },
+            Self::FileWriteError { path, message } => Self::FileWriteError {
+                path: path.clone(),
+                message: message.clone(),
+            },
+            Self::DataLoadingError(msg) => Self::DataLoadingError(msg.clone()),
             Self::IoError(err) => Self::IoError(std::io::Error::new(err.kind(), err.to_string())),
         }
     }
