@@ -1,7 +1,7 @@
 <table style="width:100%" align="center" border="0">
   <tr>
     <td width="40%" align="center"><img src=".github/assets/fairy.png" alt="Winx" width="300"></td>
-    <td><h1>✨ Ｗｉｎｘ Ｃｏｄｅ Ａｇｅｎｔ ✨</h1></td>
+    <td><h1>✨ Ｗｉｎｘ Ａｇｅｎｔ ✨</h1></td>
   </tr>
 </table>
 
