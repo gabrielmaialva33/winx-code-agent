@@ -266,9 +266,13 @@ impl WinxService {
         // Validate file_paths is not empty (this should be handled by the deserializer, but double-check)
         if args.file_paths.is_empty() {
             tracing::error!("ReadFiles called with empty file_paths");
-            let error_message = "file_paths cannot be empty. Please provide at least one file path to read.";
-            let exception_message = format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
-            return Ok(CallToolResult::success(vec![Content::text(exception_message)]));
+            let error_message =
+                "file_paths cannot be empty. Please provide at least one file path to read.";
+            let exception_message =
+                format!("GOT EXCEPTION while calling tool. Error: {}", error_message);
+            return Ok(CallToolResult::success(vec![Content::text(
+                exception_message,
+            )]));
         }
 
         // We'll handle line range parsing in the implementation

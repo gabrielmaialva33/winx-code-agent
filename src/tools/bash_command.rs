@@ -134,9 +134,9 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
         .args(["-X", "-S", screen_name, "quit"])
         .output();
 
-    // Start a new screen session with the command
+    // Start a new screen session with the command, capturing exit code properly
     let screen_cmd = format!(
-        "screen -dmS {} bash -c '{} ; echo \"Command completed with exit code: $?\" ; sleep 1'",
+        "screen -dmS {} bash -c '{} ; ec=$? ; echo \"Command completed with exit code: $ec\" ; sleep 1 ; exit $ec'",
         screen_name,
         command.replace("'", "'\\''")
     );
@@ -168,6 +168,14 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
 
     let screen_list = String::from_utf8_lossy(&screen_check.stdout).to_string();
 
+    // Setup automatic cleanup after 1 hour to avoid orphaned sessions
+    let cleanup_cmd = format!(
+        "sh -c '( sleep 3600 && if screen -list | grep -q \"{}\" ; then screen -X -S {} quit > /dev/null 2>&1 ; fi ) > /dev/null 2>&1 &'",
+        screen_name, screen_name
+    );
+
+    let _cleanup_proc = Command::new("sh").arg("-c").arg(&cleanup_cmd).spawn();
+
     // Get current working directory
     let current_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
@@ -177,6 +185,7 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
         "Started command in background screen session '{}'.\n\
         Use status_check to get output.\n\n\
         Screen sessions:\n{}\n\
+        Note: Background process will be automatically terminated if still running after 1 hour.\n\
         ---\n\n\
         status = running in background\n\
         cwd = {}\n",
@@ -197,7 +206,7 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
 /// # Returns
 ///
 /// A Result containing the command output or an error
-async fn execute_screen_command(bash_state: &BashState, command: &str) -> Result<String> {
+async fn execute_screen_command(bash_state: &mut BashState, command: &str) -> Result<String> {
     // Generate a unique screen session name if not specified
     let mut screen_name = format!("winx_{}", rand::rng().random_range(1000..10000));
 
@@ -231,17 +240,40 @@ async fn execute_screen_command(bash_state: &BashState, command: &str) -> Result
     let cleanup_cmd = format!("screen -X -S {} quit 2>/dev/null || true", screen_name);
     let _ = execute_interactive_command(bash_state, &cleanup_cmd, None).await;
 
-    // Modified command to ensure we get useful output
+    // Modified command to ensure we get useful output and proper cleanup
     let modified_command = if command.contains(" -d") || command.contains(" -dm") {
-        // It's already a detached session, leave as is
-        command.to_string()
+        // It's already a detached session, leave as is but ensure we track the session name
+        if command.contains(" -S ") {
+            // Command already specifies session name
+            command.to_string()
+        } else {
+            // Add session name to track it
+            command.replace("screen ", &format!("screen -S {} ", screen_name))
+        }
     } else {
-        // Add detached flag to prevent hanging
-        command.replace("screen ", "screen -dm ")
+        // Add detached flag to prevent hanging and ensure we have a session name
+        if command.contains(" -S ") {
+            command.replace("screen ", "screen -dm ")
+        } else {
+            format!(
+                "screen -dm -S {} {}",
+                screen_name,
+                command.strip_prefix("screen ").unwrap_or(command)
+            )
+        }
     };
 
     // Execute the screen command
     let result = execute_interactive_command(bash_state, &modified_command, None).await?;
+
+    // Setup automatic cleanup after 1 hour to avoid orphaned sessions
+    let cleanup_cmd = format!(
+        "( sleep 3600 && if screen -list | grep -q '{}' ; then screen -X -S {} quit > /dev/null 2>&1 ; fi ) > /dev/null 2>&1 &",
+        screen_name, screen_name
+    );
+
+    // Run the cleanup command without waiting for result
+    let _ = execute_interactive_command(bash_state, &cleanup_cmd, None).await;
 
     // List screen sessions to confirm
     let list_cmd = "screen -ls";
@@ -255,6 +287,7 @@ async fn execute_screen_command(bash_state: &BashState, command: &str) -> Result
         "Screen session '{}' started.\n\n{}\n\n\
         To reattach: screen -r {}\n\
         To terminate: screen -X -S {} quit\n\n\
+        Note: Background process will be automatically terminated if still running after 1 hour.\n\n\
         Current screen sessions:\n{}\n",
         screen_name, result, screen_name, screen_name, screen_list
     );
@@ -275,7 +308,7 @@ async fn execute_screen_command(bash_state: &BashState, command: &str) -> Result
 /// # Returns
 ///
 /// A Result containing the command output or an error
-async fn execute_background_command(bash_state: &BashState, command: &str) -> Result<String> {
+async fn execute_background_command(bash_state: &mut BashState, command: &str) -> Result<String> {
     debug!("Executing background command: {}", command);
 
     // Generate a unique screen session name for this background job
@@ -285,10 +318,10 @@ async fn execute_background_command(bash_state: &BashState, command: &str) -> Re
     let screen_check = execute_interactive_command(bash_state, "which screen", None).await;
 
     if screen_check.is_ok() {
-        // Create a modified command that runs inside a screen session
-        // This allows the command to continue running after we detach
+        // Create a modified command that runs inside a screen session with proper cleanup
+        // This allows the command to continue running after we detach, but ensures cleanup
         let wrapped_command = format!(
-            "screen -dm -S {} bash -c '{} ; echo \"Command completed with status code: $?\" > /tmp/{}_result'",
+            "screen -dm -S {} bash -c '{} ; ec=$? ; echo \"Command completed with status code: $ec\" > /tmp/{}_result ; exit $ec'",
             screen_name,
             command.replace("'", "'\\''"),  // Escape single quotes
             screen_name
@@ -300,6 +333,15 @@ async fn execute_background_command(bash_state: &BashState, command: &str) -> Re
         // Check that the screen session started
         let screen_list = execute_interactive_command(bash_state, "screen -ls", None).await?;
 
+        // Register a cleanup command to run after a timeout (e.g., terminate if orphaned)
+        let cleanup_command = format!(
+            "( sleep 3600 && if screen -list | grep -q '{}' ; then screen -X -S {} quit > /dev/null 2>&1 ; rm -f /tmp/{}_result ; fi ) > /dev/null 2>&1 &",
+            screen_name, screen_name, screen_name
+        );
+
+        // Run the cleanup command in the background to avoid waiting
+        let _ = execute_interactive_command(bash_state, &cleanup_command, None).await;
+
         // Format a nice response about the background process
         let response = format!(
             "Command started in background screen session '{}'.\n\
@@ -309,6 +351,8 @@ async fn execute_background_command(bash_state: &BashState, command: &str) -> Re
             - `screen -r {}` to attach to it (detach with Ctrl+A, d)\n\
             - `screen -X -S {} quit` to terminate it\n\
             - `cat /tmp/{}_result` to see the exit status when finished\n\
+            \n\
+            Note: Background process will be automatically terminated if still running after 1 hour.\n\
             \n\
             Current screen sessions:\n{}",
             screen_name, screen_name, screen_name, screen_name, screen_list
@@ -568,7 +612,7 @@ pub async fn handle_tool_call(
     // to avoid holding the MutexGuard across await points
 
     // Data to extract from bash_state
-    let bash_state: BashState;
+    let mut bash_state: BashState;
 
     // Lock bash state to extract data
     {
@@ -635,7 +679,7 @@ pub async fn handle_tool_call(
             // Check for screen command specifically to handle it specially
             if command.trim().starts_with("screen ") {
                 info!("Detected screen command, using special handling");
-                execute_screen_command(&bash_state, command).await
+                execute_screen_command(&mut bash_state, command).await
             }
             // Check if command should run in background (contains &)
             else if command.contains(" & ")
@@ -645,16 +689,16 @@ pub async fn handle_tool_call(
                 || (command.contains(" > ") && command.contains(" < "))
             {
                 info!("Command contains background operator, using background execution");
-                execute_background_command(&bash_state, command).await
+                execute_background_command(&mut bash_state, command).await
             } else {
                 // Normal command execution
-                execute_interactive_command(&bash_state, command, bash_command.wait_for_seconds)
+                execute_interactive_command(&mut bash_state, command, bash_command.wait_for_seconds)
                     .await
             }
         }
         BashCommandAction::StatusCheck { status_check: _ } => {
             debug!("Processing StatusCheck action");
-            check_command_status(&bash_state).await
+            check_command_status(&mut bash_state).await
         }
         BashCommandAction::SendText { send_text } => {
             debug!("Processing SendText action: {}", send_text);
@@ -664,7 +708,7 @@ pub async fn handle_tool_call(
                 ));
             }
 
-            send_text_to_interactive(&bash_state, send_text).await
+            send_text_to_interactive(&mut bash_state, send_text).await
         }
         BashCommandAction::SendSpecials { send_specials } => {
             debug!("Processing SendSpecials action: {:?}", send_specials);
@@ -674,7 +718,7 @@ pub async fn handle_tool_call(
                 ));
             }
 
-            send_special_keys_to_interactive(&bash_state, send_specials).await
+            send_special_keys_to_interactive(&mut bash_state, send_specials).await
         }
         BashCommandAction::SendAscii { send_ascii } => {
             debug!("Processing SendAscii action: {:?}", send_ascii);
@@ -684,7 +728,7 @@ pub async fn handle_tool_call(
                 ));
             }
 
-            send_ascii_to_interactive(&bash_state, send_ascii).await
+            send_ascii_to_interactive(&mut bash_state, send_ascii).await
         }
     }
 }
@@ -702,7 +746,7 @@ pub async fn handle_tool_call(
 /// # Returns
 ///
 /// A Result containing the command output with status information
-async fn send_text_to_interactive(bash_state: &BashState, text: &str) -> Result<String> {
+async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Result<String> {
     debug!("Sending text to interactive process: {}", text);
 
     // Validate input
@@ -870,7 +914,7 @@ async fn send_text_to_interactive(bash_state: &BashState, text: &str) -> Result<
 ///
 /// A Result containing the command output with detailed status
 async fn send_special_keys_to_interactive(
-    bash_state: &BashState,
+    bash_state: &mut BashState,
     keys: &[SpecialKey],
 ) -> Result<String> {
     debug!("Sending special keys to interactive process: {:?}", keys);
@@ -1079,7 +1123,10 @@ async fn send_special_keys_to_interactive(
 /// # Returns
 ///
 /// A Result containing the command output with detailed status
-async fn send_ascii_to_interactive(bash_state: &BashState, ascii_codes: &[u8]) -> Result<String> {
+async fn send_ascii_to_interactive(
+    bash_state: &mut BashState,
+    ascii_codes: &[u8],
+) -> Result<String> {
     debug!("Sending ASCII to interactive process: {:?}", ascii_codes);
 
     // Validate input
@@ -1287,7 +1334,7 @@ async fn send_ascii_to_interactive(bash_state: &BashState, ascii_codes: &[u8]) -
 ///
 /// A Result containing the command output with detailed status
 async fn execute_interactive_command(
-    bash_state: &BashState,
+    bash_state: &mut BashState,
     command: &str,
     timeout: Option<f32>,
 ) -> Result<String> {
@@ -1423,7 +1470,7 @@ async fn execute_interactive_command(
 /// # Returns
 ///
 /// A Result containing the command status with detailed information
-async fn check_command_status(bash_state: &BashState) -> Result<String> {
+async fn check_command_status(bash_state: &mut BashState) -> Result<String> {
     debug!("Checking command status");
 
     // We can't hold the lock across an await, so we need to extract all information

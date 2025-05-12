@@ -121,12 +121,34 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
     debug!("Found {} relevant files", relevant_files.len());
 
     // Get the app directory for storing memory files
-    let app_dir = get_app_dir_xdg()?;
-    let memory_dir = app_dir.join("memory");
-    fs::create_dir_all(&memory_dir).map_err(|e| WinxError::FileAccessError {
-        path: memory_dir.clone(),
-        message: format!("Failed to create memory directory: {}", e),
-    })?;
+    let app_dir = match get_app_dir_xdg() {
+        Ok(dir) => dir,
+        Err(e) => {
+            debug!("Failed to get primary app directory: {:?}", e);
+            // Try using temporary directory directly as a last resort
+            let fallback = std::env::temp_dir().join("winx-memory");
+            debug!("Using fallback directory: {}", fallback.display());
+            fs::create_dir_all(&fallback).map_err(|e2| WinxError::FileAccessError {
+                path: fallback.clone(),
+                message: format!(
+                    "Failed to create fallback directory: {} (after previous error: {:?})",
+                    e2, e
+                ),
+            })?;
+            fallback
+        }
+    };
+
+    let mut memory_dir = app_dir.join("memory");
+    match fs::create_dir_all(&memory_dir) {
+        Ok(_) => {}
+        Err(e) => {
+            debug!("Failed to create memory directory: {}", e);
+            // If we can't create the memory subdirectory, use the app dir directly as the memory_dir
+            debug!("Using app_dir directly as memory_dir due to failed subdirectory creation");
+            memory_dir = app_dir;
+        }
+    };
 
     // Validate the task ID
     if context.id.is_empty() {
@@ -141,21 +163,28 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
     // Format the memory data
     let memory_data = format_memory(&context, &relevant_files_data);
 
-    // Save the memory file
-    let memory_file_path = memory_dir.join(format!("{}.txt", context.id));
-    let mut file = File::create(&memory_file_path).map_err(|e| WinxError::FileAccessError {
-        path: memory_file_path.clone(),
-        message: format!("Failed to create memory file: {}", e),
-    })?;
+    // Create safe filenames by replacing any invalid characters
+    let safe_id = sanitize_filename(&context.id);
 
-    file.write_all(memory_data.as_bytes())
-        .map_err(|e| WinxError::FileAccessError {
-            path: memory_file_path.clone(),
-            message: format!("Failed to write to memory file: {}", e),
-        })?;
+    // Save the memory file
+    let memory_file_path = memory_dir.join(format!("{}.txt", safe_id));
+    match File::create(&memory_file_path) {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(memory_data.as_bytes()) {
+                warn!("Failed to write memory data: {}", e);
+                // Try writing to temp file as last resort
+                return save_to_temp_file(memory_data, &context);
+            }
+        }
+        Err(e) => {
+            warn!("Failed to create memory file: {}", e);
+            // Try writing to temp file as last resort
+            return save_to_temp_file(memory_data, &context);
+        }
+    };
 
     // Save the bash state if available
-    let state_file_path = memory_dir.join(format!("{}_bash_state.json", context.id));
+    let state_file_path = memory_dir.join(format!("{}_bash_state.json", safe_id));
 
     // Serialize the bash state (simplified for now)
     let bash_state_dict = serde_json::json!({
@@ -172,18 +201,19 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
         WinxError::SerializationError(format!("Failed to serialize bash state: {}", e))
     })?;
 
-    let mut state_file =
-        File::create(&state_file_path).map_err(|e| WinxError::FileAccessError {
-            path: state_file_path.clone(),
-            message: format!("Failed to create bash state file: {}", e),
-        })?;
-
-    state_file
-        .write_all(state_json.as_bytes())
-        .map_err(|e| WinxError::FileAccessError {
-            path: state_file_path.clone(),
-            message: format!("Failed to write to bash state file: {}", e),
-        })?;
+    // Try to create and write state file, but don't fail if it doesn't work
+    match File::create(&state_file_path) {
+        Ok(mut state_file) => {
+            if let Err(e) = state_file.write_all(state_json.as_bytes()) {
+                warn!("Failed to write bash state data: {}", e);
+                // Non-fatal, continue
+            }
+        }
+        Err(e) => {
+            warn!("Failed to create bash state file: {}", e);
+            // Non-fatal, continue
+        }
+    };
 
     // Prepare the response message
     let memory_file_path_str = memory_file_path.to_string_lossy().to_string();
@@ -245,30 +275,68 @@ fn format_memory(context: &ContextSave, relevant_files_data: &str) -> String {
     memory_data
 }
 
-/// Get the XDG data directory for the application
+/// Get the application directory for storing data
+///
+/// This function tries multiple locations in order of preference:
+/// 1. XDG_DATA_HOME/winx if XDG_DATA_HOME is set
+/// 2. HOME/.local/share/winx if HOME is set
+/// 3. Current directory/.winx-data as a fallback
+/// 4. Temporary directory as a last resort
 ///
 /// # Returns
 ///
 /// A Result with the path to the app directory
 fn get_app_dir_xdg() -> Result<PathBuf> {
-    // Get the XDG data directory
-    let xdg_data_dir = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = std::env::var("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| PathBuf::from("~"));
-            home.join(".local/share")
-        });
+    // Try multiple locations in order of preference
+    let app_dir = get_primary_app_dir().or_else(|_| get_fallback_app_dir())?;
 
-    // Create the app directory if it doesn't exist
-    let app_dir = xdg_data_dir.join("winx");
-    fs::create_dir_all(&app_dir).map_err(|e| WinxError::FileAccessError {
-        path: app_dir.clone(),
-        message: format!("Failed to create app directory: {}", e),
+    debug!("Using app directory: {}", app_dir.display());
+    Ok(app_dir)
+}
+
+/// Try to get the primary application directory
+fn get_primary_app_dir() -> Result<PathBuf> {
+    // Try XDG_DATA_HOME first
+    if let Ok(xdg_path) = std::env::var("XDG_DATA_HOME") {
+        let app_dir = PathBuf::from(xdg_path).join("winx");
+        if let Ok(()) = fs::create_dir_all(&app_dir) {
+            return Ok(app_dir);
+        }
+    }
+
+    // Try HOME/.local/share next
+    if let Ok(home) = std::env::var("HOME") {
+        let app_dir = PathBuf::from(home).join(".local/share/winx");
+        if let Ok(()) = fs::create_dir_all(&app_dir) {
+            return Ok(app_dir);
+        }
+    }
+
+    // No successful primary location
+    Err(WinxError::FileAccessError {
+        path: PathBuf::from("<primary-paths>"),
+        message: "Could not create app directory in primary locations".to_string(),
+    })
+}
+
+/// Get a fallback application directory when primary ones fail
+fn get_fallback_app_dir() -> Result<PathBuf> {
+    // Try current directory
+    let current_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    let app_dir = current_dir.join(".winx-data");
+    if let Ok(()) = fs::create_dir_all(&app_dir) {
+        return Ok(app_dir);
+    }
+
+    // Try temporary directory as a last resort
+    let temp_dir = std::env::temp_dir().join("winx-data");
+    fs::create_dir_all(&temp_dir).map_err(|e| WinxError::FileAccessError {
+        path: temp_dir.clone(),
+        message: format!("Failed to create app directory in any location: {}", e),
     })?;
 
-    Ok(app_dir)
+    Ok(temp_dir)
 }
 
 /// Read the content of multiple files
@@ -369,4 +437,51 @@ fn try_open_file(file_path: &str) -> Result<()> {
     // (This mimics the Python implementation)
 
     Ok(())
+}
+
+/// Save context data to a temporary file as a last resort
+fn save_to_temp_file(memory_data: String, context: &ContextSave) -> Result<String> {
+    let temp_dir = std::env::temp_dir();
+    let safe_id = sanitize_filename(&context.id);
+    let temp_file_path = temp_dir.join(format!("winx-{}.txt", safe_id));
+
+    let mut file = File::create(&temp_file_path).map_err(|e| WinxError::FileAccessError {
+        path: temp_file_path.clone(),
+        message: format!("Failed to create temporary file: {}", e),
+    })?;
+
+    file.write_all(memory_data.as_bytes())
+        .map_err(|e| WinxError::FileAccessError {
+            path: temp_file_path.clone(),
+            message: format!("Failed to write to temporary file: {}", e),
+        })?;
+
+    let path_str = temp_file_path.to_string_lossy().to_string();
+
+    Ok(format!(
+        "Context was saved to temporary file at {} due to permission issues with regular locations.",
+        path_str
+    ))
+}
+
+/// Sanitize a filename to ensure it's valid on all platforms
+fn sanitize_filename(input: &str) -> String {
+    let invalid_chars = vec!['/', '\\', ':', '*', '?', '"', '<', '>', '|'];
+    let mut result = input.to_string();
+
+    for c in invalid_chars {
+        result = result.replace(c, "_");
+    }
+
+    // Limit length to avoid issues
+    if result.len() > 50 {
+        use rand::Rng;
+        result = format!(
+            "{}-{}",
+            &result[0..45],
+            rand::rng().random_range(1000..9999).to_string()
+        );
+    }
+
+    result
 }
