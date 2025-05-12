@@ -35,10 +35,12 @@ and other LLMs via the Model Context Protocol (MCP).
     - 📖 Read files with line range support
     - ✏️ Write new files with syntax validation
     - 🔍 Edit existing files with intelligent search/replace
+    - 🔄 Smart file caching with change detection
+    - 📏 Line-level granular read tracking
 - 🖥️ **Command Execution**:
     - 🚀 Run shell commands with status tracking
-    - 📺 GNU Screen integration for interactive sessions
-    - ⌨️ Send input to running commands
+    - 📟 Interactive shell with persistent session
+    - ⌨️ Full input/output control via PTY
     - 🏃‍♂️ Background process execution
 - 🔀 **Operational Modes**:
     - 🔓 `wcgw`: Complete access to all features
@@ -129,11 +131,30 @@ initialize(
 
 ### 🖥️ bash_command
 
-Execute shell commands with intelligent error handling and status tracking.
+Execute shell commands with persistent shell state and full interactive capabilities.
 
 ```
+# Execute commands
 bash_command(
   action_json={"command": "ls -la"},
+  chat_id="i1234"
+)
+
+# Check command status
+bash_command(
+  action_json={"status_check": true},
+  chat_id="i1234"
+)
+
+# Send input to running commands
+bash_command(
+  action_json={"send_text": "y"},
+  chat_id="i1234"
+)
+
+# Send special keys (Ctrl+C, arrow keys, etc.)
+bash_command(
+  action_json={"send_specials": ["Enter", "CtrlC"]},
   chat_id="i1234"
 )
 ```
