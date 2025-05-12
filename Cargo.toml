@@ -1,6 +1,6 @@
 [package]
 name = "winx-code-agent"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Shell and coding agent for Claude Desktop"
 authors = ["Gabriel Maia <gabrielmaialva33@gmail.com>"]
