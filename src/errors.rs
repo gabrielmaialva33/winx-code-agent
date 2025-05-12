@@ -76,6 +76,22 @@ pub enum WinxError {
     #[error("Failed to load data: {0}")]
     DataLoadingError(String),
 
+    /// Parameter validation error
+    #[error("Invalid parameter: {field} - {message}")]
+    ParameterValidationError { field: String, message: String },
+
+    /// Required parameter missing error
+    #[error("Required parameter missing: {field} - {message}")]
+    MissingParameterError { field: String, message: String },
+
+    /// Null or undefined value error
+    #[error("Null or undefined value where object expected: {field}")]
+    NullValueError { field: String },
+
+    /// Recovery suggestion error with potential solutions
+    #[error("{message} - {suggestion}")]
+    RecoverableSuggestionError { message: String, suggestion: String },
+
     /// IO error
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -120,12 +136,99 @@ impl AnyhowErrorExt for anyhow::Error {
             WinxError::WorkspacePathError(err_string)
         } else if err_string.contains("command") {
             WinxError::CommandExecutionError(err_string)
+        } else if err_string.contains("null") || err_string.contains("undefined") {
+            WinxError::NullValueError {
+                field: "unknown".to_string(),
+            }
         } else if err_string.contains("parse") || err_string.contains("deserializ") {
             WinxError::DeserializationError(err_string)
         } else if err_string.contains("serialize") {
             WinxError::SerializationError(err_string)
         } else {
             WinxError::ShellInitializationError(format!("{}: {}", default_message, err_string))
+        }
+    }
+}
+
+/// Helper function to create recoverable errors with suggestions
+pub fn with_suggestion(error: WinxError, suggestion: &str) -> WinxError {
+    match error {
+        WinxError::FileAccessError { path, message } => WinxError::RecoverableSuggestionError {
+            message: format!("File access error for {}: {}", path.display(), message),
+            suggestion: suggestion.to_string(),
+        },
+        WinxError::DeserializationError(msg) => WinxError::RecoverableSuggestionError {
+            message: format!("Failed to parse input: {}", msg),
+            suggestion: suggestion.to_string(),
+        },
+        WinxError::NullValueError { field } => WinxError::RecoverableSuggestionError {
+            message: format!("Null or undefined value found in field: {}", field),
+            suggestion: suggestion.to_string(),
+        },
+        WinxError::ParameterValidationError { field, message } => {
+            WinxError::RecoverableSuggestionError {
+                message: format!("Invalid parameter {}: {}", field, message),
+                suggestion: suggestion.to_string(),
+            }
+        }
+        WinxError::MissingParameterError { field, message } => {
+            WinxError::RecoverableSuggestionError {
+                message: format!("Missing required parameter {}: {}", field, message),
+                suggestion: suggestion.to_string(),
+            }
+        }
+        // For other error types, just add the suggestion but maintain the original error type
+        _ => WinxError::RecoverableSuggestionError {
+            message: format!("{}", error),
+            suggestion: suggestion.to_string(),
+        },
+    }
+}
+
+/// Recovery options for errors
+pub struct ErrorRecovery;
+
+impl ErrorRecovery {
+    /// Create a recoverable error with suggestion
+    pub fn suggest(error: WinxError, suggestion: &str) -> WinxError {
+        with_suggestion(error, suggestion)
+    }
+
+    /// Attempt to recover from a parameter error with a default value
+    pub fn with_default<T: Clone>(
+        result: std::result::Result<T, WinxError>,
+        default: T,
+        context: &str,
+    ) -> Result<T> {
+        match result {
+            Ok(value) => Ok(value),
+            Err(e) => {
+                tracing::warn!("Recovering from error in {}: {}", context, e);
+                Ok(default)
+            }
+        }
+    }
+
+    /// Create a parameter validation error
+    pub fn param_error(field: &str, message: &str) -> WinxError {
+        WinxError::ParameterValidationError {
+            field: field.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    /// Create a missing parameter error
+    pub fn missing_param(field: &str, message: &str) -> WinxError {
+        WinxError::MissingParameterError {
+            field: field.to_string(),
+            message: message.to_string(),
+        }
+    }
+
+    /// Create a null value error
+    pub fn null_value(field: &str) -> WinxError {
+        WinxError::NullValueError {
+            field: field.to_string(),
         }
     }
 }
@@ -165,6 +268,24 @@ impl Clone for WinxError {
                 message: message.clone(),
             },
             Self::DataLoadingError(msg) => Self::DataLoadingError(msg.clone()),
+            Self::ParameterValidationError { field, message } => Self::ParameterValidationError {
+                field: field.clone(),
+                message: message.clone(),
+            },
+            Self::MissingParameterError { field, message } => Self::MissingParameterError {
+                field: field.clone(),
+                message: message.clone(),
+            },
+            Self::NullValueError { field } => Self::NullValueError {
+                field: field.clone(),
+            },
+            Self::RecoverableSuggestionError {
+                message,
+                suggestion,
+            } => Self::RecoverableSuggestionError {
+                message: message.clone(),
+                suggestion: suggestion.clone(),
+            },
             Self::IoError(err) => Self::IoError(std::io::Error::new(err.kind(), err.to_string())),
         }
     }
