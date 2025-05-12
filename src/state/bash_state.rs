@@ -11,7 +11,11 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::state::terminal::{render_terminal_output, TerminalEmulator};
+use crate::state::terminal::MAX_OUTPUT_SIZE as TERMINAL_MAX_OUTPUT_SIZE;
+use crate::state::terminal::{
+    incremental_text, render_terminal_output, TerminalEmulator, TerminalOutputDiff,
+    DEFAULT_MAX_SCREEN_LINES,
+};
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
 };
@@ -109,17 +113,19 @@ impl FileWhitelistData {
 #[derive(Debug, Clone)]
 pub struct TerminalState {
     /// Last command that was executed
-    #[allow(dead_code)]
     pub last_command: String,
     /// Last pending output, used for incremental updates
-    #[allow(dead_code)]
     pub last_pending_output: String,
     /// Flag indicating if a command is currently running
-    #[allow(dead_code)]
     pub command_running: bool,
     /// Terminal emulator for processing output
-    #[allow(dead_code)]
     pub terminal_emulator: Arc<Mutex<TerminalEmulator>>,
+    /// Output difference detector for efficient incremental updates
+    pub diff_detector: Option<TerminalOutputDiff>,
+    /// Indicates if buffer should be limited to handle large outputs
+    pub limit_buffer: bool,
+    /// Maximum buffer size for large outputs (in lines)
+    pub max_buffer_lines: usize,
 }
 
 impl TerminalState {
@@ -130,14 +136,42 @@ impl TerminalState {
             last_pending_output: String::new(),
             command_running: false,
             terminal_emulator: Arc::new(Mutex::new(TerminalEmulator::new(160))),
+            diff_detector: Some(TerminalOutputDiff::new()),
+            limit_buffer: false,
+            max_buffer_lines: DEFAULT_MAX_SCREEN_LINES,
+        }
+    }
+
+    /// Creates a new terminal state with custom settings
+    pub fn new_with_settings(columns: usize, max_buffer_lines: usize, limit_buffer: bool) -> Self {
+        Self {
+            last_command: String::new(),
+            last_pending_output: String::new(),
+            command_running: false,
+            terminal_emulator: Arc::new(Mutex::new(TerminalEmulator::new_with_max_lines(
+                columns,
+                max_buffer_lines,
+            ))),
+            diff_detector: Some(TerminalOutputDiff::new_with_max_lines(max_buffer_lines)),
+            limit_buffer,
+            max_buffer_lines,
         }
     }
 
     /// Process new output with the terminal emulator
-    #[allow(dead_code)]
     pub fn process_output(&mut self, output: &str) -> String {
         // Update the last pending output
         self.last_pending_output = output.to_string();
+
+        // For large outputs, use limited buffer mode if configured
+        if self.limit_buffer && output.len() > TERMINAL_MAX_OUTPUT_SIZE {
+            if let Ok(mut emulator) = self.terminal_emulator.lock() {
+                // Process with limited buffer
+                emulator.process_with_limited_buffer(output, self.max_buffer_lines);
+                let display = emulator.display();
+                return display.join("\n");
+            }
+        }
 
         // Process the output with the terminal emulator
         if let Ok(mut emulator) = self.terminal_emulator.lock() {
@@ -147,6 +181,47 @@ impl TerminalState {
         } else {
             // Fallback if we can't lock the emulator
             output.to_string()
+        }
+    }
+
+    /// Get incremental output updates efficiently
+    pub fn get_incremental_output(&mut self, output: &str) -> String {
+        if output.is_empty() {
+            return String::new();
+        }
+
+        // Use the optimized incremental_text function
+        let result = incremental_text(output, &self.last_pending_output);
+
+        // Update the last pending output
+        self.last_pending_output = output.to_string();
+
+        result
+    }
+
+    /// Reset the terminal state
+    pub fn reset(&mut self) {
+        self.last_command = String::new();
+        self.last_pending_output = String::new();
+        self.command_running = false;
+
+        // Reset the diff detector
+        if let Some(diff_detector) = &mut self.diff_detector {
+            diff_detector.reset();
+        }
+
+        // Clear the terminal emulator
+        if let Ok(mut emulator) = self.terminal_emulator.lock() {
+            emulator.clear();
+        }
+    }
+
+    /// Smart truncate the terminal output if it gets too large
+    pub fn smart_truncate(&mut self, max_size: usize) {
+        if let Ok(mut screen) = self.terminal_emulator.lock() {
+            if let Ok(mut screen_guard) = screen.get_screen().lock() {
+                screen_guard.smart_truncate(max_size);
+            }
         }
     }
 }
@@ -545,24 +620,73 @@ impl InteractiveBash {
                             debug!("Process completed after interrupt");
                             self.command_state = CommandState::Idle;
                         } else {
-                            // Process might be waiting for more input or ignoring the interrupt
-                            debug!("Process still running after interrupt, may be ignoring Ctrl+C");
-
-                            // Add message to output
-                            self.last_output.push_str(
-                                "\n(Sent interrupt signal, but process is still running)",
+                            // Send a second Ctrl+C after a short delay for processes that need multiple signals
+                            debug!(
+                                "Process still running after first Ctrl+C, sending a second one"
                             );
+                            if let Some(mut stdin) = self.process.stdin.take() {
+                                let _ = stdin.write_all(&[3]);
+                                let _ = stdin.flush();
+                                self.process.stdin = Some(stdin);
+                                std::thread::sleep(Duration::from_millis(100));
+                            }
 
-                            // Keep command state as running
-                            if let CommandState::Running {
-                                start_time,
-                                command,
-                            } = &self.command_state
-                            {
-                                self.command_state = CommandState::Running {
-                                    start_time: *start_time,
-                                    command: command.clone(),
-                                };
+                            // Check again if the process has exited
+                            if let Ok(Some(status)) = self.process.try_wait() {
+                                debug!(
+                                    "Process exited after second interrupt with status: {:?}",
+                                    status
+                                );
+                                self.command_state = CommandState::Idle;
+                            } else {
+                                // If process is still not responding to Ctrl+C, try SIGTERM
+                                #[cfg(unix)]
+                                {
+                                    // CommandExt not needed
+                                    debug!("Process still running, attempting to terminate with SIGTERM");
+                                    unsafe {
+                                        // Get process ID
+                                        let pid = self.process.id();
+                                        if pid > 0 {
+                                            // Send SIGTERM
+                                            let _ = libc::kill(pid as i32, libc::SIGTERM);
+                                            std::thread::sleep(Duration::from_millis(200));
+
+                                            // Check if terminated
+                                            if let Ok(Some(_)) = self.process.try_wait() {
+                                                debug!("Process terminated with SIGTERM");
+                                                self.command_state = CommandState::Idle;
+                                            } else {
+                                                // Process is still running, may be ignoring signals
+                                                debug!("Process still running after SIGTERM");
+                                                self.last_output.push_str(
+                                                    "\n(Sent multiple interrupt signals, but process is still running. It may need to be killed manually)",
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+
+                                #[cfg(not(unix))]
+                                {
+                                    // Process might be waiting for more input or ignoring the interrupt
+                                    debug!("Process still running after interrupt, may be ignoring Ctrl+C");
+                                    self.last_output.push_str(
+                                        "\n(Sent interrupt signals, but process is still running)",
+                                    );
+                                }
+
+                                // Keep command state as running
+                                if let CommandState::Running {
+                                    start_time,
+                                    command,
+                                } = &self.command_state
+                                {
+                                    self.command_state = CommandState::Running {
+                                        start_time: *start_time,
+                                        command: command.clone(),
+                                    };
+                                }
                             }
                         }
                     }
@@ -771,31 +895,38 @@ impl BashState {
             .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
 
         if let Some(bash) = bash_guard.as_mut() {
-            // Send 'jobs | wc -l' command to count background jobs
-            bash.send_command("jobs | wc -l")?;
+            // Use 'jobs -l' and manually count - avoids creating a pipeline which can leave jobs running
+            bash.send_command("jobs -l")?;
             let (output, _) = bash.read_output(0.5)?;
 
-            // Parse output to get job count
+            // Parse output to count jobs manually
             let lines = render_terminal_output(&output);
+            let mut job_count = 0;
+
             for line in lines {
                 let trimmed = line.trim();
-                if !trimmed.is_empty()
-                    && !trimmed.contains("jobs")
-                    && !line.contains(DEFAULT_BASH_PROMPT)
-                {
-                    // Try to parse the line as a number
-                    if let Ok(count) = trimmed.trim().parse::<usize>() {
-                        return Ok(count);
-                    }
+                // Count lines that start with job numbers (e.g. "[1]", "[2]+", etc.)
+                if !trimmed.is_empty() && trimmed.starts_with('[') && trimmed.contains(']') {
+                    job_count += 1;
                 }
             }
+
+            // Send an empty command to ensure cleanup
+            bash.send_command("")?;
+            let _ = bash.read_output(0.1)?;
+
+            return Ok(job_count);
         }
 
         Ok(0)
     }
 
     /// Execute a command in the interactive bash
-    pub async fn execute_interactive(&self, command: &str, timeout_secs: f32) -> Result<String> {
+    pub async fn execute_interactive(
+        &mut self,
+        command: &str,
+        timeout_secs: f32,
+    ) -> Result<String> {
         // Get effective timeout - use default if none specified
         let effective_timeout = if timeout_secs <= 0.0 {
             DEFAULT_READ_INTERVAL * 100.0 // 10 seconds default
@@ -1017,8 +1148,15 @@ impl BashState {
             }
         }
 
-        // Process output through terminal emulation
-        let rendered_output = crate::state::terminal::incremental_text(&result, "");
+        // Process output through optimized terminal emulation
+        let rendered_output =
+            if self.terminal_state.limit_buffer && result.len() > TERMINAL_MAX_OUTPUT_SIZE {
+                // For very large outputs, use the limited buffer processing
+                self.terminal_state.process_output(&result)
+            } else {
+                // For normal outputs, use the optimized incremental text function
+                self.terminal_state.get_incremental_output(&result)
+            };
 
         // Add status information
         let status = if complete {
@@ -1028,7 +1166,8 @@ impl BashState {
         };
 
         // Get current working directory (it might have changed if cd was used)
-        let current_cwd = self.update_cwd_from_bash()
+        let current_cwd = self
+            .update_cwd_from_bash()
             .unwrap_or_else(|_| self.cwd.display().to_string());
 
         // Check for background jobs
@@ -1046,6 +1185,17 @@ impl BashState {
             format!("status = {}", status)
         };
 
+        // Check if output is very large and might need truncation
+        if result.len() > TERMINAL_MAX_OUTPUT_SIZE {
+            // Apply smart truncation to avoid excessive memory usage
+            self.terminal_state
+                .smart_truncate(self.terminal_state.max_buffer_lines);
+            debug!(
+                "Applied smart truncation for large output ({} bytes)",
+                result.len()
+            );
+        }
+
         // Assemble final result
         let final_result = format!(
             "{}\n\n---\n\n{}\ncwd = {}\n",
@@ -1054,8 +1204,7 @@ impl BashState {
 
         Ok(final_result)
     }
-    #[allow(dead_code)]
-    pub async fn check_command_status(&self, timeout_secs: f32) -> Result<String> {
+    pub async fn check_command_status(&mut self, timeout_secs: f32) -> Result<String> {
         let mut bash_guard = self
             .interactive_bash
             .lock()
@@ -1064,9 +1213,15 @@ impl BashState {
         if let Some(bash) = bash_guard.as_mut() {
             let (output, complete) = bash.read_output(timeout_secs)?;
 
-            // Process the output through terminal emulation for better display
-            let rendered_lines = render_terminal_output(&output);
-            let rendered_output = rendered_lines.join("\n");
+            // Process output through optimized terminal emulation
+            let rendered_output =
+                if self.terminal_state.limit_buffer && output.len() > TERMINAL_MAX_OUTPUT_SIZE {
+                    // For very large outputs, use the limited buffer processing
+                    self.terminal_state.process_output(&output)
+                } else {
+                    // For normal outputs, use the optimized incremental text function
+                    self.terminal_state.get_incremental_output(&output)
+                };
 
             // Add status information
             let status = if complete {
@@ -1074,6 +1229,17 @@ impl BashState {
             } else {
                 "still running"
             };
+
+            // Check if output is very large and might need truncation
+            if output.len() > TERMINAL_MAX_OUTPUT_SIZE {
+                // Apply smart truncation to avoid excessive memory usage
+                self.terminal_state
+                    .smart_truncate(self.terminal_state.max_buffer_lines);
+                debug!(
+                    "Applied smart truncation for large output ({} bytes)",
+                    output.len()
+                );
+            }
 
             // Assemble final result
             let final_result = format!(
@@ -1085,7 +1251,10 @@ impl BashState {
 
             Ok(final_result)
         } else {
-            Ok("No command running\n\n---\n\nstatus = process exited\ncwd = {}\n".to_string())
+            Ok(format!(
+                "No command running\n\n---\n\nstatus = process exited\ncwd = {}\n",
+                self.cwd.display()
+            ))
         }
     }
 }
