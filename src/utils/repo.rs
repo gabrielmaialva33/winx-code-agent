@@ -4,7 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-// Tracing imported through utils module
+use rayon::prelude::*;
+use tracing::{debug, info};
 
 use crate::utils::path_analyzer;
 
@@ -291,10 +292,10 @@ impl WorkspaceStats {
     pub fn refresh(&mut self, workspace_path: &Path) -> std::io::Result<()> {
         self.last_refresh = SystemTime::now();
 
-        // Scan the filesystem to update file modification times
-        let mut files = Vec::new();
-        collect_files_recursively(workspace_path, &mut files, None)?;
+        // Collect files using the parallel implementation
+        let files = collect_files_par(workspace_path, None)?;
 
+        // Process file metadata
         for file_path in files {
             if let Ok(metadata) = fs::metadata(&file_path) {
                 if let Ok(modified) = metadata.modified() {
@@ -374,18 +375,28 @@ impl WorkspaceStats {
     }
 }
 
-/// Helper function to collect files recursively from a directory
-fn collect_files_recursively(
+/// Helper function to collect files recursively using parallel processing
+/// Returns a vector of files
+fn collect_files_par(
     dir: &Path,
-    files: &mut Vec<PathBuf>,
     exclude_patterns: Option<&[&str]>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Vec<PathBuf>> {
+    // Handle non-directories
     if !dir.is_dir() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
+    // Get directory entries
+    let entries: Vec<_> = match fs::read_dir(dir) {
+        Ok(entries) => entries.filter_map(Result::ok).collect(),
+        Err(e) => return Err(e),
+    };
+
+    // Collect files and directories
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+
+    for entry in entries {
         let path = entry.path();
 
         // Skip paths matching exclude patterns
@@ -418,11 +429,88 @@ fn collect_files_recursively(
                 continue;
             }
 
-            collect_files_recursively(&path, files, exclude_patterns)?;
+            dirs.push(path);
         }
     }
 
+    // If we have many subdirectories, process them in parallel
+    if dirs.len() > 10 {
+        debug!(
+            "Using parallel processing for {} subdirectories in {}",
+            dirs.len(),
+            dir.display()
+        );
+
+        let exclude_patterns_owned = match exclude_patterns {
+            Some(patterns) => Some(patterns.iter().map(|&s| s.to_owned()).collect::<Vec<_>>()),
+            None => None,
+        };
+
+        // Process subdirectories in parallel
+        let subdir_files: Vec<PathBuf> = dirs
+            .into_par_iter()
+            .flat_map(|subdir| {
+                let exclude_patterns_refs = exclude_patterns_owned
+                    .as_ref()
+                    .map(|patterns| patterns.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+
+                match collect_files_par(&subdir, exclude_patterns_refs.as_deref()) {
+                    Ok(sub_files) => sub_files,
+                    Err(_) => Vec::new(), // Skip errors
+                }
+            })
+            .collect();
+
+        // Add subdirectory files
+        files.extend(subdir_files);
+    } else {
+        // Process directories sequentially
+        for subdir in dirs {
+            match collect_files_par(&subdir, exclude_patterns) {
+                Ok(sub_files) => files.extend(sub_files),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    Ok(files)
+}
+
+/// Helper function to collect files recursively from a directory
+fn collect_files_recursively(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    exclude_patterns: Option<&[&str]>,
+) -> std::io::Result<()> {
+    // Simply use our parallel implementation and extend the files vector
+    let collected = collect_files_par(dir, exclude_patterns)?;
+    files.extend(collected);
     Ok(())
+}
+
+/// Process files in parallel using a provided operation function
+///
+/// # Arguments
+///
+/// * `files` - List of files to process
+/// * `threshold` - Minimum number of files to use parallel processing
+/// * `operation` - Function that processes each file and returns a result
+///
+/// # Returns
+///
+/// Vector of results from processing each file
+pub fn process_files_parallel<T, F>(files: &[PathBuf], threshold: usize, operation: F) -> Vec<T>
+where
+    T: Send + 'static,
+    F: Fn(&Path) -> T + Send + Sync + 'static,
+{
+    if files.len() >= threshold {
+        debug!("Using parallel processing for {} files", files.len());
+        files.par_iter().map(|path| operation(path)).collect()
+    } else {
+        // Use sequential processing for small batches
+        files.iter().map(|path| operation(path)).collect()
+    }
 }
 
 /// Calculate dynamic file limit based on repository size
@@ -479,12 +567,12 @@ pub fn get_active_files_from_stats(
 }
 
 /// Get most relevant files from the repository using path scoring
+/// with parallel processing for improved performance
 pub fn get_relevant_files(
     workspace_path: &Path,
     limit: Option<usize>,
     workspace_stats: Option<&WorkspaceStats>,
 ) -> std::io::Result<Vec<String>> {
-    let mut files = Vec::new();
     let exclude_patterns = &[
         "node_modules",
         ".git",
@@ -497,23 +585,84 @@ pub fn get_relevant_files(
         ".idea",
     ];
 
-    // Collect all files recursively
-    collect_files_recursively(workspace_path, &mut files, Some(exclude_patterns))?;
+    // Use our parallel file collection function
+    let files = collect_files_par(workspace_path, Some(exclude_patterns))?;
 
-    // Convert PathBufs to relative path Strings
-    let file_paths: Vec<String> = files
-        .into_iter()
-        .filter_map(|path| {
-            path.strip_prefix(workspace_path)
-                .ok()
-                .map(|rel_path| rel_path.to_string_lossy().to_string())
-        })
-        .collect();
+    // Convert PathBufs to relative path Strings in parallel for large repositories
+    let file_paths: Vec<String> = if files.len() > 1000 {
+        debug!(
+            "Using parallel processing for path conversion: {} files",
+            files.len()
+        );
+        files
+            .par_iter()
+            .filter_map(|path| {
+                path.strip_prefix(workspace_path)
+                    .ok()
+                    .map(|rel_path| rel_path.to_string_lossy().to_string())
+            })
+            .collect()
+    } else {
+        files
+            .iter()
+            .filter_map(|path| {
+                path.strip_prefix(workspace_path)
+                    .ok()
+                    .map(|rel_path| rel_path.to_string_lossy().to_string())
+            })
+            .collect()
+    };
 
+    // Calculate dynamic limit based on repository size
     let limit = limit.unwrap_or_else(|| calculate_dynamic_file_limit(file_paths.len()));
 
-    // If a path scorer is available, use it to rank files
+    // Log information for large repositories
+    if file_paths.len() > 1000 {
+        info!(
+            "Analyzing {} files in workspace: {}",
+            file_paths.len(),
+            workspace_path.display()
+        );
+    }
+
+    // If workspace stats are available, use them to enhance path scoring
+    if let Some(stats) = workspace_stats {
+        // Create a context-aware path scorer using recent activity from workspace stats
+        let recent_files = stats.get_most_active_files(50);
+
+        // Get recently modified files (last 3 days) to include in context
+        let three_days = Duration::from_secs(3 * 24 * 60 * 60);
+        let recent_modified = stats.get_recently_modified_files(three_days, 50);
+
+        // Combine all recent files for context
+        let mut context_files = recent_files.clone();
+        for file in recent_modified {
+            if !context_files.contains(&file) {
+                context_files.push(file);
+            }
+        }
+
+        // Create context-aware scorer
+        if let Ok(mut path_scorer) = path_analyzer::create_default_path_scorer() {
+            // Extract context tokens from recent files
+            path_scorer.extract_context_from_files(&context_files, None);
+
+            // Create custom extension weights (optional - using defaults)
+            let scored_paths = path_scorer.calculate_path_probabilities_batch(&file_paths);
+
+            let relevant_paths: Vec<String> = scored_paths
+                .into_iter()
+                .take(limit)
+                .map(|(_, path)| path)
+                .collect();
+
+            return Ok(relevant_paths);
+        }
+    }
+
+    // Fallback to regular path scorer if workspace stats are not available
     if let Ok(path_scorer) = path_analyzer::create_default_path_scorer() {
+        // The calculate_path_probabilities_batch already uses parallel processing internally
         let scored_paths = path_scorer.calculate_path_probabilities_batch(&file_paths);
 
         let relevant_paths: Vec<String> = scored_paths
@@ -531,8 +680,15 @@ pub fn get_relevant_files(
     }
 
     // If all else fails, just return the files sorted alphabetically
+    // Sort in parallel for large collections
     let mut sorted_paths = file_paths;
-    sorted_paths.sort();
+    if sorted_paths.len() > 10000 {
+        // Use parallel sort for very large collections
+        sorted_paths.par_sort();
+    } else {
+        sorted_paths.sort();
+    }
+
     Ok(sorted_paths.into_iter().take(limit).collect())
 }
 
@@ -563,8 +719,45 @@ pub fn get_repo_summary(
     if relevant_files.is_empty() {
         writeln!(output, "No relevant files found.")?;
     } else {
-        for (i, file) in relevant_files.iter().enumerate() {
-            writeln!(output, "{}. {}", i + 1, file)?;
+        // If we have a path scorer, try to group by relevance
+        if let Ok(mut path_scorer) = path_analyzer::create_default_path_scorer() {
+            // Use workspace stats if available
+            if let Some(stats) = workspace_stats {
+                let recent_files = stats.get_most_active_files(20);
+                path_scorer.extract_context_from_files(&recent_files, None);
+            }
+
+            // Group files by relevance level
+            let grouped = path_scorer.group_by_relevance(&relevant_files);
+
+            // Display high relevance files
+            if !grouped.high.is_empty() {
+                writeln!(output, "### High Relevance")?;
+                for (i, file) in grouped.high.iter().enumerate() {
+                    writeln!(output, "{}. {}", i + 1, file)?;
+                }
+            }
+
+            // Display medium relevance files
+            if !grouped.medium.is_empty() {
+                writeln!(output, "### Medium Relevance")?;
+                for (i, file) in grouped.medium.iter().enumerate() {
+                    writeln!(output, "{}. {}", i + 1, file)?;
+                }
+            }
+
+            // Display low relevance files
+            if !grouped.low.is_empty() {
+                writeln!(output, "### Low Relevance")?;
+                for (i, file) in grouped.low.iter().enumerate() {
+                    writeln!(output, "{}. {}", i + 1, file)?;
+                }
+            }
+        } else {
+            // Fall back to flat list if grouping isn't available
+            for (i, file) in relevant_files.iter().enumerate() {
+                writeln!(output, "{}. {}", i + 1, file)?;
+            }
         }
     }
 
@@ -588,9 +781,8 @@ pub fn get_repo_summary(
     Ok(String::from_utf8_lossy(&output).to_string())
 }
 
-/// Calculate statistics on file types in the repository
+/// Calculate statistics on file types in the repository using parallel processing
 fn calculate_file_type_stats(workspace_path: &Path) -> std::io::Result<HashMap<String, usize>> {
-    let mut files = Vec::new();
     let exclude_patterns = &[
         "node_modules",
         ".git",
@@ -603,18 +795,57 @@ fn calculate_file_type_stats(workspace_path: &Path) -> std::io::Result<HashMap<S
         ".idea",
     ];
 
-    collect_files_recursively(workspace_path, &mut files, Some(exclude_patterns))?;
+    // Use our parallel file collection function
+    let files = collect_files_par(workspace_path, Some(exclude_patterns))?;
 
-    let mut file_types: HashMap<String, usize> = HashMap::new();
+    // Process files based on count
+    if files.len() > 1000 {
+        debug!(
+            "Using parallel processing for file type analysis: {} files",
+            files.len()
+        );
 
-    for path in files {
-        let extension = path
-            .extension()
-            .map(|ext| ext.to_string_lossy().to_string())
-            .unwrap_or_else(|| "no_extension".to_string());
+        // Process in parallel using rayon's fold/reduce pattern for lock-free parallelism
+        let file_types = files
+            .par_iter()
+            .fold(
+                || HashMap::new(), // Create a HashMap for each thread
+                |mut thread_map, path| {
+                    // Process each file in the thread's chunk
+                    let extension = path
+                        .extension()
+                        .map(|ext| ext.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "no_extension".to_string());
 
-        *file_types.entry(extension).or_insert(0) += 1;
+                    *thread_map.entry(extension).or_insert(0) += 1;
+                    thread_map
+                },
+            )
+            .reduce(
+                || HashMap::new(), // Identity value
+                |mut result_map, thread_map| {
+                    // Merge thread results
+                    for (ext, count) in thread_map.into_iter() {
+                        *result_map.entry(ext).or_insert(0) += count;
+                    }
+                    result_map
+                },
+            );
+
+        Ok(file_types)
+    } else {
+        // Sequential processing for smaller repositories
+        let mut file_types = HashMap::new();
+
+        for path in files {
+            let extension = path
+                .extension()
+                .map(|ext| ext.to_string_lossy().to_string())
+                .unwrap_or_else(|| "no_extension".to_string());
+
+            *file_types.entry(extension).or_insert(0) += 1;
+        }
+
+        Ok(file_types)
     }
-
-    Ok(file_types)
 }

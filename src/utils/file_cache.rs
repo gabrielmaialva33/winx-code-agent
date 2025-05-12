@@ -4,15 +4,15 @@
 //! allowing for more efficient file operations when the same file is accessed
 //! multiple times.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::utils::repo::WorkspaceStats;
 
@@ -20,9 +20,13 @@ use crate::utils::repo::WorkspaceStats;
 const MAX_CACHE_ENTRIES: usize = 100;
 /// Maximum size of a cached file in bytes (10MB)
 const MAX_CACHED_FILE_SIZE: u64 = 10 * 1024 * 1024;
+/// Maximum total memory budget for file content caching (default: 100MB)
+const DEFAULT_MEMORY_BUDGET: u64 = 100 * 1024 * 1024;
 /// Cache entry expiration time (30 minutes)
 #[allow(dead_code)]
 const CACHE_EXPIRATION: Duration = Duration::from_secs(30 * 60);
+/// How often to check for cache eviction (every 10 seconds)
+const EVICTION_CHECK_INTERVAL: Duration = Duration::from_secs(10);
 
 /// File statistics to track usage patterns
 #[derive(Debug, Clone, Default)]
@@ -123,11 +127,23 @@ impl FileStats {
     }
 }
 
-/// Metadata for a cached file
+/// Content loading strategy for file cache entries
+#[derive(Debug, Clone, PartialEq)]
+enum ContentLoadingStrategy {
+    /// Always cache content in memory if within size limit
+    AlwaysCache,
+    /// Only load content on demand and discard after use (for large files)
+    OnDemand,
+    /// Only keep metadata, never cache content (for very large files)
+    MetadataOnly,
+    /// Only cache frequently accessed file segments (memory-mapped)
+    SegmentedCache,
+}
+
+/// Metadata for a cached file with memory optimization
 #[derive(Debug, Clone)]
 struct FileCacheEntry {
     /// Path to the file
-    #[allow(dead_code)]
     path: PathBuf,
 
     /// SHA-256 hash of the file content
@@ -142,8 +158,20 @@ struct FileCacheEntry {
     /// Time when this entry was last accessed
     last_accessed: SystemTime,
 
-    /// File content (only cached for small files)
+    /// File content (only cached for small files or frequently accessed segments)
     content: Option<Vec<u8>>,
+
+    /// Content loading strategy based on file size and access patterns
+    loading_strategy: ContentLoadingStrategy,
+
+    /// Last time the content was loaded or access (for memory management)
+    last_content_access: Instant,
+
+    /// Number of times this entry has been accessed since content was loaded
+    access_count_since_load: usize,
+
+    /// Whether the content is currently pinned in memory (higher priority for retention)
+    is_pinned: bool,
 
     /// Indicates if the entire file has been read
     fully_read: bool,
@@ -159,7 +187,7 @@ struct FileCacheEntry {
 }
 
 impl FileCacheEntry {
-    /// Create a new cache entry
+    /// Create a new cache entry with auto-determined loading strategy
     fn new(
         path: PathBuf,
         hash: String,
@@ -168,6 +196,21 @@ impl FileCacheEntry {
         content: Option<Vec<u8>>,
         total_lines: usize,
     ) -> Self {
+        // Determine loading strategy based on file size
+        let loading_strategy = if size > MAX_CACHED_FILE_SIZE * 10 {
+            // Very large files, never cache
+            ContentLoadingStrategy::MetadataOnly
+        } else if size > MAX_CACHED_FILE_SIZE {
+            // Large files, on-demand loading
+            ContentLoadingStrategy::OnDemand
+        } else if size > MAX_CACHED_FILE_SIZE / 2 && total_lines > 1000 {
+            // Medium files with many lines, use segmented caching
+            ContentLoadingStrategy::SegmentedCache
+        } else {
+            // Small files, always cache
+            ContentLoadingStrategy::AlwaysCache
+        };
+
         Self {
             path,
             hash,
@@ -175,6 +218,10 @@ impl FileCacheEntry {
             last_modified,
             last_accessed: SystemTime::now(),
             content,
+            loading_strategy,
+            last_content_access: Instant::now(),
+            access_count_since_load: 0,
+            is_pinned: false,
             fully_read: false,
             read_ranges: Vec::new(),
             total_lines,
@@ -182,28 +229,57 @@ impl FileCacheEntry {
         }
     }
 
-    /// Update the last accessed time
+    /// Update the last accessed time and access counts
     fn touch(&mut self) {
         self.last_accessed = SystemTime::now();
+        self.last_content_access = Instant::now();
+        self.access_count_since_load += 1;
         self.stats.increment_read();
     }
 
     /// Record a file edit operation
     fn record_edit(&mut self) {
         self.stats.increment_edit();
+        self.touch();
+        // Pin content in memory during edit operations
+        self.is_pinned = true;
     }
 
     /// Record a file write operation
     fn record_write(&mut self) {
         self.stats.increment_write();
+        self.touch();
+        // Pin content in memory during write operations
+        self.is_pinned = true;
+    }
+
+    /// Unpin content after operation completes
+    fn unpin(&mut self) {
+        self.is_pinned = false;
     }
 
     /// Check if this entry is expired
-    #[allow(dead_code)]
     fn is_expired(&self) -> bool {
+        // Pinned entries never expire
+        if self.is_pinned {
+            return false;
+        }
+
         match self.last_accessed.elapsed() {
             Ok(elapsed) => elapsed > CACHE_EXPIRATION,
             Err(_) => false, // Time went backwards, not expired
+        }
+    }
+
+    /// Calculate content memory footprint in bytes
+    fn memory_usage(&self) -> u64 {
+        match &self.content {
+            Some(content) => {
+                content.len() as u64 +
+                // Approximate overhead for the entry structure
+                (std::mem::size_of::<Self>() as u64)
+            }
+            None => std::mem::size_of::<Self>() as u64,
         }
     }
 
@@ -316,13 +392,99 @@ impl FileCacheEntry {
 
         unread_ranges
     }
+
+    /// Gets a retention score for memory pressure situations (higher = more likely to keep)
+    fn retention_score(&self) -> f64 {
+        // Base importance from file stats
+        let base_score = self.stats.importance_score;
+
+        // Pinned files get maximum retention
+        if self.is_pinned {
+            return f64::MAX;
+        }
+
+        // Apply recency factor based on elapsed time
+        let recency_factor = {
+            let elapsed = self.last_content_access.elapsed();
+            let seconds = elapsed.as_secs() as f64;
+            // Reduces importance logarithmically as time passes
+            1.0 / (1.0 + seconds.ln().max(0.0) / 10.0)
+        };
+
+        // Apply access count factor - more accesses = higher retention
+        let access_factor = (self.access_count_since_load as f64 / 10.0).min(1.0) + 0.5;
+
+        // Apply size penalty - larger files have lower retention priority
+        let size_factor = if self.size > 0 {
+            1.0 / (1.0 + (self.size as f64 / 1024.0 / 1024.0).ln().max(0.0))
+        } else {
+            1.0
+        };
+
+        // Combine factors
+        base_score * recency_factor * access_factor * size_factor
+    }
+
+    /// Determine if content should be unloaded based on memory pressure
+    fn should_unload(&self, memory_pressure: bool) -> bool {
+        // Don't unload pinned content
+        if self.is_pinned {
+            return false;
+        }
+
+        // Check if we have content loaded
+        if self.content.is_none() {
+            return false;
+        }
+
+        match self.loading_strategy {
+            // Always retained
+            ContentLoadingStrategy::AlwaysCache => false,
+
+            // Always unload after inactivity
+            ContentLoadingStrategy::OnDemand => {
+                let elapsed = self.last_content_access.elapsed();
+                // Unload after 30 seconds of inactivity or immediately under memory pressure
+                elapsed > Duration::from_secs(30) || memory_pressure
+            }
+
+            // Never load content
+            ContentLoadingStrategy::MetadataOnly => true,
+
+            // Retain under moderate pressure, unload under high
+            ContentLoadingStrategy::SegmentedCache => {
+                if memory_pressure {
+                    // Under memory pressure, check access patterns
+                    let elapsed = self.last_content_access.elapsed();
+                    elapsed > Duration::from_secs(300)
+                        || (elapsed > Duration::from_secs(60) && self.access_count_since_load < 5)
+                } else {
+                    false
+                }
+            }
+        }
+    }
 }
 
-/// A thread-safe file cache
+// Additional FileCacheEntry methods are defined below, after the main impl block
+
+/// A thread-safe file cache with LRU eviction and memory management
 #[derive(Debug, Clone)]
 pub struct FileCache {
+    // File cache entries with path as key
     entries: Arc<RwLock<HashMap<PathBuf, FileCacheEntry>>>,
+    // LRU tracking for cache eviction (most recently used at front)
+    access_order: Arc<RwLock<VecDeque<PathBuf>>>,
+    // Track total memory usage of cached content
+    memory_usage: Arc<RwLock<u64>>,
+    // Maximum memory budget for content caching
+    memory_budget: Arc<RwLock<u64>>,
+    // Track when the last eviction check was performed
+    last_eviction_check: Arc<RwLock<Instant>>,
+    // Workspace statistics for relevance tracking
     workspace_stats: Arc<RwLock<Option<WorkspaceStats>>>,
+    // Pinned files that should not be evicted during this session
+    pinned_files: Arc<RwLock<HashSet<PathBuf>>>,
 }
 
 lazy_static::lazy_static! {
@@ -331,11 +493,68 @@ lazy_static::lazy_static! {
 }
 
 impl FileCache {
-    /// Create a new file cache
+    /// Create a new file cache with memory optimization
     pub fn new() -> Self {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
+            access_order: Arc::new(RwLock::new(VecDeque::new())),
+            memory_usage: Arc::new(RwLock::new(0)),
+            memory_budget: Arc::new(RwLock::new(DEFAULT_MEMORY_BUDGET)),
+            last_eviction_check: Arc::new(RwLock::new(Instant::now())),
             workspace_stats: Arc::new(RwLock::new(None)),
+            pinned_files: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    /// Configure memory budget for content caching (in bytes)
+    pub fn set_memory_budget(&self, budget_bytes: u64) {
+        if let Ok(mut memory_budget) = self.memory_budget.write() {
+            *memory_budget = budget_bytes;
+            debug!("File cache memory budget set to {} bytes", budget_bytes);
+        }
+    }
+
+    /// Get current memory usage (in bytes)
+    pub fn get_memory_usage(&self) -> u64 {
+        if let Ok(memory_usage) = self.memory_usage.read() {
+            *memory_usage
+        } else {
+            0
+        }
+    }
+
+    /// Pin a file in memory to prevent eviction
+    pub fn pin_file(&self, path: &Path) {
+        if let Ok(mut entries) = self.entries.write() {
+            if let Some(entry) = entries.get_mut(path) {
+                entry.is_pinned = true;
+            }
+        }
+
+        if let Ok(mut pinned) = self.pinned_files.write() {
+            pinned.insert(path.to_path_buf());
+        }
+    }
+
+    /// Unpin a file, allowing it to be evicted
+    pub fn unpin_file(&self, path: &Path) {
+        if let Ok(mut entries) = self.entries.write() {
+            if let Some(entry) = entries.get_mut(path) {
+                entry.is_pinned = false;
+            }
+        }
+
+        if let Ok(mut pinned) = self.pinned_files.write() {
+            pinned.remove(path);
+        }
+    }
+
+    /// Check if a file is pinned
+    pub fn is_file_pinned(&self, path: &Path) -> bool {
+        if let Ok(pinned) = self.pinned_files.read() {
+            pinned.contains(path)
+        } else {
+            false
         }
     }
 
@@ -372,18 +591,328 @@ impl FileCache {
     }
 
     /// Clear all entries from the cache
-    #[allow(dead_code)]
     pub fn clear(&self) {
+        // Clear entries
         if let Ok(mut entries) = self.entries.write() {
             entries.clear();
         }
+
+        // Clear access order
+        if let Ok(mut access_order) = self.access_order.write() {
+            access_order.clear();
+        }
+
+        // Reset memory usage
+        if let Ok(mut memory_usage) = self.memory_usage.write() {
+            *memory_usage = 0;
+        }
+
+        // Clear pinned files
+        if let Ok(mut pinned) = self.pinned_files.write() {
+            pinned.clear();
+        }
+
+        debug!("File cache cleared");
     }
 
     /// Remove expired entries from the cache
-    #[allow(dead_code)]
     pub fn cleanup(&self) {
+        // Track removed entries for memory accounting
+        let mut memory_freed = 0;
+        let mut removed_paths = Vec::new();
+
+        // Remove expired entries
         if let Ok(mut entries) = self.entries.write() {
-            entries.retain(|_, entry| !entry.is_expired());
+            let expired_keys: Vec<PathBuf> = entries
+                .iter()
+                .filter(|(_, entry)| entry.is_expired())
+                .map(|(path, entry)| {
+                    // Track memory usage for each expired entry
+                    if let Some(content) = &entry.content {
+                        memory_freed += content.len() as u64;
+                    }
+                    path.clone()
+                })
+                .collect();
+
+            // Remove expired entries
+            for key in &expired_keys {
+                entries.remove(key);
+                removed_paths.push(key.clone());
+            }
+
+            debug!("Removed {} expired entries from cache", expired_keys.len());
+        }
+
+        // Update memory usage
+        if memory_freed > 0 {
+            if let Ok(mut usage) = self.memory_usage.write() {
+                *usage = usage.saturating_sub(memory_freed);
+                debug!("Freed {} bytes from expired cache entries", memory_freed);
+            }
+        }
+
+        // Update access order list
+        if !removed_paths.is_empty() {
+            if let Ok(mut access_order) = self.access_order.write() {
+                access_order.retain(|path| !removed_paths.contains(path));
+            }
+        }
+    }
+
+    /// Check memory pressure and perform eviction if needed
+    fn check_memory_pressure(&self) -> bool {
+        // Only check periodically to avoid lock contention
+        let should_check = {
+            if let Ok(last_check) = self.last_eviction_check.read() {
+                last_check.elapsed() > EVICTION_CHECK_INTERVAL
+            } else {
+                false
+            }
+        };
+
+        if !should_check {
+            // Return current memory pressure status without checking
+            if let (Ok(usage), Ok(budget)) = (self.memory_usage.read(), self.memory_budget.read()) {
+                return *usage > (*budget * 9) / 10; // 90% of budget
+            }
+            return false;
+        }
+
+        // Update last check time
+        if let Ok(mut last_check) = self.last_eviction_check.write() {
+            *last_check = Instant::now();
+        }
+
+        // Calculate current memory usage and pressure level
+        let (current_usage, budget) = {
+            if let (Ok(usage), Ok(budget)) = (self.memory_usage.read(), self.memory_budget.read()) {
+                (*usage, *budget)
+            } else {
+                return false;
+            }
+        };
+
+        // Define pressure levels
+        let low_pressure = budget * 7 / 10; // 70% of budget
+        let medium_pressure = budget * 8 / 10; // 80% of budget
+        let high_pressure = budget * 9 / 10; // 90% of budget
+
+        let pressure_level = if current_usage > high_pressure {
+            debug!(
+                "High memory pressure: {} / {} bytes ({}%)",
+                current_usage,
+                budget,
+                (current_usage * 100) / budget
+            );
+            3 // High pressure
+        } else if current_usage > medium_pressure {
+            debug!(
+                "Medium memory pressure: {} / {} bytes ({}%)",
+                current_usage,
+                budget,
+                (current_usage * 100) / budget
+            );
+            2 // Medium pressure
+        } else if current_usage > low_pressure {
+            trace!(
+                "Low memory pressure: {} / {} bytes ({}%)",
+                current_usage,
+                budget,
+                (current_usage * 100) / budget
+            );
+            1 // Low pressure
+        } else {
+            0 // No pressure
+        };
+
+        // Perform eviction based on pressure level
+        if pressure_level > 0 {
+            self.perform_eviction(pressure_level);
+        }
+
+        // Return whether we're under high pressure
+        pressure_level >= 3
+    }
+
+    /// Perform cache eviction based on pressure level
+    fn perform_eviction(&self, pressure_level: u8) {
+        // Collect entries that can be evicted at this pressure level
+        let mut unload_candidates = Vec::new();
+        let mut unload_content = false;
+        let mut memory_to_free: u64 = 0;
+
+        // Memory pressure handling strategy:
+        // 1. Level 1 (Low): Unload inactive content (MetadataOnly, OnDemand)
+        // 2. Level 2 (Medium): Unload SegmentedCache content and some AlwaysCache content
+        // 3. Level 3 (High): Aggressive unloading, only keep essential files
+
+        {
+            // Read lock for analyzing entries
+            if let Ok(entries) = self.entries.read() {
+                // If we're at high pressure, first figure out how many entries should be unloaded
+                if pressure_level >= 3 {
+                    unload_content = true;
+
+                    // Set target to get below 70% of budget
+                    if let Ok(budget) = self.memory_budget.read() {
+                        let target_usage = (*budget * 7) / 10;
+                        if let Ok(usage) = self.memory_usage.read() {
+                            if *usage > target_usage {
+                                memory_to_free = *usage - target_usage;
+                            }
+                        }
+                    }
+                } else if pressure_level == 2 {
+                    unload_content = true;
+                }
+
+                // Get access order to prioritize eviction of least recently used files
+                let mut access_order_copy = Vec::new();
+                if let Ok(access_order) = self.access_order.read() {
+                    // Copy from end (oldest) to beginning (newest)
+                    for path in access_order.iter().rev() {
+                        access_order_copy.push(path.clone());
+                    }
+                }
+
+                // Only unload content if we're under memory pressure
+                if unload_content {
+                    // First pass: Collect all possible candidates
+                    let mut candidates = Vec::new();
+
+                    // Use the access order when available to prioritize least recently used files
+                    if !access_order_copy.is_empty() {
+                        for path in access_order_copy {
+                            if let Some(entry) = entries.get(&path) {
+                                // If this entry can be unloaded based on pressure
+                                if entry.should_unload(pressure_level >= 3)
+                                    && entry.content.is_some()
+                                {
+                                    candidates.push((
+                                        path,
+                                        entry.retention_score(),
+                                        entry.memory_usage(),
+                                    ));
+                                }
+                            }
+                        }
+                    } else {
+                        // Fallback if access order is not available
+                        for (path, entry) in entries.iter() {
+                            if entry.should_unload(pressure_level >= 3) && entry.content.is_some() {
+                                candidates.push((
+                                    path.clone(),
+                                    entry.retention_score(),
+                                    entry.memory_usage(),
+                                ));
+                            }
+                        }
+                    }
+
+                    // Sort by retention score (lowest first)
+                    candidates
+                        .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+                    // Level 1: Take only obvious candidates (low retention score)
+                    // Level 2: Take more candidates
+                    // Level 3: Take as many as needed to reach memory_to_free
+
+                    let mut memory_freed = 0;
+                    let count_to_take = if pressure_level == 1 {
+                        candidates.len() / 4 // 25% of candidates
+                    } else if pressure_level == 2 {
+                        candidates.len() / 2 // 50% of candidates
+                    } else {
+                        candidates.len() // All candidates potentially available
+                    };
+
+                    // For high pressure, keep unloading until we reach the target
+                    if pressure_level >= 3 && memory_to_free > 0 {
+                        for (path, _, size) in &candidates {
+                            memory_freed += size;
+                            unload_candidates.push(path.clone());
+
+                            if memory_freed >= memory_to_free {
+                                break;
+                            }
+                        }
+                    } else {
+                        // For lower pressure, just take the designated percentage
+                        for (path, _, _) in candidates.iter().take(count_to_take) {
+                            unload_candidates.push(path.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Now perform the actual unloading with a write lock
+        if unload_content && !unload_candidates.is_empty() {
+            debug!(
+                "Evicting {} entries due to memory pressure level {}",
+                unload_candidates.len(),
+                pressure_level
+            );
+
+            if let Ok(mut entries) = self.entries.write() {
+                let mut total_freed = 0;
+
+                for path in &unload_candidates {
+                    if let Some(entry) = entries.get_mut(path) {
+                        // Calculate memory to free
+                        if let Some(content) = &entry.content {
+                            total_freed += content.len() as u64;
+                        }
+
+                        // Remove content but keep metadata
+                        entry.content = None;
+
+                        // Reset access counter
+                        entry.access_count_since_load = 0;
+                    }
+                }
+
+                // Update memory usage
+                if total_freed > 0 {
+                    if let Ok(mut usage) = self.memory_usage.write() {
+                        *usage = usage.saturating_sub(total_freed);
+                    }
+
+                    debug!(
+                        "Freed {} bytes by unloading content from {} entries",
+                        total_freed,
+                        unload_candidates.len()
+                    );
+                }
+            }
+        }
+    }
+
+    /// Update memory usage tracking
+    fn update_memory_usage(&self, delta: i64) {
+        if let Ok(mut usage) = self.memory_usage.write() {
+            if delta > 0 {
+                *usage += delta as u64;
+            } else {
+                *usage = usage.saturating_sub((-delta) as u64);
+            }
+        }
+    }
+
+    /// Update LRU order when a file is accessed
+    fn update_lru_order(&self, path: &Path) {
+        if let Ok(mut access_order) = self.access_order.write() {
+            // Remove the path if it already exists
+            access_order.retain(|p| p != path);
+
+            // Add to front (most recently used)
+            access_order.push_front(path.to_path_buf());
+
+            // Keep size bounded
+            if access_order.len() > MAX_CACHE_ENTRIES * 2 {
+                access_order.truncate(MAX_CACHE_ENTRIES * 2);
+            }
         }
     }
 
@@ -434,14 +963,17 @@ impl FileCache {
 
     /// Read a file's contents, using the cache if possible
     pub fn read_file(&self, path: &Path) -> Result<Vec<u8>> {
+        // Check for memory pressure periodically
+        let under_pressure = self.check_memory_pressure();
+
         // Use a two-phase approach to reduce lock contention:
         // 1. Try to get content from cache with read lock
         // 2. If cache miss or file modified, acquire write lock to update cache
 
         // Phase 1: Try to get from cache with read lock
-        let _cached_content: Option<Vec<u8>> = {
+        let cached_result: Result<Option<Vec<u8>>> = {
             // Scope for read lock
-            let result = match self.entries.read() {
+            match self.entries.read() {
                 Ok(entries) => {
                     if let Some(entry) = entries.get(path) {
                         // Check if the file has been modified
@@ -450,39 +982,50 @@ impl FileCache {
                                 if last_mod == entry.last_modified {
                                     // Return cached content if available
                                     if let Some(content) = &entry.content {
-                                        debug!("Returning cached content for {}", path.display());
-                                        let content_copy = content.clone();
-                                        // Update access time in a background thread to avoid blocking
+                                        trace!("Returning cached content for {}", path.display());
+                                        // Update access time and LRU order in a background thread
                                         let cache_ref = self.clone();
                                         let path_copy = path.to_path_buf();
                                         std::thread::spawn(move || {
+                                            // Update LRU order first (read lock)
+                                            cache_ref.update_lru_order(&path_copy);
+
+                                            // Then update entry (write lock)
                                             if let Ok(mut entries) = cache_ref.entries.write() {
                                                 if let Some(entry) = entries.get_mut(&path_copy) {
                                                     entry.touch();
                                                 }
                                             }
                                         });
-                                        return Ok(content_copy);
+
+                                        return Ok(content.clone());
+                                    } else if !under_pressure {
+                                        // Content not cached but entry exists - try loading
+                                        debug!(
+                                            "Content not cached for {}, loading from disk",
+                                            path.display()
+                                        );
+                                        // Fall through to load from disk but use existing entry
                                     }
                                 }
                             }
                         }
                     }
-                    Ok(None::<(Vec<u8>, PathBuf)>)
+                    Ok(None)
                 }
                 Err(e) => Err(anyhow::anyhow!("Failed to acquire read lock: {}", e)),
-            };
-
-            // Handle errors explicitly to avoid nested handling
-            match result {
-                Ok(None) => None, // Cache miss, continue to read from file
-                Err(e) => {
-                    debug!("Error reading from cache, continuing to file: {}", e);
-                    None
-                }
-                _ => None, // Other cases handled via early returns
             }
         };
+
+        // Handle successful cache hit
+        if let Ok(Some(content)) = cached_result {
+            return Ok(content);
+        }
+
+        // Handle lock errors
+        if let Err(e) = cached_result {
+            debug!("Error reading from cache, continuing to file: {}", e);
+        }
 
         // If we reach here, we need to read the file and update the cache
 
@@ -509,55 +1052,147 @@ impl FileCache {
             }
         };
 
-        // Update cache with file content if small enough
-        if metadata.len() <= MAX_CACHED_FILE_SIZE {
-            // Try to update cache but don't fail if we can't
-            if let Err(e) = self.update_cache_entry(path, &content, &metadata) {
-                debug!("Failed to update cache for {}: {}", path.display(), e);
-                // Continue without caching
-            }
-        } else {
-            // For large files, just cache metadata
-            let hash = {
-                let mut hasher = Sha256::new();
-                hasher.update(&content);
-                format!("{:x}", hasher.finalize())
-            };
+        // Check if we should try to cache this file based on size and memory pressure
+        let should_cache_content = metadata.len() <= MAX_CACHED_FILE_SIZE
+            && (!under_pressure || metadata.len() <= MAX_CACHED_FILE_SIZE / 5);
 
-            // Count lines - we only do this for large files when needed
-            let total_lines = count_lines(&content);
-
-            // Try to update cache but don't block or fail if we can't
-            match self.entries.try_write() {
-                Ok(mut entries) => {
-                    entries.insert(
-                        path.to_path_buf(),
-                        FileCacheEntry::new(
-                            path.to_path_buf(),
-                            hash,
-                            metadata.len(),
-                            metadata.modified().unwrap_or_else(|_| SystemTime::now()),
-                            None, // Don't cache content for large files
-                            total_lines,
-                        ),
-                    );
-
-                    // Ensure cache doesn't grow too large
-                    if entries.len() > MAX_CACHE_ENTRIES {
-                        self.evict_oldest_entries(&mut entries);
-                    }
-                }
-                Err(_) => {
-                    // Couldn't get write lock immediately, continue without caching
-                    debug!(
-                        "Skipping cache update for large file: {} (couldn't get write lock)",
-                        path.display()
-                    );
-                }
-            }
+        // Update the cache with optimized approach
+        if let Err(e) =
+            self.update_cache_with_content(path, &content, &metadata, should_cache_content)
+        {
+            debug!("Cache update failed but will still return content: {}", e);
         }
 
         Ok(content)
+    }
+
+    /// Update cache with optimized memory management
+    fn update_cache_with_content(
+        &self,
+        path: &Path,
+        content: &[u8],
+        metadata: &fs::Metadata,
+        cache_content: bool,
+    ) -> Result<()> {
+        // Calculate hash
+        let hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(content);
+            format!("{:x}", hasher.finalize())
+        };
+
+        // Count lines
+        let total_lines = count_lines(content);
+
+        // Track memory delta for updating usage counter
+        let mut memory_delta: i64 = 0;
+
+        // Attempt to update the cache with timeout to prevent long waits
+        let update_result = tokio::task::block_in_place(|| {
+            // Use a short timeout since this is a frequent operation
+            let timeout = Duration::from_millis(200);
+            let start = Instant::now();
+
+            while start.elapsed() < timeout {
+                match self.entries.try_write() {
+                    Ok(mut entries) => {
+                        // Check if we're updating an existing entry
+                        let mut existing_memory: u64 = 0;
+
+                        let (file_content, loading_strategy) = if cache_content {
+                            // Include content in cache if requested
+                            let strategy = if metadata.len() > MAX_CACHED_FILE_SIZE / 2 {
+                                // For medium-sized files, use segmented caching
+                                ContentLoadingStrategy::SegmentedCache
+                            } else {
+                                // For small files, always cache
+                                ContentLoadingStrategy::AlwaysCache
+                            };
+                            (Some(content.to_vec()), strategy)
+                        } else {
+                            // For large files, don't cache content
+                            let strategy = if metadata.len() > MAX_CACHED_FILE_SIZE * 10 {
+                                ContentLoadingStrategy::MetadataOnly
+                            } else {
+                                ContentLoadingStrategy::OnDemand
+                            };
+                            (None, strategy)
+                        };
+
+                        if let Some(entry) = entries.get(path) {
+                            // Calculate existing memory usage for delta tracking
+                            if let Some(old_content) = &entry.content {
+                                existing_memory = old_content.len() as u64;
+                            }
+                        }
+
+                        // Calculate new memory usage
+                        let new_memory = if let Some(new_content) = &file_content {
+                            new_content.len() as u64
+                        } else {
+                            0
+                        };
+
+                        // Calculate memory delta (negative if we're freeing memory)
+                        memory_delta = new_memory as i64 - existing_memory as i64;
+
+                        // Create or update the cache entry
+                        entries.insert(
+                            path.to_path_buf(),
+                            FileCacheEntry {
+                                path: path.to_path_buf(),
+                                hash,
+                                size: metadata.len(),
+                                last_modified: metadata
+                                    .modified()
+                                    .unwrap_or_else(|_| SystemTime::now()),
+                                last_accessed: SystemTime::now(),
+                                content: file_content,
+                                loading_strategy,
+                                last_content_access: Instant::now(),
+                                access_count_since_load: 1,
+                                is_pinned: self.is_file_pinned(path),
+                                fully_read: false,
+                                read_ranges: Vec::new(),
+                                total_lines,
+                                stats: FileStats::new(),
+                            },
+                        );
+
+                        // Update LRU tracking independently of content
+                        self.update_lru_order(path);
+
+                        // Ensure cache doesn't grow too large (entry count)
+                        if entries.len() > MAX_CACHE_ENTRIES {
+                            self.evict_oldest_entries(&mut entries);
+                        }
+
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        // Couldn't get lock, sleep briefly and retry
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
+
+            // Timed out waiting for lock
+            Err(anyhow::anyhow!(
+                "Timed out waiting for write lock during cache update"
+            ))
+        });
+
+        // Update memory usage counter
+        if memory_delta != 0 {
+            self.update_memory_usage(memory_delta);
+        }
+
+        // Log errors but don't fail the operation
+        if let Err(e) = update_result {
+            debug!("Failed to update cache entry for {}: {}", path.display(), e);
+        }
+
+        Ok(())
     }
 
     /// Update a file's cache entry
@@ -668,20 +1303,137 @@ impl FileCache {
         Ok(())
     }
 
-    /// Evict the oldest entries from the cache to maintain size limit
+    /// Evict entries from the cache to maintain size limits using LRU strategy
     fn evict_oldest_entries(&self, entries: &mut HashMap<PathBuf, FileCacheEntry>) {
-        // Sort entries by last access time
-        let mut entry_times: Vec<_> = entries
-            .iter()
-            .map(|(path, entry)| (path.clone(), entry.last_accessed))
-            .collect();
+        // Memory tracking for freed memory
+        let mut memory_freed: u64 = 0;
+        let mut removed_paths = Vec::new();
 
-        entry_times.sort_by(|a, b| a.1.cmp(&b.1));
+        // Get access order to identify least recently used entries
+        let mut lru_paths = Vec::new();
 
-        // Remove oldest entries
-        let to_remove = entry_times.len().saturating_sub(MAX_CACHE_ENTRIES / 2);
-        for (path, _) in entry_times.into_iter().take(to_remove) {
-            entries.remove(&path);
+        if let Ok(access_order) = self.access_order.read() {
+            // Get paths from back (least recently used) to front
+            for path in access_order.iter().rev() {
+                lru_paths.push(path.clone());
+            }
+        }
+
+        // If we have access order data, use it for eviction
+        if !lru_paths.is_empty() {
+            // Calculate target entries (keep at most MAX_CACHE_ENTRIES)
+            let target_count = MAX_CACHE_ENTRIES;
+            let excess_count = entries.len().saturating_sub(target_count);
+
+            if excess_count > 0 {
+                debug!("Evicting {} entries to maintain size limit", excess_count);
+
+                // Track which entries were removed
+                let mut removed_count = 0;
+
+                // Start from least recently used
+                for path in lru_paths {
+                    // Don't exceed target removal count
+                    if removed_count >= excess_count {
+                        break;
+                    }
+
+                    // Skip pinned files
+                    if self.is_file_pinned(&path) {
+                        continue;
+                    }
+
+                    // Get entry and decide whether to remove or unload content
+                    if let Some(entry) = entries.get(&path) {
+                        // For high importance files, just unload content
+                        if entry.stats.importance_score > 10.0 && entry.content.is_some() {
+                            // If this entry has high importance, just unload the content
+                            if let Some(content) = &entry.content {
+                                memory_freed += content.len() as u64;
+                            }
+
+                            if let Some(entry) = entries.get_mut(&path) {
+                                entry.content = None;
+                                entry.access_count_since_load = 0;
+                            }
+                        } else {
+                            // Remove entry completely
+                            if let Some(content) = &entry.content {
+                                memory_freed += content.len() as u64;
+                            }
+
+                            entries.remove(&path);
+                            removed_paths.push(path);
+                            removed_count += 1;
+                        }
+                    }
+                }
+            }
+        } else {
+            // Fallback if we don't have access order data: use traditional last_accessed time
+            let mut entry_data: Vec<_> = entries
+                .iter()
+                .map(|(path, entry)| {
+                    // Create a tuple with (path, is_pinned, importance, last_accessed)
+                    (
+                        path.clone(),
+                        entry.is_pinned,
+                        entry.stats.importance_score,
+                        entry.last_accessed,
+                        entry.content.as_ref().map(|c| c.len() as u64).unwrap_or(0),
+                    )
+                })
+                .collect();
+
+            // Sort: unpinned first, then by importance (low to high), then by last_accessed (oldest first)
+            entry_data.sort_by(|a, b| {
+                // First criteria: pinned status (unpinned first)
+                match (a.1, b.1) {
+                    (true, false) => return std::cmp::Ordering::Greater,
+                    (false, true) => return std::cmp::Ordering::Less,
+                    _ => {}
+                }
+
+                // Second criteria: importance score (low to high)
+                match a.2.partial_cmp(&b.2) {
+                    Some(ord) if ord != std::cmp::Ordering::Equal => return ord,
+                    _ => {}
+                }
+
+                // Third criteria: access time (oldest first)
+                a.3.cmp(&b.3)
+            });
+
+            // Calculate how many entries to remove
+            let target_count = MAX_CACHE_ENTRIES;
+            let excess_count = entries.len().saturating_sub(target_count);
+
+            // Remove oldest/least important entries
+            for (path, is_pinned, _, _, content_size) in entry_data.iter().take(excess_count) {
+                // Skip pinned files
+                if *is_pinned {
+                    continue;
+                }
+
+                memory_freed += *content_size;
+                entries.remove(path);
+                removed_paths.push(path.clone());
+            }
+        }
+
+        // Update memory usage counter asynchronously if memory was freed
+        if memory_freed > 0 {
+            let cache_ref = self.clone();
+            std::thread::spawn(move || {
+                cache_ref.update_memory_usage(-(memory_freed as i64));
+            });
+        }
+
+        // Update access order list to remove evicted entries
+        if !removed_paths.is_empty() {
+            if let Ok(mut access_order) = self.access_order.write() {
+                access_order.retain(|path| !removed_paths.contains(path));
+            }
         }
     }
 
