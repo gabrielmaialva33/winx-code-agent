@@ -4,6 +4,7 @@
 //! to read and display the contents of files, optionally with line numbers and
 //! line range filtering.
 
+#[allow(unused_imports)]
 use anyhow::Context as AnyhowContext;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -13,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use tokio::task;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::errors::{Result, WinxError};
+use crate::errors::{ErrorRecovery, Result, WinxError};
 use crate::state::bash_state::BashState;
 use crate::types::ReadFiles;
 use crate::utils::file_cache::FileCache;
@@ -106,38 +107,85 @@ fn read_file(
 
     // Check if path exists
     if !path.exists() {
-        return Err(WinxError::FileAccessError {
+        let error = WinxError::FileAccessError {
             path: path.clone(),
             message: "File does not exist".to_string(),
-        });
+        };
+
+        // Provide helpful suggestions for common errors
+        return Err(ErrorRecovery::suggest(
+            error,
+            &format!(
+                "Check the file path. If it's a newly created file, make sure it has been saved. Current path: {}",
+                path.display()
+            ),
+        ));
     }
 
     // Ensure it's a file
     if !path.is_file() {
-        return Err(WinxError::FileAccessError {
+        let error = WinxError::FileAccessError {
             path: path.clone(),
             message: "Path exists but is not a file".to_string(),
-        });
+        };
+
+        // If it's a directory, suggest using a specific file
+        if path.is_dir() {
+            return Err(ErrorRecovery::suggest(
+                error,
+                &format!(
+                    "The specified path is a directory. Please specify a file within this directory instead. Try using the Glob tool to list files in this directory."
+                ),
+            ));
+        }
+
+        return Err(error);
     }
 
     // Get file metadata
-    let metadata = fs::metadata(&path).context("Failed to get file metadata")?;
+    let metadata = match fs::metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) => {
+            let error = WinxError::FileAccessError {
+                path: path.clone(),
+                message: format!("Failed to get file metadata: {}", e),
+            };
+
+            return Err(ErrorRecovery::suggest(
+                error,
+                "Check file permissions and ensure the file is not locked by another process",
+            ));
+        }
+    };
 
     // Check file size
     if metadata.len() > MAX_FILE_SIZE {
         warn!("File size exceeds limit: {} bytes", metadata.len());
-        return Err(WinxError::FileAccessError {
+        let error = WinxError::FileTooLarge {
             path: path.clone(),
-            message: format!(
-                "File is too large: {} bytes (max {})",
-                metadata.len(),
-                MAX_FILE_SIZE
+            size: metadata.len(),
+            max_size: MAX_FILE_SIZE,
+        };
+
+        return Err(ErrorRecovery::suggest(
+            error,
+            &format!(
+                "You can read parts of this file by specifying a line range (e.g., {}:1-1000)",
+                file_path
             ),
-        });
+        ));
     }
 
     // Read file content using optimized reader
-    let content = read_file_to_string(&path, MAX_FILE_SIZE)?;
+    let content = match read_file_to_string(&path, MAX_FILE_SIZE) {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(ErrorRecovery::suggest(
+                e,
+                "Try reading the file with smaller line ranges or check if it contains binary content",
+            ));
+        }
+    };
 
     // Use more efficient line handling with better memory characteristics
     let lines: Vec<&str> = content.lines().collect();
@@ -146,6 +194,29 @@ fn read_file(
     // Apply line range filtering with bounds checking
     let start_idx = start_line_num.map_or(0, |n| n.saturating_sub(1).min(lines.len()));
     let end_idx = end_line_num.map_or(lines.len(), |n| n.min(lines.len()));
+
+    // Validate line range
+    if start_idx >= lines.len() || start_idx >= end_idx {
+        let error = ErrorRecovery::param_error(
+            "line_range",
+            &format!(
+                "Invalid line range: start={:?}, end={:?}, file has {} lines",
+                start_line_num,
+                end_line_num,
+                lines.len()
+            ),
+        );
+
+        return Err(ErrorRecovery::suggest(
+            error,
+            &format!(
+                "File has {} lines. Please specify a valid line range (e.g., {}:1-{})",
+                lines.len(),
+                file_path,
+                lines.len().min(1000)
+            ),
+        ));
+    }
 
     // Effective line numbers for tracking (1-indexed)
     let effective_start = start_line_num.unwrap_or(1);
@@ -233,6 +304,67 @@ fn read_file(
     ))
 }
 
+/// Validate ReadFiles parameters and provide defaults for missing values
+///
+/// This function performs validation on the ReadFiles struct and returns
+/// a Result containing either a validated ReadFiles struct or an appropriate error.
+fn validate_read_files(read_files: ReadFiles) -> Result<ReadFiles> {
+    // Check if file_paths is empty
+    if read_files.file_paths.is_empty() {
+        return Err(ErrorRecovery::suggest(
+            ErrorRecovery::missing_param(
+                "file_paths",
+                "No file paths provided. Please specify at least one file to read.",
+            ),
+            "Example: { \"file_paths\": [\"/path/to/your/file.txt\"] }",
+        ));
+    }
+
+    // Check if any file_path is null, undefined or an empty string
+    for (i, path) in read_files.file_paths.iter().enumerate() {
+        if path.trim().is_empty() {
+            return Err(ErrorRecovery::suggest(
+                ErrorRecovery::param_error(
+                    &format!("file_paths[{}]", i),
+                    "File path cannot be empty",
+                ),
+                "Please provide a valid file path for each element in the file_paths array",
+            ));
+        }
+    }
+
+    // Ensure start_line_nums and end_line_nums are properly sized if provided
+    let mut validated = read_files.clone();
+    if !validated.start_line_nums.is_empty()
+        && validated.start_line_nums.len() < validated.file_paths.len()
+    {
+        // Extend start_line_nums with None values
+        validated
+            .start_line_nums
+            .resize(validated.file_paths.len(), None);
+    }
+
+    if !validated.end_line_nums.is_empty()
+        && validated.end_line_nums.len() < validated.file_paths.len()
+    {
+        // Extend end_line_nums with None values
+        validated
+            .end_line_nums
+            .resize(validated.file_paths.len(), None);
+    }
+
+    // Initialize start_line_nums and end_line_nums if they're empty
+    if validated.start_line_nums.is_empty() {
+        validated.start_line_nums = vec![None; validated.file_paths.len()];
+    }
+
+    if validated.end_line_nums.is_empty() {
+        validated.end_line_nums = vec![None; validated.file_paths.len()];
+    }
+
+    Ok(validated)
+}
+
 /// Handle the ReadFiles tool call
 ///
 /// This function processes the ReadFiles tool call, which reads the contents
@@ -257,6 +389,15 @@ pub async fn handle_tool_call(
 ) -> Result<String> {
     info!("ReadFiles tool called with: {:?}", read_files);
 
+    // Validate parameters and provide default values for missing ones
+    let validated_read_files = match validate_read_files(read_files) {
+        Ok(validated) => validated,
+        Err(e) => {
+            error!("Failed to validate ReadFiles parameters: {}", e);
+            return Err(e);
+        }
+    };
+
     // Extract data from the bash state before any async operations
     let cwd: PathBuf;
 
@@ -271,7 +412,10 @@ pub async fn handle_tool_call(
             Some(state) => state,
             None => {
                 error!("BashState not initialized");
-                return Err(WinxError::BashStateNotInitialized);
+                return Err(ErrorRecovery::suggest(
+                    WinxError::BashStateNotInitialized,
+                    "Please call Initialize first with type=\"first_call\" and a valid workspace path",
+                ));
             }
         };
 
@@ -281,15 +425,23 @@ pub async fn handle_tool_call(
 
     // Process file paths and line ranges
     // Create a vector of file reading parameters for parallel processing
-    let mut file_params = Vec::with_capacity(read_files.file_paths.len());
-    let show_line_numbers = read_files.show_line_numbers();
-    let max_tokens_per_file = read_files.max_tokens;
+    let mut file_params = Vec::with_capacity(validated_read_files.file_paths.len());
+    let show_line_numbers = validated_read_files.show_line_numbers();
+    let max_tokens_per_file = validated_read_files.max_tokens;
 
     // Prepare file parameters
-    for (i, file_path) in read_files.file_paths.iter().enumerate() {
+    for (i, file_path) in validated_read_files.file_paths.iter().enumerate() {
         // Parse path for line ranges
-        let mut start_line_num = read_files.start_line_nums.get(i).copied().unwrap_or(None);
-        let mut end_line_num = read_files.end_line_nums.get(i).copied().unwrap_or(None);
+        let mut start_line_num = validated_read_files
+            .start_line_nums
+            .get(i)
+            .copied()
+            .unwrap_or(None);
+        let mut end_line_num = validated_read_files
+            .end_line_nums
+            .get(i)
+            .copied()
+            .unwrap_or(None);
         let mut clean_path = file_path.clone();
 
         // Extract line range from path if present
@@ -402,6 +554,7 @@ pub async fn handle_tool_call(
     let mut file_ranges_dict: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
     let mut remaining_tokens = max_tokens_per_file;
     let mut should_stop = false;
+    let mut had_errors = false;
 
     for (i, file_info) in file_read_tasks.into_iter().enumerate() {
         if should_stop {
@@ -450,8 +603,12 @@ pub async fn handle_tool_call(
                     should_stop = true;
 
                     // Mention files we're not reading if any remain
-                    let remaining_files: Vec<String> =
-                        read_files.file_paths.iter().skip(i + 1).cloned().collect();
+                    let remaining_files: Vec<String> = validated_read_files
+                        .file_paths
+                        .iter()
+                        .skip(i + 1)
+                        .cloned()
+                        .collect();
                     if !remaining_files.is_empty() {
                         message.push_str(&format!(
                             "\nNot reading the rest of the files: {} due to token limit, please call again",
@@ -465,9 +622,45 @@ pub async fn handle_tool_call(
             Err(e) => {
                 // Log the error but continue with other files
                 error!("Error reading file {}: {}", file_path, e);
-                message.push_str(&format!("\n{}: {}\n", file_path, e));
+
+                // Format error messages more helpfully
+                let error_msg = match &e {
+                    WinxError::FileAccessError { path, message } => {
+                        format!("Error accessing file: {} - {}", path.display(), message)
+                    }
+                    WinxError::RecoverableSuggestionError {
+                        message,
+                        suggestion,
+                    } => {
+                        format!("{} - Suggestion: {}", message, suggestion)
+                    }
+                    _ => format!("{}", e),
+                };
+
+                message.push_str(&format!("\n{}: {}\n", file_path, error_msg));
+                had_errors = true;
             }
         }
+    }
+
+    // Add warning/error information if there were errors
+    if had_errors && message.is_empty() {
+        return Err(ErrorRecovery::suggest(
+            ErrorRecovery::param_error(
+                "file_paths",
+                "All file read operations failed. Please check the file paths and permissions.",
+            ),
+            "Ensure that the file paths are correct and the files exist",
+        ));
+    } else if had_errors {
+        message.push_str(
+            "\n\nNOTE: Some files could not be read. Check the error messages above for details.",
+        );
+    }
+
+    // If no content was read at all
+    if message.is_empty() {
+        message = "No files were read or all files were empty.".to_string();
     }
 
     // Use the file cache to record read ranges

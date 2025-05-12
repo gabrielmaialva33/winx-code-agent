@@ -11,11 +11,12 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::task;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, FileWhitelistData};
 use crate::types::FileWriteOrEdit;
+use crate::utils::fuzzy_match::{FuzzyMatch, FuzzyMatcher};
 use crate::utils::path::expand_user;
 // Already importing utils module indirectly through usages in the code
 
@@ -43,7 +44,7 @@ fn replace_marker() -> &'static Regex {
 }
 
 /// Maximum file size to read
-const MAX_FILE_SIZE: u64 = 50_000_000; // Increased to 50MB
+const MAX_FILE_SIZE: u64 = 50_000_000; // 50MB
 
 /// Helper struct for search/replace operations
 #[derive(Debug)]
@@ -58,6 +59,12 @@ struct SearchReplaceHelper {
     fuzzy_threshold: f64,
     /// Maximum number of suggestions to provide
     max_suggestions: usize,
+    /// Whether to use fuzzy matching
+    use_fuzzy_matching: bool,
+    /// Fuzzy matcher instance for advanced matching
+    fuzzy_matcher: Option<FuzzyMatcher>,
+    /// Auto-apply fuzzy matching fixes if confidence is high
+    auto_apply_fuzzy_fixes: bool,
 }
 
 impl SearchReplaceHelper {
@@ -69,6 +76,9 @@ impl SearchReplaceHelper {
             debug_info: Vec::new(),
             fuzzy_threshold: 0.7, // Default threshold for fuzzy matching
             max_suggestions: 3,   // Default maximum number of suggestions
+            use_fuzzy_matching: true,
+            fuzzy_matcher: Some(FuzzyMatcher::new().levenshtein_threshold(0.7)),
+            auto_apply_fuzzy_fixes: false,
         }
     }
 
@@ -78,6 +88,7 @@ impl SearchReplaceHelper {
         blocks: Vec<(String, String)>,
         threshold: f64,
         max_suggestions: usize,
+        auto_apply: bool,
     ) -> Self {
         Self {
             original_content,
@@ -85,6 +96,11 @@ impl SearchReplaceHelper {
             debug_info: Vec::new(),
             fuzzy_threshold: threshold.clamp(0.0, 1.0),
             max_suggestions,
+            use_fuzzy_matching: true,
+            fuzzy_matcher: Some(
+                FuzzyMatcher::new().levenshtein_threshold(threshold.clamp(0.0, 1.0)),
+            ),
+            auto_apply_fuzzy_fixes: auto_apply,
         }
     }
 
@@ -98,6 +114,8 @@ impl SearchReplaceHelper {
 
         // Apply each block sequentially
         for (i, (search, replace)) in self.blocks.iter().enumerate() {
+            trace!("Processing block {}/{}", i + 1, total_blocks);
+
             // Check for exact match first
             if content.contains(search) {
                 let count_before = content.matches(search).count();
@@ -115,12 +133,65 @@ impl SearchReplaceHelper {
             }
 
             // If we reach here, the search block wasn't found
+            debug!(
+                "Block {} not found by exact match, trying fuzzy matching",
+                i + 1
+            );
 
             // Collect debugging information
-            self.debug_info
-                .push(format!("Block {} not found in content", i + 1));
+            self.debug_info.push(format!(
+                "Block {} not found in content, trying fuzzy match",
+                i + 1
+            ));
 
-            // Try to find approximate matches
+            // Try fuzzy matching if enabled
+            if self.use_fuzzy_matching && self.fuzzy_matcher.is_some() {
+                let mut fuzzy_matcher = self.fuzzy_matcher.as_ref().unwrap().clone();
+                let matches = fuzzy_matcher.find_matches(search, &content);
+
+                if !matches.is_empty() {
+                    let best_match = &matches[0];
+                    self.debug_info.push(format!(
+                        "Best fuzzy match for block {} (similarity: {:.2})",
+                        i + 1,
+                        best_match.similarity
+                    ));
+
+                    // If confidence is high enough and auto-apply is enabled, perform the replacement
+                    if best_match.similarity >= self.fuzzy_threshold && self.auto_apply_fuzzy_fixes
+                    {
+                        self.debug_info.push(format!(
+                            "Auto-applying fuzzy fix for block {} (similarity: {:.2})",
+                            i + 1,
+                            best_match.similarity
+                        ));
+
+                        // Replace the matched text with the replacement text
+                        let before = &content[..best_match.start_pos];
+                        let after = &content[best_match.end_pos..];
+                        content = format!("{}{}{}", before, replace, after);
+                        _success_count += 1;
+                        continue;
+                    }
+
+                    // Add suggestions if the match wasn't automatically applied
+                    for (j, m) in matches.iter().enumerate().take(self.max_suggestions) {
+                        self.debug_info.push(format!(
+                            "Suggestion {}: similarity={:.2}, match_type={:?}, text={}",
+                            j + 1,
+                            m.similarity,
+                            m.match_type,
+                            if m.text.len() > 100 {
+                                format!("{}...", &m.text[..100])
+                            } else {
+                                m.text.clone()
+                            }
+                        ));
+                    }
+                }
+            }
+
+            // Try to find approximate matches using the legacy approach
             let suggestion = self
                 .find_closest_match(search, &content)
                 .unwrap_or_else(|| {
@@ -137,6 +208,117 @@ impl SearchReplaceHelper {
         }
 
         Ok(content)
+    }
+
+    /// Try to use fuzzy matching to find and replace content
+    fn try_fuzzy_match_and_replace(
+        &mut self,
+        block_index: usize,
+        search: &str,
+        replace: &str,
+        content: &mut String,
+    ) -> Result<()> {
+        let matcher = match &mut self.fuzzy_matcher {
+            Some(matcher) => matcher,
+            None => {
+                return Err(WinxError::SearchBlockNotFound(
+                    "Fuzzy matching not available".to_string(),
+                ))
+            }
+        };
+
+        // Find the best matches for the search block
+        let matches = matcher.find_matches(search, content);
+
+        if matches.is_empty() {
+            return Err(WinxError::SearchBlockNotFound(
+                "No fuzzy matches found for search block".to_string(),
+            ));
+        }
+
+        // Find highest confidence match
+        let best_match = &matches[0];
+
+        // Log detailed information about the match
+        debug!(
+            "Best fuzzy match for block {}: score={:.2}, type={:?}, range={}..{}",
+            block_index + 1,
+            best_match.similarity,
+            best_match.match_type,
+            best_match.start_pos,
+            best_match.end_pos
+        );
+
+        // If confidence is high enough and auto-apply is enabled, perform the replacement
+        if best_match.similarity >= self.fuzzy_threshold && self.auto_apply_fuzzy_fixes {
+            // Replace the matched text with the replacement text
+            let before = &content[..best_match.start_pos];
+            let after = &content[best_match.end_pos..];
+            *content = format!("{}{}{}", before, replace, after);
+
+            self.debug_info.push(format!(
+                "Block {} automatically replaced using fuzzy matching (confidence: {:.1}%)",
+                block_index + 1,
+                best_match.similarity * 100.0
+            ));
+
+            return Ok(());
+        }
+
+        // If confidence is high but auto-apply is disabled, include this in the error message
+        let match_suggestions = self.format_fuzzy_match_suggestions(&matches);
+
+        // Format confidence level nicely
+        let confidence_percent = (best_match.similarity * 100.0).round() as i32;
+
+        if best_match.similarity >= self.fuzzy_threshold {
+            // High confidence match, but auto-apply is disabled
+            let error_message = format!(
+                "Found potential match with high confidence ({confidence_percent}%) but automatic replacement is disabled.\n\n{}\n\nTo enable automatic fixing with high-confidence matches, set auto_apply_fuzzy_fixes=true.",
+                match_suggestions
+            );
+            return Err(WinxError::SearchBlockNotFound(error_message));
+        } else {
+            // Low confidence match
+            let error_message = format!(
+                "Found potential match but confidence is too low ({confidence_percent}%).\n\n{}",
+                match_suggestions
+            );
+            return Err(WinxError::SearchBlockNotFound(error_message));
+        }
+    }
+
+    /// Format fuzzy match suggestions into a readable string
+    fn format_fuzzy_match_suggestions(&self, matches: &[FuzzyMatch]) -> String {
+        let mut suggestions = String::new();
+
+        suggestions.push_str("Potential matches found:\n\n");
+
+        for (i, m) in matches.iter().take(self.max_suggestions).enumerate() {
+            let confidence_percent = (m.similarity * 100.0).round() as i32;
+            let snippet = if m.text.len() > 100 {
+                format!("{}...", &m.text[..100])
+            } else {
+                m.text.clone()
+            };
+
+            suggestions.push_str(&format!(
+                "Match {} ({}% confidence, type: {:?}):\n```\n{}\n```\n\n",
+                i + 1,
+                confidence_percent,
+                m.match_type,
+                snippet
+            ));
+        }
+
+        if matches.len() > self.max_suggestions {
+            suggestions.push_str(&format!(
+                "...and {} more potential matches not shown.",
+                matches.len() - self.max_suggestions
+            ));
+        }
+
+        suggestions
     }
 
     /// Find the closest match for a search block using various matching strategies
@@ -531,6 +713,7 @@ fn parse_search_replace_blocks(
 /// * `original_content` - The original content to modify
 /// * `fuzzy_threshold` - Optional threshold for fuzzy matching (0.0-1.0)
 /// * `max_suggestions` - Optional maximum number of suggestions to provide
+/// * `auto_apply_fuzzy` - Optional flag to automatically apply high-confidence fuzzy matches
 ///
 /// # Returns
 ///
@@ -540,10 +723,27 @@ fn apply_search_replace_blocks(
     original_content: String,
     fuzzy_threshold: Option<f64>,
     max_suggestions: Option<usize>,
+    auto_apply_fuzzy: Option<bool>,
 ) -> Result<String> {
     // Create a helper with optional custom fuzzy matching parameters
-    let helper = if let (Some(threshold), Some(max_sugg)) = (fuzzy_threshold, max_suggestions) {
-        SearchReplaceHelper::new_with_fuzzy_options(original_content, blocks, threshold, max_sugg)
+    let helper = if let (Some(threshold), Some(max_sugg), Some(auto_apply)) =
+        (fuzzy_threshold, max_suggestions, auto_apply_fuzzy)
+    {
+        SearchReplaceHelper::new_with_fuzzy_options(
+            original_content,
+            blocks,
+            threshold,
+            max_sugg,
+            auto_apply,
+        )
+    } else if let (Some(threshold), Some(max_sugg)) = (fuzzy_threshold, max_suggestions) {
+        SearchReplaceHelper::new_with_fuzzy_options(
+            original_content,
+            blocks,
+            threshold,
+            max_sugg,
+            false,
+        )
     } else {
         SearchReplaceHelper::new(original_content, blocks)
     };
@@ -708,6 +908,55 @@ fn check_path_allowed(file_path: &str, bash_state: &BashState) -> Result<()> {
     }
 }
 
+/// Detect if file content has changed and return only the diff
+///
+/// This function compares the original and new content of a file
+/// and returns only the changes as a unified diff, if any.
+///
+/// # Arguments
+///
+/// * `original` - Original file content
+/// * `new` - New file content
+///
+/// # Returns
+///
+/// Option containing the unified diff if there are changes, None otherwise
+fn detect_file_changes(original: &str, new: &str) -> Option<String> {
+    if original == new {
+        return None;
+    }
+
+    // Create temporary files for diff
+    let mut original_file = tempfile::NamedTempFile::new().ok()?;
+    let mut new_file = tempfile::NamedTempFile::new().ok()?;
+
+    // Write content to temp files
+    if original_file.write_all(original.as_bytes()).is_err()
+        || new_file.write_all(new.as_bytes()).is_err()
+    {
+        return None;
+    }
+
+    // Get file paths
+    let original_path = original_file.path();
+    let new_path = new_file.path();
+
+    // Run diff command
+    let output = std::process::Command::new("diff")
+        .args(["-u", original_path.to_str()?, new_path.to_str()?])
+        .output()
+        .ok()?;
+
+    // Parse output
+    let diff = String::from_utf8_lossy(&output.stdout).to_string();
+
+    if diff.is_empty() {
+        None
+    } else {
+        Some(diff)
+    }
+}
+
 /// Handle the FileWriteOrEdit tool call
 ///
 /// This function processes the FileWriteOrEdit tool call, which writes or edits files.
@@ -788,8 +1037,20 @@ pub async fn handle_tool_call(
     // Process based on content type (full content or search/replace blocks)
     let content = &file_write_or_edit.file_content_or_search_replace_blocks;
 
+    // Get the original content if file exists (for diff and incremental updates)
+    let original_content = if Path::new(&file_path).exists() {
+        fs::read_to_string(&file_path).ok()
+    } else {
+        None
+    };
+
     // Determine if this is an edit or a full file write
     let is_edit_operation = is_edit(content, file_write_or_edit.percentage_to_change);
+
+    // Setup for advanced fuzzy matching
+    let fuzzy_threshold = file_write_or_edit.fuzzy_threshold.unwrap_or(0.7);
+    let max_suggestions = file_write_or_edit.max_suggestions.unwrap_or(3);
+    let auto_apply_fuzzy = file_write_or_edit.auto_apply_fuzzy.unwrap_or(false);
 
     if is_edit_operation {
         // This is a search/replace edit operation
@@ -853,8 +1114,14 @@ pub async fn handle_tool_call(
             }
         };
 
-        // Apply search/replace blocks with default fuzzy matching parameters
-        let new_content = match apply_search_replace_blocks(blocks, original_content, None, None) {
+        // Apply search/replace blocks with fuzzy matching parameters
+        let new_content = match apply_search_replace_blocks(
+            blocks,
+            original_content.clone(),
+            Some(fuzzy_threshold),
+            Some(max_suggestions),
+            Some(auto_apply_fuzzy),
+        ) {
             Ok(content) => content,
             Err(e) => {
                 // Only log the error once at this level and avoid duplicating in error message
@@ -876,6 +1143,24 @@ pub async fn handle_tool_call(
 
                 return Err(e);
             }
+        };
+
+        // Check if content has actually changed
+        if original_content == new_content {
+            return Ok(format!(
+                "File {} unchanged - content is identical after applying search/replace blocks",
+                file_path
+            ));
+        }
+
+        // Generate diff if requested
+        let diff_info = if file_write_or_edit.show_diff.unwrap_or(false) {
+            match detect_file_changes(&original_content, &new_content) {
+                Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
+                None => "".to_string(),
+            }
+        } else {
+            "".to_string()
         };
 
         // Write the new content to the file
@@ -937,13 +1222,41 @@ pub async fn handle_tool_call(
             }
         });
 
-        Ok(format!("Successfully edited file {}", file_path))
+        Ok(format!(
+            "Successfully edited file {}{}",
+            file_path, diff_info
+        ))
     } else {
         // This is a full file write operation
         debug!("Processing as full file write operation");
 
         // Get absolute path
         let file_path_obj = Path::new(&file_path);
+
+        // Check if content has changed (for existing files)
+        let content_unchanged = if let Some(orig) = &original_content {
+            orig == content
+        } else {
+            false
+        };
+
+        if content_unchanged {
+            return Ok(format!(
+                "File {} unchanged - content is identical to existing file",
+                file_path
+            ));
+        }
+
+        // Generate diff if requested and file exists
+        let diff_info =
+            if file_write_or_edit.show_diff.unwrap_or(false) && original_content.is_some() {
+                match detect_file_changes(original_content.as_ref().unwrap(), content) {
+                    Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
+                    None => "".to_string(),
+                }
+            } else {
+                "".to_string()
+            };
 
         // Write the content to the file
         if let Err(e) = write_to_file(file_path_obj, content) {
@@ -1004,7 +1317,10 @@ pub async fn handle_tool_call(
             }
         });
 
-        Ok(format!("Successfully wrote file {}", file_path))
+        Ok(format!(
+            "Successfully wrote file {}{}",
+            file_path, diff_info
+        ))
     }
 }
 
