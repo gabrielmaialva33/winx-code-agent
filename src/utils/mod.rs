@@ -3,11 +3,13 @@
 //! This module contains various utility functions and types used throughout
 //! the application, such as file and path handling, repository analysis, etc.
 
+pub mod error_predictor;
 pub mod file_cache;
 pub mod fuzzy_match;
 pub mod mmap;
 pub mod path;
 pub mod path_analyzer;
+pub mod pattern_analyzer;
 pub mod repo;
 
 use crate::types::Initialize;

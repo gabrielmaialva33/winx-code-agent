@@ -42,8 +42,7 @@ use crate::errors::WinxError;
 /// // Example: Creating a context-aware path scorer
 /// let recent_files = vec!["src/main.rs".to_string(), "src/lib.rs".to_string()];
 /// let context_scorer = create_context_aware_path_scorer(&recent_files, None)?;
-/// ```
-///
+/// ```///
 /// ## File Extension Weighting
 /// Different file extensions can be assigned different weights, allowing
 /// certain file types to be prioritized over others in the ranking.
@@ -53,8 +52,7 @@ use crate::errors::WinxError;
 /// let mut scorer = create_default_path_scorer()?;
 /// scorer.set_extension_weight("rs", 1.5); // Boost Rust files
 /// scorer.set_extension_weight("md", 0.8); // Lower priority for markdown
-/// ```
-///
+/// ```///
 /// ## Relevance Levels
 /// Files can be filtered or grouped by predefined relevance levels:
 ///
@@ -71,7 +69,6 @@ use crate::errors::WinxError;
 /// let grouped = scorer.group_by_relevance(&paths);
 /// let high_files = grouped.get(&RelevanceLevel::High).unwrap_or(&Vec::new());
 /// ```
-
 /// Relevance level for path filtering
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum RelevanceLevel {
@@ -729,6 +726,7 @@ pub fn create_default_path_scorer() -> Result<PathScorer> {
 /// // Get the most relevant files based on context
 /// let relevant_files = scorer.filter_and_rank_paths(&all_files, None);
 /// ```
+
 pub fn create_context_aware_path_scorer(
     recent_files: &[String],
     extension_weights: Option<HashMap<String, f32>>,
