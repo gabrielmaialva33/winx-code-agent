@@ -706,7 +706,7 @@ impl FileCache {
     /// Try to update read range without blocking
     fn try_update_read_range(&self, path: &Path, start: usize, end: usize) -> Result<()> {
         // Try to get a write lock with timeout
-        let write_result = tokio::task::block_in_place(|| {
+        tokio::task::block_in_place(|| {
             use std::time::Duration;
             // Use a shorter timeout since this is a frequent operation
             let timeout = Duration::from_millis(200);
@@ -737,9 +737,7 @@ impl FileCache {
 
             // Could not get lock within timeout
             Err(anyhow::anyhow!("Timed out waiting for write lock"))
-        });
-
-        write_result
+        })
     }
 
     /// Record a file edit operation

@@ -432,16 +432,16 @@ pub fn calculate_dynamic_file_limit(total_files: usize) -> usize {
 
     if total_files < 100 {
         // For very small repos, include most files
-        return min_files.min(total_files);
+        min_files.min(total_files)
     } else if total_files < 1000 {
         // For small repos, scale linearly from 50 to 150
-        return min_files + (total_files - 100) * 100 / 900;
+        min_files + (total_files - 100) * 100 / 900
     } else if total_files < 10000 {
         // For medium repos, scale from 150 to 300
-        return 150 + (total_files - 1000) * 150 / 9000;
+        150 + (total_files - 1000) * 150 / 9000
     } else {
         // For large repos, cap at max_files
-        return max_files;
+        max_files
     }
 }
 
