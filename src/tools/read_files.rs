@@ -5,7 +5,6 @@
 //! line range filtering.
 
 use anyhow::Context as AnyhowContext;
-use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
@@ -17,6 +16,7 @@ use tracing::{debug, error, info, instrument, warn};
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
 use crate::types::ReadFiles;
+use crate::utils::file_cache::FileCache;
 use crate::utils::mmap::{read_file_optimized, read_file_to_string};
 use crate::utils::path::expand_user;
 
@@ -470,53 +470,81 @@ pub async fn handle_tool_call(
         }
     }
 
-    // Update whitelist data in bash state
-    let whitelist_data: HashMap<String, Vec<(usize, usize)>> = file_ranges_dict.clone();
+    // Use the file cache to record read ranges
+    let cache = FileCache::global();
 
-    // Process file hashes in parallel for better performance
-    let hash_results: Vec<_> = whitelist_data
-        .par_iter()
-        .filter_map(|(file_path, ranges)| {
-            match read_file_optimized(Path::new(file_path), MAX_FILE_SIZE) {
-                Ok(file_content) => {
-                    // Calculate file hash
-                    let mut hasher = Sha256::new();
-                    hasher.update(&file_content);
-                    let file_hash = format!("{:x}", hasher.finalize());
-
-                    // Calculate total lines in file
-                    let total_lines = file_content.iter().filter(|&c| *c == b'\n').count() + 1;
-
-                    Some((file_path.clone(), file_hash, ranges.clone(), total_lines))
-                }
-                Err(_) => None,
+    // For each file that was read, record the ranges in the cache
+    for (file_path, ranges) in &file_ranges_dict {
+        for &(start, end) in ranges {
+            if let Err(e) = cache.record_read_range(Path::new(file_path), start, end) {
+                warn!("Failed to record read range for {}: {}", file_path, e);
             }
-        })
-        .collect();
+        }
+    }
 
-    // Update the bash state with the computed hashes
+    // Update whitelist data in bash state
     tokio::task::spawn_blocking({
         let bash_state_arc = Arc::clone(bash_state_arc);
+        let whitelist_data: HashMap<String, Vec<(usize, usize)>> = file_ranges_dict.clone();
+
         move || {
             if let Ok(mut bash_state_guard) = bash_state_arc.lock() {
                 if let Some(bash_state) = bash_state_guard.as_mut() {
-                    for (file_path, file_hash, ranges, total_lines) in &hash_results {
+                    for (file_path, ranges) in whitelist_data {
+                        // The cache already has the file hash and metadata,
+                        // so we just need to ensure it's in the whitelist
+
+                        // Get the hash from the cache
+                        let file_hash = cache
+                            .get_cached_hash(Path::new(&file_path))
+                            .unwrap_or_else(|| {
+                                // If not in cache (shouldn't happen), calculate it
+                                match read_file_optimized(Path::new(&file_path), MAX_FILE_SIZE) {
+                                    Ok(content) => {
+                                        let mut hasher = Sha256::new();
+                                        hasher.update(&content);
+                                        format!("{:x}", hasher.finalize())
+                                    }
+                                    Err(_) => String::new(),
+                                }
+                            });
+
                         // Add or update the whitelist entry
                         if let Some(existing) =
-                            bash_state.whitelist_for_overwrite.get_mut(file_path)
+                            bash_state.whitelist_for_overwrite.get_mut(&file_path)
                         {
                             existing.file_hash = file_hash.clone();
-                            existing.total_lines = *total_lines;
+
+                            // Get total lines from the cache
+                            let total_lines = cache
+                                .get_unread_ranges(Path::new(&file_path))
+                                .iter()
+                                .map(|&(_, end)| end)
+                                .max()
+                                .unwrap_or(0);
+
+                            if total_lines > 0 {
+                                existing.total_lines = total_lines;
+                            }
+
                             for range in ranges {
                                 existing.add_range(range.0, range.1);
                             }
                         } else {
+                            // Create new entry
+                            let total_lines = cache
+                                .get_unread_ranges(Path::new(&file_path))
+                                .iter()
+                                .map(|&(_, end)| end)
+                                .max()
+                                .unwrap_or(ranges.iter().map(|&(_, end)| end).max().unwrap_or(0));
+
                             bash_state.whitelist_for_overwrite.insert(
                                 file_path.clone(),
                                 crate::state::bash_state::FileWhitelistData::new(
-                                    file_hash.clone(),
-                                    ranges.clone(),
-                                    *total_lines,
+                                    file_hash,
+                                    ranges,
+                                    total_lines,
                                 ),
                             );
                         }

@@ -635,18 +635,56 @@ pub fn render_terminal_output(text: &str) -> Vec<String> {
 }
 
 /// Get incremental text output by comparing old and new terminal states
-#[allow(dead_code)]
 pub fn incremental_text(text: &str, last_pending_output: &str) -> String {
+    // Limit text size to prevent excessive memory usage
+    let text_limit = if text.len() > 100_000 {
+        &text[text.len() - 100_000..]
+    } else {
+        text
+    };
+
     // Process the entire text
-    let processed_lines = render_terminal_output(text);
+    let processed_lines = render_terminal_output(text_limit);
 
     if last_pending_output.is_empty() {
-        // First call, return all processed lines
-        return processed_lines.join("\n");
+        // First call, return all processed lines with leading/trailing whitespace trimmed
+        return processed_lines.join("\n").trim().to_string();
     }
 
     // Process the last pending output
     let last_rendered_lines = render_terminal_output(last_pending_output);
+
+    // If the last output was empty, handle specially
+    if last_rendered_lines.is_empty() {
+        return processed_lines.join("\n").trim().to_string();
+    }
+
+    // If new content is actually new text appended to previous text,
+    // only process the new text for efficiency
+    let text_increment = if text_limit.len() > last_pending_output.len() {
+        &text_limit[last_pending_output.len()..]
+    } else {
+        ""
+    };
+
+    if !text_increment.is_empty() {
+        // Process the combined output for context
+        let combined = format!("{}\n{}", last_rendered_lines.join("\n"), text_increment);
+        let combined_lines = render_terminal_output(&combined);
+
+        // Get the incremental output
+        let mut incremental_lines = get_incremental_output(&last_rendered_lines, &combined_lines);
+
+        // If first line of incremental matches last line of previous output, skip it
+        if !incremental_lines.is_empty()
+            && !last_rendered_lines.is_empty()
+            && incremental_lines[0] == last_rendered_lines[last_rendered_lines.len() - 1]
+        {
+            incremental_lines.remove(0);
+        }
+
+        return incremental_lines.join("\n");
+    }
 
     // Get the incremental output
     let incremental_lines = get_incremental_output(&last_rendered_lines, &processed_lines);

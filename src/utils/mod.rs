@@ -1,3 +1,4 @@
+pub mod file_cache;
 pub mod mmap;
 pub mod path;
 pub mod repo;

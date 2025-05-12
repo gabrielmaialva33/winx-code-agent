@@ -331,6 +331,16 @@ pub async fn handle_tool_call(
                             e
                         ))
                     })?;
+
+                // Initialize the interactive bash session
+                info!("Initializing interactive bash session");
+                if let Err(e) = new_bash_state.init_interactive_bash() {
+                    warn!("Failed to initialize interactive bash: {}", e);
+                    response.push_str(&format!(
+                        "\nWarning: Failed to initialize interactive bash: {}\nSome shell commands may not work properly.\n",
+                        e
+                    ));
+                }
             } else {
                 warn!("Folder to start does not exist: {:?}", folder_to_start);
             }
