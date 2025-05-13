@@ -254,19 +254,23 @@ impl FuzzyMatcher {
         while let Some(pos) = text_lower[start..].find(&pattern_lower) {
             let abs_pos = start + pos;
             let end_pos = abs_pos + pattern.len();
-            let actual_text = if end_pos <= text.len() {
-                text[abs_pos..end_pos].to_string()
-            } else {
-                text[abs_pos..].to_string()
-            };
-
-            matches.push(FuzzyMatch::new(
-                actual_text,
-                0.9, // Slightly lower than exact match
-                abs_pos,
-                end_pos.min(text.len()),
-                MatchType::CaseInsensitive,
-            ));
+            
+            // Ensure indices are valid
+            if abs_pos < text.len() {
+                let actual_text = if end_pos <= text.len() {
+                    text[abs_pos..end_pos].to_string()
+                } else {
+                    text[abs_pos..].to_string()
+                };
+                
+                matches.push(FuzzyMatch::new(
+                    actual_text,
+                    0.9, // Slightly lower than exact match
+                    abs_pos,
+                    end_pos.min(text.len()),
+                    MatchType::CaseInsensitive,
+                ));
+            }
 
             start = abs_pos + 1;
             if start >= text.len() {
@@ -300,15 +304,18 @@ impl FuzzyMatcher {
                 .copied()
                 .unwrap_or_else(|| text.len());
 
-            let actual_text = text[orig_start..orig_end].to_string();
-
-            matches.push(FuzzyMatch::new(
-                actual_text,
-                0.85, // Slightly lower than case-insensitive
-                orig_start,
-                orig_end,
-                MatchType::NormalizedWhitespace,
-            ));
+            // Ensure bounds are valid
+            if orig_start < text.len() && orig_start <= orig_end && orig_end <= text.len() {
+                let actual_text = text[orig_start..orig_end].to_string();
+                
+                matches.push(FuzzyMatch::new(
+                    actual_text,
+                    0.85, // Slightly lower than case-insensitive
+                    orig_start,
+                    orig_end,
+                    MatchType::NormalizedWhitespace,
+                ));
+            }
 
             start = abs_pos + 1;
             if start >= text_norm.len() {
@@ -381,15 +388,18 @@ impl FuzzyMatcher {
                         text.len()
                     };
 
-                    let matched_text = text_lines[start_idx..end_lines].join("\n");
+                    // Ensure start_pos is less than or equal to end_pos
+                    if start_pos <= end_pos && end_pos <= text.len() {
+                        let matched_text = text_lines[start_idx..end_lines].join("\n");
 
-                    matches.push(FuzzyMatch::new(
-                        matched_text,
-                        similarity,
-                        start_pos,
-                        end_pos,
-                        MatchType::LineByLine,
-                    ));
+                        matches.push(FuzzyMatch::new(
+                            matched_text,
+                            similarity,
+                            start_pos,
+                            end_pos,
+                            MatchType::LineByLine,
+                        ));
+                    }
                 }
             }
         }
@@ -450,15 +460,18 @@ impl FuzzyMatcher {
                 };
 
                 if let Some(start) = start_pos {
-                    let actual_text = text[start..end_pos.unwrap_or(text.len())].to_string();
-
-                    matches.push(FuzzyMatch::new(
-                        actual_text,
-                        similarity,
-                        start,
-                        end_pos.unwrap_or(text.len()),
-                        MatchType::TokenBased,
-                    ));
+                    let end = end_pos.unwrap_or(text.len());
+                    // Ensure end index is not less than start index
+                    if start <= end && end <= text.len() {
+                        let actual_text = text[start..end].to_string();
+                        matches.push(FuzzyMatch::new(
+                            actual_text,
+                            similarity,
+                            start,
+                            end,
+                            MatchType::TokenBased,
+                        ));
+                    }
                 }
             }
         }
@@ -538,12 +551,13 @@ impl FuzzyMatcher {
                         0.0
                     };
 
-                    if similarity >= self.config.levenshtein_threshold {
+                    let end_pos = start_pos + window_text.len();
+                    if similarity >= self.config.levenshtein_threshold && start_pos <= end_pos && end_pos <= text.len() {
                         Some(FuzzyMatch::new(
                             window_text.to_string(),
                             similarity,
                             start_pos,
-                            start_pos + window_text.len(),
+                            end_pos,
                             MatchType::Levenshtein,
                         ))
                     } else {
@@ -563,12 +577,13 @@ impl FuzzyMatcher {
                         0.0
                     };
 
-                    if similarity >= self.config.levenshtein_threshold {
+                    let end_pos = start_pos + window_text.len();
+                    if similarity >= self.config.levenshtein_threshold && start_pos <= end_pos && end_pos <= text.len() {
                         Some(FuzzyMatch::new(
                             window_text.to_string(),
                             similarity,
                             start_pos,
-                            start_pos + window_text.len(),
+                            end_pos,
                             MatchType::Levenshtein,
                         ))
                     } else {
@@ -626,20 +641,28 @@ impl FuzzyMatcher {
             let start_pos_in_s1 = end_pos_in_s1 - max_length;
             let start_pos_in_s2 = end_pos_in_s2 - max_length;
 
-            let common_str: String = s1_chars[start_pos_in_s1..end_pos_in_s1].iter().collect();
+            // Validate indices before creating substring
+            if start_pos_in_s1 < s1_chars.len() && end_pos_in_s1 <= s1_chars.len() && 
+               start_pos_in_s2 < s2_chars.len() && end_pos_in_s2 <= s2_chars.len() && 
+               start_pos_in_s1 <= end_pos_in_s1 && start_pos_in_s2 <= end_pos_in_s2 {
+                
+                let common_str: String = s1_chars[start_pos_in_s1..end_pos_in_s1].iter().collect();
 
-            // Calculate similarity based on coverage of pattern
-            let similarity = max_length as f64 / pattern.len() as f64;
+                // Calculate similarity based on coverage of pattern
+                let similarity = max_length as f64 / pattern.len() as f64;
 
-            // Only include matches with reasonable similarity
-            if similarity >= 0.4 {
-                vec![FuzzyMatch::new(
-                    common_str,
-                    similarity,
-                    start_pos_in_s2,
-                    end_pos_in_s2,
-                    MatchType::LongestCommonSubstring,
-                )]
+                // Only include matches with reasonable similarity
+                if similarity >= 0.4 {
+                    vec![FuzzyMatch::new(
+                        common_str,
+                        similarity,
+                        start_pos_in_s2,
+                        end_pos_in_s2,
+                        MatchType::LongestCommonSubstring,
+                    )]
+                } else {
+                    Vec::new()
+                }
             } else {
                 Vec::new()
             }
@@ -684,14 +707,18 @@ impl FuzzyMatcher {
                     let pattern_len = pattern.len();
                     let min_size = std::cmp::min(*window_size, pattern_len);
                     let similarity = min_size as f64 / pattern_len as f64;
-
-                    return vec![FuzzyMatch::new(
-                        window,
-                        similarity,
-                        text_pos,
-                        text_pos + window_size,
-                        MatchType::LongestCommonSubstring,
-                    )];
+                    
+                    let end_pos = text_pos + window_size;
+                    // Ensure indices are valid
+                    if text_pos <= end_pos && end_pos <= text.len() {
+                        return vec![FuzzyMatch::new(
+                            window,
+                            similarity,
+                            text_pos,
+                            end_pos,
+                            MatchType::LongestCommonSubstring,
+                        )];
+                    }
                 }
             }
         }
@@ -716,14 +743,18 @@ impl FuzzyMatcher {
                 if let Some(text_pos) = text.find(&window) {
                     // We found a smaller match
                     let similarity = size as f64 / pattern.len() as f64;
-
-                    return vec![FuzzyMatch::new(
-                        window,
-                        similarity,
-                        text_pos,
-                        text_pos + size,
-                        MatchType::LongestCommonSubstring,
-                    )];
+                    
+                    let end_pos = text_pos + size;
+                    // Ensure indices are valid
+                    if text_pos <= end_pos && end_pos <= text.len() {
+                        return vec![FuzzyMatch::new(
+                            window,
+                            similarity,
+                            text_pos,
+                            end_pos,
+                            MatchType::LongestCommonSubstring,
+                        )];
+                    }
                 }
             }
         }
