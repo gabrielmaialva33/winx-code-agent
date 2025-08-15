@@ -18,6 +18,8 @@
     <img src="https://img.shields.io/github/last-commit/gabrielmaialva33/winx-code-agent?style=flat&logo=appveyor" alt="Last Commit" >
   </a>
   <img src="https://img.shields.io/badge/made%20by-Maia-15c3d6?style=flat&logo=appveyor" alt="Made by Maia" >
+
+[![Trust Score](https://archestra.ai/mcp-catalog/api/badge/quality/gabrielmaialva33/winx-code-agent)](https://archestra.ai/mcp-catalog/gabrielmaialva33__winx-code-agent)
 </p>
 
 ---
