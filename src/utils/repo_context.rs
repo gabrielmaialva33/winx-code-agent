@@ -52,7 +52,9 @@ impl GitAnalyzer {
     /// Create a new git analyzer for the given path
     pub fn new(path: &Path) -> Option<Self> {
         let git_path = Self::find_git_root(path)?;
-        Some(Self { repo_path: git_path })
+        Some(Self {
+            repo_path: git_path,
+        })
     }
 
     /// Find the git root directory
@@ -130,7 +132,7 @@ impl RepoTraverser {
     /// Create a new repository traverser
     pub fn new(workspace_root: &Path) -> Self {
         let git_analyzer = GitAnalyzer::new(workspace_root);
-        
+
         // Default ignore patterns (similar to WCGW)
         let ignored_patterns = vec![
             ".git".to_string(),
@@ -259,10 +261,11 @@ impl RepoTraverser {
         }
 
         // Special files
-        let filename = Path::new(path).file_name()
+        let filename = Path::new(path)
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("");
-        
+
         score += match filename.to_lowercase().as_str() {
             "cargo.toml" | "package.json" | "pyproject.toml" => 15.0,
             "readme.md" | "readme.txt" => 10.0,
@@ -291,12 +294,14 @@ impl RepoTraverser {
 
         for file_path in files {
             let full_path = self.workspace_root.join(file_path);
-            
+
             if let Ok(metadata) = fs::metadata(&full_path) {
                 let stats = FileStats {
                     path: file_path.clone(),
                     size: metadata.len(),
-                    last_modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    last_modified: metadata
+                        .modified()
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                     importance_score: 0.0, // Will be calculated later
                     file_type: Path::new(file_path)
                         .extension()
@@ -329,7 +334,7 @@ impl RepoContextAnalyzer {
 
         let traverser = RepoTraverser::new(workspace_path);
         let all_files = traverser.get_all_files()?;
-        
+
         debug!("Found {} files in repository", all_files.len());
 
         // Generate file statistics
@@ -348,9 +353,10 @@ impl RepoContextAnalyzer {
             .filter(|(_, stats)| stats.importance_score > 5.0)
             .map(|(path, _)| path.clone())
             .collect();
-        
+
         important_files.sort_by(|a, b| {
-            file_stats[b].importance_score
+            file_stats[b]
+                .importance_score
                 .partial_cmp(&file_stats[a].importance_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
@@ -358,7 +364,8 @@ impl RepoContextAnalyzer {
         important_files.truncate(20); // Top 20 important files
 
         // Generate project summary
-        let project_summary = Self::generate_project_summary(&all_files, &file_stats, workspace_path);
+        let project_summary =
+            Self::generate_project_summary(&all_files, &file_stats, workspace_path);
 
         Ok(RepoContext {
             workspace_root: workspace_path.to_path_buf(),
@@ -379,11 +386,14 @@ impl RepoContextAnalyzer {
         workspace_path: &Path,
     ) -> String {
         let mut summary = String::new();
-        
-        summary.push_str(&format!("# Project: {}\n\n", 
-            workspace_path.file_name()
+
+        summary.push_str(&format!(
+            "# Project: {}\n\n",
+            workspace_path
+                .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or("Unknown")));
+                .unwrap_or("Unknown")
+        ));
 
         // File type distribution
         let mut type_counts = HashMap::new();
@@ -394,7 +404,7 @@ impl RepoContextAnalyzer {
         summary.push_str("## File Types:\n");
         let mut types: Vec<_> = type_counts.into_iter().collect();
         types.sort_by(|a, b| b.1.cmp(&a.1));
-        
+
         for (file_type, count) in types.into_iter().take(10) {
             summary.push_str(&format!("- {}: {} files\n", file_type, count));
         }
@@ -407,12 +417,15 @@ impl RepoContextAnalyzer {
         if files.iter().any(|f| f.ends_with("package.json")) {
             summary.push_str("- Node.js project (package.json found)\n");
         }
-        if files.iter().any(|f| f.ends_with("pyproject.toml") || f.ends_with("requirements.txt")) {
+        if files
+            .iter()
+            .any(|f| f.ends_with("pyproject.toml") || f.ends_with("requirements.txt"))
+        {
             summary.push_str("- Python project\n");
         }
 
         summary.push_str(&format!("\nTotal files: {}\n", files.len()));
-        
+
         summary
     }
 }

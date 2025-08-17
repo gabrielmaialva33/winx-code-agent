@@ -13,10 +13,10 @@ use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Initialize,
     InitializeType, ModeName, Modes, WriteIfEmptyMode,
 };
+use crate::utils::mode_prompts::get_mode_prompt;
 use crate::utils::path::{ensure_directory_exists, expand_user};
 use crate::utils::repo::{get_git_info, get_repo_context};
 use crate::utils::repo_context::RepoContextAnalyzer;
-use crate::utils::mode_prompts::get_mode_prompt;
 
 /// Converts ModeName to the internal Modes enum
 ///
@@ -350,34 +350,44 @@ pub async fn handle_tool_call(
                 match RepoContextAnalyzer::analyze(&folder_to_start) {
                     Ok(repo_context) => {
                         debug!("Repository analysis completed successfully");
-                        
+
                         // Add repository context to response
                         response.push_str("\n# Workspace Analysis\n");
                         response.push_str(&repo_context.project_summary);
-                        
+
                         if repo_context.is_git_repo {
                             response.push_str("\n✓ Git repository detected\n");
                             if !repo_context.recent_files.is_empty() {
                                 response.push_str(&format!(
-                                    "Recent files: {}\n", 
+                                    "Recent files: {}\n",
                                     repo_context.recent_files.join(", ")
                                 ));
                             }
                         }
-                        
+
                         if !repo_context.important_files.is_empty() {
                             response.push_str(&format!(
-                                "Key files: {}\n", 
-                                repo_context.important_files.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+                                "Key files: {}\n",
+                                repo_context
+                                    .important_files
+                                    .iter()
+                                    .take(5)
+                                    .cloned()
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
                             ));
                         }
-                        
-                        response.push_str(&format!("Total project files: {}\n", repo_context.project_files.len()));
+
+                        response.push_str(&format!(
+                            "Total project files: {}\n",
+                            repo_context.project_files.len()
+                        ));
                     }
                     Err(e) => {
                         warn!("Failed to analyze repository context: {}", e);
                         response.push_str(&format!(
-                            "\nWarning: Could not analyze repository structure: {}\n", e
+                            "\nWarning: Could not analyze repository structure: {}\n",
+                            e
                         ));
                     }
                 }

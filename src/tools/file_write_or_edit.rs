@@ -108,7 +108,7 @@ impl SearchReplaceHelper {
     fn apply(mut self) -> Result<String> {
         // First, analyze all blocks for potential conflicts using WCGW-style detection
         let resolver = MultiMatchResolver::new(&self.blocks, &self.original_content);
-        
+
         // Check for conflicts before proceeding
         if let Err(conflict_error) = resolver.analyze_conflicts() {
             // Add resolution suggestions to the error
@@ -130,13 +130,13 @@ impl SearchReplaceHelper {
             // Check for exact match first with enhanced multi-match detection
             if content.contains(search) {
                 let count_before = content.matches(search).count();
-                
+
                 // WCGW-style: check for multiple matches and warn/error if ambiguous
                 if count_before > 1 {
                     // Find all match locations for detailed error reporting
                     let mut match_locations = Vec::new();
                     let mut start = 0;
-                    
+
                     while let Some(pos) = content[start..].find(search) {
                         let actual_pos = start + pos;
                         let before_match = &content[..actual_pos];
@@ -144,7 +144,7 @@ impl SearchReplaceHelper {
                         match_locations.push(line_num);
                         start = actual_pos + 1;
                     }
-                    
+
                     return Err(WinxError::SearchBlockAmbiguous {
                         block_content: search.clone(),
                         match_count: count_before,
@@ -161,7 +161,7 @@ impl SearchReplaceHelper {
                         ],
                     });
                 }
-                
+
                 content = content.replace(search, replace);
 
                 self.debug_info.push(format!(
@@ -566,12 +566,12 @@ impl MatchAnalysis {
             fuzzy_matches: Vec::new(),
             conflict_score: 0.0,
         };
-        
+
         analysis.find_all_matches(&search_block, content);
         analysis.calculate_conflict_score();
         analysis
     }
-    
+
     /// Find all exact and fuzzy matches for the search block
     fn find_all_matches(&mut self, search_block: &str, content: &str) {
         // Find exact matches
@@ -579,30 +579,30 @@ impl MatchAnalysis {
         while let Some(pos) = content[start..].find(search_block) {
             let actual_pos = start + pos;
             let end_pos = actual_pos + search_block.len();
-            
+
             // Calculate line numbers
             let before_match = &content[..actual_pos];
             let line_start = before_match.lines().count();
             let line_end = line_start + search_block.lines().count().saturating_sub(1);
-            
+
             // Get context around the match
             let context_lines = 3;
             let lines: Vec<&str> = content.lines().collect();
             let context_start = line_start.saturating_sub(context_lines);
             let context_end = (line_end + context_lines).min(lines.len());
-            
+
             let context_before = if context_start < line_start {
                 lines[context_start..line_start].join("\n")
             } else {
                 String::new()
             };
-            
+
             let context_after = if line_end + 1 < context_end {
-                lines[line_end + 1..context_end].join("\n") 
+                lines[line_end + 1..context_end].join("\n")
             } else {
                 String::new()
             };
-            
+
             self.exact_matches.push(MatchLocation {
                 start_pos: actual_pos,
                 end_pos,
@@ -611,11 +611,11 @@ impl MatchAnalysis {
                 context_before,
                 context_after,
             });
-            
+
             start = actual_pos + 1; // Continue searching after this match
         }
     }
-    
+
     /// Calculate conflict score based on WCGW patterns
     fn calculate_conflict_score(&mut self) {
         if self.exact_matches.len() > 1 {
@@ -623,58 +623,90 @@ impl MatchAnalysis {
             self.conflict_score = 100.0 * self.exact_matches.len() as f64;
         } else if self.exact_matches.is_empty() && !self.fuzzy_matches.is_empty() {
             // No exact matches but fuzzy matches available
-            let best_fuzzy = self.fuzzy_matches.iter()
-                .max_by(|a, b| a.similarity.partial_cmp(&b.similarity).unwrap_or(std::cmp::Ordering::Equal));
-            
+            let best_fuzzy = self.fuzzy_matches.iter().max_by(|a, b| {
+                a.similarity
+                    .partial_cmp(&b.similarity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
             if let Some(best) = best_fuzzy {
                 // Score based on how fuzzy the match is
                 self.conflict_score = (1.0 - best.similarity) * 50.0;
             }
         }
     }
-    
+
     /// Check if this match analysis indicates a conflict requiring user intervention
     fn has_conflicts(&self) -> bool {
-        self.exact_matches.len() > 1 || (self.exact_matches.is_empty() && self.fuzzy_matches.len() > 1)
+        self.exact_matches.len() > 1
+            || (self.exact_matches.is_empty() && self.fuzzy_matches.len() > 1)
     }
-    
+
     /// Generate a detailed error message for conflicts (WCGW-style)
     fn generate_conflict_error(&self) -> Result<()> {
         if self.exact_matches.len() > 1 {
             // Multiple exact matches
             let mut suggestions = vec![
-                format!("The search block appears {} times in the file:", self.exact_matches.len()),
+                format!(
+                    "The search block appears {} times in the file:",
+                    self.exact_matches.len()
+                ),
                 "".to_string(),
             ];
-            
+
             for (i, location) in self.exact_matches.iter().enumerate() {
-                suggestions.push(format!("Match {} (lines {}-{}):", i + 1, location.line_start + 1, location.line_end + 1));
+                suggestions.push(format!(
+                    "Match {} (lines {}-{}):",
+                    i + 1,
+                    location.line_start + 1,
+                    location.line_end + 1
+                ));
                 if !location.context_before.is_empty() {
-                    suggestions.push(format!("  Context before: {}", 
-                        location.context_before.lines().take(2).collect::<Vec<_>>().join(" / ")));
+                    suggestions.push(format!(
+                        "  Context before: {}",
+                        location
+                            .context_before
+                            .lines()
+                            .take(2)
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    ));
                 }
-                suggestions.push(format!("  Match: {}", 
-                    self.search_block.lines().take(2).collect::<Vec<_>>().join(" / ")));
+                suggestions.push(format!(
+                    "  Match: {}",
+                    self.search_block
+                        .lines()
+                        .take(2)
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                ));
                 if !location.context_after.is_empty() {
-                    suggestions.push(format!("  Context after: {}", 
-                        location.context_after.lines().take(2).collect::<Vec<_>>().join(" / ")));
+                    suggestions.push(format!(
+                        "  Context after: {}",
+                        location
+                            .context_after
+                            .lines()
+                            .take(2)
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    ));
                 }
                 suggestions.push("".to_string());
             }
-            
+
             suggestions.extend(vec![
                 "Consider adding more context before and after this block to make the match unique.".to_string(),
                 "Include additional surrounding lines in your search block.".to_string(),
                 "Use more specific content that uniquely identifies the location to change.".to_string(),
             ]);
-            
+
             return Err(WinxError::SearchBlockAmbiguous {
                 block_content: self.search_block.clone(),
                 match_count: self.exact_matches.len(),
                 suggestions,
             });
         }
-        
+
         Ok(())
     }
 }
@@ -695,32 +727,32 @@ impl MultiMatchResolver {
             .enumerate()
             .map(|(i, (search, _))| MatchAnalysis::new(search.clone(), i, content))
             .collect();
-            
+
         Self {
             analyses,
             content: content.to_string(),
             conflict_threshold: 50.0, // WCGW-style threshold
         }
     }
-    
+
     /// Analyze all blocks for conflicts and return detailed results
     fn analyze_conflicts(&self) -> Result<()> {
         let mut conflicting_blocks = Vec::new();
         let mut first_differing_block = None;
-        
+
         for analysis in &self.analyses {
             if analysis.has_conflicts() {
                 conflicting_blocks.push(analysis.search_block.clone());
-                
+
                 if first_differing_block.is_none() && analysis.exact_matches.len() > 1 {
                     first_differing_block = Some(analysis.search_block.clone());
                 }
-                
+
                 // Generate specific error for this block
                 analysis.generate_conflict_error()?;
             }
         }
-        
+
         // If multiple blocks have conflicts, generate a summary error
         if conflicting_blocks.len() > 1 {
             return Err(WinxError::SearchBlockConflict {
@@ -728,26 +760,31 @@ impl MultiMatchResolver {
                 first_differing_block,
             });
         }
-        
+
         Ok(())
     }
-    
+
     /// Get suggestions for resolving conflicts
     fn get_resolution_suggestions(&self) -> Vec<String> {
         let mut suggestions = Vec::new();
-        
+
         let conflicting_count = self.analyses.iter().filter(|a| a.has_conflicts()).count();
-        
+
         if conflicting_count > 0 {
-            suggestions.push(format!("{} search block(s) have matching conflicts", conflicting_count));
+            suggestions.push(format!(
+                "{} search block(s) have matching conflicts",
+                conflicting_count
+            ));
             suggestions.push("".to_string());
             suggestions.push("Resolution strategies:".to_string());
-            suggestions.push("• Add more context lines before and after ambiguous blocks".to_string());
+            suggestions
+                .push("• Add more context lines before and after ambiguous blocks".to_string());
             suggestions.push("• Include unique identifiers or function signatures".to_string());
-            suggestions.push("• Break large changes into smaller, more specific blocks".to_string());
+            suggestions
+                .push("• Break large changes into smaller, more specific blocks".to_string());
             suggestions.push("• Use more distinctive content that appears only once".to_string());
         }
-        
+
         suggestions
     }
 }
@@ -776,7 +813,8 @@ impl SearchReplaceSyntaxError {
             line_number: None,
             block_type: None,
             suggestions: vec![
-                "Make sure blocks are in correct sequence, and the markers are in separate lines:".to_string(),
+                "Make sure blocks are in correct sequence, and the markers are in separate lines:"
+                    .to_string(),
                 "".to_string(),
                 "<<<<<<< SEARCH".to_string(),
                 " example old".to_string(),
@@ -786,13 +824,13 @@ impl SearchReplaceSyntaxError {
             ],
         }
     }
-    
+
     /// Create enhanced error with detailed context
     fn detailed(
-        message: impl Into<String>, 
+        message: impl Into<String>,
         line_number: Option<usize>,
         block_type: Option<String>,
-        suggestions: Vec<String>
+        suggestions: Vec<String>,
     ) -> Self {
         Self {
             message: message.into(),
@@ -801,21 +839,24 @@ impl SearchReplaceSyntaxError {
             suggestions,
         }
     }
-    
+
     /// Format the error message with all context
     fn format_message(&self) -> String {
-        let mut msg = format!("Got syntax error while parsing search replace blocks:\n{}", self.message);
-        
+        let mut msg = format!(
+            "Got syntax error while parsing search replace blocks:\n{}",
+            self.message
+        );
+
         if let Some(line) = self.line_number {
             msg.push_str(&format!("\nLine {}", line));
         }
-        
+
         if let Some(ref block_type) = self.block_type {
             msg.push_str(&format!(" in {} block", block_type));
         }
-        
+
         msg.push_str("\n---\n");
-        
+
         if !self.suggestions.is_empty() {
             msg.push_str("\nSuggestions:\n");
             for suggestion in &self.suggestions {
@@ -826,7 +867,7 @@ impl SearchReplaceSyntaxError {
                 }
             }
         }
-        
+
         msg
     }
 }
@@ -983,9 +1024,10 @@ fn parse_search_replace_blocks(
                     Some("SEARCH".to_string()),
                     vec![
                         "Add content between <<<<<<< SEARCH and ======= markers".to_string(),
-                        "The search block should contain the exact text you want to replace".to_string(),
+                        "The search block should contain the exact text you want to replace"
+                            .to_string(),
                         "Make sure there's at least one line of non-whitespace content".to_string(),
-                    ]
+                    ],
                 ));
             }
 
@@ -998,10 +1040,13 @@ fn parse_search_replace_blocks(
                     Some(line_num),
                     Some("SEARCH".to_string()),
                     vec![
-                        "Include non-whitespace content between <<<<<<< SEARCH and ======= markers".to_string(),
-                        "The search block should contain the exact text you want to replace".to_string(),
-                        "Avoid having only spaces, tabs, or empty lines in the search block".to_string(),
-                    ]
+                        "Include non-whitespace content between <<<<<<< SEARCH and ======= markers"
+                            .to_string(),
+                        "The search block should contain the exact text you want to replace"
+                            .to_string(),
+                        "Avoid having only spaces, tabs, or empty lines in the search block"
+                            .to_string(),
+                    ],
                 ));
             }
 
@@ -1075,7 +1120,7 @@ fn parse_search_replace_blocks(
                 "".to_string(),
                 "Check that all markers are on separate lines".to_string(),
                 "Ensure there are no typos in the marker syntax".to_string(),
-            ]
+            ],
         ));
     }
 
@@ -1406,18 +1451,20 @@ pub async fn handle_tool_call(
 
         // Enhanced file operation validation using WCGW-style mode checking
         let path_for_validation = Path::new(&file_path);
-        
+
         // Check if file operation is allowed in current mode
         if path_for_validation.exists() {
             // File exists, check edit permissions
             if !bash_state.is_file_edit_allowed(&file_path) {
-                let violation_message = bash_state.get_mode_violation_message("file editing", &file_path);
+                let violation_message =
+                    bash_state.get_mode_violation_message("file editing", &file_path);
                 return Err(WinxError::CommandNotAllowed(violation_message));
             }
         } else {
-            // New file, check write permissions 
+            // New file, check write permissions
             if !bash_state.is_file_write_allowed(&file_path) {
-                let violation_message = bash_state.get_mode_violation_message("file writing", &file_path);
+                let violation_message =
+                    bash_state.get_mode_violation_message("file writing", &file_path);
                 return Err(WinxError::CommandNotAllowed(violation_message));
             }
         }

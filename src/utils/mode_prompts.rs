@@ -1,7 +1,7 @@
 //! WCGW-style mode prompts and instructions
 //!
 //! This module provides the exact prompt text and instructions used by WCGW
-//! for different operational modes, ensuring consistent behavior between 
+//! for different operational modes, ensuring consistent behavior between
 //! the Python original and Rust implementation.
 
 use crate::types::{AllowedCommands, AllowedGlobs, Modes};
@@ -139,11 +139,11 @@ pub fn get_mode_prompt(
             let default_edit_globs = AllowedGlobs::All("all".to_string());
             let default_write_globs = AllowedGlobs::All("all".to_string());
             let default_commands = AllowedCommands::All("all".to_string());
-            
+
             let edit_globs = allowed_file_edit_globs.unwrap_or(&default_edit_globs);
             let write_globs = allowed_write_new_globs.unwrap_or(&default_write_globs);
             let commands = allowed_commands.unwrap_or(&default_commands);
-            
+
             code_writer_prompt(edit_globs, write_globs, commands)
         }
     }
@@ -176,17 +176,21 @@ pub fn generate_mode_instructions(
 
     // Add safety reminders
     instructions.push_str("\n# Safety Reminders\n");
-    instructions.push_str("- Always read files before editing them to understand the current content\n");
-    instructions.push_str("- Use search/replace blocks for precise edits instead of rewriting entire files\n");
+    instructions
+        .push_str("- Always read files before editing them to understand the current content\n");
+    instructions.push_str(
+        "- Use search/replace blocks for precise edits instead of rewriting entire files\n",
+    );
     instructions.push_str("- Run tests after making changes to ensure nothing is broken\n");
-    
+
     match mode {
         Modes::Wcgw => {
             instructions.push_str("- You have full access to the repository and system\n");
             instructions.push_str("- Be careful with destructive operations\n");
         }
         Modes::Architect => {
-            instructions.push_str("- READ-ONLY MODE: No file modifications or system changes allowed\n");
+            instructions
+                .push_str("- READ-ONLY MODE: No file modifications or system changes allowed\n");
             instructions.push_str("- Focus on analysis, understanding, and providing guidance\n");
         }
         Modes::CodeWriter => {
@@ -197,8 +201,10 @@ pub fn generate_mode_instructions(
 
     instructions.push_str("\n# Tool Usage Guidelines\n");
     instructions.push_str("- Use ReadFiles to examine multiple files at once for efficiency\n");
-    instructions.push_str("- Use BashCommand for running shell commands with proper error handling\n");
-    instructions.push_str("- Use FileWriteOrEdit for making precise changes with search/replace blocks\n");
+    instructions
+        .push_str("- Use BashCommand for running shell commands with proper error handling\n");
+    instructions
+        .push_str("- Use FileWriteOrEdit for making precise changes with search/replace blocks\n");
     instructions.push_str("- Use Initialize to set up or change workspace and mode settings\n");
 
     instructions

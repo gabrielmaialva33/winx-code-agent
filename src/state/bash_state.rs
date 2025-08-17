@@ -204,7 +204,7 @@ impl FileWhitelistData {
     pub fn get_read_error_message(&self, file_path: &Path) -> String {
         let unread_ranges = self.get_unread_ranges();
         let percentage_read = self.get_percentage_read();
-        
+
         if unread_ranges.is_empty() {
             format!(
                 "File {} has been read ({:.1}% coverage), but minimum required is {:.1}%",
@@ -224,13 +224,17 @@ impl FileWhitelistData {
                     }
                 })
                 .collect();
-            
+
             let ranges_str = if unread_ranges.len() > 3 {
-                format!("{} and {} more ranges", range_descriptions.join(", "), unread_ranges.len() - 3)
+                format!(
+                    "{} and {} more ranges",
+                    range_descriptions.join(", "),
+                    unread_ranges.len() - 3
+                )
             } else {
                 range_descriptions.join(", ")
             };
-            
+
             format!(
                 "File {} needs more reading. Only {:.1}% read (need {:.1}%). Unread: {}",
                 file_path.display(),
@@ -1413,7 +1417,7 @@ impl BashState {
     }
 
     // Enhanced mode validation methods (inspired by WCGW)
-    
+
     /// Check if a command is allowed in the current mode
     pub fn is_command_allowed(&self, command: &str) -> bool {
         match self.mode {
@@ -1426,9 +1430,9 @@ impl BashState {
                 // Code writer mode: check against allowed commands
                 match &self.bash_command_mode.allowed_commands {
                     AllowedCommands::All(_) => true,
-                    AllowedCommands::List(commands) => {
-                        commands.iter().any(|allowed| self.command_matches(command, allowed))
-                    }
+                    AllowedCommands::List(commands) => commands
+                        .iter()
+                        .any(|allowed| self.command_matches(command, allowed)),
                 }
             }
         }
@@ -1437,15 +1441,15 @@ impl BashState {
     /// Check if a file path is allowed for editing in the current mode
     pub fn is_file_edit_allowed(&self, file_path: &str) -> bool {
         match self.mode {
-            Modes::Wcgw => true, // Full permissions
+            Modes::Wcgw => true,       // Full permissions
             Modes::Architect => false, // No file editing in architect mode
             Modes::CodeWriter => {
                 // Code writer mode: check against allowed globs
                 match &self.file_edit_mode.allowed_globs {
                     AllowedGlobs::All(_) => true,
-                    AllowedGlobs::List(globs) => {
-                        globs.iter().any(|glob| self.path_matches_glob(file_path, glob))
-                    }
+                    AllowedGlobs::List(globs) => globs
+                        .iter()
+                        .any(|glob| self.path_matches_glob(file_path, glob)),
                 }
             }
         }
@@ -1454,15 +1458,15 @@ impl BashState {
     /// Check if a file path is allowed for writing (new files) in the current mode  
     pub fn is_file_write_allowed(&self, file_path: &str) -> bool {
         match self.mode {
-            Modes::Wcgw => true, // Full permissions
+            Modes::Wcgw => true,       // Full permissions
             Modes::Architect => false, // No file writing in architect mode
             Modes::CodeWriter => {
                 // Code writer mode: check against allowed globs
                 match &self.write_if_empty_mode.allowed_globs {
                     AllowedGlobs::All(_) => true,
-                    AllowedGlobs::List(globs) => {
-                        globs.iter().any(|glob| self.path_matches_glob(file_path, glob))
-                    }
+                    AllowedGlobs::List(globs) => globs
+                        .iter()
+                        .any(|glob| self.path_matches_glob(file_path, glob)),
                 }
             }
         }
@@ -1471,36 +1475,105 @@ impl BashState {
     /// Check if a command is read-only (safe for architect mode)
     fn is_readonly_command(&self, command: &str) -> bool {
         let cmd = command.trim().to_lowercase();
-        
+
         // List of read-only commands allowed in architect mode
         let readonly_commands = [
-            "ls", "cat", "head", "tail", "less", "more", "find", "grep", "wc", "file",
-            "pwd", "which", "whereis", "type", "ps", "top", "df", "du", "free",
-            "uname", "whoami", "id", "date", "history", "echo", "printf",
-            "tree", "stat", "readlink", "dirname", "basename",
+            "ls",
+            "cat",
+            "head",
+            "tail",
+            "less",
+            "more",
+            "find",
+            "grep",
+            "wc",
+            "file",
+            "pwd",
+            "which",
+            "whereis",
+            "type",
+            "ps",
+            "top",
+            "df",
+            "du",
+            "free",
+            "uname",
+            "whoami",
+            "id",
+            "date",
+            "history",
+            "echo",
+            "printf",
+            "tree",
+            "stat",
+            "readlink",
+            "dirname",
+            "basename",
             // Git read-only commands
-            "git status", "git log", "git show", "git diff", "git branch", "git remote",
+            "git status",
+            "git log",
+            "git show",
+            "git diff",
+            "git branch",
+            "git remote",
             // Package manager queries
-            "pip list", "npm list", "cargo tree", "gem list",
+            "pip list",
+            "npm list",
+            "cargo tree",
+            "gem list",
             // Language-specific inspections
-            "python --version", "node --version", "cargo --version", "rustc --version",
+            "python --version",
+            "node --version",
+            "cargo --version",
+            "rustc --version",
         ];
 
         // Check for exact matches first
-        if readonly_commands.iter().any(|&readonly_cmd| cmd.starts_with(readonly_cmd)) {
+        if readonly_commands
+            .iter()
+            .any(|&readonly_cmd| cmd.starts_with(readonly_cmd))
+        {
             return true;
         }
 
         // Check for dangerous patterns that should be blocked
         let dangerous_patterns = [
-            "rm", "mv", "cp", "chmod", "chown", "sudo", "su", "kill", "killall",
-            "mkdir", "rmdir", "touch", "dd", "mount", "umount",
-            "git add", "git commit", "git push", "git pull", "git merge", "git rebase",
-            "npm install", "pip install", "cargo install", "gem install",
-            "make", "cmake", "gcc", "g++", "clang", "rustc",
+            "rm",
+            "mv",
+            "cp",
+            "chmod",
+            "chown",
+            "sudo",
+            "su",
+            "kill",
+            "killall",
+            "mkdir",
+            "rmdir",
+            "touch",
+            "dd",
+            "mount",
+            "umount",
+            "git add",
+            "git commit",
+            "git push",
+            "git pull",
+            "git merge",
+            "git rebase",
+            "npm install",
+            "pip install",
+            "cargo install",
+            "gem install",
+            "make",
+            "cmake",
+            "gcc",
+            "g++",
+            "clang",
+            "rustc",
         ];
 
-        !dangerous_patterns.iter().any(|&dangerous| cmd.contains(dangerous))
+        !dangerous_patterns
+            .iter()
+            .any(|&dangerous| cmd.contains(dangerous))
     }
 
     /// Check if a command matches an allowed command pattern
@@ -1533,13 +1606,13 @@ impl BashState {
         } else {
             // Fallback to simple prefix/suffix matching
             if glob_pattern.starts_with('*') && glob_pattern.ends_with('*') {
-                let middle = &glob_pattern[1..glob_pattern.len()-1];
+                let middle = &glob_pattern[1..glob_pattern.len() - 1];
                 file_path.contains(middle)
             } else if glob_pattern.starts_with('*') {
                 let suffix = &glob_pattern[1..];
                 file_path.ends_with(suffix)
             } else if glob_pattern.ends_with('*') {
-                let prefix = &glob_pattern[..glob_pattern.len()-1];
+                let prefix = &glob_pattern[..glob_pattern.len() - 1];
                 file_path.starts_with(prefix)
             } else {
                 file_path == glob_pattern
@@ -1550,15 +1623,15 @@ impl BashState {
     /// Enhanced file safety check combining WCGW patterns
     pub fn validate_file_access(&mut self, file_path: &Path) -> Result<()> {
         let file_path_str = file_path.to_string_lossy();
-        
+
         // Check mode permissions first
         if !self.is_file_edit_allowed(&file_path_str) {
             return Err(anyhow!(
                 "File editing not allowed in {} mode for path: {}. Check your mode configuration.",
                 match self.mode {
                     Modes::Wcgw => "wcgw",
-                    Modes::Architect => "architect", 
-                    Modes::CodeWriter => "code_writer"
+                    Modes::Architect => "architect",
+                    Modes::CodeWriter => "code_writer",
                 },
                 file_path.display()
             ));
@@ -1568,7 +1641,7 @@ impl BashState {
         if let Some(whitelist_data) = self.whitelist_for_overwrite.get(file_path_str.as_ref()) {
             if whitelist_data.needs_more_reading() {
                 return Err(anyhow!(
-                    "{}. Use ReadFiles tool to read more of the file first.", 
+                    "{}. Use ReadFiles tool to read more of the file first.",
                     whitelist_data.get_read_error_message(file_path)
                 ));
             }
@@ -1579,7 +1652,8 @@ impl BashState {
                 let mut whitelist_data = whitelist_data.clone();
                 if whitelist_data.check_file_changed(&current_hash) {
                     // Update the stored data
-                    self.whitelist_for_overwrite.insert(file_path_str.to_string(), whitelist_data);
+                    self.whitelist_for_overwrite
+                        .insert(file_path_str.to_string(), whitelist_data);
                     return Err(anyhow!(
                         "File {} has changed since last read. Please read the file again with ReadFiles before modifying.",
                         file_path.display()
@@ -1599,7 +1673,10 @@ impl BashState {
     /// Get mode-specific error message for unauthorized operations
     pub fn get_mode_violation_message(&self, operation: &str, target: &str) -> String {
         match self.mode {
-            Modes::Wcgw => format!("Unexpected error: {} should be allowed in wcgw mode", operation),
+            Modes::Wcgw => format!(
+                "Unexpected error: {} should be allowed in wcgw mode",
+                operation
+            ),
             Modes::Architect => format!(
                 "Operation '{}' not allowed in architect mode. Architect mode is read-only. \
                 Use Initialize with mode_name=\"wcgw\" or \"code_writer\" to enable modifications.",

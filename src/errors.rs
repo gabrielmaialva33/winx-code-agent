@@ -366,16 +366,28 @@ impl Clone for WinxError {
             Self::SerializationError(msg) => Self::SerializationError(msg.clone()),
             Self::SearchReplaceSyntaxError(msg) => Self::SearchReplaceSyntaxError(msg.clone()),
             Self::SearchBlockNotFound(msg) => Self::SearchBlockNotFound(msg.clone()),
-            Self::SearchBlockAmbiguous { block_content, match_count, suggestions } => Self::SearchBlockAmbiguous {
+            Self::SearchBlockAmbiguous {
+                block_content,
+                match_count,
+                suggestions,
+            } => Self::SearchBlockAmbiguous {
                 block_content: block_content.clone(),
                 match_count: *match_count,
                 suggestions: suggestions.clone(),
             },
-            Self::SearchBlockConflict { conflicting_blocks, first_differing_block } => Self::SearchBlockConflict {
+            Self::SearchBlockConflict {
+                conflicting_blocks,
+                first_differing_block,
+            } => Self::SearchBlockConflict {
                 conflicting_blocks: conflicting_blocks.clone(),
                 first_differing_block: first_differing_block.clone(),
             },
-            Self::SearchReplaceSyntaxErrorDetailed { message, line_number, block_type, suggestions } => Self::SearchReplaceSyntaxErrorDetailed {
+            Self::SearchReplaceSyntaxErrorDetailed {
+                message,
+                line_number,
+                block_type,
+                suggestions,
+            } => Self::SearchReplaceSyntaxErrorDetailed {
                 message: message.clone(),
                 line_number: *line_number,
                 block_type: block_type.clone(),

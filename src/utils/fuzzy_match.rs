@@ -254,7 +254,7 @@ impl FuzzyMatcher {
         while let Some(pos) = text_lower[start..].find(&pattern_lower) {
             let abs_pos = start + pos;
             let end_pos = abs_pos + pattern.len();
-            
+
             // Ensure indices are valid
             if abs_pos < text.len() {
                 let actual_text = if end_pos <= text.len() {
@@ -262,7 +262,7 @@ impl FuzzyMatcher {
                 } else {
                     text[abs_pos..].to_string()
                 };
-                
+
                 matches.push(FuzzyMatch::new(
                     actual_text,
                     0.9, // Slightly lower than exact match
@@ -307,7 +307,7 @@ impl FuzzyMatcher {
             // Ensure bounds are valid
             if orig_start < text.len() && orig_start <= orig_end && orig_end <= text.len() {
                 let actual_text = text[orig_start..orig_end].to_string();
-                
+
                 matches.push(FuzzyMatch::new(
                     actual_text,
                     0.85, // Slightly lower than case-insensitive
@@ -552,7 +552,10 @@ impl FuzzyMatcher {
                     };
 
                     let end_pos = start_pos + window_text.len();
-                    if similarity >= self.config.levenshtein_threshold && start_pos <= end_pos && end_pos <= text.len() {
+                    if similarity >= self.config.levenshtein_threshold
+                        && start_pos <= end_pos
+                        && end_pos <= text.len()
+                    {
                         Some(FuzzyMatch::new(
                             window_text.to_string(),
                             similarity,
@@ -578,7 +581,10 @@ impl FuzzyMatcher {
                     };
 
                     let end_pos = start_pos + window_text.len();
-                    if similarity >= self.config.levenshtein_threshold && start_pos <= end_pos && end_pos <= text.len() {
+                    if similarity >= self.config.levenshtein_threshold
+                        && start_pos <= end_pos
+                        && end_pos <= text.len()
+                    {
                         Some(FuzzyMatch::new(
                             window_text.to_string(),
                             similarity,
@@ -642,10 +648,13 @@ impl FuzzyMatcher {
             let start_pos_in_s2 = end_pos_in_s2 - max_length;
 
             // Validate indices before creating substring
-            if start_pos_in_s1 < s1_chars.len() && end_pos_in_s1 <= s1_chars.len() && 
-               start_pos_in_s2 < s2_chars.len() && end_pos_in_s2 <= s2_chars.len() && 
-               start_pos_in_s1 <= end_pos_in_s1 && start_pos_in_s2 <= end_pos_in_s2 {
-                
+            if start_pos_in_s1 < s1_chars.len()
+                && end_pos_in_s1 <= s1_chars.len()
+                && start_pos_in_s2 < s2_chars.len()
+                && end_pos_in_s2 <= s2_chars.len()
+                && start_pos_in_s1 <= end_pos_in_s1
+                && start_pos_in_s2 <= end_pos_in_s2
+            {
                 let common_str: String = s1_chars[start_pos_in_s1..end_pos_in_s1].iter().collect();
 
                 // Calculate similarity based on coverage of pattern
@@ -707,7 +716,7 @@ impl FuzzyMatcher {
                     let pattern_len = pattern.len();
                     let min_size = std::cmp::min(*window_size, pattern_len);
                     let similarity = min_size as f64 / pattern_len as f64;
-                    
+
                     let end_pos = text_pos + window_size;
                     // Ensure indices are valid
                     if text_pos <= end_pos && end_pos <= text.len() {
@@ -743,7 +752,7 @@ impl FuzzyMatcher {
                 if let Some(text_pos) = text.find(&window) {
                     // We found a smaller match
                     let similarity = size as f64 / pattern.len() as f64;
-                    
+
                     let end_pos = text_pos + size;
                     // Ensure indices are valid
                     if text_pos <= end_pos && end_pos <= text.len() {
