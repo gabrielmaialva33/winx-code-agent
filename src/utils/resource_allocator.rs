@@ -41,7 +41,7 @@ pub enum ReadPriority {
 }
 
 /// File size category for resource allocation
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum FileCategory {
     Small,
     Medium,

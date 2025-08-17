@@ -6,38 +6,53 @@ description = "Shell and coding agent for Claude Desktop"
 authors = ["Gabriel Maia <gabrielmaialva33@gmail.com>"]
 
 [dependencies]
-rmcp = { version = "0.5.0", features = ["server", "transport-io"] }
-tokio = { version = "1", features = ["full"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-anyhow = "1"
-rand = "0.9.1"
+# Modern MCP SDK - official and maintained
+rust-mcp-sdk = { version = "0.2.0", features = ["server", "macros"] }
+rust-mcp-schema = "0.7.2"
+
+# Async runtime
+tokio = { version = "1.44", features = ["full"] }
+async-trait = "0.1"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Logging and tracing
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-schemars = "1.0.4"
+
+# File and system operations
 home = "0.5"
 sha2 = "0.10"
-thiserror = "2.0.12"
-base64 = "0.22.1"
+base64 = "0.22"
 glob = "0.3"
-regex = "1.10.2"
-mime_guess = "2.0.4"
-vte = "0.15.0"
-memmap2 = "0.9.5"
-rayon = "1.8.0"
-bytes = "1.5.0"
-lazy_static = "1.4.0"
-libc = "0.2.151"
-tokenizers = "0.21.1"
-tempfile = "3.8.1"
+regex = "1.11"
+mime_guess = "2.0"
+memmap2 = "0.9"
+tempfile = "3.20"
 chrono = { version = "0.4", features = ["serde"] }
+
+# Performance and concurrency
+rayon = "1.10"
+bytes = "1.10"
+lazy_static = "1.5"
+libc = "0.2"
+
+# Terminal and text processing
+vte = "0.15"
+
+# Random number generation
+rand = "0.9"
 
 [dev-dependencies]
 tempfile = "3.8.1"
 tokio-test = "0.4"
-serde_json = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
-tarpaulin = "0.31"
 
 [[bench]]
 name = "performance"

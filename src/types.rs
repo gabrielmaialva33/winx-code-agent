@@ -75,12 +75,12 @@ impl<'de> Deserialize<'de> for ModeName {
 
 // Implement schema generation for JSON schema since we removed the derive
 impl JsonSchema for ModeName {
-    fn schema_name() -> String {
-        "ModeName".to_string()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "ModeName".into()
     }
 
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        let mut schema = schemars::schema::SchemaObject::default();
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = schemars::SchemaObject::default();
         schema.metadata().description = Some("The mode name for initialization".to_string());
         let enum_values = vec![
             serde_json::Value::String("wcgw".to_string()),
@@ -311,12 +311,12 @@ pub enum Modes {
 
 // Implement schema generation for Modes
 impl JsonSchema for Modes {
-    fn schema_name() -> String {
-        "Modes".to_string()
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "Modes".into()
     }
 
-    fn json_schema(_gen: &mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema {
-        let mut schema = schemars::schema::SchemaObject::default();
+    fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = schemars::SchemaObject::default();
         schema.metadata().description = Some("Internal representation of modes".to_string());
         let enum_values = vec![
             serde_json::Value::String("wcgw".to_string()),

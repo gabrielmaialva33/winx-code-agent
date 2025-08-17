@@ -88,9 +88,9 @@ impl WinxService {
     }
 }
 
-#[tool(tool_box)]
 impl WinxService {
     /// Initialize the shell environment
+    #[tool]
     ///
     /// This tool must be called before any other shell tools can be used.
     /// It sets up the shell environment with the specified workspace path
@@ -811,7 +811,6 @@ Get status information about the Winx agent.
     }
 }
 
-#[tool(tool_box)]
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {

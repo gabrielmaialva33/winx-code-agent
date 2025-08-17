@@ -5,12 +5,14 @@
 #![allow(clippy::let_and_return)]
 #![allow(clippy::needless_return)]
 
-//! This file exists to suppress dead code warnings in the project.
-//! The project has many utility functions that are not directly used yet
-//! but are maintained for future use.
+//! # Winx Code Agent
+//! 
+//! A high-performance Rust implementation of WCGW (What Could Go Wrong) for code agents.
+//! Provides shell execution and file management capabilities for LLM code agents,
+//! designed to integrate with Claude and other LLMs via the Model Context Protocol (MCP).
 
-// Add a function that uses all the supposedly unused code to suppress warnings
-fn suppress_unused_warnings() {
-    // This function is never called, it only exists to suppress warnings
-    // It's a common technique for libraries with intentionally unused code
-}
+pub mod errors;
+pub mod server;
+
+pub use errors::{Result, WinxError};
+pub use server::{WinxServerHandler, start_winx_server};

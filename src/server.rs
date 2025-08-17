@@ -1,196 +1,318 @@
-//! Server module for the Winx application.
-//!
-//! This module provides functionality for starting and managing the Model Context Protocol
-//! server using stdio transport. It handles the lifecycle of the server and all
-//! communication with the client.
+//! Winx MCP Server implementation using rust-mcp-sdk
+//! Simplified version based on official examples
 
-use rmcp::{transport::stdio, ServiceExt};
+use async_trait::async_trait;
+use rust_mcp_sdk::{
+    mcp_server::{server_runtime, ServerHandler, ServerRuntime},
+    McpServer, StdioTransport, TransportOptions,
+    error::SdkResult,
+    macros::{mcp_tool, JsonSchema},
+    tool_box,
+};
+use rust_mcp_schema::{
+    schema_utils::CallToolError,
+    CallToolRequest, CallToolResult, RpcError, TextContent,
+    ListToolsRequest, ListToolsResult,
+    Implementation, InitializeResult, ServerCapabilities, 
+    ServerCapabilitiesTools, LATEST_PROTOCOL_VERSION,
+};
+use serde::{Deserialize, Serialize};
+use tracing::{info, warn};
 
-use crate::errors::{Result, WinxError};
-use crate::tools;
-use std::time::SystemTime;
-
-/// Configuration for the server
-#[derive(Debug, Clone, Default)]
-pub struct ServerConfig {
-    /// Whether to use a simulated environment for testing
-    pub simulation_mode: bool,
-    /// Enable debug mode with enhanced error reporting
-    pub debug_mode: bool,
+//****************//
+//  InitializeTool  //
+//****************//
+#[mcp_tool(
+    name = "initialize",
+    description = "Initialize the shell environment with workspace path and configuration"
+)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct InitializeTool {
+    /// The workspace folder to start in
+    #[serde(default)]
+    pub folder_to_start: String,
+    /// Operating mode (wcgw, architect, code_writer)
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// Whether to use screen session
+    #[serde(default)]
+    pub over_screen: Option<bool>,
 }
 
-/// Runs the MCP server using the stdio transport
-///
-/// This function initializes the Winx service, connects it to the stdio transport,
-/// and waits for the service to complete. It handles proper error reporting and
-/// graceful shutdown.
-///
-/// # Returns
-///
-/// Returns a Result indicating whether the server ran successfully.
-///
-/// # Errors
-///
-/// Returns an error if the server fails to start or encounters an error during operation.
-pub async fn run_server() -> Result<()> {
-    // Use default configuration
-    run_server_with_config(ServerConfig::default()).await
-}
-
-/// Initializes the server with a custom configuration
-///
-/// This is a more flexible version of run_server that allows customizing the server behavior.
-///
-/// # Arguments
-///
-/// * `config` - The server configuration
-///
-/// # Returns
-///
-/// Returns a Result indicating whether the server ran successfully.
-pub async fn run_server_with_config(config: ServerConfig) -> Result<()> {
-    tracing::info!("Starting server with custom configuration: {:?}", config);
-
-    if config.simulation_mode {
-        tracing::warn!("Running in simulation mode - some features may be limited");
-        // In a real implementation, you would use a different service implementation
-        // or mock certain components
+impl InitializeTool {
+    pub fn call_tool(&self) -> Result<CallToolResult, CallToolError> {
+        let result = format!(
+            "Environment initialized in: {}\nMode: {}\nOver screen: {}",
+            self.folder_to_start,
+            self.mode.as_deref().unwrap_or("wcgw"),
+            self.over_screen.unwrap_or(false)
+        );
+        Ok(CallToolResult::text_content(vec![TextContent::from(result)]))
     }
+}
 
-    if config.debug_mode {
-        tracing::info!("Running in debug mode - enhanced error reporting enabled");
+//******************//
+//  BashCommandTool  //
+//******************//
+#[mcp_tool(
+    name = "bash_command",
+    description = "Execute a bash command with stateful session management"
+)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct BashCommandTool {
+    /// The bash command to execute
+    pub command: String,
+    /// Optional text to send to the command's stdin
+    #[serde(default)]
+    pub send_text: Option<String>,
+}
 
-        // Enable stack traces for errors
-        std::env::set_var("RUST_BACKTRACE", "1");
+impl BashCommandTool {
+    pub fn call_tool(&self) -> Result<CallToolResult, CallToolError> {
+        let rt = tokio::runtime::Handle::current();
+        let command = self.command.clone();
+        
+        let result = rt.block_on(async move {
+            let output = tokio::process::Command::new("bash")
+                .arg("-c")
+                .arg(&command)
+                .output()
+                .await
+                .map_err(|e| CallToolError::new(e))?;
 
-        // Create a debug log file
-        let _debug_log = std::fs::File::create("winx_debug.log").map_err(|e| {
-            WinxError::ShellInitializationError(format!("Failed to create debug log: {}", e))
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let exit_code = output.status.code().unwrap_or(-1);
+
+            let mut result = String::new();
+            if !stdout.is_empty() {
+                result.push_str(&stdout);
+            }
+            if !stderr.is_empty() {
+                if !result.is_empty() {
+                    result.push('\n');
+                }
+                result.push_str("STDERR:\n");
+                result.push_str(&stderr);
+            }
+            result.push_str(&format!("\n[Exit code: {}]", exit_code));
+
+            Ok::<String, CallToolError>(result)
         })?;
 
-        // Log system information
-        let current_time = format!("{:?}", SystemTime::now());
-        let sys_info = format!(
-            "System Info:\n\
-            - OS: {}\n\
-            - Arch: {}\n\
-            - Version: {}\n\
-            - Debug Mode: {}\n\
-            - Simulation Mode: {}\n\
-            - Rust Version: {}\n\
-            - Time: {}\n",
-            std::env::consts::OS,
-            std::env::consts::ARCH,
-            env!("CARGO_PKG_VERSION"),
-            config.debug_mode,
-            config.simulation_mode,
-            "unknown",
-            current_time,
-        );
-
-        // Log to console and file
-        tracing::info!("Debug System Info:\n{}", sys_info);
-
-        if let Err(e) = std::fs::write("winx_debug_info.txt", sys_info) {
-            tracing::warn!("Failed to write debug info to file: {}", e);
-        }
+        Ok(CallToolResult::text_content(vec![TextContent::from(result)]))
     }
+}
 
-    // Use timeout for the server startup
-    let start_time = std::time::Instant::now();
+//******************//
+//  ReadFilesTool  //
+//******************//
+#[mcp_tool(
+    name = "read_files",
+    description = "Read full file content of one or more files with optional line ranges"
+)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct ReadFilesTool {
+    /// Array of file paths to read
+    pub paths: Vec<String>,
+    /// Whether to include line numbers
+    #[serde(default)]
+    pub include_line_numbers: Option<bool>,
+}
 
-    // Initialize the Winx service
-    tracing::debug!("Initializing server...");
+impl ReadFilesTool {
+    pub fn call_tool(&self) -> Result<CallToolResult, CallToolError> {
+        if self.paths.is_empty() {
+            return Err(CallToolError::new("No file paths provided"));
+        }
 
-    // Create service with debug mode if enabled
-    let service = tools::WinxService::new();
-
-    // Use a timeout for server initialization to avoid hanging
-    let service_future = service.serve(stdio());
-    let service = tokio::time::timeout(
-        std::time::Duration::from_secs(30), // 30 second timeout
-        service_future,
-    )
-    .await
-    .map_err(|_| {
-        WinxError::ShellInitializationError(
-            "Server initialization timed out after 30 seconds".to_string(),
-        )
-    })?
-    .map_err(|e| {
-        WinxError::ShellInitializationError(format!("Failed to start MCP service: {}", e))
-    })?;
-
-    // Log successful startup
-    let startup_duration = start_time.elapsed();
-    tracing::info!(
-        "Server started and connected successfully in {:.2?}",
-        startup_duration
-    );
-
-    // Create a task to periodically report the server status
-    let status_reporter = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(300)); // 5 minutes
-        loop {
-            interval.tick().await;
-
-            // Add more detailed status in debug mode
-            if config.debug_mode {
-                let mem_usage = match std::process::Command::new("ps")
-                    .args(["o", "rss=", "-p", &std::process::id().to_string()])
-                    .output()
-                {
-                    Ok(output) => {
-                        let output_str = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                        if let Ok(kb) = output_str.parse::<u64>() {
-                            format!("{:.2} MB", kb as f64 / 1024.0)
-                        } else {
-                            "Unknown".to_string()
-                        }
-                    }
-                    Err(_) => "Unknown".to_string(),
+        let rt = tokio::runtime::Handle::current();
+        let paths = self.paths.clone();
+        let include_line_numbers = self.include_line_numbers.unwrap_or(false);
+        
+        let result = rt.block_on(async move {
+            let mut results = Vec::new();
+            
+            for path in &paths {
+                let expanded_path = if path.starts_with('~') {
+                    home::home_dir()
+                        .map(|home| home.join(&path[2..]))
+                        .unwrap_or_else(|| std::path::PathBuf::from(path))
+                } else {
+                    std::path::PathBuf::from(path)
                 };
 
-                tracing::debug!(
-                    "Server is running (periodic status report) - Memory usage: {}, Uptime: {:.2?}",
-                    mem_usage,
-                    start_time.elapsed()
-                );
-            } else {
-                tracing::debug!("Server is running (periodic status report)");
-            }
-        }
-    });
-
-    // Wait for the service to complete, with proper error handling
-    match service.waiting().await {
-        Ok(_) => {
-            tracing::info!("Server completed normally");
-            // Cancel the status reporter
-            status_reporter.abort();
-            Ok(())
-        }
-        Err(e) => {
-            // Cancel the status reporter
-            status_reporter.abort();
-
-            // More detailed error reporting in debug mode
-            if config.debug_mode {
-                tracing::error!("Server error details: {:?}", e);
-
-                // Try to log error details to file
-                if let Err(log_err) = std::fs::write(
-                    "winx_error_log.txt",
-                    format!("Error time: {:?}\nError: {:?}\n", SystemTime::now(), e),
-                ) {
-                    tracing::warn!("Failed to write error log: {}", log_err);
+                match tokio::fs::read_to_string(&expanded_path).await {
+                    Ok(content) => {
+                        let final_content = if include_line_numbers {
+                            content
+                                .lines()
+                                .enumerate()
+                                .map(|(i, line)| format!("{:4} | {}", i + 1, line))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        } else {
+                            content
+                        };
+                        
+                        results.push(format!("=== {} ===\n{}", path, final_content));
+                    }
+                    Err(e) => {
+                        results.push(format!("=== {} ===\nERROR: {}", path, e));
+                    }
                 }
             }
 
-            Err(WinxError::ShellInitializationError(format!(
-                "Server error: {}",
-                e
-            )))
+            Ok::<String, CallToolError>(results.join("\n\n"))
+        })?;
+
+        Ok(CallToolResult::text_content(vec![TextContent::from(result)]))
+    }
+}
+
+//******************//
+//  WriteFileTool  //
+//******************//
+#[mcp_tool(
+    name = "write_file", 
+    description = "Write content to a file, creating directories if needed"
+)]
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct WriteFileTool {
+    /// Path to the file to write
+    pub path: String,
+    /// Content to write to the file
+    pub content: String,
+    /// Whether to make the file executable
+    #[serde(default)]
+    pub is_executable: Option<bool>,
+}
+
+impl WriteFileTool {
+    pub fn call_tool(&self) -> Result<CallToolResult, CallToolError> {
+        let rt = tokio::runtime::Handle::current();
+        let path = self.path.clone();
+        let content = self.content.clone();
+        let is_executable = self.is_executable.unwrap_or(false);
+        
+        let result = rt.block_on(async move {
+            let expanded_path = if path.starts_with('~') {
+                home::home_dir()
+                    .map(|home| home.join(&path[2..]))
+                    .unwrap_or_else(|| std::path::PathBuf::from(&path))
+            } else {
+                std::path::PathBuf::from(&path)
+            };
+
+            // Create parent directories if they don't exist
+            if let Some(parent) = expanded_path.parent() {
+                tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| CallToolError::new(e))?;
+            }
+
+            tokio::fs::write(&expanded_path, &content)
+                .await
+                .map_err(|e| CallToolError::new(e))?;
+
+            // Set executable if requested
+            if is_executable {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = tokio::fs::metadata(&expanded_path)
+                        .await
+                        .map_err(|e| CallToolError::new(e))?
+                        .permissions();
+                    perms.set_mode(perms.mode() | 0o755);
+                    tokio::fs::set_permissions(&expanded_path, perms)
+                        .await
+                        .map_err(|e| CallToolError::new(e))?;
+                }
+            }
+
+            Ok::<String, CallToolError>(format!("File written successfully: {}", path))
+        })?;
+
+        Ok(CallToolResult::text_content(vec![TextContent::from(result)]))
+    }
+}
+
+//******************//
+//  WinxTools  //
+//******************//
+// Generates an enum named WinxTools with all tool variants
+tool_box!(WinxTools, [InitializeTool, BashCommandTool, ReadFilesTool, WriteFileTool]);
+
+//******************//
+//  WinxServerHandler  //
+//******************//
+pub struct WinxServerHandler;
+
+#[async_trait]
+impl ServerHandler for WinxServerHandler {
+    // Handle ListToolsRequest, return list of available tools as ListToolsResult
+    async fn handle_list_tools_request(
+        &self,
+        _request: ListToolsRequest,
+        _runtime: &dyn McpServer,
+    ) -> std::result::Result<ListToolsResult, RpcError> {
+        Ok(ListToolsResult {
+            meta: None,
+            next_cursor: None,
+            tools: WinxTools::tools(),
+        })
+    }
+
+    // Handles incoming CallToolRequest and processes it using the appropriate tool
+    async fn handle_call_tool_request(
+        &self,
+        request: CallToolRequest,
+        _runtime: &dyn McpServer,
+    ) -> std::result::Result<CallToolResult, CallToolError> {
+        info!("Handling tool request: {}", request.method);
+        
+        // Attempt to convert request parameters into WinxTools enum
+        let tool_params: WinxTools =
+            WinxTools::try_from(request.params).map_err(CallToolError::new)?;
+
+        // Match the tool variant and execute its corresponding logic
+        match tool_params {
+            WinxTools::InitializeTool(tool) => tool.call_tool(),
+            WinxTools::BashCommandTool(tool) => tool.call_tool(),
+            WinxTools::ReadFilesTool(tool) => tool.call_tool(),
+            WinxTools::WriteFileTool(tool) => tool.call_tool(),
         }
     }
+}
+
+/// Create and start the Winx MCP server
+pub async fn start_winx_server() -> SdkResult<()> {
+    info!("Starting Winx MCP Server using rust-mcp-sdk");
+
+    // Define server capabilities and info
+    let server_details = InitializeResult {
+        server_info: Implementation {
+            name: "winx-code-agent".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            title: Some("Winx Code Agent - Rust WCGW Implementation".to_string()),
+        },
+        capabilities: ServerCapabilities {
+            tools: Some(ServerCapabilitiesTools { list_changed: None }),
+            ..Default::default()
+        },
+        meta: None,
+        instructions: Some("Winx is a high-performance Rust implementation of WCGW for code agents. It provides shell execution and file management capabilities.".to_string()),
+        protocol_version: LATEST_PROTOCOL_VERSION.to_string(),
+    };
+
+    // Create stdio transport
+    let transport = StdioTransport::new(TransportOptions::default())?;
+
+    // Create handler
+    let handler = WinxServerHandler;
+
+    // Create and start server
+    let server: ServerRuntime = server_runtime::create_server(server_details, transport, handler);
+    server.start().await
 }
