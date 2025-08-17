@@ -461,6 +461,33 @@ impl Clone for WinxError {
                 suggestion: suggestion.clone(),
             },
             Self::ContextSaveError(msg) => Self::ContextSaveError(msg.clone()),
+            Self::CommandTimeout {
+                command,
+                timeout_seconds,
+            } => Self::CommandTimeout {
+                command: command.clone(),
+                timeout_seconds: *timeout_seconds,
+            },
+            Self::InteractiveCommandDetected { command } => Self::InteractiveCommandDetected {
+                command: command.clone(),
+            },
+            Self::CommandAlreadyRunning {
+                current_command,
+                duration_seconds,
+            } => Self::CommandAlreadyRunning {
+                current_command: current_command.clone(),
+                duration_seconds: *duration_seconds,
+            },
+            Self::ProcessCleanupError { message } => Self::ProcessCleanupError {
+                message: message.clone(),
+            },
+            Self::BufferOverflow { size, max_size } => Self::BufferOverflow {
+                size: *size,
+                max_size: *max_size,
+            },
+            Self::SessionRecoveryError { message } => Self::SessionRecoveryError {
+                message: message.clone(),
+            },
             Self::IoError(err) => Self::IoError(std::io::Error::new(err.kind(), err.to_string())),
         }
     }

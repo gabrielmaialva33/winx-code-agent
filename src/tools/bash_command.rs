@@ -1524,12 +1524,27 @@ async fn execute_interactive_command(
         warn!("Failed to record command for pattern analysis: {}", e);
     }
 
-    // Execute the command with enriched error handling
+    // Execute the command with WCGW-style timeout and error handling
+    let start_execution_time = Instant::now();
     match bash_state
         .execute_interactive(command, effective_timeout)
         .await
     {
         Ok(output) => {
+            let execution_duration = start_execution_time.elapsed();
+            debug!("Command completed in {:.2?}", execution_duration);
+            
+            // Record successful command execution for pattern analysis
+            if let Err(e) = bash_state.error_predictor.record_error(
+                "command_success",
+                "Command executed successfully",
+                Some(command),
+                None,
+                Some(&bash_state.cwd.to_string_lossy())
+            ) {
+                debug!("Failed to record successful command: {}", e);
+            }
+            
             // Check for common error patterns in output and enhance with suggestions
             if output.contains("command not found") {
                 let cmd_name = command.split_whitespace().next().unwrap_or(command);
@@ -1547,21 +1562,46 @@ async fn execute_interactive_command(
             Ok(output)
         }
         Err(e) => {
-            // Convert anyhow::Error to WinxError
-            let err: WinxError = e.into();
+            let execution_duration = start_execution_time.elapsed();
+            
+            // Record command error for pattern analysis
+            if let Err(record_err) = bash_state.error_predictor.record_error(
+                "command_execution_error",
+                &format!("{}", e),
+                Some(command),
+                None,
+                Some(&bash_state.cwd.to_string_lossy())
+            ) {
+                debug!("Failed to record command error: {}", record_err);
+            }
+            
+            // Convert anyhow::Error to WinxError and enhance with WCGW-style context
+            let mut err: WinxError = e.into();
 
-            // Enhance error messages with context
+            // Check if this might be a timeout
+            if execution_duration.as_secs_f32() >= effective_timeout * 0.95 {
+                err = WinxError::CommandTimeout {
+                    command: command.to_string(),
+                    timeout_seconds: effective_timeout as u64,
+                };
+            }
+
+            // Enhance error messages with WCGW-style suggestions
             match &err {
                 WinxError::CommandExecutionError(msg) => {
                     if msg.contains("already running") {
                         // Already have a running command - provide more helpful info
-                        Err(WinxError::CommandExecutionError(format!(
-                            "{}. To interact with the running command, use send_text, send_specials, or status_check.",
-                            msg
-                        )))
+                        Err(WinxError::CommandAlreadyRunning {
+                            current_command: command.to_string(),
+                            duration_seconds: execution_duration.as_secs_f64(),
+                        })
                     } else {
                         Err(err)
                     }
+                }
+                WinxError::CommandTimeout { .. } => {
+                    warn!("Command '{}' timed out after {:.1}s", command, effective_timeout);
+                    Err(err)
                 }
                 _ => Err(err),
             }
