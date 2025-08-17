@@ -80,7 +80,7 @@ impl JsonSchema for ModeName {
     }
 
     fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::Schema::Bool(true)
+        schemars::Schema::new_ref("#/definitions/ModeName".to_string())
     }
 }
 
@@ -308,7 +308,7 @@ impl JsonSchema for Modes {
     }
 
     fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::Schema::Bool(true)
+        schemars::Schema::new_ref("#/definitions/Modes".to_string())
     }
 }
 
