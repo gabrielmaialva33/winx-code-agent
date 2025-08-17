@@ -38,6 +38,12 @@ pub struct WinxService {
     start_time: std::time::Instant,
 }
 
+impl Default for WinxService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WinxService {
     /// Create a new instance of the WinxService
     ///

@@ -492,6 +492,12 @@ lazy_static::lazy_static! {
     static ref GLOBAL_CACHE: FileCache = FileCache::new();
 }
 
+impl Default for FileCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileCache {
     /// Create a new file cache with memory optimization
     pub fn new() -> Self {
