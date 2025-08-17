@@ -3,14 +3,11 @@
 
 use rmcp::{
     model::*,
-    tool, tool_router, tool_handler,
     transport::stdio,
-    ServerHandler,
     ServiceExt,
     ErrorData as McpError,
 };
 use std::sync::{Arc, Mutex};
-use std::future::Future;
 use tracing::info;
 
 use crate::state::bash_state::BashState;
@@ -24,7 +21,6 @@ pub struct WinxService {
     pub version: String,
 }
 
-#[tool_router]
 impl WinxService {
     /// Create a new WinxService instance
     pub fn new() -> Self {
@@ -36,7 +32,6 @@ impl WinxService {
     }
 
     /// Initialize the shell environment
-    #[tool(description = "Initialize the shell environment with workspace path and configuration")]
     async fn initialize(
         &self,
         folder_to_start: String,
@@ -53,7 +48,6 @@ impl WinxService {
     }
 
     /// Execute a bash command
-    #[tool(description = "Execute a bash command with stateful session management")]
     async fn bash_command(
         &self,
         command: String,
@@ -64,7 +58,7 @@ impl WinxService {
             .arg(&command)
             .output()
             .await
-            .map_err(|e| McpError::internal_error(e.to_string()))?;
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -87,14 +81,13 @@ impl WinxService {
     }
 
     /// Read files with optional line numbers
-    #[tool(description = "Read full file content of one or more files with optional line ranges")]
     async fn read_files(
         &self,
         paths: Vec<String>,
         include_line_numbers: Option<bool>,
     ) -> Result<CallToolResult, McpError> {
         if paths.is_empty() {
-            return Err(McpError::invalid_params("No file paths provided"));
+            return Err(McpError::invalid_params("No file paths provided", None));
         }
 
         let include_line_numbers = include_line_numbers.unwrap_or(false);
@@ -134,7 +127,6 @@ impl WinxService {
     }
 
     /// Write content to a file
-    #[tool(description = "Write content to a file, creating directories if needed")]
     async fn write_file(
         &self,
         path: String,
@@ -153,12 +145,12 @@ impl WinxService {
         if let Some(parent) = expanded_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|e| McpError::internal_error(e.to_string()))?;
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         }
 
         tokio::fs::write(&expanded_path, &content)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string()))?;
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         // Set executable if requested
         if is_executable.unwrap_or(false) {
@@ -167,12 +159,12 @@ impl WinxService {
                 use std::os::unix::fs::PermissionsExt;
                 let mut perms = tokio::fs::metadata(&expanded_path)
                     .await
-                    .map_err(|e| McpError::internal_error(e.to_string()))?
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
                     .permissions();
                 perms.set_mode(perms.mode() | 0o755);
                 tokio::fs::set_permissions(&expanded_path, perms)
                     .await
-                    .map_err(|e| McpError::internal_error(e.to_string()))?;
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             }
         }
 
@@ -181,16 +173,138 @@ impl WinxService {
     }
 }
 
-// Implement ServerHandler for the service
-#[tool_handler]
+// Manual implementation of the MCP server without macros for now
+// We'll implement the ServerHandler trait directly
+
+use rmcp::ServerHandler;
+
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             name: "winx-code-agent".to_string(),
             version: self.version.clone(),
-            instructions: Some("Winx is a high-performance Rust implementation of WCGW for code agents. It provides shell execution and file management capabilities.".into()),
-            capabilities: ServerCapabilities::builder().tools().build(),
-            ..Default::default()
+        }
+    }
+
+    fn get_capabilities(&self) -> ServerCapabilities {
+        ServerCapabilities::builder()
+            .with_tools()
+            .build()
+    }
+
+    async fn list_tools(&self, _params: ListToolsRequestParams) -> Result<ListToolsResult, McpError> {
+        let tools = vec![
+            Tool {
+                name: "initialize".to_string(),
+                description: "Initialize the shell environment with workspace path and configuration".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "folder_to_start": {"type": "string"},
+                        "mode": {"type": "string", "enum": ["wcgw", "architect", "code_writer"]},
+                        "over_screen": {"type": "boolean"}
+                    },
+                    "required": ["folder_to_start"]
+                }),
+            },
+            Tool {
+                name: "bash_command".to_string(),
+                description: "Execute a bash command with stateful session management".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string"},
+                        "send_text": {"type": "string"}
+                    },
+                    "required": ["command"]
+                }),
+            },
+            Tool {
+                name: "read_files".to_string(),
+                description: "Read full file content of one or more files with optional line ranges".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "paths": {"type": "array", "items": {"type": "string"}},
+                        "include_line_numbers": {"type": "boolean"}
+                    },
+                    "required": ["paths"]
+                }),
+            },
+            Tool {
+                name: "write_file".to_string(),
+                description: "Write content to a file, creating directories if needed".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "content": {"type": "string"},
+                        "is_executable": {"type": "boolean"}
+                    },
+                    "required": ["path", "content"]
+                }),
+            },
+        ];
+
+        Ok(ListToolsResult { tools })
+    }
+
+    async fn call_tool(&self, params: CallToolRequestParams) -> Result<CallToolResult, McpError> {
+        info!("Handling tool request: {}", params.name);
+        
+        match params.name.as_str() {
+            "initialize" => {
+                let folder_to_start = params.arguments.get("folder_to_start")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let mode = params.arguments.get("mode")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let over_screen = params.arguments.get("over_screen")
+                    .and_then(|v| v.as_bool());
+                
+                self.initialize(folder_to_start, mode, over_screen).await
+            }
+            "bash_command" => {
+                let command = params.arguments.get("command")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::invalid_params("Missing command parameter", None))?
+                    .to_string();
+                let send_text = params.arguments.get("send_text")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                
+                self.bash_command(command, send_text).await
+            }
+            "read_files" => {
+                let paths = params.arguments.get("paths")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| McpError::invalid_params("Missing paths parameter", None))?
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>();
+                let include_line_numbers = params.arguments.get("include_line_numbers")
+                    .and_then(|v| v.as_bool());
+                
+                self.read_files(paths, include_line_numbers).await
+            }
+            "write_file" => {
+                let path = params.arguments.get("path")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::invalid_params("Missing path parameter", None))?
+                    .to_string();
+                let content = params.arguments.get("content")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| McpError::invalid_params("Missing content parameter", None))?
+                    .to_string();
+                let is_executable = params.arguments.get("is_executable")
+                    .and_then(|v| v.as_bool());
+                
+                self.write_file(path, content, is_executable).await
+            }
+            _ => Err(McpError::method_not_found(format!("Unknown tool: {}", params.name), None)),
         }
     }
 }
