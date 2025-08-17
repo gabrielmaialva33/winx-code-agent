@@ -1,10 +1,13 @@
 //! Winx MCP Server implementation using rmcp 0.5.0
-//! Following the tool_router pattern from official examples
+//! Minimal working server implementation
 
 use rmcp::{
     model::*,
     transport::stdio,
     ServiceExt,
+    ServerHandler,
+    service::RequestContext,
+    RoleServer,
     ErrorData as McpError,
 };
 use std::sync::{Arc, Mutex};
@@ -36,13 +39,12 @@ impl WinxService {
         &self,
         folder_to_start: String,
         mode: Option<String>,
-        over_screen: Option<bool>,
+        _over_screen: Option<bool>,
     ) -> Result<CallToolResult, McpError> {
         let result = format!(
-            "Environment initialized in: {}\nMode: {}\nOver screen: {}",
+            "Environment initialized in: {}\nMode: {}",
             folder_to_start,
             mode.as_deref().unwrap_or("wcgw"),
-            over_screen.unwrap_or(false)
         );
         Ok(CallToolResult::success(vec![Content::text(result)]))
     }
@@ -51,7 +53,7 @@ impl WinxService {
     async fn bash_command(
         &self,
         command: String,
-        send_text: Option<String>,
+        _send_text: Option<String>,
     ) -> Result<CallToolResult, McpError> {
         let output = tokio::process::Command::new("bash")
             .arg("-c")
@@ -173,83 +175,50 @@ impl WinxService {
     }
 }
 
-// Manual implementation of the MCP server without macros for now
-// We'll implement the ServerHandler trait directly
-
-use rmcp::ServerHandler;
-
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            name: "winx-code-agent".to_string(),
-            version: self.version.clone(),
+            name: "winx-code-agent".into(),
+            version: self.version.clone().into(),
         }
     }
 
-    fn get_capabilities(&self) -> ServerCapabilities {
-        ServerCapabilities::builder()
-            .with_tools()
-            .build()
-    }
-
-    async fn list_tools(&self, _params: ListToolsRequestParams) -> Result<ListToolsResult, McpError> {
+    async fn list_tools(
+        &self,
+        _params: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
         let tools = vec![
             Tool {
-                name: "initialize".to_string(),
-                description: "Initialize the shell environment with workspace path and configuration".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "folder_to_start": {"type": "string"},
-                        "mode": {"type": "string", "enum": ["wcgw", "architect", "code_writer"]},
-                        "over_screen": {"type": "boolean"}
-                    },
-                    "required": ["folder_to_start"]
-                }),
+                name: "initialize".into(),
+                description: "Initialize the shell environment with workspace path and configuration".into(),
+                input_schema: Arc::new(serde_json::Map::new()),
             },
             Tool {
-                name: "bash_command".to_string(),
-                description: "Execute a bash command with stateful session management".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "command": {"type": "string"},
-                        "send_text": {"type": "string"}
-                    },
-                    "required": ["command"]
-                }),
+                name: "bash_command".into(),
+                description: "Execute a bash command with stateful session management".into(),
+                input_schema: Arc::new(serde_json::Map::new()),
             },
             Tool {
-                name: "read_files".to_string(),
-                description: "Read full file content of one or more files with optional line ranges".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "paths": {"type": "array", "items": {"type": "string"}},
-                        "include_line_numbers": {"type": "boolean"}
-                    },
-                    "required": ["paths"]
-                }),
+                name: "read_files".into(),
+                description: "Read full file content of one or more files with optional line ranges".into(),
+                input_schema: Arc::new(serde_json::Map::new()),
             },
             Tool {
-                name: "write_file".to_string(),
-                description: "Write content to a file, creating directories if needed".to_string(),
-                input_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "path": {"type": "string"},
-                        "content": {"type": "string"},
-                        "is_executable": {"type": "boolean"}
-                    },
-                    "required": ["path", "content"]
-                }),
+                name: "write_file".into(),
+                description: "Write content to a file, creating directories if needed".into(),
+                input_schema: Arc::new(serde_json::Map::new()),
             },
         ];
 
         Ok(ListToolsResult { tools })
     }
 
-    async fn call_tool(&self, params: CallToolRequestParams) -> Result<CallToolResult, McpError> {
+    async fn call_tool(
+        &self,
+        params: CallToolRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
         info!("Handling tool request: {}", params.name);
         
         match params.name.as_str() {
