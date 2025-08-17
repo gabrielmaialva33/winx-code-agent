@@ -856,6 +856,7 @@ impl SharedErrorPredictor {
             WinxError::MissingParameterError { .. } => "missing_parameter",
             WinxError::NullValueError { .. } => "null_value",
             WinxError::RecoverableSuggestionError { .. } => "recoverable_suggestion",
+            WinxError::ContextSaveError(_) => "context_save_error",
             WinxError::IoError(_) => "io_error",
         };
 
