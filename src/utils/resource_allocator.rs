@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::errors::{Result, WinxError};
 
@@ -264,11 +264,18 @@ impl ResourceAllocator {
 
     /// Release resources after file read completion
     pub async fn release_allocation(&self, file_path: &Path) -> Result<()> {
-        let mut allocations = self.allocations.lock().unwrap();
-        if let Some(memory) = allocations.remove(file_path) {
-            let mut stats = self.stats.lock().unwrap();
-            stats.total_allocated = stats.total_allocated.saturating_sub(memory);
-            stats.active_reads = stats.active_reads.saturating_sub(1);
+        // Release allocation and update stats in separate blocks
+        let memory_released = {
+            let mut allocations = self.allocations.lock().unwrap();
+            allocations.remove(file_path)
+        };
+
+        if let Some(memory) = memory_released {
+            {
+                let mut stats = self.stats.lock().unwrap();
+                stats.total_allocated = stats.total_allocated.saturating_sub(memory);
+                stats.active_reads = stats.active_reads.saturating_sub(1);
+            }
             
             debug!("Released {} bytes for: {:?}", memory, file_path);
         }
@@ -339,21 +346,31 @@ impl ResourceAllocator {
 
     /// Process pending allocation requests
     async fn process_pending_queue(&self) {
-        let mut queue = self.pending_queue.lock().unwrap();
         let mut processed = Vec::new();
         
-        while let Some(request) = queue.pop_front() {
-            let category = FileCategory::from_size(request.file_size);
-            if let Ok(allocation) = self.calculate_allocation(&request, category).await {
-                if self.can_allocate(allocation.allocated_memory).await {
-                    self.allocate_resources(&request.file_path, allocation.allocated_memory).await;
-                    self.cache_allocation(&request.file_path, allocation).await;
-                    processed.push(request.file_path);
-                } else {
-                    // Put back in queue
-                    queue.push_front(request);
-                    break;
+        loop {
+            // Take next request without holding the lock across await
+            let request = {
+                let mut queue = self.pending_queue.lock().unwrap();
+                queue.pop_front()
+            };
+            
+            if let Some(request) = request {
+                let category = FileCategory::from_size(request.file_size);
+                if let Ok(allocation) = self.calculate_allocation(&request, category).await {
+                    if self.can_allocate(allocation.allocated_memory).await {
+                        self.allocate_resources(&request.file_path, allocation.allocated_memory).await;
+                        self.cache_allocation(&request.file_path, allocation).await;
+                        processed.push(request.file_path);
+                    } else {
+                        // Put back in queue and stop processing
+                        let mut queue = self.pending_queue.lock().unwrap();
+                        queue.push_front(request);
+                        break;
+                    }
                 }
+            } else {
+                break; // No more requests
             }
         }
         
