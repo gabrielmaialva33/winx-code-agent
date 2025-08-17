@@ -395,6 +395,13 @@ async fn read_file(
         Err(_) => path_clone.to_string_lossy().to_string(),
     };
 
+    // Mark read operation as successful
+    let allocator = get_global_allocator();
+    allocator.mark_read_success().await;
+
+    debug!("Successfully read file: {} ({} bytes, {} lines)", 
+           canon_path, content.len(), total_lines);
+
     Ok((
         result_content,
         truncated,
@@ -663,7 +670,7 @@ pub async fn handle_tool_call(
                     let end = *end_line_num;
                     let file_tokens = *allocated_tokens;
 
-                    task::spawn_blocking(move || {
+                    tokio::spawn(async move {
                         let result = read_file(
                             &clean_path,
                             file_tokens,
@@ -671,7 +678,13 @@ pub async fn handle_tool_call(
                             show_line_numbers,
                             start,
                             end,
-                        );
+                        ).await;
+
+                        // Track errors if read failed
+                        if result.is_err() {
+                            let allocator = get_global_allocator();
+                            allocator.mark_read_failure().await;
+                        }
 
                         FileReadInfo {
                             original_path,
