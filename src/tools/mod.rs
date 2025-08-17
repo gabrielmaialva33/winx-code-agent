@@ -173,18 +173,18 @@ impl WinxService {
     ///
     /// This tool executes a command in the shell environment and returns the result.
     /// It can also be used to check the status of a running command or send input.
-    #//#[tool(description = "
-- Execute a bash command. This is stateful (beware with subsequent calls).
-- Status of the command and the current working directory will always be returned at the end.
-- The first or the last line might be `(...truncated)` if the output is too long.
-- Always run `pwd` if you get any file or directory not found error to make sure you're not lost.
-- Run long running commands in background using screen instead of \"&\".
-- Do not use 'cat' to read files, use ReadFiles tool instead
-- In order to check status of previous command, use `status_check` with empty command argument.
-- Only command is allowed to run at a time. You need to wait for any previous command to finish before running a new one.
-- Programs don't hang easily, so most likely explanation for no output is usually that the program is still running, and you need to check status again.
-- Do not send Ctrl-c before checking for status till 10 minutes or whatever is appropriate for the program to finish.
-")]
+    // #[tool(description = "
+    // - Execute a bash command. This is stateful (beware with subsequent calls).
+    // - Status of the command and the current working directory will always be returned at the end.
+    // - The first or the last line might be (...truncated) if the output is too long.
+    // - Always run pwd if you get any file or directory not found error to make sure you're not lost.
+    // - Run long running commands in background using screen instead of &.
+    // - Do not use cat to read files, use ReadFiles tool instead
+    // - In order to check status of previous command, use status_check with empty command argument.
+    // - Only command is allowed to run at a time. You need to wait for any previous command to finish before running a new one.
+    // - Programs dont hang easily, so most likely explanation for no output is usually that the program is still running, and you need to check status again.
+    // - Do not send Ctrl-c before checking for status till 10 minutes or whatever is appropriate for the program to finish.
+    // ")]
     async fn bash_command(
         &self,
         #//#[tool(aggr)] args: crate::types::BashCommand,
@@ -522,7 +522,7 @@ Saves provided description and file contents of all the relevant file paths or g
     ///
     /// This tool reads an image file and returns its contents as base64-encoded
     /// data with the appropriate MIME type.
-    #//#[tool(description = "Read an image from the shell.")]
+    // #[tool(description = "Read an image from the shell.")]
     async fn read_image(
         &self,
         #//#[tool(aggr)] args: crate::types::ReadImage,
