@@ -161,32 +161,67 @@ async fn read_file(
         }
     };
 
-    // Check file size
-    if metadata.len() > MAX_FILE_SIZE {
-        warn!("File size exceeds limit: {} bytes", metadata.len());
+    // Smart resource allocation based on file size
+    let file_size = metadata.len();
+    let allocation = match request_file_allocation(&path, file_size).await {
+        Ok(alloc) => alloc,
+        Err(e) => {
+            // If allocation fails due to resource constraints, provide alternatives
+            return Err(ErrorRecovery::suggest(
+                e,
+                &format!(
+                    "System is under memory pressure. Try reading smaller sections using line ranges (e.g., {}:1-1000) or wait for other operations to complete",
+                    file_path
+                ),
+            ));
+        }
+    };
+
+    // Create allocation guard for automatic cleanup
+    let _guard = AllocationGuard::new(path.clone(), allocation.clone()).await;
+
+    // Check file size against allocation
+    if file_size > allocation.allocated_memory as u64 && !allocation.should_use_streaming {
+        warn!("File size exceeds allocated memory: {} bytes", file_size);
         let error = WinxError::FileTooLarge {
             path: path.clone(),
-            size: metadata.len(),
-            max_size: MAX_FILE_SIZE,
+            size: file_size,
+            max_size: allocation.allocated_memory as u64,
         };
 
         return Err(ErrorRecovery::suggest(
             error,
             &format!(
-                "You can read parts of this file by specifying a line range (e.g., {}:1-1000)",
+                "File is too large for current memory allocation. Try reading parts of this file by specifying a line range (e.g., {}:1-1000)",
                 file_path
             ),
         ));
     }
 
-    // Read file content using optimized reader
-    let content = match read_file_to_string(&path, MAX_FILE_SIZE) {
-        Ok(c) => c,
-        Err(e) => {
-            return Err(ErrorRecovery::suggest(
-                e,
-                "Try reading the file with smaller line ranges or check if it contains binary content",
-            ));
+    // Read file content using smart allocation strategy
+    let content = if allocation.should_use_streaming {
+        // Use streaming for large files
+        debug!("Using streaming read for large file: {} bytes", file_size);
+        match read_file_with_streaming(&path, allocation.chunk_size.unwrap_or(1024 * 1024)).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(ErrorRecovery::suggest(
+                    e,
+                    "Try reading the file with smaller line ranges or check if it contains binary content",
+                ));
+            }
+        }
+    } else {
+        // Use standard memory-mapped reading for smaller files
+        debug!("Using standard read for file: {} bytes", file_size);
+        match read_file_to_string(&path, allocation.allocated_memory as u64) {
+            Ok(c) => c,
+            Err(e) => {
+                return Err(ErrorRecovery::suggest(
+                    e,
+                    "Try reading the file with smaller line ranges or check if it contains binary content",
+                ));
+            }
         }
     };
 
