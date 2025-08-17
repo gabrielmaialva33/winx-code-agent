@@ -397,7 +397,7 @@ pub enum CommandState {
 
 /// The BashState struct holds the state of a bash session, including
 /// the current working directory, workspace root, and various modes.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BashState {
     pub cwd: PathBuf,
     pub workspace_root: PathBuf,
