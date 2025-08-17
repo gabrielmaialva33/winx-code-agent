@@ -651,10 +651,10 @@ pub async fn handle_tool_call(
             debug!("Processing Command action: {}", command);
 
             // Enhanced command validation using WCGW-style mode checking
-            if !bash_state.is_command_allowed(&command) {
+            if !bash_state.is_command_allowed(command) {
                 error!("Command '{}' not allowed in current mode", command);
                 let violation_message =
-                    bash_state.get_mode_violation_message("command execution", &command);
+                    bash_state.get_mode_violation_message("command execution", command);
                 return Err(WinxError::CommandNotAllowed(violation_message));
             }
 
