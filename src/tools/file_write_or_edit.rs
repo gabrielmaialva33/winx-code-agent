@@ -1061,6 +1061,10 @@ pub async fn handle_tool_call(
         .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
 
     if let Some(bash_state) = bash_state_guard.as_mut() {
+        // Enhanced file access validation for existing files
+        if Path::new(&file_path).exists() {
+            bash_state.validate_file_access(Path::new(&file_path))?;
+        }
         // Predict potential errors for this file operation
         match bash_state
             .error_predictor
