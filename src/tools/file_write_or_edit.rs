@@ -150,7 +150,7 @@ impl SearchReplaceHelper {
                         match_count: count_before,
                         suggestions: vec![
                             format!("Block {} matches {} times in the file at lines: {}", 
-                                i + 1, count_before, 
+                                i + 1, count_before,
                                 match_locations.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")),
                             "".to_string(),
                             "To resolve this ambiguity:".to_string(),

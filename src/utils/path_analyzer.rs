@@ -726,7 +726,6 @@ pub fn create_default_path_scorer() -> Result<PathScorer> {
 /// // Get the most relevant files based on context
 /// let relevant_files = scorer.filter_and_rank_paths(&all_files, None);
 /// ```
-
 pub fn create_context_aware_path_scorer(
     recent_files: &[String],
     extension_weights: Option<HashMap<String, f32>>,
