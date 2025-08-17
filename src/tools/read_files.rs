@@ -134,9 +134,7 @@ fn read_file(
         if path.is_dir() {
             return Err(ErrorRecovery::suggest(
                 error,
-                &format!(
-                    "The specified path is a directory. Please specify a file within this directory instead. Try using the Glob tool to list files in this directory."
-                ),
+                "The specified path is a directory. Please specify a file within this directory instead. Try using the Glob tool to list files in this directory.",
             ));
         }
 
