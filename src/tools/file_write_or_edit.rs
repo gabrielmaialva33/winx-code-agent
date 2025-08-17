@@ -494,26 +494,88 @@ impl SearchReplaceHelper {
     }
 }
 
-/// Error raised during search/replace block parsing
-#[derive(Debug, thiserror::Error)]
-#[error("Search/Replace Syntax Error: {0}")]
-struct SearchReplaceSyntaxError(String);
+/// Enhanced search/replace syntax error with WCGW-style detailed reporting
+#[derive(Debug)]
+struct SearchReplaceSyntaxError {
+    message: String,
+    line_number: Option<usize>,
+    block_type: Option<String>,
+    suggestions: Vec<String>,
+}
 
 impl SearchReplaceSyntaxError {
     /// Create a new error with a detailed explanation and example
     fn with_help_text(message: impl Into<String>) -> Self {
         let msg = message.into();
-        Self(format!(
-            "{}\n---\n\nMake sure blocks are in correct sequence, and the markers are in separate lines:\n\n<<<<<<< SEARCH\n example old\n=======\n example new\n>>>>>>> REPLACE",
-            msg
-        ))
+        Self {
+            message: msg,
+            line_number: None,
+            block_type: None,
+            suggestions: vec![
+                "Make sure blocks are in correct sequence, and the markers are in separate lines:".to_string(),
+                "".to_string(),
+                "<<<<<<< SEARCH".to_string(),
+                " example old".to_string(),
+                "=======".to_string(),
+                " example new".to_string(),
+                ">>>>>>> REPLACE".to_string(),
+            ],
+        }
+    }
+    
+    /// Create enhanced error with detailed context
+    fn detailed(
+        message: impl Into<String>, 
+        line_number: Option<usize>,
+        block_type: Option<String>,
+        suggestions: Vec<String>
+    ) -> Self {
+        Self {
+            message: message.into(),
+            line_number,
+            block_type,
+            suggestions,
+        }
+    }
+    
+    /// Format the error message with all context
+    fn format_message(&self) -> String {
+        let mut msg = format!("Got syntax error while parsing search replace blocks:\n{}", self.message);
+        
+        if let Some(line) = self.line_number {
+            msg.push_str(&format!("\nLine {}", line));
+        }
+        
+        if let Some(ref block_type) = self.block_type {
+            msg.push_str(&format!(" in {} block", block_type));
+        }
+        
+        msg.push_str("\n---\n");
+        
+        if !self.suggestions.is_empty() {
+            msg.push_str("\nSuggestions:\n");
+            for suggestion in &self.suggestions {
+                if suggestion.is_empty() {
+                    msg.push('\n');
+                } else {
+                    msg.push_str(&format!("• {}\n", suggestion));
+                }
+            }
+        }
+        
+        msg
     }
 }
 
 /// Convert internal SearchReplaceSyntaxError to WinxError
 impl From<SearchReplaceSyntaxError> for WinxError {
     fn from(err: SearchReplaceSyntaxError) -> Self {
-        WinxError::SearchReplaceSyntaxError(err.0)
+        WinxError::SearchReplaceSyntaxErrorDetailed {
+            message: err.message,
+            line_number: err.line_number,
+            block_type: err.block_type,
+            suggestions: err.suggestions,
+        }
     }
 }
 
