@@ -747,7 +747,6 @@ pub fn create_context_aware_path_scorer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::io::Write;
     use tempfile::TempDir;
 
