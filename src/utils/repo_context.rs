@@ -10,7 +10,7 @@ use anyhow::{Context as AnyhowContext, Result};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{debug, warn};
+use tracing::debug;
 
 /// Maximum entries to check during repository traversal
 const MAX_ENTRIES_CHECK: usize = 100_000;

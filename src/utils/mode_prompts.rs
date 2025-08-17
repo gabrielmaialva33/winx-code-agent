@@ -135,9 +135,14 @@ pub fn get_mode_prompt(
         Modes::Wcgw => WCGW_PROMPT.to_string(),
         Modes::Architect => ARCHITECT_PROMPT.to_string(),
         Modes::CodeWriter => {
-            let edit_globs = allowed_file_edit_globs.unwrap_or(&AllowedGlobs::All("all".to_string()));
-            let write_globs = allowed_write_new_globs.unwrap_or(&AllowedGlobs::All("all".to_string()));
-            let commands = allowed_commands.unwrap_or(&AllowedCommands::All("all".to_string()));
+            // Create default values with longer lifetimes
+            let default_edit_globs = AllowedGlobs::All("all".to_string());
+            let default_write_globs = AllowedGlobs::All("all".to_string());
+            let default_commands = AllowedCommands::All("all".to_string());
+            
+            let edit_globs = allowed_file_edit_globs.unwrap_or(&default_edit_globs);
+            let write_globs = allowed_write_new_globs.unwrap_or(&default_write_globs);
+            let commands = allowed_commands.unwrap_or(&default_commands);
             
             code_writer_prompt(edit_globs, write_globs, commands)
         }
