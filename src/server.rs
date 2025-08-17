@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
-use crate::state::bash_state::BashState;
+use crate::state::BashState;
 
 /// Winx service with shared bash state
 #[derive(Clone)]
