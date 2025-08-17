@@ -7,14 +7,13 @@ use rmcp::{
     transport::stdio,
     ServerHandler,
     ServiceExt,
+    ErrorData as McpError,
 };
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use tracing::{info, warn};
+use std::future::Future;
+use tracing::info;
 
 use crate::state::bash_state::BashState;
-use crate::errors::WinxError;
 
 /// Winx service with shared bash state and tool implementations
 #[derive(Clone)]
@@ -43,7 +42,7 @@ impl WinxService {
         folder_to_start: String,
         mode: Option<String>,
         over_screen: Option<bool>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    ) -> Result<CallToolResult, McpError> {
         let result = format!(
             "Environment initialized in: {}\nMode: {}\nOver screen: {}",
             folder_to_start,
@@ -59,13 +58,13 @@ impl WinxService {
         &self,
         command: String,
         send_text: Option<String>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    ) -> Result<CallToolResult, McpError> {
         let output = tokio::process::Command::new("bash")
             .arg("-c")
             .arg(&command)
             .output()
             .await
-            .map_err(|e| rmcp::Error::internal(e.to_string()))?;
+            .map_err(|e| McpError::internal_error(e.to_string()))?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -93,9 +92,9 @@ impl WinxService {
         &self,
         paths: Vec<String>,
         include_line_numbers: Option<bool>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    ) -> Result<CallToolResult, McpError> {
         if paths.is_empty() {
-            return Err(rmcp::Error::invalid_params("No file paths provided"));
+            return Err(McpError::invalid_params("No file paths provided"));
         }
 
         let include_line_numbers = include_line_numbers.unwrap_or(false);
@@ -141,7 +140,7 @@ impl WinxService {
         path: String,
         content: String,
         is_executable: Option<bool>,
-    ) -> Result<CallToolResult, rmcp::Error> {
+    ) -> Result<CallToolResult, McpError> {
         let expanded_path = if path.starts_with('~') {
             home::home_dir()
                 .map(|home| home.join(&path[2..]))
@@ -154,12 +153,12 @@ impl WinxService {
         if let Some(parent) = expanded_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
-                .map_err(|e| rmcp::Error::internal(e.to_string()))?;
+                .map_err(|e| McpError::internal_error(e.to_string()))?;
         }
 
         tokio::fs::write(&expanded_path, &content)
             .await
-            .map_err(|e| rmcp::Error::internal(e.to_string()))?;
+            .map_err(|e| McpError::internal_error(e.to_string()))?;
 
         // Set executable if requested
         if is_executable.unwrap_or(false) {
@@ -168,12 +167,12 @@ impl WinxService {
                 use std::os::unix::fs::PermissionsExt;
                 let mut perms = tokio::fs::metadata(&expanded_path)
                     .await
-                    .map_err(|e| rmcp::Error::internal(e.to_string()))?
+                    .map_err(|e| McpError::internal_error(e.to_string()))?
                     .permissions();
                 perms.set_mode(perms.mode() | 0o755);
                 tokio::fs::set_permissions(&expanded_path, perms)
                     .await
-                    .map_err(|e| rmcp::Error::internal(e.to_string()))?;
+                    .map_err(|e| McpError::internal_error(e.to_string()))?;
             }
         }
 
@@ -183,12 +182,14 @@ impl WinxService {
 }
 
 // Implement ServerHandler for the service
-#[rmcp::tool_handler]
+#[tool_handler]
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
+            name: "winx-code-agent".to_string(),
+            version: self.version.clone(),
             instructions: Some("Winx is a high-performance Rust implementation of WCGW for code agents. It provides shell execution and file management capabilities.".into()),
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder().tools().build(),
             ..Default::default()
         }
     }
