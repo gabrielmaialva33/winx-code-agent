@@ -11,49 +11,114 @@ use std::path::Path;
 /// Each extension is listed without the dot (e.g., 'rs' not '.rs')
 const SOURCE_CODE_EXTENSIONS: &[&str] = &[
     // Rust
-    "rs", "rlib",
+    "rs",
+    "rlib",
     // Python
-    "py", "pyx", "pyi", "pyw",
+    "py",
+    "pyx",
+    "pyi",
+    "pyw",
     // JavaScript and TypeScript
-    "js", "jsx", "ts", "tsx", "mjs", "cjs",
+    "js",
+    "jsx",
+    "ts",
+    "tsx",
+    "mjs",
+    "cjs",
     // Web
-    "html", "htm", "xhtml", "css", "scss", "sass", "less",
+    "html",
+    "htm",
+    "xhtml",
+    "css",
+    "scss",
+    "sass",
+    "less",
     // C and C++
-    "c", "h", "cpp", "cxx", "cc", "hpp", "hxx", "hh", "inl",
+    "c",
+    "h",
+    "cpp",
+    "cxx",
+    "cc",
+    "hpp",
+    "hxx",
+    "hh",
+    "inl",
     // C#
-    "cs", "csx",
+    "cs",
+    "csx",
     // Java
-    "java", "scala", "kt", "kts", "groovy",
+    "java",
+    "scala",
+    "kt",
+    "kts",
+    "groovy",
     // Go
-    "go", "mod",
+    "go",
+    "mod",
     // Swift
     "swift",
     // Ruby
-    "rb", "rake", "gemspec",
+    "rb",
+    "rake",
+    "gemspec",
     // PHP
-    "php", "phtml", "phar", "phps",
+    "php",
+    "phtml",
+    "phar",
+    "phps",
     // Shell
-    "sh", "bash", "zsh", "fish",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
     // PowerShell
-    "ps1", "psm1", "psd1",
+    "ps1",
+    "psm1",
+    "psd1",
     // SQL
-    "sql", "ddl", "dml",
+    "sql",
+    "ddl",
+    "dml",
     // Markup and config
-    "xml", "json", "yaml", "yml", "toml", "ini", "cfg", "conf",
+    "xml",
+    "json",
+    "yaml",
+    "yml",
+    "toml",
+    "ini",
+    "cfg",
+    "conf",
     // Documentation
-    "md", "markdown", "rst", "adoc", "tex",
+    "md",
+    "markdown",
+    "rst",
+    "adoc",
+    "tex",
     // Build and dependency files
-    "Makefile", "Dockerfile", "Jenkinsfile",
+    "Makefile",
+    "Dockerfile",
+    "Jenkinsfile",
     // Haskell
-    "hs", "lhs",
+    "hs",
+    "lhs",
     // Lisp family
-    "lisp", "cl", "el", "clj", "cljs", "edn", "scm",
+    "lisp",
+    "cl",
+    "el",
+    "clj",
+    "cljs",
+    "edn",
+    "scm",
     // Erlang and Elixir
-    "erl", "hrl", "ex", "exs",
+    "erl",
+    "hrl",
+    "ex",
+    "exs",
     // Dart and Flutter
     "dart",
     // Objective-C
-    "m", "mm",
+    "m",
+    "mm",
 ];
 
 /// Context length limits based on file type (in tokens)
@@ -117,17 +182,13 @@ impl FileExtensionAnalyzer {
     /// True if the file has a recognized source code extension, False otherwise
     pub fn is_source_code_file(&self, filename: &str) -> bool {
         // Extract extension (without the dot)
-        if let Some(ext) = Path::new(filename)
-            .extension()
-            .and_then(|ext| ext.to_str())
-        {
+        if let Some(ext) = Path::new(filename).extension().and_then(|ext| ext.to_str()) {
             return self.source_extensions.contains(&ext.to_lowercase());
         }
 
         // Files without extensions (like 'Makefile', 'Dockerfile')
         // Case-insensitive match for files without extensions
-        self.source_extensions
-            .contains(&filename.to_lowercase())
+        self.source_extensions.contains(&filename.to_lowercase())
     }
 
     /// Get the appropriate context length limit for a file based on its extension
@@ -179,19 +240,18 @@ impl FileExtensionAnalyzer {
     /// # Returns
     /// A string describing the file type category
     pub fn get_file_type_category(&self, filename: &str) -> String {
-        if let Some(ext) = Path::new(filename)
-            .extension()
-            .and_then(|ext| ext.to_str())
-        {
+        if let Some(ext) = Path::new(filename).extension().and_then(|ext| ext.to_str()) {
             let ext_lower = ext.to_lowercase();
-            
+
             // Categorize by major language families
             match ext_lower.as_str() {
                 "rs" | "rlib" => "Rust".to_string(),
                 "py" | "pyx" | "pyi" | "pyw" => "Python".to_string(),
                 "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => "JavaScript/TypeScript".to_string(),
                 "html" | "htm" | "xhtml" | "css" | "scss" | "sass" | "less" => "Web".to_string(),
-                "c" | "h" | "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" | "inl" => "C/C++".to_string(),
+                "c" | "h" | "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" | "inl" => {
+                    "C/C++".to_string()
+                }
                 "cs" | "csx" => "C#".to_string(),
                 "java" | "scala" | "kt" | "kts" | "groovy" => "JVM Languages".to_string(),
                 "go" | "mod" => "Go".to_string(),
@@ -201,7 +261,9 @@ impl FileExtensionAnalyzer {
                 "sh" | "bash" | "zsh" | "fish" => "Shell".to_string(),
                 "ps1" | "psm1" | "psd1" => "PowerShell".to_string(),
                 "sql" | "ddl" | "dml" => "SQL".to_string(),
-                "xml" | "json" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" => "Configuration".to_string(),
+                "xml" | "json" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" => {
+                    "Configuration".to_string()
+                }
                 "md" | "markdown" | "rst" | "adoc" | "tex" => "Documentation".to_string(),
                 "hs" | "lhs" => "Haskell".to_string(),
                 "lisp" | "cl" | "el" | "clj" | "cljs" | "edn" | "scm" => "Lisp Family".to_string(),
@@ -236,13 +298,24 @@ impl FileExtensionAnalyzer {
     /// True if the file is considered high priority for analysis
     pub fn is_high_priority_file(&self, filename: &str) -> bool {
         let filename_lower = filename.to_lowercase();
-        
+
         // Configuration and project files
         if matches!(
             filename_lower.as_str(),
-            "cargo.toml" | "package.json" | "pyproject.toml" | "requirements.txt" |
-            "readme.md" | "readme.txt" | "license" | "license.txt" | "license.md" |
-            "makefile" | "dockerfile" | "jenkinsfile" | ".gitignore" | ".env"
+            "cargo.toml"
+                | "package.json"
+                | "pyproject.toml"
+                | "requirements.txt"
+                | "readme.md"
+                | "readme.txt"
+                | "license"
+                | "license.txt"
+                | "license.md"
+                | "makefile"
+                | "dockerfile"
+                | "jenkinsfile"
+                | ".gitignore"
+                | ".env"
         ) {
             return true;
         }
@@ -250,8 +323,16 @@ impl FileExtensionAnalyzer {
         // Main entry points
         if matches!(
             filename_lower.as_str(),
-            "main.rs" | "lib.rs" | "main.py" | "__init__.py" | "index.js" | 
-            "index.ts" | "app.js" | "app.ts" | "main.go" | "main.java"
+            "main.rs"
+                | "lib.rs"
+                | "main.py"
+                | "__init__.py"
+                | "index.js"
+                | "index.ts"
+                | "app.js"
+                | "app.ts"
+                | "main.go"
+                | "main.java"
         ) {
             return true;
         }
@@ -267,7 +348,11 @@ impl FileExtensionAnalyzer {
     ///
     /// # Returns
     /// Vector of (filename, allocated_tokens) pairs
-    pub fn allocate_token_budget(&self, files: &[String], total_budget: usize) -> Vec<(String, usize)> {
+    pub fn allocate_token_budget(
+        &self,
+        files: &[String],
+        total_budget: usize,
+    ) -> Vec<(String, usize)> {
         if files.is_empty() {
             return Vec::new();
         }
@@ -359,12 +444,24 @@ mod tests {
         let analyzer = FileExtensionAnalyzer::new();
 
         // Test with both limits set
-        assert_eq!(analyzer.select_max_tokens("main.rs", Some(1000), Some(500)), Some(1000));
-        assert_eq!(analyzer.select_max_tokens("data.csv", Some(1000), Some(500)), Some(500));
+        assert_eq!(
+            analyzer.select_max_tokens("main.rs", Some(1000), Some(500)),
+            Some(1000)
+        );
+        assert_eq!(
+            analyzer.select_max_tokens("data.csv", Some(1000), Some(500)),
+            Some(500)
+        );
 
         // Test with only one limit set
-        assert_eq!(analyzer.select_max_tokens("main.rs", Some(1000), None), Some(1000));
-        assert_eq!(analyzer.select_max_tokens("data.csv", Some(1000), None), None);
+        assert_eq!(
+            analyzer.select_max_tokens("main.rs", Some(1000), None),
+            Some(1000)
+        );
+        assert_eq!(
+            analyzer.select_max_tokens("data.csv", Some(1000), None),
+            None
+        );
 
         // Test with no limits
         assert_eq!(analyzer.select_max_tokens("main.rs", None, None), None);
@@ -376,8 +473,14 @@ mod tests {
 
         assert_eq!(analyzer.get_file_type_category("main.rs"), "Rust");
         assert_eq!(analyzer.get_file_type_category("script.py"), "Python");
-        assert_eq!(analyzer.get_file_type_category("component.tsx"), "JavaScript/TypeScript");
-        assert_eq!(analyzer.get_file_type_category("config.json"), "Configuration");
+        assert_eq!(
+            analyzer.get_file_type_category("component.tsx"),
+            "JavaScript/TypeScript"
+        );
+        assert_eq!(
+            analyzer.get_file_type_category("config.json"),
+            "Configuration"
+        );
         assert_eq!(analyzer.get_file_type_category("Dockerfile"), "Docker");
     }
 
@@ -400,19 +503,19 @@ mod tests {
     #[test]
     fn test_token_budget_allocation() {
         let analyzer = FileExtensionAnalyzer::new();
-        
+
         let files = vec![
-            "Cargo.toml".to_string(),     // High priority
-            "main.rs".to_string(),        // High priority
-            "utils.rs".to_string(),       // Normal
-            "test.rs".to_string(),        // Normal
+            "Cargo.toml".to_string(), // High priority
+            "main.rs".to_string(),    // High priority
+            "utils.rs".to_string(),   // Normal
+            "test.rs".to_string(),    // Normal
         ];
 
         let allocations = analyzer.allocate_token_budget(&files, 1000);
-        
+
         // Should have allocations for all files
         assert_eq!(allocations.len(), 4);
-        
+
         // Total should not exceed budget
         let total_allocated: usize = allocations.iter().map(|(_, tokens)| tokens).sum();
         assert!(total_allocated <= 1000);

@@ -428,14 +428,15 @@ pub async fn handle_tool_call(
     // Create a vector of file reading parameters for parallel processing
     let mut file_params = Vec::with_capacity(validated_read_files.file_paths.len());
     let show_line_numbers = validated_read_files.show_line_numbers();
-    
+
     // Use intelligent token allocation based on file types
     let file_extension_analyzer = FileExtensionAnalyzer::new();
     let max_tokens_per_file = validated_read_files.max_tokens;
-    
+
     // If we have a token limit, allocate intelligently across files
     let token_allocations = if let Some(total_tokens) = max_tokens_per_file {
-        let file_names: Vec<String> = validated_read_files.file_paths
+        let file_names: Vec<String> = validated_read_files
+            .file_paths
             .iter()
             .map(|path| {
                 // Extract just the filename for analysis
@@ -446,8 +447,9 @@ pub async fn handle_tool_call(
                     .to_string()
             })
             .collect();
-        
-        file_extension_analyzer.allocate_token_budget(&file_names, total_tokens)
+
+        file_extension_analyzer
+            .allocate_token_budget(&file_names, total_tokens)
             .into_iter()
             .collect::<HashMap<String, usize>>()
     } else {
@@ -516,12 +518,20 @@ pub async fn handle_tool_call(
             .and_then(|name| name.to_str())
             .unwrap_or(&clean_path)
             .to_string();
-        
-        let allocated_tokens = token_allocations.get(&file_name).copied()
+
+        let allocated_tokens = token_allocations
+            .get(&file_name)
+            .copied()
             .or(max_tokens_per_file); // Fallback to global limit if no allocation
-        
+
         // Store file params for parallel processing
-        file_params.push((clean_path, file_path.clone(), start_line_num, end_line_num, allocated_tokens));
+        file_params.push((
+            clean_path,
+            file_path.clone(),
+            start_line_num,
+            end_line_num,
+            allocated_tokens,
+        ));
     }
 
     // Build a structure to hold results
