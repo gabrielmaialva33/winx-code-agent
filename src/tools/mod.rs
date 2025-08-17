@@ -14,10 +14,8 @@ pub mod initialize;
 pub mod read_files;
 pub mod read_image;
 
-use anyhow::Result;
-use rmcp::{model::*, ErrorData as McpError, ServerHandler};
 use std::sync::{Arc, Mutex};
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::errors::WinxError;
 use crate::state::bash_state::BashState;
