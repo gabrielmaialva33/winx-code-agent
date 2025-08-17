@@ -4,7 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Winx is a high-performance Rust implementation of WCGW (What Could Go Wrong) for code agents. It provides shell execution and file management capabilities for LLM code agents, designed to integrate with Claude and other LLMs via the Model Context Protocol (MCP).
+Winx is a high-performance Rust implementation of WCGW (What Could Go Wrong) for code agents with NVIDIA AI integration. It provides shell execution, file management, and AI-powered code analysis capabilities for LLM code agents, designed to integrate with Claude and other LLMs via the Model Context Protocol (MCP).
+
+### New AI Features (NVIDIA Integration)
+
+Winx now includes powerful AI capabilities through NVIDIA's NIM (NVIDIA Inference Microservices) API:
+
+- **AI-Powered Code Analysis**: Analyze code for bugs, security issues, performance problems, and style violations
+- **Code Generation**: Generate code from natural language descriptions
+- **Code Explanation**: Get detailed explanations of complex code
+- **Multi-Language Support**: Works with Rust, Python, JavaScript, TypeScript, Go, Java, C++, and many more
+- **Smart Model Selection**: Automatically chooses the best NVIDIA model for each task
 
 ## Building and Running the Project
 
@@ -36,6 +46,26 @@ cargo run -- --debug
 # Display version
 cargo run -- --version
 ```
+
+### NVIDIA AI Integration Setup
+
+To enable AI-powered features, set your NVIDIA API key:
+
+```bash
+# Set NVIDIA API key (required for AI features)
+export NVIDIA_API_KEY="your-nvidia-api-key-here"
+
+# Alternative environment variable name
+export NVAPI_KEY="your-nvidia-api-key-here"
+
+# Optional: Configure NVIDIA settings
+export NVIDIA_DEFAULT_MODEL="meta/llama-3.1-70b-instruct"
+export NVIDIA_TIMEOUT_SECONDS="30"
+export NVIDIA_MAX_RETRIES="3"
+export NVIDIA_RATE_LIMIT_RPM="60"
+```
+
+Get your API key from: [https://build.nvidia.com/](https://build.nvidia.com/)
 
 ### Testing
 
@@ -86,11 +116,37 @@ Winx is a Rust MCP server implementation with the following core components:
 
 Winx provides several key features:
 
+### Core Features
 1. **Shell Command Execution**: Run commands with full interactive capabilities
 2. **File Operations**: Read, write, and edit files with change tracking
 3. **Project Context**: Save and restore project context for task resumption
 4. **Image Support**: Process image files as base64
 5. **Multiple Operation Modes**: wcgw (full access), architect (read-only), code_writer (restricted)
+
+### AI-Powered Features (with NVIDIA API)
+1. **Code Analysis**: 
+   - Detect bugs, security vulnerabilities, and performance issues
+   - Style and maintainability suggestions
+   - Complexity scoring (0-100 scale)
+   - Language-specific analysis for 20+ programming languages
+
+2. **Code Generation**:
+   - Generate code from natural language descriptions
+   - Context-aware code completion
+   - Multi-language support
+
+3. **Intelligent Model Selection**:
+   - **Codestral 22B**: For code generation and completion
+   - **CodeGemma 7B**: For code analysis and bug detection
+   - **Llama 3.1 70B**: For code explanation and documentation
+   - **Nemotron 340B**: For complex reasoning and refactoring
+   - **Phi-3 Medium**: For fast responses
+
+4. **Advanced Features**:
+   - Rate limiting and retry logic
+   - Streaming responses for long content
+   - Automatic language detection
+   - Security-focused analysis
 
 ## Integration with Claude
 
