@@ -749,7 +749,7 @@ mod tests {
         let size = 10 * 1024; // 10KB
         let (file, expected_data) = create_test_file(size);
 
-        let result = read_direct(&file, size as u64, file.path()).unwrap();
+        let result = read_direct(file.as_file(), size as u64, file.path()).unwrap();
         assert_eq!(result, expected_data);
     }
 
@@ -758,7 +758,7 @@ mod tests {
         let size = 1 * 1024 * 1024; // 1MB
         let (file, expected_data) = create_test_file(size);
 
-        let result = read_mmap(&file, file.path()).unwrap();
+        let result = read_mmap(file.as_file(), file.path()).unwrap();
         assert_eq!(result, expected_data);
     }
 
@@ -772,10 +772,10 @@ mod tests {
         let length = 200 * 1024; // 200KB
         let expected_segment = &data[offset as usize..(offset + length) as usize];
 
-        let result = read_segment_direct(&file, offset, length, file.path()).unwrap();
+        let result = read_segment_direct(file.as_file(), offset, length, file.path()).unwrap();
         assert_eq!(result, expected_segment);
 
-        let result = read_segment_mmap(&file, offset, length, file.path()).unwrap();
+        let result = read_segment_mmap(file.as_file(), offset, length, file.path()).unwrap();
         assert_eq!(result, expected_segment);
     }
 

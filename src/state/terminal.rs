@@ -1697,7 +1697,7 @@ mod tests {
         let mut screen = Screen::new(80);
 
         // Create default attributes
-        let attributes = ScreenCellAttributes::default();
+        let _attributes = ScreenCellAttributes::default();
 
         // Test putting characters
         screen.put_char_basic('H', false, false, false, false, None, None, false, false);
@@ -1791,7 +1791,7 @@ mod tests {
         for i in 0..30 {
             let line = format!("Line {}", i);
             for c in line.chars() {
-                screen.put_char(c, false, false, false, false, None, None, false, false);
+                screen.put_char(c, ScreenCellAttributes::default());
             }
             screen.carriage_return();
             screen.linefeed();

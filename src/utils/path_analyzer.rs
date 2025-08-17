@@ -797,7 +797,7 @@ mod tests {
 
         PathScorer {
             tokenizer: Arc::new(Tokenizer::new(
-                tokenizers::models::wordpiece::WordPiece::new(HashMap::new(), "[UNK]".to_string()),
+                tokenizers::models::wordpiece::WordPiece::default(),
             )),
             vocab_probs,
             unknown_score: DEFAULT_UNKNOWN_SCORE,
@@ -814,7 +814,7 @@ mod tests {
         // Mock a scorer without loading files
         let scorer = PathScorer {
             tokenizer: Arc::new(Tokenizer::new(
-                tokenizers::models::wordpiece::WordPiece::new(HashMap::new(), "[UNK]".to_string()),
+                tokenizers::models::wordpiece::WordPiece::default(),
             )),
             vocab_probs: HashMap::new(),
             unknown_score: DEFAULT_UNKNOWN_SCORE,
