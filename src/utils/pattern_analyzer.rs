@@ -295,6 +295,12 @@ pub struct SharedPatternAnalyzer {
     inner: Arc<tokio::sync::Mutex<PatternAnalyzer>>,
 }
 
+impl Default for SharedPatternAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SharedPatternAnalyzer {
     /// Create a new shared pattern analyzer
     pub fn new() -> Self {
