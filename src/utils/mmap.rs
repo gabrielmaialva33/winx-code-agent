@@ -194,11 +194,8 @@ fn read_mmap(file: &File, path: &Path) -> Result<Vec<u8>> {
 
         // Process in parallel chunks
         const CHUNK_SIZE: usize = 1_048_576; // 1MB chunks
-        let chunk_count = (mmap.len() + CHUNK_SIZE - 1) / CHUNK_SIZE;
-        let mut result = Vec::with_capacity(mmap.len());
-
-        // Pre-allocate result vector with empty chunks
-        result.resize(mmap.len(), 0);
+        let chunk_count = mmap.len().div_ceil(CHUNK_SIZE);
+        let mut result = vec![0; mmap.len()];
 
         // Process in parallel with Rayon - use collect for parallel map
         let chunks: Vec<_> = (0..chunk_count)
