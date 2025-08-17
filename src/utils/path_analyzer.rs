@@ -357,7 +357,7 @@ impl PathScorer {
         }
 
         // Extract the extension from the path
-        let extension = path.split('.').last().unwrap_or("");
+        let extension = path.split('.').next_back().unwrap_or("");
 
         // Get the extension weight or default to 1.0
         let weight = self
@@ -665,7 +665,7 @@ impl PathScorer {
             let normalized_path = self.normalize_path(file_path);
 
             // Split by common delimiters
-            for part in normalized_path.split(|c| c == '/' || c == '_' || c == '-' || c == '.') {
+            for part in normalized_path.split(['/', '_', '-', '.']) {
                 if !part.is_empty() {
                     *token_frequencies.entry(part.to_string()).or_insert(0) += 1;
                 }
