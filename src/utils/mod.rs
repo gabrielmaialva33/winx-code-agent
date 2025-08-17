@@ -11,6 +11,7 @@ pub mod path;
 pub mod path_analyzer;
 pub mod pattern_analyzer;
 pub mod repo;
+pub mod repo_context;
 
 use crate::types::Initialize;
 use serde_json::Value;
