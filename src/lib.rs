@@ -15,4 +15,4 @@ pub mod errors;
 pub mod server;
 
 pub use errors::{Result, WinxError};
-pub use server::{WinxServerHandler, start_winx_server};
+pub use server::{WinxService, start_winx_server};
