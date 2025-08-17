@@ -510,8 +510,18 @@ pub async fn handle_tool_call(
             }
         }
 
+        // Get allocated tokens for this file
+        let file_name = Path::new(&clean_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&clean_path)
+            .to_string();
+        
+        let allocated_tokens = token_allocations.get(&file_name).copied()
+            .or(max_tokens_per_file); // Fallback to global limit if no allocation
+        
         // Store file params for parallel processing
-        file_params.push((clean_path, file_path.clone(), start_line_num, end_line_num));
+        file_params.push((clean_path, file_path.clone(), start_line_num, end_line_num, allocated_tokens));
     }
 
     // Build a structure to hold results
@@ -536,17 +546,18 @@ pub async fn handle_tool_call(
         let chunk_tasks = chunk
             .iter()
             .map(
-                |(clean_path, original_path, start_line_num, end_line_num)| {
+                |(clean_path, original_path, start_line_num, end_line_num, allocated_tokens)| {
                     let clean_path = clean_path.clone();
                     let original_path = original_path.clone();
                     let cwd = cwd.clone();
                     let start = *start_line_num;
                     let end = *end_line_num;
+                    let file_tokens = *allocated_tokens;
 
                     task::spawn_blocking(move || {
                         let result = read_file(
                             &clean_path,
-                            max_tokens_per_file,
+                            file_tokens,
                             &cwd,
                             show_line_numbers,
                             start,
