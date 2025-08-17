@@ -2,14 +2,12 @@
 //! Minimal working server implementation for now
 
 use rmcp::{
-    ErrorData as McpError, 
     ServiceExt, 
     model::*, 
     transport::stdio, 
     ServerHandler,
 };
 use std::sync::Arc;
-use std::future::Future;
 use tokio::sync::Mutex;
 use tracing::info;
 
