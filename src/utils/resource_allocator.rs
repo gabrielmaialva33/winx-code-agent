@@ -101,14 +101,14 @@ pub struct Allocation {
 
 /// Resource usage statistics
 #[derive(Debug, Clone)]
-struct ResourceStats {
-    total_allocated: usize,
-    active_reads: usize,
-    pending_requests: usize,
-    successful_reads: u64,
-    failed_reads: u64,
-    cache_hits: u64,
-    cache_misses: u64,
+pub struct ResourceStats {
+    pub total_allocated: usize,
+    pub active_reads: usize,
+    pub pending_requests: usize,
+    pub successful_reads: u64,
+    pub failed_reads: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
 }
 
 /// Cache entry for allocation decisions
@@ -477,7 +477,7 @@ pub struct AllocationGuard {
 
 impl AllocationGuard {
     /// Create a new allocation guard
-    pub async fn new(file_path: PathBuf, allocation: Allocation) -> Self {
+    pub async fn new(file_path: PathBuf, _allocation: Allocation) -> Self {
         let allocator = get_global_allocator();
         let permit = allocator.acquire_read_permit().await;
         

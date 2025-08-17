@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tokio::task;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::errors::{ErrorRecovery, Result, WinxError};
@@ -22,8 +21,7 @@ use crate::utils::file_extensions::FileExtensionAnalyzer;
 use crate::utils::mmap::{read_file_optimized, read_file_to_string};
 use crate::utils::path::expand_user;
 use crate::utils::resource_allocator::{
-    get_global_allocator, request_file_allocation, release_file_allocation, AllocationGuard,
-    AllocationRequest, ReadPriority,
+    get_global_allocator, request_file_allocation, AllocationGuard,
 };
 
 /// Type alias for file reading result
