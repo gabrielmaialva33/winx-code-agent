@@ -916,6 +916,12 @@ impl InteractiveBash {
     }
 }
 
+impl Default for BashState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BashState {
     /// Creates a new BashState with default settings
     pub fn new() -> Self {
