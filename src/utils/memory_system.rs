@@ -6,9 +6,8 @@
 
 use anyhow::{Context as AnyhowContext, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
 use crate::state::bash_state::BashState;
@@ -148,12 +147,20 @@ impl MemorySystem {
 
         debug!("Saved memory data to: {:?}", memory_file_path);
 
-        // Save bash state if provided
+        // Save bash state if provided (simplified serialization)
         if let Some(bash_state) = bash_state {
             let state_file_path = self.memory_dir.join(format!("{}_bash_state.json", task_id));
             
-            // Serialize bash state to JSON
-            let state_json = serde_json::to_string_pretty(bash_state)
+            // Create a simplified representation of the bash state
+            let state_data = serde_json::json!({
+                "cwd": bash_state.cwd.to_string_lossy().to_string(),
+                "workspace_root": bash_state.workspace_root.to_string_lossy().to_string(),
+                "current_chat_id": bash_state.current_chat_id,
+                "mode": format!("{:?}", bash_state.mode),
+                "initialized": bash_state.initialized,
+            });
+            
+            let state_json = serde_json::to_string_pretty(&state_data)
                 .context("Failed to serialize bash state")?;
             
             fs::write(&state_file_path, state_json)
@@ -169,17 +176,17 @@ impl MemorySystem {
     ///
     /// # Arguments
     /// * `task_id` - The unique task identifier
-    /// * `coding_max_tokens` - Maximum tokens for source code files
+    /// * `_coding_max_tokens` - Maximum tokens for source code files (unused)
     /// * `noncoding_max_tokens` - Maximum tokens for non-source code files
     ///
     /// # Returns
-    /// Tuple of (project_root_path, memory_data, bash_state)
+    /// Tuple of (project_root_path, memory_data, bash_state_json)
     pub fn load_memory(
         &self,
         task_id: &str,
-        coding_max_tokens: Option<usize>,
+        _coding_max_tokens: Option<usize>,
         noncoding_max_tokens: Option<usize>,
-    ) -> Result<(String, String, Option<BashState>)> {
+    ) -> Result<(String, String, Option<serde_json::Value>)> {
         let memory_file_path = self.memory_dir.join(format!("{}.txt", task_id));
         
         if !memory_file_path.exists() {
@@ -202,10 +209,10 @@ impl MemorySystem {
 
         // Try to load bash state if it exists
         let state_file_path = self.memory_dir.join(format!("{}_bash_state.json", task_id));
-        let bash_state = if state_file_path.exists() {
+        let bash_state_json = if state_file_path.exists() {
             match fs::read_to_string(&state_file_path) {
                 Ok(state_json) => {
-                    match serde_json::from_str::<BashState>(&state_json) {
+                    match serde_json::from_str::<serde_json::Value>(&state_json) {
                         Ok(state) => {
                             debug!("Successfully loaded bash state from: {:?}", state_file_path);
                             Some(state)
@@ -226,7 +233,7 @@ impl MemorySystem {
             None
         };
 
-        Ok((project_root_path, data, bash_state))
+        Ok((project_root_path, data, bash_state_json))
     }
 
     /// List all saved tasks
@@ -454,14 +461,14 @@ mod tests {
         assert!(saved_path.exists());
         
         // Load memory
-        let (project_root, loaded_data, bash_state) = memory_system
+        let (project_root, loaded_data, bash_state_json) = memory_system
             .load_memory("test-task", None, None)
             .unwrap();
         
         assert_eq!(project_root, "/test/path");
         assert!(loaded_data.contains("Test task"));
         assert!(loaded_data.contains("Test file content"));
-        assert!(bash_state.is_none());
+        assert!(bash_state_json.is_none());
     }
 
     #[test]
