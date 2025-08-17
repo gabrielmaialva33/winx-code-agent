@@ -22,7 +22,7 @@ use crate::state::bash_state::BashState;
 
 /// Version of the MCP protocol implemented by this service
 #[allow(dead_code)]
-const MCP_PROTOCOL_VERSION: ProtocolVersion = ProtocolVersion::V_2024_11_05;
+const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Main service implementation for Winx
 ///
