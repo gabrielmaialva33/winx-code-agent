@@ -503,6 +503,12 @@ struct SearchReplaceSyntaxError {
     suggestions: Vec<String>,
 }
 
+impl std::fmt::Display for SearchReplaceSyntaxError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.format_message())
+    }
+}
+
 impl SearchReplaceSyntaxError {
     /// Create a new error with a detailed explanation and example
     fn with_help_text(message: impl Into<String>) -> Self {
