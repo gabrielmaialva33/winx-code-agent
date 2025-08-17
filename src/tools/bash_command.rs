@@ -661,11 +661,11 @@ pub async fn handle_tool_call(
 
             // WCGW-style command safety analysis
             let command_context = CommandContext::new(command);
-            
+
             // Check if command should be allowed (interactive detection)
             if let Err(e) = command_context.should_allow_execution() {
                 warn!("Command safety check failed for '{}': {}", command, e);
-                
+
                 // Add helpful message about alternatives
                 let enhanced_error = match e {
                     WinxError::InteractiveCommandDetected { command: cmd } => {
@@ -680,7 +680,7 @@ pub async fn handle_tool_call(
                 };
                 return Err(enhanced_error);
             }
-            
+
             // Log safety warnings
             if !command_context.warnings.is_empty() {
                 for warning in &command_context.warnings {
@@ -704,13 +704,16 @@ pub async fn handle_tool_call(
                 execute_background_command(&mut bash_state, command).await
             } else {
                 // Normal command execution with WCGW-style timeout handling
-                let timeout_seconds = bash_command.wait_for_seconds
+                let timeout_seconds = bash_command
+                    .wait_for_seconds
                     .or_else(|| Some(command_context.timeout.as_secs_f32()))
                     .unwrap_or(30.0); // Fallback to 30 seconds
-                    
-                info!("Executing command '{}' with timeout: {:.1}s", command, timeout_seconds);
-                execute_interactive_command(&mut bash_state, command, Some(timeout_seconds))
-                    .await
+
+                info!(
+                    "Executing command '{}' with timeout: {:.1}s",
+                    command, timeout_seconds
+                );
+                execute_interactive_command(&mut bash_state, command, Some(timeout_seconds)).await
             }
         }
         BashCommandAction::StatusCheck { status_check: _ } => {
@@ -1360,15 +1363,19 @@ async fn execute_interactive_command(
     // WCGW-style command safety validation
     if !command.trim().is_empty() {
         let command_safety = CommandSafety::new();
-        
+
         // Check for command already running before validation
         {
             let bash_guard = bash_state.interactive_bash.lock().map_err(|e| {
                 WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
             })?;
-            
+
             if let Some(ref bash) = *bash_guard {
-                if let CommandState::Running { command: current_cmd, start_time } = &bash.command_state {
+                if let CommandState::Running {
+                    command: current_cmd,
+                    start_time,
+                } = &bash.command_state
+                {
                     let duration = start_time.elapsed().unwrap_or_default().as_secs_f64();
                     return Err(WinxError::CommandAlreadyRunning {
                         current_command: current_cmd.clone(),
@@ -1377,24 +1384,24 @@ async fn execute_interactive_command(
                 }
             }
         }
-        
+
         // Validate command safety
         if command_safety.is_interactive(command) {
             warn!("Interactive command detected: {}", command);
             return Err(WinxError::InteractiveCommandDetected {
                 command: format!(
-                    "{} - Interactive commands may hang. Use non-interactive alternatives or flags", 
+                    "{} - Interactive commands may hang. Use non-interactive alternatives or flags",
                     command
                 ),
             });
         }
-        
+
         // Check for background commands and warn
         if command_safety.is_background_command(command) {
             info!("Background command detected: {}", command);
             // Continue execution but with modified timeout
         }
-        
+
         // Get safety warnings and log them
         let warnings = command_safety.get_warnings(command);
         for warning in &warnings {
@@ -1512,8 +1519,11 @@ async fn execute_interactive_command(
             }
         }
     };
-    
-    debug!("Using timeout of {:.1}s for command: {}", effective_timeout, command);
+
+    debug!(
+        "Using timeout of {:.1}s for command: {}",
+        effective_timeout, command
+    );
 
     // Record this command for pattern analysis
     if let Err(e) = bash_state
@@ -1533,18 +1543,18 @@ async fn execute_interactive_command(
         Ok(output) => {
             let execution_duration = start_execution_time.elapsed();
             debug!("Command completed in {:.2?}", execution_duration);
-            
+
             // Record successful command execution for pattern analysis
             if let Err(e) = bash_state.error_predictor.record_error(
                 "command_success",
                 "Command executed successfully",
                 Some(command),
                 None,
-                Some(&bash_state.cwd.to_string_lossy())
+                Some(&bash_state.cwd.to_string_lossy()),
             ) {
                 debug!("Failed to record successful command: {}", e);
             }
-            
+
             // Check for common error patterns in output and enhance with suggestions
             if output.contains("command not found") {
                 let cmd_name = command.split_whitespace().next().unwrap_or(command);
@@ -1563,18 +1573,18 @@ async fn execute_interactive_command(
         }
         Err(e) => {
             let execution_duration = start_execution_time.elapsed();
-            
+
             // Record command error for pattern analysis
             if let Err(record_err) = bash_state.error_predictor.record_error(
                 "command_execution_error",
                 &format!("{}", e),
                 Some(command),
                 None,
-                Some(&bash_state.cwd.to_string_lossy())
+                Some(&bash_state.cwd.to_string_lossy()),
             ) {
                 debug!("Failed to record command error: {}", record_err);
             }
-            
+
             // Convert anyhow::Error to WinxError and enhance with WCGW-style context
             let mut err: WinxError = e.into();
 
@@ -1600,7 +1610,10 @@ async fn execute_interactive_command(
                     }
                 }
                 WinxError::CommandTimeout { .. } => {
-                    warn!("Command '{}' timed out after {:.1}s", command, effective_timeout);
+                    warn!(
+                        "Command '{}' timed out after {:.1}s",
+                        command, effective_timeout
+                    );
                     Err(err)
                 }
                 _ => Err(err),

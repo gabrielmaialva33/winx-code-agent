@@ -16,41 +16,87 @@ pub const MAX_OUTPUT_SIZE: usize = 1024 * 1024;
 /// Commands that are known to be interactive and might hang
 static INTERACTIVE_COMMANDS: &[&str] = &[
     // Editors
-    "vim", "vi", "nano", "emacs", "code", "subl",
+    "vim",
+    "vi",
+    "nano",
+    "emacs",
+    "code",
+    "subl",
     // Interactive shells/languages
-    "python", "python3", "node", "nodejs", "ruby", "irb", "scala", "ghci",
+    "python",
+    "python3",
+    "node",
+    "nodejs",
+    "ruby",
+    "irb",
+    "scala",
+    "ghci",
     // Interactive tools
-    "mysql", "psql", "sqlite3", "redis-cli", "mongo",
+    "mysql",
+    "psql",
+    "sqlite3",
+    "redis-cli",
+    "mongo",
     // Pagers
-    "less", "more", "view",
+    "less",
+    "more",
+    "view",
     // System tools that might hang
-    "top", "htop", "watch", "tail -f",
+    "top",
+    "htop",
+    "watch",
+    "tail -f",
     // Version control interactive
-    "git rebase -i", "git add -i", "git commit" // without -m
+    "git rebase -i",
+    "git add -i",
+    "git commit", // without -m
 ];
 
 /// Commands that might run for a long time
 static LONG_RUNNING_COMMANDS: &[&str] = &[
     // Build tools
-    "make", "cargo build", "npm install", "pip install", "yarn install",
+    "make",
+    "cargo build",
+    "npm install",
+    "pip install",
+    "yarn install",
     // Compilation
-    "gcc", "g++", "clang", "rustc", "javac",
+    "gcc",
+    "g++",
+    "clang",
+    "rustc",
+    "javac",
     // Package managers
-    "apt-get", "yum", "brew install", "pacman",
+    "apt-get",
+    "yum",
+    "brew install",
+    "pacman",
     // Network tools
-    "wget", "curl", "rsync", "scp",
+    "wget",
+    "curl",
+    "rsync",
+    "scp",
     // Archive tools
-    "tar", "zip", "unzip", "gzip",
+    "tar",
+    "zip",
+    "unzip",
+    "gzip",
 ];
 
 /// Commands that spawn background processes
 static BACKGROUND_COMMANDS: &[&str] = &[
     // Servers
-    "python -m http.server", "node server", "rails server", "cargo run",
+    "python -m http.server",
+    "node server",
+    "rails server",
+    "cargo run",
     // Background services
-    "nohup", "screen", "tmux",
+    "nohup",
+    "screen",
+    "tmux",
     // System services
-    "systemctl start", "service start",
+    "systemctl start",
+    "service start",
 ];
 
 /// Command safety analyzer
@@ -70,20 +116,14 @@ impl Default for CommandSafety {
 impl CommandSafety {
     /// Create a new command safety analyzer
     pub fn new() -> Self {
-        let interactive_commands = INTERACTIVE_COMMANDS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        
+        let interactive_commands = INTERACTIVE_COMMANDS.iter().map(|s| s.to_string()).collect();
+
         let long_running_commands = LONG_RUNNING_COMMANDS
             .iter()
             .map(|s| s.to_string())
             .collect();
-            
-        let background_commands = BACKGROUND_COMMANDS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+
+        let background_commands = BACKGROUND_COMMANDS.iter().map(|s| s.to_string()).collect();
 
         Self {
             interactive_commands,
@@ -95,12 +135,12 @@ impl CommandSafety {
     /// Check if a command is potentially interactive
     pub fn is_interactive(&self, command: &str) -> bool {
         let normalized = self.normalize_command(command);
-        
+
         // Check exact matches
         if self.interactive_commands.contains(&normalized) {
             return true;
         }
-        
+
         // Check if command starts with any interactive command
         for interactive_cmd in &self.interactive_commands {
             if normalized.starts_with(interactive_cmd) {
@@ -111,7 +151,7 @@ impl CommandSafety {
                 }
             }
         }
-        
+
         // Special cases
         self.check_special_interactive_cases(&normalized)
     }
@@ -119,7 +159,7 @@ impl CommandSafety {
     /// Check if a command might run for a long time
     pub fn is_long_running(&self, command: &str) -> bool {
         let normalized = self.normalize_command(command);
-        
+
         for long_cmd in &self.long_running_commands {
             if normalized.starts_with(long_cmd) {
                 let rest = &normalized[long_cmd.len()..];
@@ -128,19 +168,19 @@ impl CommandSafety {
                 }
             }
         }
-        
+
         false
     }
 
     /// Check if a command spawns background processes
     pub fn is_background_command(&self, command: &str) -> bool {
         let normalized = self.normalize_command(command);
-        
+
         // Check for explicit background operators
         if normalized.contains(" &") || normalized.ends_with('&') {
             return true;
         }
-        
+
         for bg_cmd in &self.background_commands {
             if normalized.starts_with(bg_cmd) {
                 let rest = &normalized[bg_cmd.len()..];
@@ -149,7 +189,7 @@ impl CommandSafety {
                 }
             }
         }
-        
+
         false
     }
 
@@ -167,7 +207,7 @@ impl CommandSafety {
     /// Get safety warnings for a command
     pub fn get_warnings(&self, command: &str) -> Vec<String> {
         let mut warnings = Vec::new();
-        
+
         if self.is_interactive(command) {
             warnings.push(format!(
                 "Command '{}' appears to be interactive and may hang waiting for input",
@@ -175,7 +215,7 @@ impl CommandSafety {
             ));
             warnings.push("Consider using non-interactive flags or alternatives".to_string());
         }
-        
+
         if self.is_long_running(command) {
             warnings.push(format!(
                 "Command '{}' may take a long time to complete",
@@ -183,7 +223,7 @@ impl CommandSafety {
             ));
             warnings.push("Consider using status_check to monitor progress".to_string());
         }
-        
+
         if self.is_background_command(command) {
             warnings.push(format!(
                 "Command '{}' may spawn background processes",
@@ -191,7 +231,7 @@ impl CommandSafety {
             ));
             warnings.push("Use explicit process management if needed".to_string());
         }
-        
+
         warnings
     }
 
@@ -203,25 +243,31 @@ impl CommandSafety {
     /// Check special cases for interactive commands
     fn check_special_interactive_cases(&self, command: &str) -> bool {
         // Git commit without -m flag
-        if command.starts_with("git commit") && !command.contains("-m") && !command.contains("--message") {
+        if command.starts_with("git commit")
+            && !command.contains("-m")
+            && !command.contains("--message")
+        {
             return true;
         }
-        
+
         // Docker run without -d flag (detached)
-        if command.starts_with("docker run") && !command.contains("-d") && !command.contains("--detach") {
+        if command.starts_with("docker run")
+            && !command.contains("-d")
+            && !command.contains("--detach")
+        {
             return true;
         }
-        
+
         // SSH without command
         if command == "ssh" || (command.starts_with("ssh ") && !command.contains(" -- ")) {
             return true;
         }
-        
+
         // FTP/SFTP
         if command.starts_with("ftp ") || command.starts_with("sftp ") {
             return true;
         }
-        
+
         false
     }
 }
@@ -266,7 +312,7 @@ impl CommandContext {
                 command: self.command.clone(),
             });
         }
-        
+
         Ok(())
     }
 }
@@ -278,13 +324,13 @@ mod tests {
     #[test]
     fn test_interactive_detection() {
         let safety = CommandSafety::new();
-        
+
         // Interactive commands
         assert!(safety.is_interactive("vim file.txt"));
         assert!(safety.is_interactive("python"));
         assert!(safety.is_interactive("git commit"));
         assert!(safety.is_interactive("mysql -u root"));
-        
+
         // Non-interactive commands
         assert!(!safety.is_interactive("ls -la"));
         assert!(!safety.is_interactive("git commit -m 'message'"));
@@ -295,12 +341,12 @@ mod tests {
     #[test]
     fn test_long_running_detection() {
         let safety = CommandSafety::new();
-        
+
         // Long-running commands
         assert!(safety.is_long_running("cargo build"));
         assert!(safety.is_long_running("npm install"));
         assert!(safety.is_long_running("make all"));
-        
+
         // Quick commands
         assert!(!safety.is_long_running("ls"));
         assert!(!safety.is_long_running("echo hello"));
@@ -309,12 +355,12 @@ mod tests {
     #[test]
     fn test_background_detection() {
         let safety = CommandSafety::new();
-        
+
         // Background commands
         assert!(safety.is_background_command("python -m http.server &"));
         assert!(safety.is_background_command("nohup long_process"));
         assert!(safety.is_background_command("screen -S session"));
-        
+
         // Foreground commands
         assert!(!safety.is_background_command("ls"));
         assert!(!safety.is_background_command("python script.py"));
@@ -323,13 +369,16 @@ mod tests {
     #[test]
     fn test_timeout_calculation() {
         let safety = CommandSafety::new();
-        
+
         // Long-running should get 5 minutes
         assert_eq!(safety.get_timeout("cargo build"), Duration::from_secs(300));
-        
+
         // Background should get 1 minute
-        assert_eq!(safety.get_timeout("nohup process &"), Duration::from_secs(60));
-        
+        assert_eq!(
+            safety.get_timeout("nohup process &"),
+            Duration::from_secs(60)
+        );
+
         // Default should get 30 seconds
         assert_eq!(safety.get_timeout("ls"), Duration::from_secs(30));
     }
@@ -337,11 +386,11 @@ mod tests {
     #[test]
     fn test_command_context() {
         let ctx = CommandContext::new("vim file.txt");
-        
+
         assert!(ctx.is_interactive);
         assert!(!ctx.warnings.is_empty());
         assert!(ctx.should_allow_execution().is_err());
-        
+
         let ctx2 = CommandContext::new("ls -la");
         assert!(!ctx2.is_interactive);
         assert!(ctx2.should_allow_execution().is_ok());

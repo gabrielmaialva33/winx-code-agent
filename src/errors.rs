@@ -128,7 +128,9 @@ pub enum WinxError {
     },
 
     /// Interactive command detected error
-    #[error("Interactive command detected: {command}. Use appropriate flags or consider alternatives.")]
+    #[error(
+        "Interactive command detected: {command}. Use appropriate flags or consider alternatives."
+    )]
     InteractiveCommandDetected { command: String },
 
     /// Command already running error
