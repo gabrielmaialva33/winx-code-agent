@@ -20,7 +20,7 @@ pub const MAX_OUTPUT_SIZE: usize = 500_000;
 const CACHE_TTL: u64 = 300; // 5 minutes
 
 /// Container for all possible character attributes
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ScreenCellAttributes {
     /// Whether the character is bold
     pub bold: bool,
@@ -64,32 +64,6 @@ pub struct ScreenCellAttributes {
     pub font: u8,
 }
 
-impl Default for ScreenCellAttributes {
-    fn default() -> Self {
-        Self {
-            bold: false,
-            underline: false,
-            blink: false,
-            reverse: false,
-            fg_color: None,
-            bg_color: None,
-            italic: false,
-            strikethrough: false,
-            dim: false,
-            double_underline: false,
-            framed: false,
-            encircled: false,
-            overlined: false,
-            fraktur: false,
-            conceal: false,
-            superscript: false,
-            subscript: false,
-            hyperlink: false,
-            hyperlink_url: None,
-            font: 0, // Primary font
-        }
-    }
-}
 
 /// Represents a character with attributes in the terminal
 #[derive(Debug, Clone, PartialEq, Eq)]
