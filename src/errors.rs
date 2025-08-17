@@ -120,6 +120,36 @@ pub enum WinxError {
     #[error("Context save error: {0}")]
     ContextSaveError(String),
 
+    /// Command timeout error
+    #[error("Command timed out after {timeout_seconds}s: {command}")]
+    CommandTimeout {
+        command: String,
+        timeout_seconds: u64,
+    },
+
+    /// Interactive command detected error
+    #[error("Interactive command detected: {command}. Use appropriate flags or consider alternatives.")]
+    InteractiveCommandDetected { command: String },
+
+    /// Command already running error
+    #[error("A command is already running: '{current_command}' (for {duration_seconds:.1}s). Use status_check, send_text, or interrupt.")]
+    CommandAlreadyRunning {
+        current_command: String,
+        duration_seconds: f64,
+    },
+
+    /// Process cleanup error
+    #[error("Failed to cleanup process: {message}")]
+    ProcessCleanupError { message: String },
+
+    /// Buffer overflow error
+    #[error("Command output exceeded maximum size: {size} bytes (max {max_size})")]
+    BufferOverflow { size: usize, max_size: usize },
+
+    /// Session recovery error
+    #[error("Failed to recover bash session: {message}")]
+    SessionRecoveryError { message: String },
+
     /// IO error
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),

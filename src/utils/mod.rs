@@ -3,6 +3,7 @@
 //! This module contains various utility functions and types used throughout
 //! the application, such as file and path handling, repository analysis, etc.
 
+pub mod command_safety;
 pub mod error_predictor;
 pub mod file_cache;
 pub mod file_extensions;

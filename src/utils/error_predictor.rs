@@ -857,6 +857,12 @@ impl SharedErrorPredictor {
             WinxError::NullValueError { .. } => "null_value",
             WinxError::RecoverableSuggestionError { .. } => "recoverable_suggestion",
             WinxError::ContextSaveError(_) => "context_save_error",
+            WinxError::CommandTimeout { .. } => "command_timeout",
+            WinxError::InteractiveCommandDetected { .. } => "interactive_command",
+            WinxError::CommandAlreadyRunning { .. } => "command_already_running",
+            WinxError::ProcessCleanupError { .. } => "process_cleanup",
+            WinxError::BufferOverflow { .. } => "buffer_overflow",
+            WinxError::SessionRecoveryError { .. } => "session_recovery",
             WinxError::IoError(_) => "io_error",
         };
 
