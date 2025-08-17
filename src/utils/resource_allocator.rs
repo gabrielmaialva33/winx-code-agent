@@ -90,7 +90,7 @@ pub struct AllocationRequest {
 }
 
 /// Resource allocation result
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Allocation {
     pub allocated_memory: usize,
     pub category: FileCategory,

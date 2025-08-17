@@ -863,6 +863,7 @@ impl SharedErrorPredictor {
             WinxError::ProcessCleanupError { .. } => "process_cleanup",
             WinxError::BufferOverflow { .. } => "buffer_overflow",
             WinxError::SessionRecoveryError { .. } => "session_recovery",
+            WinxError::ResourceAllocationError { .. } => "resource_allocation",
             WinxError::IoError(_) => "io_error",
         };
 
