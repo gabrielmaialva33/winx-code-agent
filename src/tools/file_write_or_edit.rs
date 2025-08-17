@@ -246,7 +246,7 @@ impl SearchReplaceHelper {
                 i + 1, total_blocks, search.trim(), suggestion
             );
 
-            Err(WinxError::SearchBlockNotFound(error_message))
+            return Err(WinxError::SearchBlockNotFound(error_message));
         }
 
         Ok(content)
