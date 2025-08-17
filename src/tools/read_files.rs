@@ -428,7 +428,31 @@ pub async fn handle_tool_call(
     // Create a vector of file reading parameters for parallel processing
     let mut file_params = Vec::with_capacity(validated_read_files.file_paths.len());
     let show_line_numbers = validated_read_files.show_line_numbers();
+    
+    // Use intelligent token allocation based on file types
+    let file_extension_analyzer = FileExtensionAnalyzer::new();
     let max_tokens_per_file = validated_read_files.max_tokens;
+    
+    // If we have a token limit, allocate intelligently across files
+    let token_allocations = if let Some(total_tokens) = max_tokens_per_file {
+        let file_names: Vec<String> = validated_read_files.file_paths
+            .iter()
+            .map(|path| {
+                // Extract just the filename for analysis
+                Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_string()
+            })
+            .collect();
+        
+        file_extension_analyzer.allocate_token_budget(&file_names, total_tokens)
+            .into_iter()
+            .collect::<HashMap<String, usize>>()
+    } else {
+        HashMap::new()
+    };
 
     // Prepare file parameters
     for (i, file_path) in validated_read_files.file_paths.iter().enumerate() {
