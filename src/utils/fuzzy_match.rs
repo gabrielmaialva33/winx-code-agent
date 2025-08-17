@@ -126,6 +126,12 @@ pub struct FuzzyMatcher {
     token_cache: HashMap<String, Vec<String>>,
 }
 
+impl Default for FuzzyMatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FuzzyMatcher {
     /// Create a new fuzzy matcher with default configuration
     pub fn new() -> Self {
