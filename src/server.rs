@@ -69,6 +69,7 @@ pub async fn run_server_with_config(config: ServerConfig) -> Result<()> {
         })?;
 
         // Log system information
+        let current_time = format!("{:?}", SystemTime::now());
         let sys_info = format!(
             "System Info:\n\
             - OS: {}\n\
@@ -84,7 +85,7 @@ pub async fn run_server_with_config(config: ServerConfig) -> Result<()> {
             config.debug_mode,
             config.simulation_mode,
             "unknown",
-            SystemTime::now(),
+            current_time,
         );
 
         // Log to console and file

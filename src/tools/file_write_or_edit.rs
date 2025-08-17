@@ -246,7 +246,7 @@ impl SearchReplaceHelper {
                 i + 1, total_blocks, search.trim(), suggestion
             );
 
-            return Err(WinxError::SearchBlockNotFound(error_message));
+            Err(WinxError::SearchBlockNotFound(error_message))
         }
 
         Ok(content)
@@ -319,14 +319,14 @@ impl SearchReplaceHelper {
                 "Found potential match with high confidence ({confidence_percent}%) but automatic replacement is disabled.\n\n{}\n\nTo enable automatic fixing with high-confidence matches, set auto_apply_fuzzy_fixes=true.",
                 match_suggestions
             );
-            return Err(WinxError::SearchBlockNotFound(error_message));
+            Err(WinxError::SearchBlockNotFound(error_message))
         } else {
             // Low confidence match
             let error_message = format!(
                 "Found potential match but confidence is too low ({confidence_percent}%).\n\n{}",
                 match_suggestions
             );
-            return Err(WinxError::SearchBlockNotFound(error_message));
+            Err(WinxError::SearchBlockNotFound(error_message))
         }
     }
 
@@ -1674,11 +1674,10 @@ pub async fn handle_tool_call(
                         None,
                         Some(&file_path),
                         Some(
-                            &file_path_obj
+                            file_path_obj
                                 .parent()
                                 .unwrap_or_else(|| Path::new("."))
-                                .to_string_lossy()
-                                .to_string(),
+                                .to_string_lossy().as_ref(),
                         ),
                     ) {
                         warn!("Failed to record error for prediction: {}", record_err);
