@@ -152,6 +152,10 @@ pub enum WinxError {
     #[error("Failed to recover bash session: {message}")]
     SessionRecoveryError { message: String },
 
+    /// Resource allocation error
+    #[error("Resource allocation failed: {message}")]
+    ResourceAllocationError { message: String },
+
     /// IO error
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -488,6 +492,9 @@ impl Clone for WinxError {
                 max_size: *max_size,
             },
             Self::SessionRecoveryError { message } => Self::SessionRecoveryError {
+                message: message.clone(),
+            },
+            Self::ResourceAllocationError { message } => Self::ResourceAllocationError {
                 message: message.clone(),
             },
             Self::IoError(err) => Self::IoError(std::io::Error::new(err.kind(), err.to_string())),
