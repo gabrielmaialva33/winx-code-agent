@@ -153,7 +153,7 @@ impl ErrorPredictor {
         if let Some(file) = file_path {
             self.file_errors
                 .entry(file.to_string())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(message.to_string());
         }
 
@@ -161,14 +161,14 @@ impl ErrorPredictor {
             let base_cmd = cmd.split_whitespace().next().unwrap_or(cmd);
             self.command_errors
                 .entry(base_cmd.to_string())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(message.to_string());
         }
 
         if let Some(dir) = directory {
             self.directory_errors
                 .entry(dir.to_string())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(message.to_string());
         }
 

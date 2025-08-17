@@ -302,7 +302,7 @@ impl FuzzyMatcher {
             let orig_end = pos_mapping
                 .get(&end_pos)
                 .copied()
-                .unwrap_or_else(|| text.len());
+                .unwrap_or(text.len());
 
             // Ensure bounds are valid
             if orig_start < text.len() && orig_start <= orig_end && orig_end <= text.len() {

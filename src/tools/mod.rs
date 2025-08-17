@@ -780,6 +780,7 @@ Get status information about the Winx agent.
         };
 
         // Format the status report
+        let mcp_version = format!("{:?}", MCP_PROTOCOL_VERSION);
         let status_report = format!(
             "## Winx Agent Status\n\n\
             - **Version**: {}\n\
@@ -796,7 +797,7 @@ Get status information about the Winx agent.
             system_load,
             active_sessions,
             cwd,
-            format!("{:?}", MCP_PROTOCOL_VERSION),
+            mcp_version,
             start_time.elapsed()
         );
 
