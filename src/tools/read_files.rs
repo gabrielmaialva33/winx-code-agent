@@ -18,6 +18,7 @@ use crate::errors::{ErrorRecovery, Result, WinxError};
 use crate::state::bash_state::BashState;
 use crate::types::ReadFiles;
 use crate::utils::file_cache::FileCache;
+use crate::utils::file_extensions::FileExtensionAnalyzer;
 use crate::utils::mmap::{read_file_optimized, read_file_to_string};
 use crate::utils::path::expand_user;
 

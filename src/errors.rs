@@ -116,6 +116,10 @@ pub enum WinxError {
     #[error("{message} - {suggestion}")]
     RecoverableSuggestionError { message: String, suggestion: String },
 
+    /// Context save error
+    #[error("Context save error: {0}")]
+    ContextSaveError(String),
+
     /// IO error
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
@@ -426,6 +430,7 @@ impl Clone for WinxError {
                 message: message.clone(),
                 suggestion: suggestion.clone(),
             },
+            Self::ContextSaveError(msg) => Self::ContextSaveError(msg.clone()),
             Self::IoError(err) => Self::IoError(std::io::Error::new(err.kind(), err.to_string())),
         }
     }
