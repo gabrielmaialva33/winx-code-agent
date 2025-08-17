@@ -802,8 +802,22 @@ fn parse_search_replace_blocks(
     }
 
     if blocks.is_empty() {
-        return Err(SearchReplaceSyntaxError::with_help_text(
-            "No valid search replace blocks found, ensure your SEARCH/REPLACE blocks are formatted correctly".to_string()
+        return Err(SearchReplaceSyntaxError::detailed(
+            "No valid search/replace blocks found".to_string(),
+            None,
+            None,
+            vec![
+                "Make sure your blocks follow this format:".to_string(),
+                "".to_string(),
+                "<<<<<<< SEARCH".to_string(),
+                "content to find".to_string(),
+                "=======".to_string(),
+                "content to replace with".to_string(),
+                ">>>>>>> REPLACE".to_string(),
+                "".to_string(),
+                "Check that all markers are on separate lines".to_string(),
+                "Ensure there are no typos in the marker syntax".to_string(),
+            ]
         ));
     }
 
