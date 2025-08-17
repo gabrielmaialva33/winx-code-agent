@@ -41,8 +41,9 @@ impl ServerHandler for WinxService {
                 name: "winx-code-agent".into(),
                 version: self.version.clone().into(),
             },
-            protocol_version: "2024-11-05".into(),
+            protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::default(),
+            instructions: Some("Winx is a high-performance Rust implementation of WCGW for code agents.".into()),
         }
     }
 }
