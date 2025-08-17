@@ -159,6 +159,30 @@ pub enum WinxError {
     /// IO error
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
+
+    /// NVIDIA API error
+    #[error("NVIDIA API error: {0}")]
+    ApiError(String),
+
+    /// Network error for HTTP requests
+    #[error("Network error: {0}")]
+    NetworkError(String),
+
+    /// Configuration error
+    #[error("Configuration error: {0}")]
+    ConfigurationError(String),
+
+    /// Parse error for responses
+    #[error("Parse error: {0}")]
+    ParseError(String),
+
+    /// Invalid input error
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
+
+    /// File error for file operations
+    #[error("File error: {0}")]
+    FileError(String),
 }
 
 /// Type alias for Result with WinxError
@@ -498,6 +522,12 @@ impl Clone for WinxError {
                 message: message.clone(),
             },
             Self::IoError(err) => Self::IoError(std::io::Error::new(err.kind(), err.to_string())),
+            Self::ApiError(msg) => Self::ApiError(msg.clone()),
+            Self::NetworkError(msg) => Self::NetworkError(msg.clone()),
+            Self::ConfigurationError(msg) => Self::ConfigurationError(msg.clone()),
+            Self::ParseError(msg) => Self::ParseError(msg.clone()),
+            Self::InvalidInput(msg) => Self::InvalidInput(msg.clone()),
+            Self::FileError(msg) => Self::FileError(msg.clone()),
         }
     }
 }

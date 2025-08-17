@@ -865,6 +865,12 @@ impl SharedErrorPredictor {
             WinxError::SessionRecoveryError { .. } => "session_recovery",
             WinxError::ResourceAllocationError { .. } => "resource_allocation",
             WinxError::IoError(_) => "io_error",
+            WinxError::ApiError(_) => "api_error",
+            WinxError::NetworkError(_) => "network_error",
+            WinxError::ConfigurationError(_) => "configuration_error",
+            WinxError::ParseError(_) => "parse_error",
+            WinxError::InvalidInput(_) => "invalid_input",
+            WinxError::FileError(_) => "file_error",
         };
 
         let message = format!("{}", error);

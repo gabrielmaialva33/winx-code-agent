@@ -16,6 +16,7 @@
 //! - Integration with Model Context Protocol (MCP)
 
 mod errors;
+mod nvidia;
 mod server;
 mod state;
 mod tools;
