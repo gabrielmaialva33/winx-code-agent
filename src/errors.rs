@@ -56,6 +56,30 @@ pub enum WinxError {
     #[error("Search block not found in content: {0}")]
     SearchBlockNotFound(String),
 
+    /// Error when search block matches multiple locations (WCGW-style)
+    #[error("Search block matched multiple times")]
+    SearchBlockAmbiguous {
+        block_content: String,
+        match_count: usize,
+        suggestions: Vec<String>,
+    },
+
+    /// Error when search blocks have conflicting matches
+    #[error("Multiple search blocks have conflicting matches")]
+    SearchBlockConflict {
+        conflicting_blocks: Vec<String>,
+        first_differing_block: Option<String>,
+    },
+
+    /// Enhanced search/replace syntax error with detailed context
+    #[error("Search/replace syntax error: {message}")]
+    SearchReplaceSyntaxErrorDetailed {
+        message: String,
+        line_number: Option<usize>,
+        block_type: Option<String>,
+        suggestions: Vec<String>,
+    },
+
     /// Error when JSON parsing fails
     #[error("Invalid JSON: {0}")]
     JsonParseError(String),
@@ -342,6 +366,21 @@ impl Clone for WinxError {
             Self::SerializationError(msg) => Self::SerializationError(msg.clone()),
             Self::SearchReplaceSyntaxError(msg) => Self::SearchReplaceSyntaxError(msg.clone()),
             Self::SearchBlockNotFound(msg) => Self::SearchBlockNotFound(msg.clone()),
+            Self::SearchBlockAmbiguous { block_content, match_count, suggestions } => Self::SearchBlockAmbiguous {
+                block_content: block_content.clone(),
+                match_count: *match_count,
+                suggestions: suggestions.clone(),
+            },
+            Self::SearchBlockConflict { conflicting_blocks, first_differing_block } => Self::SearchBlockConflict {
+                conflicting_blocks: conflicting_blocks.clone(),
+                first_differing_block: first_differing_block.clone(),
+            },
+            Self::SearchReplaceSyntaxErrorDetailed { message, line_number, block_type, suggestions } => Self::SearchReplaceSyntaxErrorDetailed {
+                message: message.clone(),
+                line_number: *line_number,
+                block_type: block_type.clone(),
+                suggestions: suggestions.clone(),
+            },
             Self::JsonParseError(msg) => Self::JsonParseError(msg.clone()),
             Self::FileTooLarge {
                 path,
