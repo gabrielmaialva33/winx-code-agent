@@ -24,11 +24,20 @@ use crate::utils::pattern_analyzer::SharedPatternAnalyzer;
 
 /// FileWhitelistData tracks information about files that have been read
 /// and can be edited or overwritten
+/// Enhanced with WCGW-style comprehensive tracking
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileWhitelistData {
     pub file_hash: String,
     pub line_ranges_read: Vec<(usize, usize)>,
     pub total_lines: usize,
+    /// Hash of the file content when it was last read
+    pub content_hash: Option<String>,
+    /// Timestamp when the file was last read
+    pub last_read_time: Option<std::time::SystemTime>,
+    /// Whether this file has been modified since last read
+    pub modified_since_read: bool,
+    /// Minimum percentage of file that must be read before editing
+    pub min_read_percentage: f64,
 }
 
 #[allow(dead_code)]
@@ -43,13 +52,64 @@ impl FileWhitelistData {
             file_hash,
             line_ranges_read,
             total_lines,
+            content_hash: None,
+            last_read_time: Some(std::time::SystemTime::now()),
+            modified_since_read: false,
+            min_read_percentage: 99.0, // WCGW default
         }
     }
 
-    /// Checks if enough of the file has been read (at least 99%)
+    /// Create new FileWhitelistData with enhanced tracking
+    pub fn new_enhanced(
+        file_hash: String,
+        content_hash: String,
+        line_ranges_read: Vec<(usize, usize)>,
+        total_lines: usize,
+        min_read_percentage: f64,
+    ) -> Self {
+        Self {
+            file_hash,
+            line_ranges_read,
+            total_lines,
+            content_hash: Some(content_hash),
+            last_read_time: Some(std::time::SystemTime::now()),
+            modified_since_read: false,
+            min_read_percentage,
+        }
+    }
+
+    /// Checks if enough of the file has been read using configurable threshold
     #[allow(dead_code)]
     pub fn is_read_enough(&self) -> bool {
-        self.get_percentage_read() >= 99.0
+        self.get_percentage_read() >= self.min_read_percentage
+    }
+
+    /// Checks if file needs to be read more before editing (WCGW-style protection)
+    pub fn needs_more_reading(&self) -> bool {
+        !self.is_read_enough()
+    }
+
+    /// Check if file has been modified since last read using hash comparison
+    pub fn check_file_changed(&mut self, current_content_hash: &str) -> bool {
+        if let Some(ref stored_hash) = self.content_hash {
+            if stored_hash != current_content_hash {
+                self.modified_since_read = true;
+                true
+            } else {
+                false
+            }
+        } else {
+            // No stored hash, assume changed
+            self.modified_since_read = true;
+            true
+        }
+    }
+
+    /// Update file hash and reset modification flag
+    pub fn update_content_hash(&mut self, new_hash: String) {
+        self.content_hash = Some(new_hash);
+        self.modified_since_read = false;
+        self.last_read_time = Some(std::time::SystemTime::now());
     }
 
     /// Calculates what percentage of the file has been read
@@ -104,10 +164,79 @@ impl FileWhitelistData {
         unread_ranges
     }
 
+    /// Merge overlapping ranges to optimize tracking
+    pub fn optimize_ranges(&mut self) {
+        if self.line_ranges_read.is_empty() {
+            return;
+        }
+
+        // Sort ranges by start position
+        self.line_ranges_read.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut merged = Vec::new();
+        let mut current = self.line_ranges_read[0];
+
+        for &(start, end) in &self.line_ranges_read[1..] {
+            if start <= current.1 + 1 {
+                // Overlapping or adjacent ranges, merge them
+                current.1 = current.1.max(end);
+            } else {
+                // Non-overlapping range, add current to merged and start new
+                merged.push(current);
+                current = (start, end);
+            }
+        }
+        merged.push(current);
+
+        self.line_ranges_read = merged;
+    }
+
     /// Adds a range of lines to the list of lines that have been read
     #[allow(dead_code)]
     pub fn add_range(&mut self, start: usize, end: usize) {
         self.line_ranges_read.push((start, end));
+        self.last_read_time = Some(std::time::SystemTime::now());
+    }
+
+    /// Get a human-readable error message for insufficient reading
+    pub fn get_read_error_message(&self, file_path: &Path) -> String {
+        let unread_ranges = self.get_unread_ranges();
+        let percentage_read = self.get_percentage_read();
+        
+        if unread_ranges.is_empty() {
+            format!(
+                "File {} has been read ({:.1}% coverage), but minimum required is {:.1}%",
+                file_path.display(),
+                percentage_read,
+                self.min_read_percentage
+            )
+        } else {
+            let range_descriptions: Vec<String> = unread_ranges
+                .iter()
+                .take(3) // Show max 3 ranges
+                .map(|(start, end)| {
+                    if start == end {
+                        format!("line {}", start)
+                    } else {
+                        format!("lines {}-{}", start, end)
+                    }
+                })
+                .collect();
+            
+            let ranges_str = if unread_ranges.len() > 3 {
+                format!("{} and {} more ranges", range_descriptions.join(", "), unread_ranges.len() - 3)
+            } else {
+                range_descriptions.join(", ")
+            };
+            
+            format!(
+                "File {} needs more reading. Only {:.1}% read (need {:.1}%). Unread: {}",
+                file_path.display(),
+                percentage_read,
+                self.min_read_percentage,
+                ranges_str
+            )
+        }
     }
 }
 
@@ -1278,6 +1407,208 @@ impl BashState {
                 "No command running\n\n---\n\nstatus = process exited\ncwd = {}\n",
                 self.cwd.display()
             ))
+        }
+    }
+
+    // Enhanced mode validation methods (inspired by WCGW)
+    
+    /// Check if a command is allowed in the current mode
+    pub fn is_command_allowed(&self, command: &str) -> bool {
+        match self.mode {
+            Modes::Wcgw => true, // Full permissions
+            Modes::Architect => {
+                // Architect mode: only read-only commands allowed
+                self.is_readonly_command(command)
+            }
+            Modes::CodeWriter => {
+                // Code writer mode: check against allowed commands
+                match &self.bash_command_mode.allowed_commands {
+                    AllowedCommands::All(_) => true,
+                    AllowedCommands::List(commands) => {
+                        commands.iter().any(|allowed| self.command_matches(command, allowed))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if a file path is allowed for editing in the current mode
+    pub fn is_file_edit_allowed(&self, file_path: &str) -> bool {
+        match self.mode {
+            Modes::Wcgw => true, // Full permissions
+            Modes::Architect => false, // No file editing in architect mode
+            Modes::CodeWriter => {
+                // Code writer mode: check against allowed globs
+                match &self.file_edit_mode.allowed_globs {
+                    AllowedGlobs::All(_) => true,
+                    AllowedGlobs::List(globs) => {
+                        globs.iter().any(|glob| self.path_matches_glob(file_path, glob))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if a file path is allowed for writing (new files) in the current mode  
+    pub fn is_file_write_allowed(&self, file_path: &str) -> bool {
+        match self.mode {
+            Modes::Wcgw => true, // Full permissions
+            Modes::Architect => false, // No file writing in architect mode
+            Modes::CodeWriter => {
+                // Code writer mode: check against allowed globs
+                match &self.write_if_empty_mode.allowed_globs {
+                    AllowedGlobs::All(_) => true,
+                    AllowedGlobs::List(globs) => {
+                        globs.iter().any(|glob| self.path_matches_glob(file_path, glob))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Check if a command is read-only (safe for architect mode)
+    fn is_readonly_command(&self, command: &str) -> bool {
+        let cmd = command.trim().to_lowercase();
+        
+        // List of read-only commands allowed in architect mode
+        let readonly_commands = [
+            "ls", "cat", "head", "tail", "less", "more", "find", "grep", "wc", "file",
+            "pwd", "which", "whereis", "type", "ps", "top", "df", "du", "free",
+            "uname", "whoami", "id", "date", "history", "echo", "printf",
+            "tree", "stat", "readlink", "dirname", "basename",
+            // Git read-only commands
+            "git status", "git log", "git show", "git diff", "git branch", "git remote",
+            // Package manager queries
+            "pip list", "npm list", "cargo tree", "gem list",
+            // Language-specific inspections
+            "python --version", "node --version", "cargo --version", "rustc --version",
+        ];
+
+        // Check for exact matches first
+        if readonly_commands.iter().any(|&readonly_cmd| cmd.starts_with(readonly_cmd)) {
+            return true;
+        }
+
+        // Check for dangerous patterns that should be blocked
+        let dangerous_patterns = [
+            "rm", "mv", "cp", "chmod", "chown", "sudo", "su", "kill", "killall",
+            "mkdir", "rmdir", "touch", "dd", "mount", "umount",
+            "git add", "git commit", "git push", "git pull", "git merge", "git rebase",
+            "npm install", "pip install", "cargo install", "gem install",
+            "make", "cmake", "gcc", "g++", "clang", "rustc",
+        ];
+
+        !dangerous_patterns.iter().any(|&dangerous| cmd.contains(dangerous))
+    }
+
+    /// Check if a command matches an allowed command pattern
+    fn command_matches(&self, command: &str, pattern: &str) -> bool {
+        if pattern == "all" || pattern == "*" {
+            return true;
+        }
+
+        // Simple glob-style matching
+        if pattern.contains('*') {
+            let regex_pattern = pattern.replace('*', ".*");
+            if let Ok(regex) = regex::Regex::new(&regex_pattern) {
+                return regex.is_match(command);
+            }
+        }
+
+        // Exact match or prefix match
+        command == pattern || command.starts_with(&format!("{} ", pattern))
+    }
+
+    /// Check if a file path matches a glob pattern
+    fn path_matches_glob(&self, file_path: &str, glob_pattern: &str) -> bool {
+        if glob_pattern == "all" || glob_pattern == "*" {
+            return true;
+        }
+
+        // Use glob crate for proper glob matching
+        if let Ok(pattern) = glob::Pattern::new(glob_pattern) {
+            pattern.matches(file_path)
+        } else {
+            // Fallback to simple prefix/suffix matching
+            if glob_pattern.starts_with('*') && glob_pattern.ends_with('*') {
+                let middle = &glob_pattern[1..glob_pattern.len()-1];
+                file_path.contains(middle)
+            } else if glob_pattern.starts_with('*') {
+                let suffix = &glob_pattern[1..];
+                file_path.ends_with(suffix)
+            } else if glob_pattern.ends_with('*') {
+                let prefix = &glob_pattern[..glob_pattern.len()-1];
+                file_path.starts_with(prefix)
+            } else {
+                file_path == glob_pattern
+            }
+        }
+    }
+
+    /// Enhanced file safety check combining WCGW patterns
+    pub fn validate_file_access(&mut self, file_path: &Path) -> Result<()> {
+        let file_path_str = file_path.to_string_lossy();
+        
+        // Check mode permissions first
+        if !self.is_file_edit_allowed(&file_path_str) {
+            return Err(anyhow!(
+                "File editing not allowed in {} mode for path: {}. Check your mode configuration.",
+                match self.mode {
+                    Modes::Wcgw => "wcgw",
+                    Modes::Architect => "architect", 
+                    Modes::CodeWriter => "code_writer"
+                },
+                file_path.display()
+            ));
+        }
+
+        // Check if file is whitelisted and has been read sufficiently
+        if let Some(whitelist_data) = self.whitelist_for_overwrite.get(file_path_str.as_ref()) {
+            if whitelist_data.needs_more_reading() {
+                return Err(anyhow!(
+                    "{}. Use ReadFiles tool to read more of the file first.", 
+                    whitelist_data.get_read_error_message(file_path)
+                ));
+            }
+
+            // Check if file has been modified since last read
+            if let Ok(current_content) = std::fs::read_to_string(file_path) {
+                let current_hash = sha256_hash(current_content.as_bytes());
+                let mut whitelist_data = whitelist_data.clone();
+                if whitelist_data.check_file_changed(&current_hash) {
+                    // Update the stored data
+                    self.whitelist_for_overwrite.insert(file_path_str.to_string(), whitelist_data);
+                    return Err(anyhow!(
+                        "File {} has changed since last read. Please read the file again with ReadFiles before modifying.",
+                        file_path.display()
+                    ));
+                }
+            }
+        } else {
+            return Err(anyhow!(
+                "File {} has not been read yet. You must read the file at least once using ReadFiles before editing it.",
+                file_path.display()
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Get mode-specific error message for unauthorized operations
+    pub fn get_mode_violation_message(&self, operation: &str, target: &str) -> String {
+        match self.mode {
+            Modes::Wcgw => format!("Unexpected error: {} should be allowed in wcgw mode", operation),
+            Modes::Architect => format!(
+                "Operation '{}' not allowed in architect mode. Architect mode is read-only. \
+                Use Initialize with mode_name=\"wcgw\" or \"code_writer\" to enable modifications.",
+                operation
+            ),
+            Modes::CodeWriter => format!(
+                "Operation '{}' on '{}' not allowed in code_writer mode. \
+                Check your allowed_globs and allowed_commands configuration, or use Initialize \
+                with mode_name=\"wcgw\" for full permissions.",
+                operation, target
+            ),
         }
     }
 }
