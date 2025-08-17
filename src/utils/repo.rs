@@ -441,10 +441,8 @@ fn collect_files_par(
             dir.display()
         );
 
-        let exclude_patterns_owned = match exclude_patterns {
-            Some(patterns) => Some(patterns.iter().map(|&s| s.to_owned()).collect::<Vec<_>>()),
-            None => None,
-        };
+        let exclude_patterns_owned = exclude_patterns
+            .map(|patterns| patterns.iter().map(|&s| s.to_owned()).collect::<Vec<_>>());
 
         // Process subdirectories in parallel
         let subdir_files: Vec<PathBuf> = dirs
@@ -454,10 +452,7 @@ fn collect_files_par(
                     .as_ref()
                     .map(|patterns| patterns.iter().map(|s| s.as_str()).collect::<Vec<_>>());
 
-                match collect_files_par(&subdir, exclude_patterns_refs.as_deref()) {
-                    Ok(sub_files) => sub_files,
-                    Err(_) => Vec::new(), // Skip errors
-                }
+                collect_files_par(&subdir, exclude_patterns_refs.as_deref()).unwrap_or_default()
             })
             .collect();
 
@@ -809,7 +804,7 @@ fn calculate_file_type_stats(workspace_path: &Path) -> std::io::Result<HashMap<S
         let file_types = files
             .par_iter()
             .fold(
-                || HashMap::new(), // Create a HashMap for each thread
+                HashMap::new, // Create a HashMap for each thread
                 |mut thread_map, path| {
                     // Process each file in the thread's chunk
                     let extension = path
@@ -822,7 +817,7 @@ fn calculate_file_type_stats(workspace_path: &Path) -> std::io::Result<HashMap<S
                 },
             )
             .reduce(
-                || HashMap::new(), // Identity value
+                HashMap::new, // Identity value
                 |mut result_map, thread_map| {
                     // Merge thread results
                     for (ext, count) in thread_map.into_iter() {

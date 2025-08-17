@@ -86,10 +86,7 @@ impl PatternAnalyzer {
 
         // Update sequence patterns if there's a previous command
         if let Some((prev_cmd, _)) = self.command_history.iter().rev().nth(1) {
-            let next_commands = self
-                .sequence_patterns
-                .entry(prev_cmd.clone())
-                .or_default();
+            let next_commands = self.sequence_patterns.entry(prev_cmd.clone()).or_default();
             *next_commands.entry(normalized.clone()).or_insert(0) += 1;
         }
 
@@ -114,8 +111,7 @@ impl PatternAnalyzer {
             if let Some(file_ext) = Path::new(&file_path).extension() {
                 if let Some(ext_str) = file_ext.to_str() {
                     let file_type = format!(".{}", ext_str);
-                    let file_commands =
-                        self.file_patterns.entry(file_type).or_default();
+                    let file_commands = self.file_patterns.entry(file_type).or_default();
 
                     if !file_commands.contains(&normalized) {
                         file_commands.push(normalized);

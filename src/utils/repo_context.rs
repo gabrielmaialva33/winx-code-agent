@@ -75,7 +75,7 @@ impl GitAnalyzer {
     pub fn get_recent_files(&self, count: usize) -> Result<Vec<String>> {
         // Use git log to get recently modified files
         let output = std::process::Command::new("git")
-            .args(&[
+            .args([
                 "log",
                 "--name-only",
                 "--pretty=format:",
@@ -111,7 +111,7 @@ impl GitAnalyzer {
     /// Check if a path is ignored by git
     pub fn is_ignored(&self, path: &str) -> bool {
         std::process::Command::new("git")
-            .args(&["check-ignore", path])
+            .args(["check-ignore", path])
             .current_dir(&self.repo_path)
             .output()
             .map(|output| output.status.success())
@@ -397,7 +397,7 @@ impl RepoContextAnalyzer {
 
         // File type distribution
         let mut type_counts = HashMap::new();
-        for (_, stats) in file_stats {
+        for stats in file_stats.values() {
             *type_counts.entry(&stats.file_type).or_insert(0) += 1;
         }
 

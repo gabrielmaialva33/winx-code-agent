@@ -1677,7 +1677,8 @@ pub async fn handle_tool_call(
                             file_path_obj
                                 .parent()
                                 .unwrap_or_else(|| Path::new("."))
-                                .to_string_lossy().as_ref(),
+                                .to_string_lossy()
+                                .as_ref(),
                         ),
                     ) {
                         warn!("Failed to record error for prediction: {}", record_err);

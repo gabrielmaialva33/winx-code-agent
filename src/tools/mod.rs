@@ -79,7 +79,9 @@ impl WinxService {
     ///
     /// A Result containing a MutexGuard for the bash state
     #[allow(dead_code)]
-    fn lock_bash_state(&self) -> crate::errors::Result<std::sync::MutexGuard<Option<BashState>>> {
+    fn lock_bash_state(
+        &self,
+    ) -> crate::errors::Result<std::sync::MutexGuard<'_, Option<BashState>>> {
         self.bash_state
             .lock()
             .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))

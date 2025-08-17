@@ -64,7 +64,6 @@ pub struct ScreenCellAttributes {
     pub font: u8,
 }
 
-
 /// Represents a character with attributes in the terminal
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScreenCell {
