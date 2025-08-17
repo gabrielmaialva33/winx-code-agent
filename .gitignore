@@ -11,3 +11,4 @@ Cargo.lock
 /release/
 
 **/.claude/settings.local.json
+tmp
