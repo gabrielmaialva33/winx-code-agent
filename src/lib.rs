@@ -20,3 +20,4 @@ pub mod utils;
 
 pub use errors::{Result, WinxError};
 pub use server::{WinxService, start_winx_server};
+pub use tools::WinxService as WinxToolsService;
