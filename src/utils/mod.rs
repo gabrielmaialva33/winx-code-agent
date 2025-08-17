@@ -7,6 +7,7 @@ pub mod error_predictor;
 pub mod file_cache;
 pub mod fuzzy_match;
 pub mod mmap;
+pub mod mode_prompts;
 pub mod path;
 pub mod path_analyzer;
 pub mod pattern_analyzer;

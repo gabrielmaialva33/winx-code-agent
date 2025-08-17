@@ -15,6 +15,8 @@ use crate::types::{
 };
 use crate::utils::path::{ensure_directory_exists, expand_user};
 use crate::utils::repo::{get_git_info, get_repo_context};
+use crate::utils::repo_context::RepoContextAnalyzer;
+use crate::utils::mode_prompts::{generate_mode_instructions, get_mode_prompt};
 
 /// Converts ModeName to the internal Modes enum
 ///
