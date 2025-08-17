@@ -684,28 +684,45 @@ fn parse_search_replace_blocks(
             // Read the search block
             while i < lines.len() && !divider_marker().is_match(lines[i]) {
                 if search_marker().is_match(lines[i]) || replace_marker().is_match(lines[i]) {
-                    return Err(SearchReplaceSyntaxError::with_help_text(format!(
-                        "Line {}: Found stray marker in SEARCH block: {}",
-                        i + 1,
-                        lines[i]
-                    )));
+                    return Err(SearchReplaceSyntaxError::detailed(
+                        format!("Found stray marker in SEARCH block: {}", lines[i]),
+                        Some(i + 1),
+                        Some("SEARCH".to_string()),
+                        vec![
+                            "Each SEARCH block should have only one <<<<<<< SEARCH marker at the beginning".to_string(),
+                            "Make sure you don't have nested search blocks".to_string(),
+                            "Remove any extra markers from inside the search content".to_string(),
+                        ]
+                    ));
                 }
                 search_block.push(lines[i]);
                 i += 1;
             }
 
             if i >= lines.len() {
-                return Err(SearchReplaceSyntaxError::with_help_text(format!(
-                    "Line {}: Unclosed SEARCH block - missing ======= marker",
-                    line_num
-                )));
+                return Err(SearchReplaceSyntaxError::detailed(
+                    "Unclosed SEARCH block - missing ======= marker".to_string(),
+                    Some(line_num),
+                    Some("SEARCH".to_string()),
+                    vec![
+                        "Add ======= after your search content".to_string(),
+                        "Make sure the block structure is: SEARCH, =======, REPLACE content, >>>>>>> REPLACE".to_string(),
+                        "Check that all search blocks are properly closed".to_string(),
+                    ]
+                ));
             }
 
             if search_block.is_empty() {
-                return Err(SearchReplaceSyntaxError::with_help_text(format!(
-                    "Line {}: SEARCH block cannot be empty. You must include content to search for between the SEARCH and ======= markers",
-                    line_num
-                )));
+                return Err(SearchReplaceSyntaxError::detailed(
+                    "SEARCH block cannot be empty".to_string(),
+                    Some(line_num),
+                    Some("SEARCH".to_string()),
+                    vec![
+                        "Add content between <<<<<<< SEARCH and ======= markers".to_string(),
+                        "The search block should contain the exact text you want to replace".to_string(),
+                        "Make sure there's at least one line of non-whitespace content".to_string(),
+                    ]
+                ));
             }
 
             // Check for whitespace-only search blocks
