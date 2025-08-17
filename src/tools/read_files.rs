@@ -21,6 +21,10 @@ use crate::utils::file_cache::FileCache;
 use crate::utils::file_extensions::FileExtensionAnalyzer;
 use crate::utils::mmap::{read_file_optimized, read_file_to_string};
 use crate::utils::path::expand_user;
+use crate::utils::resource_allocator::{
+    get_global_allocator, request_file_allocation, release_file_allocation, AllocationGuard,
+    AllocationRequest, ReadPriority,
+};
 
 /// Type alias for file reading result
 ///
@@ -85,7 +89,7 @@ fn range_format(start_line_num: Option<usize>, end_line_num: Option<usize>) -> S
 ///
 /// Returns an error if the file cannot be accessed or read
 #[instrument(level = "debug", skip(file_path))]
-fn read_file(
+async fn read_file(
     file_path: &str,
     max_tokens: Option<usize>,
     cwd: &Path,
