@@ -6,7 +6,7 @@
 #![allow(clippy::needless_return)]
 
 //! # Winx Code Agent
-//! 
+//!
 //! A high-performance Rust implementation of WCGW (What Could Go Wrong) for code agents.
 //! Provides shell execution and file management capabilities for LLM code agents,
 //! designed to integrate with Claude and other LLMs via the Model Context Protocol (MCP).
@@ -19,5 +19,5 @@ pub mod types;
 pub mod utils;
 
 pub use errors::{Result, WinxError};
-pub use server::{WinxService, start_winx_server};
+pub use server::{start_winx_server, WinxService};
 pub use tools::WinxService as WinxToolsService;

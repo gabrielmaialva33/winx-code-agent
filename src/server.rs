@@ -1,12 +1,7 @@
 //! Winx MCP Server implementation using rmcp 0.5.0
 //! Minimal working server implementation for now
 
-use rmcp::{
-    ServiceExt, 
-    model::*, 
-    transport::stdio, 
-    ServerHandler,
-};
+use rmcp::{model::*, transport::stdio, ServerHandler, ServiceExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
@@ -43,7 +38,9 @@ impl ServerHandler for WinxService {
             },
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::default(),
-            instructions: Some("Winx is a high-performance Rust implementation of WCGW for code agents.".into()),
+            instructions: Some(
+                "Winx is a high-performance Rust implementation of WCGW for code agents.".into(),
+            ),
         }
     }
 }

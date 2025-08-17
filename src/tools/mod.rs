@@ -86,6 +86,6 @@ impl WinxService {
     }
 }
 
-// NOTE: Individual tool implementations are temporarily commented out 
+// NOTE: Individual tool implementations are temporarily commented out
 // while we migrate to the new rmcp 0.5.0 pattern in server.rs
 // The tools will be re-implemented using the #[tool] macro pattern
