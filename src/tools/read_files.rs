@@ -63,10 +63,72 @@ fn range_format(start_line_num: Option<usize>, end_line_num: Option<usize>) -> S
     }
 }
 
+/// Read a large file using streaming with chunk-based processing
+///
+/// This function reads large files in chunks to reduce memory usage.
+/// It's designed for files that exceed normal memory allocation limits.
+///
+/// # Arguments
+///
+/// * `path` - Path to the file to read
+/// * `chunk_size` - Size of each chunk to read
+///
+/// # Returns
+///
+/// The complete file content as a string
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or if streaming fails
+async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<String> {
+    use std::fs::File;
+    use std::io::{BufReader, Read};
+
+    debug!("Streaming file {} with chunk size {}", path.display(), chunk_size);
+
+    let file = File::open(path).map_err(|e| WinxError::FileAccessError {
+        path: path.to_path_buf(),
+        message: format!("Failed to open file for streaming: {}", e),
+    })?;
+
+    let mut reader = BufReader::new(file);
+    let mut content = String::new();
+    let mut buffer = vec![0; chunk_size];
+
+    loop {
+        let bytes_read = reader.read(&mut buffer).map_err(|e| WinxError::FileAccessError {
+            path: path.to_path_buf(),
+            message: format!("Failed to read chunk from file: {}", e),
+        })?;
+
+        if bytes_read == 0 {
+            break; // End of file
+        }
+
+        // Convert chunk to string, handling potential UTF-8 issues
+        match std::str::from_utf8(&buffer[..bytes_read]) {
+            Ok(chunk_str) => content.push_str(chunk_str),
+            Err(e) => {
+                // Try to recover from UTF-8 errors by using lossy conversion
+                warn!("UTF-8 error in chunk, using lossy conversion: {}", e);
+                let chunk_str = String::from_utf8_lossy(&buffer[..bytes_read]);
+                content.push_str(&chunk_str);
+            }
+        }
+
+        // Yield to allow other tasks to run during large file processing
+        tokio::task::yield_now().await;
+    }
+
+    info!("Successfully streamed {} bytes from {}", content.len(), path.display());
+    Ok(content)
+}
+
 /// Read a single file with optional line range filtering
 ///
 /// This function reads a file and returns its contents, with support for
-/// showing line numbers and filtering by line range.
+/// showing line numbers and filtering by line range. Uses smart resource
+/// allocation to optimize memory usage based on file size.
 ///
 /// # Arguments
 ///
