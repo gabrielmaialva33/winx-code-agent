@@ -735,10 +735,16 @@ fn parse_search_replace_blocks(
             let search_string = search_block.join("\n");
             let search_content = search_string.trim();
             if search_content.is_empty() {
-                return Err(SearchReplaceSyntaxError::with_help_text(format!(
-                    "Line {}: SEARCH block contains only whitespace. You must include non-whitespace content to search for",
-                    line_num
-                )));
+                return Err(SearchReplaceSyntaxError::detailed(
+                    "SEARCH block contains only whitespace".to_string(),
+                    Some(line_num),
+                    Some("SEARCH".to_string()),
+                    vec![
+                        "Include non-whitespace content between <<<<<<< SEARCH and ======= markers".to_string(),
+                        "The search block should contain the exact text you want to replace".to_string(),
+                        "Avoid having only spaces, tabs, or empty lines in the search block".to_string(),
+                    ]
+                ));
             }
 
             i += 1; // Skip the divider
@@ -747,21 +753,32 @@ fn parse_search_replace_blocks(
             // Read the replace block
             while i < lines.len() && !replace_marker().is_match(lines[i]) {
                 if search_marker().is_match(lines[i]) || divider_marker().is_match(lines[i]) {
-                    return Err(SearchReplaceSyntaxError::with_help_text(format!(
-                        "Line {}: Found stray marker in REPLACE block: {}",
-                        i + 1,
-                        lines[i]
-                    )));
+                    return Err(SearchReplaceSyntaxError::detailed(
+                        format!("Found stray marker in REPLACE block: {}", lines[i]),
+                        Some(i + 1),
+                        Some("REPLACE".to_string()),
+                        vec![
+                            "Remove the stray marker from inside the replace block".to_string(),
+                            "Start a new search/replace block after closing the current one with >>>>>>> REPLACE".to_string(),
+                            "There should be only one divider per search/replace block".to_string(),
+                        ]
+                    ));
                 }
                 replace_block.push(lines[i]);
                 i += 1;
             }
 
             if i >= lines.len() {
-                return Err(SearchReplaceSyntaxError::with_help_text(format!(
-                    "Line {}: Unclosed block - missing REPLACE marker",
-                    line_num
-                )));
+                return Err(SearchReplaceSyntaxError::detailed(
+                    "Unclosed block - missing REPLACE marker".to_string(),
+                    Some(line_num),
+                    Some("REPLACE".to_string()),
+                    vec![
+                        "Add >>>>>>> REPLACE after your replacement content".to_string(),
+                        "Complete the block structure: SEARCH content, =======, REPLACE content, >>>>>>> REPLACE".to_string(),
+                        "Check that all replace blocks are properly closed".to_string(),
+                    ]
+                ));
             }
 
             i += 1; // Skip the replace marker
@@ -769,11 +786,16 @@ fn parse_search_replace_blocks(
             blocks.push((search_block.join("\n"), replace_block.join("\n")));
         } else {
             if replace_marker().is_match(lines[i]) || divider_marker().is_match(lines[i]) {
-                return Err(SearchReplaceSyntaxError::with_help_text(format!(
-                    "Line {}: Found stray marker outside block: {}",
-                    i + 1,
-                    lines[i]
-                )));
+                return Err(SearchReplaceSyntaxError::detailed(
+                    format!("Found stray marker outside block: {}", lines[i]),
+                    Some(i + 1),
+                    None,
+                    vec![
+                        "Markers should only appear inside properly structured search/replace blocks".to_string(),
+                        "Make sure every marker is part of a complete block structure".to_string(),
+                        "Remove any orphaned markers that are not part of a block".to_string(),
+                    ]
+                ));
             }
             i += 1;
         }
