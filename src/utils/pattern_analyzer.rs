@@ -89,7 +89,7 @@ impl PatternAnalyzer {
             let next_commands = self
                 .sequence_patterns
                 .entry(prev_cmd.clone())
-                .or_insert_with(HashMap::new);
+                .or_default();
             *next_commands.entry(normalized.clone()).or_insert(0) += 1;
         }
 
@@ -97,7 +97,7 @@ impl PatternAnalyzer {
         let dir_commands = self
             .directory_context
             .entry(current_dir.to_string())
-            .or_insert_with(Vec::new);
+            .or_default();
 
         // Only add if it's not already in the list
         if !dir_commands.contains(&normalized) {
@@ -115,7 +115,7 @@ impl PatternAnalyzer {
                 if let Some(ext_str) = file_ext.to_str() {
                     let file_type = format!(".{}", ext_str);
                     let file_commands =
-                        self.file_patterns.entry(file_type).or_insert_with(Vec::new);
+                        self.file_patterns.entry(file_type).or_default();
 
                     if !file_commands.contains(&normalized) {
                         file_commands.push(normalized);
