@@ -6,9 +6,8 @@ description = "Shell and coding agent for Claude Desktop"
 authors = ["Gabriel Maia <gabrielmaialva33@gmail.com>"]
 
 [dependencies]
-# Modern MCP SDK - official and maintained
+# Modern MCP SDK - use compatible versions
 rust-mcp-sdk = { version = "0.2.0", features = ["server", "macros"] }
-rust-mcp-schema = "0.7.2"
 
 # Async runtime
 tokio = { version = "1.44", features = ["full"] }
@@ -53,7 +52,3 @@ rand = "0.9"
 tempfile = "3.8.1"
 tokio-test = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
-
-[[bench]]
-name = "performance"
-harness = false
