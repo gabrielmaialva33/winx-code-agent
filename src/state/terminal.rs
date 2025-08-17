@@ -1434,6 +1434,12 @@ pub struct TerminalOutputDiff {
     max_lines: usize,
 }
 
+impl Default for TerminalOutputDiff {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TerminalOutputDiff {
     /// Create a new terminal output diff detector
     pub fn new() -> Self {
