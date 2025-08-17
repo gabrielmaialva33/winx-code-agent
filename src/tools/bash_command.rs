@@ -1491,7 +1491,7 @@ async fn execute_interactive_command(
         return Ok(result.replace("---\n\n", &format!("{}---\n\n", warnings)));
     }
 
-    // For normal commands, use execute_interactive with improved timeout handling
+    // WCGW-style intelligent timeout calculation
     let effective_timeout = match timeout {
         Some(t) => {
             if t > 0.0 {
@@ -1501,19 +1501,19 @@ async fn execute_interactive_command(
             }
         } // Default 30s if invalid
         None => {
-            // Estimate appropriate timeout based on command complexity
-            if command.contains("|") || command.contains("&&") || command.contains(";") {
-                // Complex command with pipes or multiple steps needs more time
-                60.0
-            } else if command.contains("find") || command.contains("grep -r") {
-                // Search commands might take longer
-                45.0
+            if !command.trim().is_empty() {
+                // Use command safety analyzer for intelligent timeout
+                let command_safety = CommandSafety::new();
+                let recommended_timeout = command_safety.get_timeout(command);
+                recommended_timeout.as_secs_f32()
             } else {
-                // Default for simple commands
-                30.0
+                // Status check should be quick
+                5.0
             }
         }
     };
+    
+    debug!("Using timeout of {:.1}s for command: {}", effective_timeout, command);
 
     // Record this command for pattern analysis
     if let Err(e) = bash_state
