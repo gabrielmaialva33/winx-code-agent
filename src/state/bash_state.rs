@@ -265,6 +265,12 @@ pub struct TerminalState {
     pub max_buffer_lines: usize,
 }
 
+impl Default for TerminalState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TerminalState {
     /// Creates a new terminal state
     pub fn new() -> Self {
