@@ -1025,12 +1025,22 @@ pub async fn handle_tool_call(
             cwd.join(&expanded_path).to_string_lossy().into_owned()
         };
 
-        // Check if file path is allowed
-        check_path_allowed(&file_path, bash_state)?;
-
-        // Check if file can be overwritten (if it exists)
-        if Path::new(&file_path).exists() {
-            check_can_overwrite(&file_path, bash_state)?;
+        // Enhanced file operation validation using WCGW-style mode checking
+        let path_for_validation = Path::new(&file_path);
+        
+        // Check if file operation is allowed in current mode
+        if path_for_validation.exists() {
+            // File exists, check edit permissions
+            if !bash_state.is_file_edit_allowed(&file_path) {
+                let violation_message = bash_state.get_mode_violation_message("file editing", &file_path);
+                return Err(WinxError::CommandNotAllowed(violation_message));
+            }
+        } else {
+            // New file, check write permissions 
+            if !bash_state.is_file_write_allowed(&file_path) {
+                let violation_message = bash_state.get_mode_violation_message("file writing", &file_path);
+                return Err(WinxError::CommandNotAllowed(violation_message));
+            }
         }
     }
 
