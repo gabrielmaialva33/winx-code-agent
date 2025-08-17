@@ -82,7 +82,11 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
     use std::fs::File;
     use std::io::{BufReader, Read};
 
-    debug!("Streaming file {} with chunk size {}", path.display(), chunk_size);
+    debug!(
+        "Streaming file {} with chunk size {}",
+        path.display(),
+        chunk_size
+    );
 
     let file = File::open(path).map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
@@ -94,10 +98,12 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
     let mut buffer = vec![0; chunk_size];
 
     loop {
-        let bytes_read = reader.read(&mut buffer).map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Failed to read chunk from file: {}", e),
-        })?;
+        let bytes_read = reader
+            .read(&mut buffer)
+            .map_err(|e| WinxError::FileAccessError {
+                path: path.to_path_buf(),
+                message: format!("Failed to read chunk from file: {}", e),
+            })?;
 
         if bytes_read == 0 {
             break; // End of file
@@ -118,7 +124,11 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
         tokio::task::yield_now().await;
     }
 
-    info!("Successfully streamed {} bytes from {}", content.len(), path.display());
+    info!(
+        "Successfully streamed {} bytes from {}",
+        content.len(),
+        path.display()
+    );
     Ok(content)
 }
 
@@ -397,8 +407,12 @@ async fn read_file(
     let allocator = get_global_allocator();
     allocator.mark_read_success().await;
 
-    debug!("Successfully read file: {} ({} bytes, {} lines)", 
-           canon_path, content.len(), total_lines);
+    debug!(
+        "Successfully read file: {} ({} bytes, {} lines)",
+        canon_path,
+        content.len(),
+        total_lines
+    );
 
     Ok((
         result_content,
@@ -676,7 +690,8 @@ pub async fn handle_tool_call(
                             show_line_numbers,
                             start,
                             end,
-                        ).await;
+                        )
+                        .await;
 
                         // Track errors if read failed
                         if result.is_err() {

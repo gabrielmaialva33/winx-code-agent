@@ -191,8 +191,10 @@ impl ResourceAllocator {
 
         // Try to acquire resources
         if self.can_allocate(allocation.allocated_memory).await {
-            self.allocate_resources(&request.file_path, allocation.allocated_memory).await;
-            self.cache_allocation(&request.file_path, allocation.clone()).await;
+            self.allocate_resources(&request.file_path, allocation.allocated_memory)
+                .await;
+            self.cache_allocation(&request.file_path, allocation.clone())
+                .await;
             Ok(allocation)
         } else {
             // Add to pending queue if resources not available
@@ -246,7 +248,7 @@ impl ResourceAllocator {
     async fn can_allocate(&self, requested_memory: usize) -> bool {
         let allocations = self.allocations.lock().unwrap();
         let current_total: usize = allocations.values().sum();
-        
+
         current_total + requested_memory <= self.max_total_memory
     }
 
@@ -254,11 +256,11 @@ impl ResourceAllocator {
     async fn allocate_resources(&self, file_path: &Path, memory: usize) {
         let mut allocations = self.allocations.lock().unwrap();
         allocations.insert(file_path.to_path_buf(), memory);
-        
+
         let mut stats = self.stats.lock().unwrap();
         stats.total_allocated += memory;
         stats.active_reads += 1;
-        
+
         debug!("Allocated {} bytes for: {:?}", memory, file_path);
     }
 
@@ -276,20 +278,20 @@ impl ResourceAllocator {
                 stats.total_allocated = stats.total_allocated.saturating_sub(memory);
                 stats.active_reads = stats.active_reads.saturating_sub(1);
             }
-            
+
             debug!("Released {} bytes for: {:?}", memory, file_path);
         }
 
         // Process pending queue
         self.process_pending_queue().await;
-        
+
         Ok(())
     }
 
     /// Check cache for allocation
     async fn check_cache(&self, file_path: &Path) -> Option<CacheEntry> {
         let mut cache = self.cache.lock().unwrap();
-        
+
         if let Some(entry) = cache.get_mut(file_path) {
             // Check if entry is still valid
             if entry.created_at.elapsed() < CACHE_TTL {
@@ -300,7 +302,7 @@ impl ResourceAllocator {
                 cache.remove(file_path);
             }
         }
-        
+
         None
     }
 
@@ -315,7 +317,7 @@ impl ResourceAllocator {
                 access_count: 1,
             },
         );
-        
+
         // Cleanup old entries if cache is getting large
         if cache.len() > 1000 {
             self.cleanup_cache(&mut cache);
@@ -331,15 +333,15 @@ impl ResourceAllocator {
     /// Add request to pending queue
     async fn queue_request(&self, request: AllocationRequest) {
         let mut queue = self.pending_queue.lock().unwrap();
-        
+
         // Insert in priority order
         let insert_pos = queue
             .iter()
             .position(|req| req.priority < request.priority)
             .unwrap_or(queue.len());
-            
+
         queue.insert(insert_pos, request);
-        
+
         let mut stats = self.stats.lock().unwrap();
         stats.pending_requests += 1;
     }
@@ -347,19 +349,20 @@ impl ResourceAllocator {
     /// Process pending allocation requests
     async fn process_pending_queue(&self) {
         let mut processed = Vec::new();
-        
+
         loop {
             // Take next request without holding the lock across await
             let request = {
                 let mut queue = self.pending_queue.lock().unwrap();
                 queue.pop_front()
             };
-            
+
             if let Some(request) = request {
                 let category = FileCategory::from_size(request.file_size);
                 if let Ok(allocation) = self.calculate_allocation(&request, category).await {
                     if self.can_allocate(allocation.allocated_memory).await {
-                        self.allocate_resources(&request.file_path, allocation.allocated_memory).await;
+                        self.allocate_resources(&request.file_path, allocation.allocated_memory)
+                            .await;
                         self.cache_allocation(&request.file_path, allocation).await;
                         processed.push(request.file_path);
                     } else {
@@ -373,7 +376,7 @@ impl ResourceAllocator {
                 break; // No more requests
             }
         }
-        
+
         if !processed.is_empty() {
             info!("Processed {} pending allocation requests", processed.len());
         }
@@ -429,11 +432,11 @@ impl ResourceAllocator {
     pub async fn cleanup_unused_allocations(&self) {
         let mut cache = self.cache.lock().unwrap();
         self.cleanup_cache(&mut cache);
-        
+
         // Also cleanup any stale allocations
         let mut allocations = self.allocations.lock().unwrap();
         allocations.retain(|path, _| cache.contains_key(path));
-        
+
         info!("Performed cleanup of unused allocations");
     }
 }
@@ -447,10 +450,7 @@ pub fn get_global_allocator() -> &'static ResourceAllocator {
 }
 
 /// Convenience function to request allocation with default priority
-pub async fn request_file_allocation(
-    file_path: &Path,
-    file_size: u64,
-) -> Result<Allocation> {
+pub async fn request_file_allocation(file_path: &Path, file_size: u64) -> Result<Allocation> {
     let allocator = get_global_allocator();
     allocator
         .request_allocation(AllocationRequest {
@@ -480,7 +480,7 @@ impl AllocationGuard {
     pub async fn new(file_path: PathBuf, _allocation: Allocation) -> Self {
         let allocator = get_global_allocator();
         let permit = allocator.acquire_read_permit().await;
-        
+
         Self {
             file_path,
             _permit: permit,
@@ -512,7 +512,7 @@ mod tests {
     #[tokio::test]
     async fn test_resource_allocation() {
         let allocator = ResourceAllocator::new();
-        
+
         let request = AllocationRequest {
             file_path: PathBuf::from("/test/file.txt"),
             file_size: 1_000_000,
@@ -529,7 +529,7 @@ mod tests {
     #[tokio::test]
     async fn test_streaming_for_large_files() {
         let allocator = ResourceAllocator::new();
-        
+
         let request = AllocationRequest {
             file_path: PathBuf::from("/test/large_file.txt"),
             file_size: 50_000_000, // 50MB
@@ -546,10 +546,10 @@ mod tests {
     #[tokio::test]
     async fn test_memory_pressure_detection() {
         let allocator = ResourceAllocator::new();
-        
+
         // Initially should not be under pressure
         assert!(!allocator.is_under_memory_pressure().await);
-        
+
         // Simulate high memory usage by checking percentage
         let usage = allocator.get_memory_usage_percent().await;
         assert!(usage < 80.0); // Should be low initially
