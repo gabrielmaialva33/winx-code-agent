@@ -248,7 +248,7 @@ fn read_mmap(file: &File, path: &Path) -> Result<Vec<u8>> {
 /// Returns an error if the file cannot be read or mapped
 fn read_segmented_mmap(_file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
     // Calculate number of segments needed
-    let segment_count = (file_size + SEGMENT_SIZE - 1) / SEGMENT_SIZE;
+    let segment_count = file_size.div_ceil(SEGMENT_SIZE);
     debug!(
         "Reading file {} in {} segments of {}MB each",
         path.display(),
