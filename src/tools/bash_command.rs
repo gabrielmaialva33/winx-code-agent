@@ -17,6 +17,7 @@ use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, CommandState};
 use crate::state::terminal::render_terminal_output;
 use crate::types::{BashCommand, BashCommandAction, SpecialKey};
+use crate::utils::command_safety::{CommandContext, CommandSafety};
 
 /// Maximum output length to prevent excessive responses
 #[allow(dead_code)]
@@ -658,6 +659,35 @@ pub async fn handle_tool_call(
                 return Err(WinxError::CommandNotAllowed(violation_message));
             }
 
+            // WCGW-style command safety analysis
+            let command_context = CommandContext::new(command);
+            
+            // Check if command should be allowed (interactive detection)
+            if let Err(e) = command_context.should_allow_execution() {
+                warn!("Command safety check failed for '{}': {}", command, e);
+                
+                // Add helpful message about alternatives
+                let enhanced_error = match e {
+                    WinxError::InteractiveCommandDetected { command: cmd } => {
+                        WinxError::InteractiveCommandDetected {
+                            command: format!(
+                                "{} - Consider using non-interactive flags (e.g., git commit -m 'message') or automation tools",
+                                cmd
+                            )
+                        }
+                    }
+                    _ => e,
+                };
+                return Err(enhanced_error);
+            }
+            
+            // Log safety warnings
+            if !command_context.warnings.is_empty() {
+                for warning in &command_context.warnings {
+                    warn!("Command safety warning: {}", warning);
+                }
+            }
+
             // Check for screen command specifically to handle it specially
             if command.trim().starts_with("screen ") {
                 info!("Detected screen command, using special handling");
@@ -673,8 +703,13 @@ pub async fn handle_tool_call(
                 info!("Command contains background operator, using background execution");
                 execute_background_command(&mut bash_state, command).await
             } else {
-                // Normal command execution
-                execute_interactive_command(&mut bash_state, command, bash_command.wait_for_seconds)
+                // Normal command execution with WCGW-style timeout handling
+                let timeout_seconds = bash_command.wait_for_seconds
+                    .or_else(|| Some(command_context.timeout.as_secs_f32()))
+                    .unwrap_or(30.0); // Fallback to 30 seconds
+                    
+                info!("Executing command '{}' with timeout: {:.1}s", command, timeout_seconds);
+                execute_interactive_command(&mut bash_state, command, Some(timeout_seconds))
                     .await
             }
         }
@@ -1321,6 +1356,51 @@ async fn execute_interactive_command(
     timeout: Option<f32>,
 ) -> Result<String> {
     debug!("Executing interactive command: {}", command);
+
+    // WCGW-style command safety validation
+    if !command.trim().is_empty() {
+        let command_safety = CommandSafety::new();
+        
+        // Check for command already running before validation
+        {
+            let bash_guard = bash_state.interactive_bash.lock().map_err(|e| {
+                WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
+            })?;
+            
+            if let Some(ref bash) = *bash_guard {
+                if let CommandState::Running { command: current_cmd, start_time } = &bash.command_state {
+                    let duration = start_time.elapsed().unwrap_or_default().as_secs_f64();
+                    return Err(WinxError::CommandAlreadyRunning {
+                        current_command: current_cmd.clone(),
+                        duration_seconds: duration,
+                    });
+                }
+            }
+        }
+        
+        // Validate command safety
+        if command_safety.is_interactive(command) {
+            warn!("Interactive command detected: {}", command);
+            return Err(WinxError::InteractiveCommandDetected {
+                command: format!(
+                    "{} - Interactive commands may hang. Use non-interactive alternatives or flags", 
+                    command
+                ),
+            });
+        }
+        
+        // Check for background commands and warn
+        if command_safety.is_background_command(command) {
+            info!("Background command detected: {}", command);
+            // Continue execution but with modified timeout
+        }
+        
+        // Get safety warnings and log them
+        let warnings = command_safety.get_warnings(command);
+        for warning in &warnings {
+            debug!("Command safety warning: {}", warning);
+        }
+    }
 
     // Validate input
     if command.trim().is_empty() && timeout.is_none() {
