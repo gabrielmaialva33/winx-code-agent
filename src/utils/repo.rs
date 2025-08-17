@@ -215,6 +215,12 @@ pub struct WorkspaceStats {
     pub last_refresh: SystemTime,
 }
 
+impl Default for WorkspaceStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WorkspaceStats {
     /// Create a new WorkspaceStats
     pub fn new() -> Self {
