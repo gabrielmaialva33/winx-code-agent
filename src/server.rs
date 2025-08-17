@@ -84,7 +84,7 @@ pub async fn run_server_with_config(config: ServerConfig) -> Result<()> {
             config.debug_mode,
             config.simulation_mode,
             "unknown",
-            format!("{:?}", SystemTime::now()),
+            SystemTime::now(),
         );
 
         // Log to console and file

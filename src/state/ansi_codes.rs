@@ -155,7 +155,7 @@ pub mod sgr {
 
     /// Alternative Font 1-9
     pub fn alt_font(n: usize) -> String {
-        if n < 1 || n > 9 {
+        if !(1..=9).contains(&n) {
             return "".to_string();
         }
         format!("\x1B[{}m", 10 + n)

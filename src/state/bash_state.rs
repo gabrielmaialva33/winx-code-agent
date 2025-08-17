@@ -1608,11 +1608,9 @@ impl BashState {
             if glob_pattern.starts_with('*') && glob_pattern.ends_with('*') {
                 let middle = &glob_pattern[1..glob_pattern.len() - 1];
                 file_path.contains(middle)
-            } else if glob_pattern.starts_with('*') {
-                let suffix = &glob_pattern[1..];
+            } else if let Some(suffix) = glob_pattern.strip_prefix('*') {
                 file_path.ends_with(suffix)
-            } else if glob_pattern.ends_with('*') {
-                let prefix = &glob_pattern[..glob_pattern.len() - 1];
+            } else if let Some(prefix) = glob_pattern.strip_suffix('*') {
                 file_path.starts_with(prefix)
             } else {
                 file_path == glob_pattern
