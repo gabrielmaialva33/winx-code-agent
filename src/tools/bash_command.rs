@@ -706,7 +706,7 @@ pub async fn handle_tool_call(
                 // Normal command execution with WCGW-style timeout handling
                 let timeout_seconds = bash_command
                     .wait_for_seconds
-                    .or_else(|| Some(command_context.timeout.as_secs_f32()))
+                    .or(Some(command_context.timeout.as_secs_f32()))
                     .unwrap_or(30.0); // Fallback to 30 seconds
 
                 info!(
