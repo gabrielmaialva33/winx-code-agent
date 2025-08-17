@@ -3,7 +3,7 @@
 
 use rmcp::{
     model::*,
-    tool, tool_router,
+    tool, tool_router, tool_handler,
     transport::stdio,
     ServerHandler,
     ServiceExt,

@@ -15,7 +15,7 @@ pub mod read_files;
 pub mod read_image;
 
 use anyhow::Result;
-use rmcp::{model::*, tool, Error as McpError, ServerHandler};
+use rmcp::{model::*, ErrorData as McpError, ServerHandler};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
 
@@ -90,26 +90,27 @@ impl WinxService {
 
 impl WinxService {
     /// Initialize the shell environment
-    #[tool]
+    // #//#[tool]
     ///
     /// This tool must be called before any other shell tools can be used.
     /// It sets up the shell environment with the specified workspace path
     /// and configuration.
-    #[tool(description = "
-- Always call this at the start of the conversation before using any of the shell tools from wcgw.
-- Use `any_workspace_path` to initialize the shell in the appropriate project directory.
-- If the user has mentioned a workspace or project root or any other file or folder use it to set `any_workspace_path`.
-- If user has mentioned any files use `initial_files_to_read` to read, use absolute paths only (~ allowed)
-- By default use mode \"wcgw\"
-- In \"code-writer\" mode, set the commands and globs which user asked to set, otherwise use 'all'.
-- Use type=\"first_call\" if it's the first call to this tool.
-- Use type=\"user_asked_mode_change\" if in a conversation user has asked to change mode.
-- Use type=\"reset_shell\" if in a conversation shell is not working after multiple tries.
-- Use type=\"user_asked_change_workspace\" if in a conversation user asked to change workspace
-")]
+    // #//#[tool(description = "
+    // - Always call this at the start of the conversation before using any of the shell tools from wcgw.
+    // - Use `any_workspace_path` to initialize the shell in the appropriate project directory.
+    // - If the user has mentioned a workspace or project root or any other file or folder use it to set `any_workspace_path`.
+    // - If user has mentioned any files use `initial_files_to_read` to read, use absolute paths only (~ allowed)
+    // - By default use mode \"wcgw\"
+    // - In \"code-writer\" mode, set the commands and globs which user asked to set, otherwise use 'all'.
+    // - Use type=\"first_call\" if it's the first call to this tool.
+    // - Use type=\"user_asked_mode_change\" if in a conversation user has asked to change mode.
+    // - Use type=\"reset_shell\" if in a conversation shell is not working after multiple tries.
+    // - Use type=\"user_asked_change_workspace\" if in a conversation user asked to change workspace
+    // ")]
     async fn initialize(
         &self,
-        #[tool(aggr)] args: crate::types::Initialize,
+        // #//#[tool(aggr)] 
+        args: crate::types::Initialize,
     ) -> Result<CallToolResult, McpError> {
         // Start timing for performance monitoring
         let start_time = std::time::Instant::now();
@@ -172,7 +173,7 @@ impl WinxService {
     ///
     /// This tool executes a command in the shell environment and returns the result.
     /// It can also be used to check the status of a running command or send input.
-    #[tool(description = "
+    #//#[tool(description = "
 - Execute a bash command. This is stateful (beware with subsequent calls).
 - Status of the command and the current working directory will always be returned at the end.
 - The first or the last line might be `(...truncated)` if the output is too long.
@@ -186,7 +187,7 @@ impl WinxService {
 ")]
     async fn bash_command(
         &self,
-        #[tool(aggr)] args: crate::types::BashCommand,
+        #//#[tool(aggr)] args: crate::types::BashCommand,
     ) -> Result<CallToolResult, McpError> {
         // Start timing for performance monitoring
         let start_time = std::time::Instant::now();
@@ -255,7 +256,7 @@ impl WinxService {
     ///
     /// This tool reads one or more files and returns their contents, with
     /// optional line numbers and line range filtering.
-    #[tool(description = "
+    #//#[tool(description = "
 - Read full file content of one or more files.
 - Provide absolute paths only (~ allowed)
 - REQUIRED FIELD: file_paths - A list of file paths to read (cannot be empty)
@@ -265,7 +266,7 @@ impl WinxService {
 ")]
     async fn read_files(
         &self,
-        #[tool(aggr)] args: crate::types::ReadFiles,
+        #//#[tool(aggr)] args: crate::types::ReadFiles,
     ) -> Result<CallToolResult, McpError> {
         // Start timing for performance monitoring
         let start_time = std::time::Instant::now();
@@ -346,7 +347,7 @@ impl WinxService {
     ///
     /// This tool writes new content to a file or edits an existing file using
     /// search and replace blocks. It can handle full file content or partial edits.
-    #[tool(description = "
+    #//#[tool(description = "
 - Writes or edits a file based on the percentage of changes.
 - Use absolute path only (~ allowed).
 - percentage_to_change is calculated as number of existing lines that will have some diff divided by total existing lines.
@@ -357,7 +358,7 @@ impl WinxService {
 ")]
     async fn file_write_or_edit(
         &self,
-        #[tool(aggr)] args: crate::types::FileWriteOrEdit,
+        #//#[tool(aggr)] args: crate::types::FileWriteOrEdit,
     ) -> Result<CallToolResult, McpError> {
         // Start timing for performance monitoring
         let start_time = std::time::Instant::now();
@@ -467,13 +468,13 @@ impl WinxService {
     ///
     /// This tool saves the description and contents of files matching the
     /// provided glob patterns to a file for knowledge transfer.
-    #[tool(description = "
+    #//#[tool(description = "
 Saves provided description and file contents of all the relevant file paths or globs in a single text file.
 - Provide random 3 word unqiue id or whatever user provided.
 - Leave project path as empty string if no project path")]
     async fn context_save(
         &self,
-        #[tool(aggr)] args: crate::types::ContextSave,
+        #//#[tool(aggr)] args: crate::types::ContextSave,
     ) -> Result<CallToolResult, McpError> {
         // Start timing for performance monitoring
         let start_time = std::time::Instant::now();
@@ -521,10 +522,10 @@ Saves provided description and file contents of all the relevant file paths or g
     ///
     /// This tool reads an image file and returns its contents as base64-encoded
     /// data with the appropriate MIME type.
-    #[tool(description = "Read an image from the shell.")]
+    #//#[tool(description = "Read an image from the shell.")]
     async fn read_image(
         &self,
-        #[tool(aggr)] args: crate::types::ReadImage,
+        #//#[tool(aggr)] args: crate::types::ReadImage,
     ) -> Result<CallToolResult, McpError> {
         // Start timing for performance monitoring
         let start_time = std::time::Instant::now();
@@ -573,7 +574,7 @@ Saves provided description and file contents of all the relevant file paths or g
     /// Analyze code for issues and suggestions
     ///
     /// This tool analyzes a code file for issues, suggestions, and complexity metrics.
-    #[tool(description = "
+    #//#[tool(description = "
 Analyze code for issues, suggestions, and complexity metrics.
 - Identifies potential bugs, security issues, and code smells
 - Provides suggestions for code improvement
@@ -583,7 +584,7 @@ Analyze code for issues, suggestions, and complexity metrics.
 ")]
     async fn code_analyzer(
         &self,
-        #[tool(aggr)] args: crate::types::CodeAnalysis,
+        #//#[tool(aggr)] args: crate::types::CodeAnalysis,
     ) -> Result<CallToolResult, McpError> {
         // Start timing for performance monitoring
         let start_time = std::time::Instant::now();
@@ -652,7 +653,7 @@ Analyze code for issues, suggestions, and complexity metrics.
     ///
     /// This tool provides command suggestions based on command history,
     /// context, and patterns observed in previous usage.
-    #[tool(description = "
+    #//#[tool(description = "
 Get intelligent command suggestions based on command history and context.
 - Provides command suggestions based on partial input and command history
 - Learns from your command usage patterns over time
@@ -661,7 +662,7 @@ Get intelligent command suggestions based on command history and context.
 ")]
     async fn command_suggestions(
         &self,
-        #[tool(aggr)] args: crate::types::CommandSuggestions,
+        #//#[tool(aggr)] args: crate::types::CommandSuggestions,
     ) -> Result<CallToolResult, McpError> {
         // Start timing for performance monitoring
         let start_time = std::time::Instant::now();
@@ -712,7 +713,7 @@ Get intelligent command suggestions based on command history and context.
     ///
     /// This tool returns information about the agent's current status,
     /// including uptime, version, and resource usage.
-    #[tool(description = "
+    #//#[tool(description = "
 Get status information about the Winx agent.
 - Returns uptime, version, and resource usage information
 - No parameters required

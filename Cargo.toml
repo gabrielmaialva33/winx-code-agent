@@ -49,6 +49,9 @@ vte = "0.15"
 # Random number generation
 rand = "0.9"
 
+# NLP processing
+tokenizers = "0.20"
+
 [dev-dependencies]
 tempfile = "3.8.1"
 tokio-test = "0.4"

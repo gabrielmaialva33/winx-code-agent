@@ -80,7 +80,7 @@ impl JsonSchema for ModeName {
     }
 
     fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        let mut schema = schemars::SchemaObject::default();
+        let mut schema = schemars::schema::SchemaObject::default();
         schema.metadata().description = Some("The mode name for initialization".to_string());
         let enum_values = vec![
             serde_json::Value::String("wcgw".to_string()),
@@ -316,7 +316,7 @@ impl JsonSchema for Modes {
     }
 
     fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        let mut schema = schemars::SchemaObject::default();
+        let mut schema = schemars::schema::SchemaObject::default();
         schema.metadata().description = Some("Internal representation of modes".to_string());
         let enum_values = vec![
             serde_json::Value::String("wcgw".to_string()),
