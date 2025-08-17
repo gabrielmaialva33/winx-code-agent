@@ -650,30 +650,11 @@ pub async fn handle_tool_call(
         BashCommandAction::Command { command } => {
             debug!("Processing Command action: {}", command);
 
-            // Verify command is allowed in current mode
-            match &bash_state.bash_command_mode.allowed_commands {
-                crate::types::AllowedCommands::All(s) if s == "all" => {
-                    // All commands allowed
-                }
-                crate::types::AllowedCommands::List(allowed) => {
-                    // Check if command is in allowed list
-                    let cmd_parts: Vec<&str> = command.split_whitespace().collect();
-                    if let Some(cmd) = cmd_parts.first() {
-                        if !allowed.iter().any(|a| a == cmd) {
-                            error!("Command '{}' not allowed in current mode", cmd);
-                            return Err(WinxError::CommandNotAllowed(format!(
-                                "Command '{}' not allowed in current mode. Allowed commands: {:?}",
-                                cmd, allowed
-                            )));
-                        }
-                    }
-                }
-                _ => {
-                    error!("No commands allowed in current mode");
-                    return Err(WinxError::CommandNotAllowed(
-                        "No commands allowed in current mode".to_string(),
-                    ));
-                }
+            // Enhanced command validation using WCGW-style mode checking
+            if !bash_state.is_command_allowed(&command) {
+                error!("Command '{}' not allowed in current mode", command);
+                let violation_message = bash_state.get_mode_violation_message("command execution", &command);
+                return Err(WinxError::CommandNotAllowed(violation_message));
             }
 
             // Check for screen command specifically to handle it specially
