@@ -104,26 +104,68 @@ impl SearchReplaceHelper {
         }
     }
 
-    /// Apply the search/replace blocks to the original content
+    /// Apply the search/replace blocks to the original content with multi-match detection
     fn apply(mut self) -> Result<String> {
+        // First, analyze all blocks for potential conflicts using WCGW-style detection
+        let resolver = MultiMatchResolver::new(&self.blocks, &self.original_content);
+        
+        // Check for conflicts before proceeding
+        if let Err(conflict_error) = resolver.analyze_conflicts() {
+            // Add resolution suggestions to the error
+            let suggestions = resolver.get_resolution_suggestions();
+            self.debug_info.extend(suggestions);
+            return Err(conflict_error);
+        }
+
         let mut content = self.original_content.clone();
 
         // Track successful replacements for detailed reporting
         let mut _success_count = 0;
         let total_blocks = self.blocks.len();
 
-        // Apply each block sequentially
+        // Apply each block sequentially after conflict analysis passes
         for (i, (search, replace)) in self.blocks.iter().enumerate() {
             trace!("Processing block {}/{}", i + 1, total_blocks);
 
-            // Check for exact match first
+            // Check for exact match first with enhanced multi-match detection
             if content.contains(search) {
                 let count_before = content.matches(search).count();
+                
+                // WCGW-style: check for multiple matches and warn/error if ambiguous
+                if count_before > 1 {
+                    // Find all match locations for detailed error reporting
+                    let mut match_locations = Vec::new();
+                    let mut start = 0;
+                    
+                    while let Some(pos) = content[start..].find(search) {
+                        let actual_pos = start + pos;
+                        let before_match = &content[..actual_pos];
+                        let line_num = before_match.lines().count() + 1;
+                        match_locations.push(line_num);
+                        start = actual_pos + 1;
+                    }
+                    
+                    return Err(WinxError::SearchBlockAmbiguous {
+                        block_content: search.clone(),
+                        match_count: count_before,
+                        suggestions: vec![
+                            format!("Block {} matches {} times in the file at lines: {}", 
+                                i + 1, count_before, 
+                                match_locations.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")),
+                            "".to_string(),
+                            "To resolve this ambiguity:".to_string(),
+                            "• Add more context lines before and after the search block".to_string(),
+                            "• Include surrounding function names, comments, or unique identifiers".to_string(),
+                            "• Make the search block more specific to match only the intended location".to_string(),
+                            "• Break the change into smaller, more targeted search/replace blocks".to_string(),
+                        ],
+                    });
+                }
+                
                 content = content.replace(search, replace);
-                let _count_after = content.matches(replace).count();
 
                 self.debug_info.push(format!(
-                    "Block {} successfully replaced {} occurrences",
+                    "Block {} successfully replaced {} occurrence",
                     i + 1,
                     count_before
                 ));
@@ -491,6 +533,222 @@ impl SearchReplaceHelper {
         }
 
         best_match
+    }
+}
+
+/// WCGW-style multi-match detection and analysis
+#[derive(Debug, Clone)]
+struct MatchAnalysis {
+    search_block: String,
+    block_index: usize,
+    exact_matches: Vec<MatchLocation>,
+    fuzzy_matches: Vec<FuzzyMatch>,
+    conflict_score: f64,
+}
+
+#[derive(Debug, Clone)]
+struct MatchLocation {
+    start_pos: usize,
+    end_pos: usize,
+    line_start: usize,
+    line_end: usize,
+    context_before: String,
+    context_after: String,
+}
+
+impl MatchAnalysis {
+    /// Create new match analysis for a search block
+    fn new(search_block: String, block_index: usize, content: &str) -> Self {
+        let mut analysis = Self {
+            search_block: search_block.clone(),
+            block_index,
+            exact_matches: Vec::new(),
+            fuzzy_matches: Vec::new(),
+            conflict_score: 0.0,
+        };
+        
+        analysis.find_all_matches(&search_block, content);
+        analysis.calculate_conflict_score();
+        analysis
+    }
+    
+    /// Find all exact and fuzzy matches for the search block
+    fn find_all_matches(&mut self, search_block: &str, content: &str) {
+        // Find exact matches
+        let mut start = 0;
+        while let Some(pos) = content[start..].find(search_block) {
+            let actual_pos = start + pos;
+            let end_pos = actual_pos + search_block.len();
+            
+            // Calculate line numbers
+            let before_match = &content[..actual_pos];
+            let line_start = before_match.lines().count();
+            let line_end = line_start + search_block.lines().count().saturating_sub(1);
+            
+            // Get context around the match
+            let context_lines = 3;
+            let lines: Vec<&str> = content.lines().collect();
+            let context_start = line_start.saturating_sub(context_lines);
+            let context_end = (line_end + context_lines).min(lines.len());
+            
+            let context_before = if context_start < line_start {
+                lines[context_start..line_start].join("\n")
+            } else {
+                String::new()
+            };
+            
+            let context_after = if line_end + 1 < context_end {
+                lines[line_end + 1..context_end].join("\n") 
+            } else {
+                String::new()
+            };
+            
+            self.exact_matches.push(MatchLocation {
+                start_pos: actual_pos,
+                end_pos,
+                line_start,
+                line_end,
+                context_before,
+                context_after,
+            });
+            
+            start = actual_pos + 1; // Continue searching after this match
+        }
+    }
+    
+    /// Calculate conflict score based on WCGW patterns
+    fn calculate_conflict_score(&mut self) {
+        if self.exact_matches.len() > 1 {
+            // Multiple exact matches create high conflict
+            self.conflict_score = 100.0 * self.exact_matches.len() as f64;
+        } else if self.exact_matches.is_empty() && !self.fuzzy_matches.is_empty() {
+            // No exact matches but fuzzy matches available
+            let best_fuzzy = self.fuzzy_matches.iter()
+                .max_by(|a, b| a.similarity.partial_cmp(&b.similarity).unwrap_or(std::cmp::Ordering::Equal));
+            
+            if let Some(best) = best_fuzzy {
+                // Score based on how fuzzy the match is
+                self.conflict_score = (1.0 - best.similarity) * 50.0;
+            }
+        }
+    }
+    
+    /// Check if this match analysis indicates a conflict requiring user intervention
+    fn has_conflicts(&self) -> bool {
+        self.exact_matches.len() > 1 || (self.exact_matches.is_empty() && self.fuzzy_matches.len() > 1)
+    }
+    
+    /// Generate a detailed error message for conflicts (WCGW-style)
+    fn generate_conflict_error(&self) -> Result<()> {
+        if self.exact_matches.len() > 1 {
+            // Multiple exact matches
+            let mut suggestions = vec![
+                format!("The search block appears {} times in the file:", self.exact_matches.len()),
+                "".to_string(),
+            ];
+            
+            for (i, location) in self.exact_matches.iter().enumerate() {
+                suggestions.push(format!("Match {} (lines {}-{}):", i + 1, location.line_start + 1, location.line_end + 1));
+                if !location.context_before.is_empty() {
+                    suggestions.push(format!("  Context before: {}", 
+                        location.context_before.lines().take(2).collect::<Vec<_>>().join(" / ")));
+                }
+                suggestions.push(format!("  Match: {}", 
+                    self.search_block.lines().take(2).collect::<Vec<_>>().join(" / ")));
+                if !location.context_after.is_empty() {
+                    suggestions.push(format!("  Context after: {}", 
+                        location.context_after.lines().take(2).collect::<Vec<_>>().join(" / ")));
+                }
+                suggestions.push("".to_string());
+            }
+            
+            suggestions.extend(vec![
+                "Consider adding more context before and after this block to make the match unique.".to_string(),
+                "Include additional surrounding lines in your search block.".to_string(),
+                "Use more specific content that uniquely identifies the location to change.".to_string(),
+            ]);
+            
+            return Err(WinxError::SearchBlockAmbiguous {
+                block_content: self.search_block.clone(),
+                match_count: self.exact_matches.len(),
+                suggestions,
+            });
+        }
+        
+        Ok(())
+    }
+}
+
+/// Multi-match resolution system inspired by WCGW
+#[derive(Debug)]
+struct MultiMatchResolver {
+    analyses: Vec<MatchAnalysis>,
+    content: String,
+    conflict_threshold: f64,
+}
+
+impl MultiMatchResolver {
+    /// Create a new resolver for multiple search blocks
+    fn new(search_blocks: &[(String, String)], content: &str) -> Self {
+        let analyses = search_blocks
+            .iter()
+            .enumerate()
+            .map(|(i, (search, _))| MatchAnalysis::new(search.clone(), i, content))
+            .collect();
+            
+        Self {
+            analyses,
+            content: content.to_string(),
+            conflict_threshold: 50.0, // WCGW-style threshold
+        }
+    }
+    
+    /// Analyze all blocks for conflicts and return detailed results
+    fn analyze_conflicts(&self) -> Result<()> {
+        let mut conflicting_blocks = Vec::new();
+        let mut first_differing_block = None;
+        
+        for analysis in &self.analyses {
+            if analysis.has_conflicts() {
+                conflicting_blocks.push(analysis.search_block.clone());
+                
+                if first_differing_block.is_none() && analysis.exact_matches.len() > 1 {
+                    first_differing_block = Some(analysis.search_block.clone());
+                }
+                
+                // Generate specific error for this block
+                analysis.generate_conflict_error()?;
+            }
+        }
+        
+        // If multiple blocks have conflicts, generate a summary error
+        if conflicting_blocks.len() > 1 {
+            return Err(WinxError::SearchBlockConflict {
+                conflicting_blocks,
+                first_differing_block,
+            });
+        }
+        
+        Ok(())
+    }
+    
+    /// Get suggestions for resolving conflicts
+    fn get_resolution_suggestions(&self) -> Vec<String> {
+        let mut suggestions = Vec::new();
+        
+        let conflicting_count = self.analyses.iter().filter(|a| a.has_conflicts()).count();
+        
+        if conflicting_count > 0 {
+            suggestions.push(format!("{} search block(s) have matching conflicts", conflicting_count));
+            suggestions.push("".to_string());
+            suggestions.push("Resolution strategies:".to_string());
+            suggestions.push("• Add more context lines before and after ambiguous blocks".to_string());
+            suggestions.push("• Include unique identifiers or function signatures".to_string());
+            suggestions.push("• Break large changes into smaller, more specific blocks".to_string());
+            suggestions.push("• Use more distinctive content that appears only once".to_string());
+        }
+        
+        suggestions
     }
 }
 
