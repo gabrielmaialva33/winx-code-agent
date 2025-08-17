@@ -102,14 +102,20 @@ Winx is a Rust MCP server implementation with the following core components:
    - `state/bash_state.rs`: Shell environment state
    - `state/terminal.rs`: Terminal state handling
 
-4. **Utilities**: Helper functions for various operations.
+4. **NVIDIA Integration**: AI-powered features using NVIDIA NIM API.
+   - `nvidia/client.rs`: HTTP client for NVIDIA API with authentication and rate limiting
+   - `nvidia/config.rs`: Configuration management for API keys and models
+   - `nvidia/models.rs`: Data structures for requests/responses and model definitions
+   - `nvidia/tools/code_analysis.rs`: AI-powered code analysis implementation
+
+5. **Utilities**: Helper functions for various operations.
    - `utils/file_cache.rs`: File content caching
    - `utils/path.rs`: Path handling utilities
    - `utils/path_analyzer.rs`: Path analysis
    - `utils/repo.rs`: Repository utilities
    - `utils/mmap.rs`: Memory-mapped file operations
 
-5. **Error Handling**: Comprehensive error system.
+6. **Error Handling**: Comprehensive error system.
    - `errors.rs`: Contains the WinxError enum and error handling utilities
 
 ## Key Functionality
