@@ -17,6 +17,12 @@ pub struct WinxService {
     pub version: String,
 }
 
+impl Default for WinxService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WinxService {
     /// Create a new WinxService instance
     pub fn new() -> Self {
@@ -34,7 +40,7 @@ impl ServerHandler for WinxService {
         ServerInfo {
             server_info: Implementation {
                 name: "winx-code-agent".into(),
-                version: self.version.clone().into(),
+                version: self.version.clone(),
             },
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::default(),
