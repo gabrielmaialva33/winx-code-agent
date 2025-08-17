@@ -1,16 +1,14 @@
 //! Winx MCP Server implementation using rmcp 0.5.0
 //! Enhanced server with NVIDIA AI integration
 
-use rmcp::{model::*, transport::stdio, ServerHandler, ServiceExt, tool, Error as McpError};
+use rmcp::{model::*, transport::stdio, ServerHandler, ServiceExt, tool, ErrorData as McpError, schemars};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
-use crate::nvidia::tools::code_analysis::{analyze_code_with_ai, AnalyzeCodeParams, AnalyzeCodeResult};
+use crate::nvidia::tools::code_analysis::{analyze_code_with_ai, AnalyzeCodeParams};
 use crate::state::BashState;
-use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
 
 /// Winx service with shared bash state and NVIDIA AI integration
 #[derive(Clone)]
@@ -68,9 +66,167 @@ impl WinxService {
     pub async fn get_nvidia_client(&self) -> Option<NvidiaClient> {
         self.nvidia_client.lock().await.clone()
     }
+
+    /// AI-powered code analysis tool using NVIDIA models
+    #[tool(description = "Analyze code for bugs, security issues, performance problems, and style violations using NVIDIA AI")]
+    async fn analyze_code(
+        &self,
+        #[tool(aggr)]
+        params: AnalyzeCodeParams,
+    ) -> String {
+        match self.get_nvidia_client().await {
+            Some(nvidia_client) => {
+                match analyze_code_with_ai(&nvidia_client, params).await {
+                    Ok(result) => {
+                        let json_result = serde_json::to_string_pretty(&result)
+                            .map_err(|e| McpError::Internal(format!("Failed to serialize result: {}", e)))?;
+                        
+                        Ok(CallToolResult::success(vec![Content::text(json_result)]))
+                    }
+                    Err(e) => {
+                        let error_msg = format!("AI code analysis failed: {}", e);
+                        Ok(CallToolResult::error(error_msg))
+                    }
+                }
+            }
+            None => {
+                let error_msg = "NVIDIA AI integration not available. Please set NVIDIA_API_KEY environment variable.";
+                Ok(CallToolResult::error(error_msg.to_string()))
+            }
+        }
+    }
+
+    /// AI-powered code generation tool using NVIDIA models
+    #[tool(description = "Generate code from natural language descriptions using NVIDIA AI")]
+    async fn generate_code(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Natural language description of the code to generate")]
+        prompt: String,
+        #[tool(param)]
+        #[schemars(description = "Programming language (e.g., Rust, Python, JavaScript)")]
+        language: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Additional context or constraints")]
+        context: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Maximum tokens to generate")]
+        max_tokens: Option<u32>,
+        #[tool(param)]
+        #[schemars(description = "Temperature for creativity (0.0-1.0)")]
+        temperature: Option<f32>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.get_nvidia_client().await {
+            Some(nvidia_client) => {
+                let request = crate::nvidia::models::CodeGenerationRequest {
+                    prompt,
+                    language,
+                    context,
+                    max_tokens,
+                    temperature,
+                };
+
+                match nvidia_client.generate_code(&request).await {
+                    Ok(result) => {
+                        let json_result = serde_json::to_string_pretty(&result)
+                            .map_err(|e| McpError::Internal(format!("Failed to serialize result: {}", e)))?;
+                        
+                        Ok(CallToolResult::success(vec![Content::text(json_result)]))
+                    }
+                    Err(e) => {
+                        let error_msg = format!("AI code generation failed: {}", e);
+                        Ok(CallToolResult::error(error_msg))
+                    }
+                }
+            }
+            None => {
+                let error_msg = "NVIDIA AI integration not available. Please set NVIDIA_API_KEY environment variable.";
+                Ok(CallToolResult::error(error_msg.to_string()))
+            }
+        }
+    }
+
+    /// AI-powered code explanation tool using NVIDIA models
+    #[tool(description = "Get detailed explanations of code using NVIDIA AI")]
+    async fn explain_code(
+        &self,
+        #[tool(param)]
+        #[schemars(description = "Path to the file to explain")]
+        file_path: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Code content to explain")]
+        code: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Programming language")]
+        language: Option<String>,
+        #[tool(param)]
+        #[schemars(description = "Level of detail (brief, detailed, comprehensive)")]
+        detail_level: Option<String>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.get_nvidia_client().await {
+            Some(nvidia_client) => {
+                // Get code content
+                let code_content = match (&file_path, &code) {
+                    (Some(path), _) => {
+                        match tokio::fs::read_to_string(path).await {
+                            Ok(content) => content,
+                            Err(e) => return Ok(CallToolResult::error(format!("Failed to read file {}: {}", path, e))),
+                        }
+                    }
+                    (None, Some(code)) => code.clone(),
+                    (None, None) => return Ok(CallToolResult::error("Either file_path or code must be provided".to_string())),
+                };
+
+                let detail = detail_level.as_deref().unwrap_or("detailed");
+                let language_context = language.as_ref()
+                    .map(|l| format!(" (written in {})", l))
+                    .unwrap_or_default();
+
+                let system_prompt = format!(
+                    "You are an expert code explainer. Provide a {} explanation of the code{}, including its purpose, how it works, and any important details.",
+                    detail, language_context
+                );
+
+                let user_prompt = format!("Explain this code:\n\n```\n{}\n```", code_content);
+
+                let request = crate::nvidia::models::ChatCompletionRequest {
+                    model: crate::nvidia::models::NvidiaModel::for_task(
+                        crate::nvidia::models::TaskType::CodeExplanation
+                    ).as_str().to_string(),
+                    messages: vec![
+                        crate::nvidia::models::ChatMessage::system(system_prompt),
+                        crate::nvidia::models::ChatMessage::user(user_prompt),
+                    ],
+                    max_tokens: Some(2048),
+                    temperature: Some(0.1),
+                    top_p: None,
+                    stream: Some(false),
+                };
+
+                match nvidia_client.chat_completion(&request).await {
+                    Ok(response) => {
+                        if let Some(choice) = response.choices.first() {
+                            Ok(CallToolResult::success(vec![Content::text(choice.message.content.clone())]))
+                        } else {
+                            Ok(CallToolResult::error("Empty response from NVIDIA API".to_string()))
+                        }
+                    }
+                    Err(e) => {
+                        let error_msg = format!("AI code explanation failed: {}", e);
+                        Ok(CallToolResult::error(error_msg))
+                    }
+                }
+            }
+            None => {
+                let error_msg = "NVIDIA AI integration not available. Please set NVIDIA_API_KEY environment variable.";
+                Ok(CallToolResult::error(error_msg.to_string()))
+            }
+        }
+    }
 }
 
-// Minimal ServerHandler implementation for compilation
+// ServerHandler implementation with NVIDIA tools
+#[tool(tool_box)]
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -79,7 +235,9 @@ impl ServerHandler for WinxService {
                 version: self.version.clone(),
             },
             protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::default(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .build(),
             instructions: Some(
                 "Winx is a high-performance Rust implementation of WCGW for code agents with NVIDIA AI integration. \
                 Provides shell execution, file management, and AI-powered code analysis capabilities.".into(),
