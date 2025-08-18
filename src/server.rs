@@ -79,36 +79,15 @@ impl WinxService {
     }
 }
 
-// ServerHandler implementation with NVIDIA tools
-impl ServerHandler for WinxService {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            server_info: Implementation {
-                name: "winx-code-agent".into(),
-                version: self.version.clone(),
-            },
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::default(),
-            instructions: Some(
-                "Winx is a high-performance Rust implementation of WCGW for code agents with NVIDIA AI integration. \
-                Provides shell execution, file management, and AI-powered code analysis capabilities.".into(),
-            ),
-        }
-    }
-}
-
-/// Core tool implementations
+/// Core tool implementations with proper rmcp 0.5.0 pattern
+#[tool_router]
 impl WinxService {
     /// Simple ping tool for testing connectivity
-    #[tool]
-    async fn ping(&self, message: Option<String>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    #[tool(description = "Test server connectivity")]
+    async fn ping(&self, message: Option<String>) -> Result<CallToolResult, McpError> {
         let response = message.unwrap_or_else(|| "pong".to_string());
-        Ok(serde_json::json!({
-            "status": "success",
-            "message": response,
-            "server": "winx-code-agent",
-            "version": self.version
-        }))
+        let content = format!("Server: winx-code-agent v{}\nResponse: {}", self.version, response);
+        Ok(CallToolResult::success(vec![Content::text(content)]))
     }
 
     /// Initialize the bash shell environment
