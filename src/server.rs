@@ -203,12 +203,13 @@ impl ServerHandler for WinxService {
         param: CallToolRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let args_value = param.arguments.map(|map| Value::Object(map));
         let result = match param.name.as_ref() {
-            "ping" => self.handle_ping(param.arguments).await?,
-            "initialize" => self.handle_initialize(param.arguments).await?,
-            "bash_command" => self.handle_bash_command(param.arguments).await?,
-            "read_files" => self.handle_read_files(param.arguments).await?,
-            "file_write_or_edit" => self.handle_file_write_or_edit(param.arguments).await?,
+            "ping" => self.handle_ping(args_value.clone()).await?,
+            "initialize" => self.handle_initialize(args_value.clone()).await?,
+            "bash_command" => self.handle_bash_command(args_value.clone()).await?,
+            "read_files" => self.handle_read_files(args_value.clone()).await?,
+            "file_write_or_edit" => self.handle_file_write_or_edit(args_value).await?,
             _ => return Err(McpError::invalid_request(format!("Unknown tool: {}", param.name), None)),
         };
 
