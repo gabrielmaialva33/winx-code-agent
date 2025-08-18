@@ -40,6 +40,7 @@ and other LLMs via the Model Context Protocol (MCP).
     - 🔧 **AI-Powered Code Analysis**: Detect bugs, security issues, and performance problems
     - 🚀 **AI Code Generation**: Generate code from natural language descriptions
     - 📚 **AI Code Explanation**: Get detailed explanations of complex code
+    - 🎭 **AI-to-AI Chat**: Winx fairy assistant with personality and multiple conversation modes
     - 🛡️ **Smart Fallback System**: Automatic provider switching on failures
 - 📁 **Advanced File Operations**:
     - 📖 Read files with line range support
@@ -244,6 +245,24 @@ context_save(
     detail_level="expert"
   )
   ```
+
+- **winx_chat**: Chat with Winx, your AI assistant fairy ✨
+  ```
+  winx_chat(
+    message="Oi Winx, como funciona o sistema de fallback?",
+    conversation_mode="technical",
+    include_system_info=true,
+    personality_level=8
+  )
+  ```
+
+  **Conversation Modes:**
+  - `casual`: Informal, friendly chat with personality 😊
+  - `technical`: Focused technical responses 🔧
+  - `help`: Help mode with detailed explanations 🆘
+  - `debug`: Debugging assistance 🐛
+  - `creative`: Creative brainstorming 💡
+  - `mentor`: Teaching and best practices 🧙‍♀️
 
 ---
 
