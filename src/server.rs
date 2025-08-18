@@ -84,7 +84,7 @@ impl ServerHandler for WinxService {
     }
 }
 
-/// Test tool implementation
+/// Core tool implementations
 impl WinxService {
     /// Simple ping tool for testing connectivity
     #[tool]
@@ -96,6 +96,143 @@ impl WinxService {
             "server": "winx-code-agent",
             "version": self.version
         }))
+    }
+
+    /// Initialize the bash shell environment
+    #[tool]
+    async fn initialize(&self, shell: Option<String>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let shell = shell.unwrap_or_else(|| "bash".to_string());
+        
+        let mut bash_state_guard = self.bash_state.lock().await;
+        if bash_state_guard.is_some() {
+            return Ok(serde_json::json!({
+                "status": "already_initialized",
+                "message": "Shell environment is already initialized"
+            }));
+        }
+
+        match crate::state::BashState::new(&shell).await {
+            Ok(state) => {
+                *bash_state_guard = Some(state);
+                info!("Shell environment initialized with {}", shell);
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "message": format!("Shell environment initialized with {}", shell),
+                    "shell": shell
+                }))
+            }
+            Err(e) => {
+                warn!("Failed to initialize shell: {}", e);
+                Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Failed to initialize shell: {}", e)
+                )))
+            }
+        }
+    }
+
+    /// Execute a bash command
+    #[tool]
+    async fn bash_command(
+        &self,
+        command: String,
+        timeout_seconds: Option<u64>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let timeout = std::time::Duration::from_secs(timeout_seconds.unwrap_or(30));
+        
+        let mut bash_state_guard = self.bash_state.lock().await;
+        if bash_state_guard.is_none() {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "Shell not initialized. Call initialize first."
+            )));
+        }
+
+        let bash_state = bash_state_guard.as_mut().unwrap();
+        
+        match bash_state.execute_command(&command, timeout).await {
+            Ok(result) => {
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "exit_code": result.exit_code,
+                    "working_directory": result.working_directory
+                }))
+            }
+            Err(e) => {
+                warn!("Command execution failed: {}", e);
+                Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Command execution failed: {}", e)
+                )))
+            }
+        }
+    }
+
+    /// Read file contents
+    #[tool]
+    async fn read_files(&self, paths: Vec<String>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let mut results = Vec::new();
+        
+        for path in paths {
+            match tokio::fs::read_to_string(&path).await {
+                Ok(content) => {
+                    results.push(serde_json::json!({
+                        "path": path,
+                        "status": "success",
+                        "content": content,
+                        "size": content.len()
+                    }));
+                }
+                Err(e) => {
+                    results.push(serde_json::json!({
+                        "path": path,
+                        "status": "error",
+                        "error": e.to_string()
+                    }));
+                }
+            }
+        }
+        
+        Ok(serde_json::json!({
+            "status": "success",
+            "files": results
+        }))
+    }
+
+    /// Write or edit file contents
+    #[tool]
+    async fn file_write_or_edit(
+        &self,
+        path: String,
+        content: String,
+        create_if_missing: Option<bool>,
+    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let create = create_if_missing.unwrap_or(true);
+        
+        if !create && !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+            return Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("File does not exist: {}", path)
+            )));
+        }
+
+        match tokio::fs::write(&path, &content).await {
+            Ok(_) => {
+                info!("File written successfully: {}", path);
+                Ok(serde_json::json!({
+                    "status": "success",
+                    "message": format!("File written successfully: {}", path),
+                    "path": path,
+                    "size": content.len()
+                }))
+            }
+            Err(e) => {
+                warn!("Failed to write file {}: {}", path, e);
+                Err(Box::new(e))
+            }
+        }
     }
 }
 
