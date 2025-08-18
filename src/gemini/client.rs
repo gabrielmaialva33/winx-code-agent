@@ -146,7 +146,7 @@ impl GeminiClient {
 
         if gemini_response.is_blocked() {
             warn!("Gemini response was blocked by safety filters");
-            return Err(WinxError::ExternalApiError(
+            return Err(WinxError::ApiError(
                 "Response blocked by Gemini safety filters".to_string()
             ));
         }
@@ -164,7 +164,7 @@ impl GeminiClient {
         
         response
             .get_text()
-            .ok_or_else(|| WinxError::ExternalApiError("Empty response from Gemini".to_string()))
+            .ok_or_else(|| WinxError::ApiError("Empty response from Gemini".to_string()))
     }
 
     /// Generate code using Gemini
@@ -186,7 +186,7 @@ impl GeminiClient {
         
         response
             .get_text()
-            .ok_or_else(|| WinxError::ExternalApiError("Empty response from Gemini".to_string()))
+            .ok_or_else(|| WinxError::ApiError("Empty response from Gemini".to_string()))
     }
 
     /// Explain code using Gemini
@@ -204,7 +204,7 @@ impl GeminiClient {
         
         response
             .get_text()
-            .ok_or_else(|| WinxError::ExternalApiError("Empty response from Gemini".to_string()))
+            .ok_or_else(|| WinxError::ApiError("Empty response from Gemini".to_string()))
     }
 
     /// Test the connection to Gemini API
