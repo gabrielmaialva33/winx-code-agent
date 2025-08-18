@@ -204,8 +204,12 @@ impl NvidiaClient {
             )));
         }
 
-        serde_json::from_str::<ChatCompletionResponse>(&response_text)
-            .map_err(|e| WinxError::ParseError(format!("Failed to parse response: {}", e)))
+        serde_json::from_str::<ChatCompletionResponse>(&response_text).map_err(|e| {
+            WinxError::ParseError(format!(
+                "Failed to parse response: {}. Response body: {}",
+                e, response_text
+            ))
+        })
     }
 
     /// High-level method for code analysis
