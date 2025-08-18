@@ -786,127 +786,103 @@ impl WinxService {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // Check if NVIDIA client is available
-        if let Some(nvidia_client) = self.get_nvidia_client().await {
-            // Read file content
-            match tokio::fs::read_to_string(file_path).await {
-                Ok(code) => {
-                    // Perform AI analysis using NVIDIA
-                    match nvidia_client.analyze_code(&code, language.as_deref()).await {
-                        Ok(result) => {
-                            let issues_text = if result.issues.is_empty() {
-                                "No issues found.".to_string()
-                            } else {
-                                result.issues.iter()
-                                    .map(|issue| format!("• [{}] {}", issue.severity, issue.message))
-                                    .collect::<Vec<_>>()
-                                    .join("\n")
-                            };
+        // Read file content
+        let code = match tokio::fs::read_to_string(file_path).await {
+            Ok(content) => content,
+            Err(e) => {
+                return Err(McpError::internal_error(format!("Failed to read file {}: {}", file_path, e), None));
+            }
+        };
 
-                            let suggestions_text = if result.suggestions.is_empty() {
-                                "".to_string()
-                            } else {
-                                format!("\n\n### Suggestions:\n{}", 
-                                    result.suggestions.iter()
-                                        .map(|s| format!("• {}", s))
-                                        .collect::<Vec<_>>()
-                                        .join("\n"))
-                            };
-
-                            let complexity_text = result.complexity_score
-                                .map(|score| format!("\n\n### Complexity Score: {}/100", score))
-                                .unwrap_or_default();
-
-                            let analysis_result = format!(
-                                "## 🔍 AI Code Analysis: {}\n\n**Summary:** {}\n\n### Issues Found ({}):\n{}{}{}\n\n*Analyzed using NVIDIA AI*",
-                                file_path,
-                                result.summary,
-                                result.issues.len(),
-                                issues_text,
-                                suggestions_text,
-                                complexity_text
-                            );
-
-                            info!("AI code analysis completed for: {} ({} issues found)", file_path, result.issues.len());
-                            Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
-                        }
-                        Err(e) => {
-                            warn!("NVIDIA analysis failed for {}: {}, trying Gemini fallback", file_path, e);
-                            
-                            // Try Gemini as fallback
-                            if let Some(gemini_client) = self.get_gemini_client().await {
-                                match gemini_client.analyze_code(&code, language.as_deref()).await {
-                                    Ok(gemini_result) => {
-                                        let analysis_result = format!(
-                                            "## 🔍 AI Code Analysis: {}\n\n{}\n\n*NVIDIA failed, analyzed using Gemini AI*\n\n**Note:** NVIDIA error: {}",
-                                            file_path, gemini_result, e
-                                        );
-                                        info!("Gemini fallback analysis completed for: {}", file_path);
-                                        Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
-                                    }
-                                    Err(gemini_e) => {
-                                        warn!("Both NVIDIA and Gemini analysis failed for {}: NVIDIA: {}, Gemini: {}", file_path, e, gemini_e);
-                                        let fallback = format!(
-                                            "## ⚠️ Code Analysis: {}\n\nBoth AI providers failed:\n- NVIDIA: {}\n- Gemini: {}\n\nFalling back to basic analysis: File exists and is readable.",
-                                            file_path, e, gemini_e
-                                        );
-                                        Ok(CallToolResult::success(vec![Content::text(fallback)]))
-                                    }
-                                }
-                            } else {
-                                let fallback = format!(
-                                    "## ⚠️ Code Analysis: {}\n\nNVIDIA AI analysis failed: {}\nGemini fallback not available (missing GEMINI_API_KEY).\n\nFalling back to basic analysis: File exists and is readable.",
-                                    file_path, e
-                                );
-                                Ok(CallToolResult::success(vec![Content::text(fallback)]))
-                            }
-                        }
-                    }
+        // Try DashScope first (primary)
+        if let Some(dashscope_client) = self.get_dashscope_client().await {
+            match dashscope_client.analyze_code(&code, language.as_deref()).await {
+                Ok(result) => {
+                    let analysis_result = format!(
+                        "## 🔍 AI Code Analysis: {}\n\n{}\n\n*Analyzed using DashScope/Qwen3 AI*",
+                        file_path, result
+                    );
+                    info!("DashScope code analysis completed for: {}", file_path);
+                    return Ok(CallToolResult::success(vec![Content::text(analysis_result)]));
                 }
                 Err(e) => {
-                    Err(McpError::internal_error(format!("Failed to read file {}: {}", file_path, e), None))
+                    warn!("DashScope analysis failed for {}: {}, trying NVIDIA fallback", file_path, e);
                 }
-            }
-        } else {
-            // Try Gemini if NVIDIA is not available
-            if let Some(gemini_client) = self.get_gemini_client().await {
-                match tokio::fs::read_to_string(file_path).await {
-                    Ok(code) => {
-                        match gemini_client.analyze_code(&code, language.as_deref()).await {
-                            Ok(gemini_result) => {
-                                let analysis_result = format!(
-                                    "## 🔍 AI Code Analysis: {}\n\n{}\n\n*Analyzed using Gemini AI (NVIDIA not available)*",
-                                    file_path, gemini_result
-                                );
-                                info!("Gemini code analysis completed for: {}", file_path);
-                                Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
-                            }
-                            Err(e) => {
-                                warn!("Gemini analysis failed for {}: {}", file_path, e);
-                                let fallback = format!(
-                                    "## 📄 Basic Code Analysis: {}\n\nBoth AI providers unavailable:\n- NVIDIA: missing NVIDIA_API_KEY\n- Gemini: {}\n\nBasic analysis: File exists and appears to be valid {} code.",
-                                    file_path, e, language.as_deref().unwrap_or("source")
-                                );
-                                Ok(CallToolResult::success(vec![Content::text(fallback)]))
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        Err(McpError::internal_error(format!("Failed to read file {}: {}", file_path, e), None))
-                    }
-                }
-            } else {
-                // Fallback without any AI
-                let analysis_result = format!(
-                    "## 📄 Basic Code Analysis: {}\n\nBoth AI providers unavailable:\n- NVIDIA: missing NVIDIA_API_KEY\n- Gemini: missing GEMINI_API_KEY\n\nBasic analysis: File exists and appears to be valid {} code.",
-                    file_path,
-                    language.as_deref().unwrap_or("source")
-                );
-                
-                info!("Basic code analysis completed for: {}", file_path);
-                Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
             }
         }
+
+        // Try NVIDIA as fallback 1
+        if let Some(nvidia_client) = self.get_nvidia_client().await {
+            match nvidia_client.analyze_code(&code, language.as_deref()).await {
+                Ok(result) => {
+                    let issues_text = if result.issues.is_empty() {
+                        "No issues found.".to_string()
+                    } else {
+                        result.issues.iter()
+                            .map(|issue| format!("• [{}] {}", issue.severity, issue.message))
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    };
+
+                    let suggestions_text = if result.suggestions.is_empty() {
+                        "".to_string()
+                    } else {
+                        format!("\n\n### Suggestions:\n{}", 
+                            result.suggestions.iter()
+                                .map(|s| format!("• {}", s))
+                                .collect::<Vec<_>>()
+                                .join("\n"))
+                    };
+
+                    let complexity_text = result.complexity_score
+                        .map(|score| format!("\n\n### Complexity Score: {}/100", score))
+                        .unwrap_or_default();
+
+                    let analysis_result = format!(
+                        "## 🔍 AI Code Analysis: {}\n\n**Summary:** {}\n\n### Issues Found ({}):\n{}{}{}\n\n*DashScope failed, analyzed using NVIDIA AI*",
+                        file_path,
+                        result.summary,
+                        result.issues.len(),
+                        issues_text,
+                        suggestions_text,
+                        complexity_text
+                    );
+
+                    info!("NVIDIA fallback code analysis completed for: {} ({} issues found)", file_path, result.issues.len());
+                    return Ok(CallToolResult::success(vec![Content::text(analysis_result)]));
+                }
+                Err(e) => {
+                    warn!("NVIDIA analysis failed for {}: {}, trying Gemini fallback", file_path, e);
+                }
+            }
+        }
+
+        // Try Gemini as fallback 2
+        if let Some(gemini_client) = self.get_gemini_client().await {
+            match gemini_client.analyze_code(&code, language.as_deref()).await {
+                Ok(gemini_result) => {
+                    let analysis_result = format!(
+                        "## 🔍 AI Code Analysis: {}\n\n{}\n\n*DashScope and NVIDIA failed, analyzed using Gemini AI*",
+                        file_path, gemini_result
+                    );
+                    info!("Gemini fallback code analysis completed for: {}", file_path);
+                    return Ok(CallToolResult::success(vec![Content::text(analysis_result)]));
+                }
+                Err(e) => {
+                    warn!("All AI providers failed for analysis of {}: Gemini: {}", file_path, e);
+                }
+            }
+        }
+
+        // All AI providers failed - provide basic fallback
+        let fallback = format!(
+            "## 📄 Basic Code Analysis: {}\n\nAll AI providers unavailable:\n- DashScope: missing DASHSCOPE_API_KEY or failed\n- NVIDIA: missing NVIDIA_API_KEY or failed\n- Gemini: missing GEMINI_API_KEY or failed\n\nBasic analysis: File exists and appears to be valid {} code.",
+            file_path,
+            language.as_deref().unwrap_or("source")
+        );
+        
+        info!("Basic code analysis completed for: {} (all AI providers failed)", file_path);
+        Ok(CallToolResult::success(vec![Content::text(fallback)]))
     }
 
     async fn handle_ai_generate_code(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
@@ -922,6 +898,30 @@ impl WinxService {
         let max_tokens = args.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32);
         let temperature = args.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32);
 
+        // Try DashScope first (primary)
+        if let Some(dashscope_client) = self.get_dashscope_client().await {
+            match dashscope_client.generate_code(
+                prompt,
+                language.as_deref(),
+                context.as_deref(),
+                max_tokens,
+                temperature,
+            ).await {
+                Ok(result) => {
+                    let formatted_result = format!(
+                        "## 🤖 AI Generated Code\n\n{}\n\n*Generated using DashScope/Qwen3 AI*",
+                        result
+                    );
+                    info!("DashScope code generation completed for prompt: '{}'", prompt);
+                    return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
+                }
+                Err(e) => {
+                    warn!("DashScope code generation failed: {}, trying NVIDIA fallback", e);
+                }
+            }
+        }
+
+        // Try NVIDIA as fallback 1
         if let Some(nvidia_client) = self.get_nvidia_client().await {
             let request = crate::nvidia::models::CodeGenerationRequest {
                 prompt: prompt.to_string(),
@@ -934,91 +934,53 @@ impl WinxService {
             match nvidia_client.generate_code(&request).await {
                 Ok(result) => {
                     let formatted_result = format!(
-                        "## 🤖 AI Generated Code\n\n### Language: {}\n\n```{}\n{}\n```\n\n*Generated using NVIDIA AI*",
+                        "## 🤖 AI Generated Code\n\n### Language: {}\n\n```{}\n{}\n```\n\n*DashScope failed, generated using NVIDIA AI*",
                         result.language.as_deref().unwrap_or("auto-detected"),
                         result.language.as_deref().unwrap_or(""),
                         result.code
                     );
 
-                    info!("AI code generation completed for prompt: '{}'", prompt);
-                    Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
+                    info!("NVIDIA fallback code generation completed for prompt: '{}'", prompt);
+                    return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
                 }
                 Err(e) => {
                     warn!("NVIDIA code generation failed: {}, trying Gemini fallback", e);
-                    
-                    // Try Gemini as fallback
-                    if let Some(gemini_client) = self.get_gemini_client().await {
-                        match gemini_client.generate_code(
-                            prompt, 
-                            language.as_deref(), 
-                            context.as_deref(), 
-                            max_tokens, 
-                            temperature
-                        ).await {
-                            Ok(gemini_result) => {
-                                let formatted_result = format!(
-                                    "## 🤖 AI Generated Code\n\n{}\n\n*NVIDIA failed, generated using Gemini AI*\n\n**Note:** NVIDIA error: {}",
-                                    gemini_result, e
-                                );
-                                info!("Gemini fallback code generation completed for prompt: '{}'", prompt);
-                                Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
-                            }
-                            Err(gemini_e) => {
-                                warn!("Both NVIDIA and Gemini code generation failed: NVIDIA: {}, Gemini: {}", e, gemini_e);
-                                let fallback = format!(
-                                    "## ⚠️ Code Generation Failed\n\nBoth AI providers failed:\n- NVIDIA: {}\n- Gemini: {}\n\nPlease check your API keys and try again.",
-                                    e, gemini_e
-                                );
-                                Ok(CallToolResult::success(vec![Content::text(fallback)]))
-                            }
-                        }
-                    } else {
-                        let fallback = format!(
-                            "## ⚠️ Code Generation Failed\n\nNVIDIA AI code generation failed: {}\nGemini fallback not available (missing GEMINI_API_KEY).\n\nPlease check your NVIDIA_API_KEY and try again.",
-                            e
-                        );
-                        Ok(CallToolResult::success(vec![Content::text(fallback)]))
-                    }
                 }
-            }
-        } else {
-            // Try Gemini if NVIDIA is not available
-            if let Some(gemini_client) = self.get_gemini_client().await {
-                match gemini_client.generate_code(
-                    prompt, 
-                    language.as_deref(), 
-                    context.as_deref(), 
-                    max_tokens, 
-                    temperature
-                ).await {
-                    Ok(gemini_result) => {
-                        let formatted_result = format!(
-                            "## 🤖 AI Generated Code\n\n{}\n\n*Generated using Gemini AI (NVIDIA not available)*",
-                            gemini_result
-                        );
-                        info!("Gemini code generation completed for prompt: '{}'", prompt);
-                        Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
-                    }
-                    Err(e) => {
-                        warn!("Gemini code generation failed: {}", e);
-                        let fallback = format!(
-                            "## 📝 Code Generation Not Available\n\nBoth AI providers unavailable:\n- NVIDIA: missing NVIDIA_API_KEY\n- Gemini: {}\n\nPrompt: {}\nLanguage: {}",
-                            e, prompt, language.as_deref().unwrap_or("not specified")
-                        );
-                        Ok(CallToolResult::success(vec![Content::text(fallback)]))
-                    }
-                }
-            } else {
-                let fallback = format!(
-                    "## 📝 Code Generation Not Available\n\nBoth AI providers unavailable:\n- NVIDIA: missing NVIDIA_API_KEY\n- Gemini: missing GEMINI_API_KEY\n\nPrompt: {}\nLanguage: {}",
-                    prompt,
-                    language.as_deref().unwrap_or("not specified")
-                );
-                
-                info!("Code generation requested but no AI providers available");
-                Ok(CallToolResult::success(vec![Content::text(fallback)]))
             }
         }
+
+        // Try Gemini as fallback 2
+        if let Some(gemini_client) = self.get_gemini_client().await {
+            match gemini_client.generate_code(
+                prompt, 
+                language.as_deref(), 
+                context.as_deref(), 
+                max_tokens, 
+                temperature
+            ).await {
+                Ok(gemini_result) => {
+                    let formatted_result = format!(
+                        "## 🤖 AI Generated Code\n\n{}\n\n*DashScope and NVIDIA failed, generated using Gemini AI*",
+                        gemini_result
+                    );
+                    info!("Gemini fallback code generation completed for prompt: '{}'", prompt);
+                    return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
+                }
+                Err(e) => {
+                    warn!("All AI providers failed for code generation: Gemini: {}", e);
+                }
+            }
+        }
+
+        // All AI providers failed
+        let fallback = format!(
+            "## 📝 Code Generation Not Available\n\nAll AI providers unavailable:\n- DashScope: missing DASHSCOPE_API_KEY or failed\n- NVIDIA: missing NVIDIA_API_KEY or failed\n- Gemini: missing GEMINI_API_KEY or failed\n\nPrompt: {}\nLanguage: {}",
+            prompt,
+            language.as_deref().unwrap_or("not specified")
+        );
+        
+        info!("Code generation requested but all AI providers failed");
+        Ok(CallToolResult::success(vec![Content::text(fallback)]))
     }
 
     async fn handle_ai_explain_code(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
