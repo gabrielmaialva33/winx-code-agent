@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
 use crate::state::BashState;
+use crate::types::{ContextSave, ReadImage, CommandSuggestions};
 
 /// Helper function to create JSON schema from serde_json::Value
 fn json_to_schema(value: Value) -> Arc<serde_json::Map<String, Value>> {
@@ -195,6 +196,96 @@ impl ServerHandler for WinxService {
                     output_schema: None,
                     annotations: None,
                 },
+                Tool {
+                    name: "context_save".into(),
+                    description: Some("Save task context to a file for resumption".into()),
+                    input_schema: json_to_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "id": {
+                                "type": "string",
+                                "description": "Unique identifier for the task"
+                            },
+                            "project_root_path": {
+                                "type": "string",
+                                "description": "Root path of the project"
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Description of the task"
+                            },
+                            "relevant_file_globs": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "List of file glob patterns to include"
+                            }
+                        },
+                        "required": ["id", "project_root_path", "description", "relevant_file_globs"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                },
+                Tool {
+                    name: "read_image".into(),
+                    description: Some("Read image file and return as base64".into()),
+                    input_schema: json_to_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Path to the image file"
+                            }
+                        },
+                        "required": ["file_path"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                },
+                Tool {
+                    name: "command_suggestions".into(),
+                    description: Some("Get command suggestions based on context".into()),
+                    input_schema: json_to_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "partial_command": {
+                                "type": "string",
+                                "description": "Partial command to get suggestions for"
+                            },
+                            "current_dir": {
+                                "type": "string",
+                                "description": "Optional directory context"
+                            },
+                            "previous_command": {
+                                "type": "string",
+                                "description": "Optional previous command"
+                            }
+                        }
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                },
+                Tool {
+                    name: "code_analyzer".into(),
+                    description: Some("Analyze code for issues and suggestions".into()),
+                    input_schema: json_to_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Path to the code file to analyze"
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "Programming language (optional, auto-detected if not provided)"
+                            }
+                        },
+                        "required": ["file_path"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                },
             ],
             next_cursor: None,
         })
@@ -211,7 +302,11 @@ impl ServerHandler for WinxService {
             "initialize" => self.handle_initialize(args_value.clone()).await?,
             "bash_command" => self.handle_bash_command(args_value.clone()).await?,
             "read_files" => self.handle_read_files(args_value.clone()).await?,
-            "file_write_or_edit" => self.handle_file_write_or_edit(args_value).await?,
+            "file_write_or_edit" => self.handle_file_write_or_edit(args_value.clone()).await?,
+            "context_save" => self.handle_context_save(args_value.clone()).await?,
+            "read_image" => self.handle_read_image(args_value.clone()).await?,
+            "command_suggestions" => self.handle_command_suggestions(args_value.clone()).await?,
+            "code_analyzer" => self.handle_code_analyzer(args_value).await?,
             _ => {
                 return Err(McpError::invalid_request(
                     format!("Unknown tool: {}", param.name),
