@@ -21,15 +21,15 @@ mod tests {
     fn test_model_for_task() {
         assert_eq!(
             NvidiaModel::for_task(TaskType::CodeGeneration).as_str(),
-            "qwen/qwen3-235b-a22b"
+            "qwen3-235b-a22b"
         );
         assert_eq!(
             NvidiaModel::for_task(TaskType::CodeAnalysis).as_str(),
-            "qwen/qwen3-235b-a22b"
+            "qwen3-235b-a22b"
         );
         assert_eq!(
             NvidiaModel::for_task(TaskType::ComplexReasoning).as_str(),
-            "qwen/qwen3-235b-a22b"
+            "qwen3-235b-a22b"
         );
         assert_eq!(
             NvidiaModel::for_task(TaskType::FastResponse).as_str(),
@@ -77,7 +77,7 @@ mod tests {
     fn test_nvidia_config_default() {
         let config = NvidiaConfig::default();
         assert_eq!(config.base_url, "https://integrate.api.nvidia.com");
-        assert_eq!(config.default_model, "qwen/qwen3-235b-a22b");
+        assert_eq!(config.default_model, "qwen3-235b-a22b");
         assert_eq!(config.timeout_seconds, 30);
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.rate_limit_rpm, 60);
