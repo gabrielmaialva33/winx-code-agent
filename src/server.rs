@@ -996,18 +996,36 @@ impl WinxService {
             return Err(McpError::invalid_request("Must provide either file_path or code", None));
         }
 
-        if let Some(nvidia_client) = self.get_nvidia_client().await {
-            let (code, source_info) = if let Some(path) = file_path {
-                match tokio::fs::read_to_string(path).await {
-                    Ok(content) => (content, format!("file: {}", path)),
-                    Err(e) => {
-                        return Err(McpError::internal_error(format!("Failed to read file {}: {}", path, e), None));
-                    }
+        let (code, source_info) = if let Some(path) = file_path {
+            match tokio::fs::read_to_string(path).await {
+                Ok(content) => (content, format!("file: {}", path)),
+                Err(e) => {
+                    return Err(McpError::internal_error(format!("Failed to read file {}: {}", path, e), None));
                 }
-            } else {
-                (code_snippet.unwrap().to_string(), "provided snippet".to_string())
-            };
+            }
+        } else {
+            (code_snippet.unwrap().to_string(), "provided snippet".to_string())
+        };
 
+        // Try DashScope first (primary)
+        if let Some(dashscope_client) = self.get_dashscope_client().await {
+            match dashscope_client.explain_code(&code, language.as_deref(), detail_level).await {
+                Ok(result) => {
+                    let formatted_result = format!(
+                        "## 📚 AI Code Explanation\n\n**Source:** {}\n**Detail Level:** {}\n\n{}\n\n*Explained using DashScope/Qwen3 AI*",
+                        source_info, detail_level, result
+                    );
+                    info!("DashScope code explanation completed for: {}", source_info);
+                    return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
+                }
+                Err(e) => {
+                    warn!("DashScope explanation failed: {}, trying NVIDIA fallback", e);
+                }
+            }
+        }
+
+        // Try NVIDIA as fallback 1
+        if let Some(nvidia_client) = self.get_nvidia_client().await {
             let detail_prompt = match detail_level {
                 "basic" => "Provide a brief, high-level explanation of what this code does.",
                 "expert" => "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities.",
@@ -1042,94 +1060,51 @@ impl WinxService {
                     if let Some(choice) = response.choices.first() {
                         let explanation = choice.message.effective_content();
                         let formatted_result = format!(
-                            "## 📚 AI Code Explanation\n\n**Source:** {}\n**Detail Level:** {}\n\n{}\n\n*Explained using: {}*",
+                            "## 📚 AI Code Explanation\n\n**Source:** {}\n**Detail Level:** {}\n\n{}\n\n*DashScope failed, explained using: {}*",
                             source_info,
                             detail_level,
                             explanation,
                             request.model
                         );
 
-                        info!("AI code explanation completed for: {}", source_info);
-                        Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
+                        info!("NVIDIA fallback code explanation completed for: {}", source_info);
+                        return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
                     } else {
-                        Err(McpError::internal_error("Empty response from NVIDIA API", None))
+                        warn!("Empty response from NVIDIA API, trying Gemini fallback");
                     }
                 }
                 Err(e) => {
                     warn!("NVIDIA explanation failed: {}, trying Gemini fallback", e);
-                    
-                    // Try Gemini as fallback
-                    if let Some(gemini_client) = self.get_gemini_client().await {
-                        match gemini_client.explain_code(&code, language.as_deref(), detail_level).await {
-                            Ok(gemini_result) => {
-                                let formatted_result = format!(
-                                    "## 📚 AI Code Explanation\n\n**Source:** {}\n**Detail Level:** {}\n\n{}\n\n*NVIDIA failed, explained using Gemini AI*\n\n**Note:** NVIDIA error: {}",
-                                    source_info, detail_level, gemini_result, e
-                                );
-                                info!("Gemini fallback explanation completed for: {}", source_info);
-                                Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
-                            }
-                            Err(gemini_e) => {
-                                warn!("Both NVIDIA and Gemini explanation failed: NVIDIA: {}, Gemini: {}", e, gemini_e);
-                                let fallback = format!(
-                                    "## ⚠️ Code Explanation Failed\n\nBoth AI providers failed:\n- NVIDIA: {}\n- Gemini: {}\n\nSource: {}\n\nPlease check your API keys and try again.",
-                                    e, gemini_e, source_info
-                                );
-                                Ok(CallToolResult::success(vec![Content::text(fallback)]))
-                            }
-                        }
-                    } else {
-                        let fallback = format!(
-                            "## ⚠️ Code Explanation Failed\n\nNVIDIA AI explanation failed: {}\nGemini fallback not available (missing GEMINI_API_KEY).\n\nSource: {}\n\nPlease check your NVIDIA_API_KEY and try again.",
-                            e, source_info
-                        );
-                        Ok(CallToolResult::success(vec![Content::text(fallback)]))
-                    }
                 }
-            }
-        } else {
-            // Try Gemini if NVIDIA is not available
-            if let Some(gemini_client) = self.get_gemini_client().await {
-                let (code, source_info) = if let Some(path) = file_path {
-                    match tokio::fs::read_to_string(path).await {
-                        Ok(content) => (content, format!("file: {}", path)),
-                        Err(e) => {
-                            return Err(McpError::internal_error(format!("Failed to read file {}: {}", path, e), None));
-                        }
-                    }
-                } else {
-                    (code_snippet.unwrap().to_string(), "provided snippet".to_string())
-                };
-
-                match gemini_client.explain_code(&code, language.as_deref(), detail_level).await {
-                    Ok(gemini_result) => {
-                        let formatted_result = format!(
-                            "## 📚 AI Code Explanation\n\n**Source:** {}\n**Detail Level:** {}\n\n{}\n\n*Explained using Gemini AI (NVIDIA not available)*",
-                            source_info, detail_level, gemini_result
-                        );
-                        info!("Gemini code explanation completed for: {}", source_info);
-                        Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
-                    }
-                    Err(e) => {
-                        warn!("Gemini explanation failed: {}", e);
-                        let fallback = format!(
-                            "## 📖 Code Explanation Not Available\n\nBoth AI providers unavailable:\n- NVIDIA: missing NVIDIA_API_KEY\n- Gemini: {}\n\nSource: {}\nDetail Level: {}",
-                            e, file_path.unwrap_or("code snippet"), detail_level
-                        );
-                        Ok(CallToolResult::success(vec![Content::text(fallback)]))
-                    }
-                }
-            } else {
-                let fallback = format!(
-                    "## 📖 Code Explanation Not Available\n\nBoth AI providers unavailable:\n- NVIDIA: missing NVIDIA_API_KEY\n- Gemini: missing GEMINI_API_KEY\n\nSource: {}\nDetail Level: {}",
-                    file_path.unwrap_or("code snippet"),
-                    detail_level
-                );
-                
-                info!("Code explanation requested but no AI providers available");
-                Ok(CallToolResult::success(vec![Content::text(fallback)]))
             }
         }
+
+        // Try Gemini as fallback 2
+        if let Some(gemini_client) = self.get_gemini_client().await {
+            match gemini_client.explain_code(&code, language.as_deref(), detail_level).await {
+                Ok(gemini_result) => {
+                    let formatted_result = format!(
+                        "## 📚 AI Code Explanation\n\n**Source:** {}\n**Detail Level:** {}\n\n{}\n\n*DashScope and NVIDIA failed, explained using Gemini AI*",
+                        source_info, detail_level, gemini_result
+                    );
+                    info!("Gemini fallback code explanation completed for: {}", source_info);
+                    return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
+                }
+                Err(e) => {
+                    warn!("All AI providers failed for code explanation: Gemini: {}", e);
+                }
+            }
+        }
+
+        // All AI providers failed
+        let fallback = format!(
+            "## 📖 Code Explanation Not Available\n\nAll AI providers unavailable:\n- DashScope: missing DASHSCOPE_API_KEY or failed\n- NVIDIA: missing NVIDIA_API_KEY or failed\n- Gemini: missing GEMINI_API_KEY or failed\n\nSource: {}\nDetail Level: {}",
+            source_info,
+            detail_level
+        );
+        
+        info!("Code explanation requested but all AI providers failed");
+        Ok(CallToolResult::success(vec![Content::text(fallback)]))
     }
 }
 
