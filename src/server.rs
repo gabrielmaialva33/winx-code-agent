@@ -167,7 +167,7 @@ impl WinxService {
     async fn get_src_structure(&self) -> Result<String, McpError> {
         let mut structure = String::new();
         structure.push_str("# Source Code Organization\n\n");
-        
+
         // Try to read actual directory structure
         if let Ok(mut read_dir) = tokio::fs::read_dir("src").await {
             structure.push_str("## src/ Directory Contents\n");
@@ -175,11 +175,15 @@ impl WinxService {
             while let Some(entry) = read_dir.next_entry().await.unwrap_or(None) {
                 entries.push(entry);
             }
-            entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-            
+            entries.sort_by_key(|a| a.file_name());
+
             for entry in entries {
                 let name = entry.file_name().to_string_lossy().to_string();
-                let is_dir = entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false);
+                let is_dir = entry
+                    .file_type()
+                    .await
+                    .map(|ft| ft.is_dir())
+                    .unwrap_or(false);
                 if is_dir {
                     structure.push_str(&format!("- {}/\n", name));
                 } else {
@@ -197,7 +201,7 @@ impl WinxService {
             structure.push_str("- gemini/ - Gemini integration\n");
             structure.push_str("- utils/ - Utilities\n");
         }
-        
+
         Ok(structure)
     }
 }
@@ -552,18 +556,20 @@ impl ServerHandler for WinxService {
                 let structure = self.get_project_structure().await?;
                 vec![ResourceContents::text(structure, param.uri.clone())]
             }
-            "file://readme" => {
-                match tokio::fs::read_to_string("README.md").await {
-                    Ok(content) => vec![ResourceContents::text(content, param.uri.clone())],
-                    Err(_) => vec![ResourceContents::text("README.md not found".to_string(), param.uri.clone())],
-                }
-            }
-            "file://cargo-toml" => {
-                match tokio::fs::read_to_string("Cargo.toml").await {
-                    Ok(content) => vec![ResourceContents::text(content, param.uri.clone())],
-                    Err(_) => vec![ResourceContents::text("Cargo.toml not found".to_string(), param.uri.clone())],
-                }
-            }
+            "file://readme" => match tokio::fs::read_to_string("README.md").await {
+                Ok(content) => vec![ResourceContents::text(content, param.uri.clone())],
+                Err(_) => vec![ResourceContents::text(
+                    "README.md not found".to_string(),
+                    param.uri.clone(),
+                )],
+            },
+            "file://cargo-toml" => match tokio::fs::read_to_string("Cargo.toml").await {
+                Ok(content) => vec![ResourceContents::text(content, param.uri.clone())],
+                Err(_) => vec![ResourceContents::text(
+                    "Cargo.toml not found".to_string(),
+                    param.uri.clone(),
+                )],
+            },
             "file://src-structure" => {
                 let structure = self.get_src_structure().await?;
                 vec![ResourceContents::text(structure, param.uri.clone())]
@@ -597,7 +603,10 @@ impl ServerHandler for WinxService {
                         },
                         PromptArgument {
                             name: "focus_areas".into(),
-                            description: Some("Specific areas to focus on (security, performance, bugs, style)".into()),
+                            description: Some(
+                                "Specific areas to focus on (security, performance, bugs, style)"
+                                    .into(),
+                            ),
                             required: Some(false),
                         },
                     ]),
@@ -629,7 +638,9 @@ impl ServerHandler for WinxService {
                         },
                         PromptArgument {
                             name: "target_language".into(),
-                            description: Some("Programming language (auto-detected if not provided)".into()),
+                            description: Some(
+                                "Programming language (auto-detected if not provided)".into(),
+                            ),
                             required: Some(false),
                         },
                     ]),
@@ -637,13 +648,13 @@ impl ServerHandler for WinxService {
                 Prompt {
                     name: "security_analyzer".into(),
                     description: Some("Security vulnerability analysis and recommendations".into()),
-                    arguments: Some(vec![
-                        PromptArgument {
-                            name: "file_path".into(),
-                            description: Some("Path to the code file to analyze for security issues".into()),
-                            required: Some(true),
-                        },
-                    ]),
+                    arguments: Some(vec![PromptArgument {
+                        name: "file_path".into(),
+                        description: Some(
+                            "Path to the code file to analyze for security issues".into(),
+                        ),
+                        required: Some(true),
+                    }]),
                 },
                 Prompt {
                     name: "documentation_generator".into(),
@@ -656,7 +667,9 @@ impl ServerHandler for WinxService {
                         },
                         PromptArgument {
                             name: "doc_style".into(),
-                            description: Some("Documentation style (rustdoc, jsdoc, sphinx, etc.)".into()),
+                            description: Some(
+                                "Documentation style (rustdoc, jsdoc, sphinx, etc.)".into(),
+                            ),
                             required: Some(false),
                         },
                     ]),
@@ -667,12 +680,16 @@ impl ServerHandler for WinxService {
                     arguments: Some(vec![
                         PromptArgument {
                             name: "source_file".into(),
-                            description: Some("Path to the source code file to generate tests for".into()),
+                            description: Some(
+                                "Path to the source code file to generate tests for".into(),
+                            ),
                             required: Some(true),
                         },
                         PromptArgument {
                             name: "test_framework".into(),
-                            description: Some("Testing framework to use (auto-detected if not provided)".into()),
+                            description: Some(
+                                "Testing framework to use (auto-detected if not provided)".into(),
+                            ),
                             required: Some(false),
                         },
                     ]),
@@ -689,15 +706,19 @@ impl ServerHandler for WinxService {
     ) -> Result<GetPromptResult, McpError> {
         let prompt_content = match param.name.as_ref() {
             "code_review" => {
-                let file_path = param.arguments.as_ref()
+                let file_path = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("file_path"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("[file_path]");
-                let focus_areas = param.arguments.as_ref()
+                let focus_areas = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("focus_areas"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("all areas");
-                
+
                 format!(
                     "Please perform a comprehensive code review of the file: {}\n\n\
                     Focus areas: {}\n\n\
@@ -713,15 +734,19 @@ impl ServerHandler for WinxService {
                 )
             }
             "bug_fix_assistant" => {
-                let error_message = param.arguments.as_ref()
+                let error_message = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("error_message"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("[error_message]");
-                let code_context = param.arguments.as_ref()
+                let code_context = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("code_context"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("[code_context]");
-                
+
                 format!(
                     "Help me fix this bug:\n\n\
                     Error: {}\n\n\
@@ -736,15 +761,19 @@ impl ServerHandler for WinxService {
                 )
             }
             "performance_optimizer" => {
-                let code_snippet = param.arguments.as_ref()
+                let code_snippet = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("code_snippet"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("[code_snippet]");
-                let target_language = param.arguments.as_ref()
+                let target_language = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("target_language"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("auto-detect");
-                
+
                 format!(
                     "Optimize this code for better performance:\n\n\
                     Code: {}\n\n\
@@ -759,11 +788,13 @@ impl ServerHandler for WinxService {
                 )
             }
             "security_analyzer" => {
-                let file_path = param.arguments.as_ref()
+                let file_path = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("file_path"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("[file_path]");
-                
+
                 format!(
                     "Perform a security analysis of the file: {}\n\n\
                     Please check for:\n\
@@ -780,15 +811,19 @@ impl ServerHandler for WinxService {
                 )
             }
             "documentation_generator" => {
-                let code_file = param.arguments.as_ref()
+                let code_file = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("code_file"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("[code_file]");
-                let doc_style = param.arguments.as_ref()
+                let doc_style = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("doc_style"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("auto-detect");
-                
+
                 format!(
                     "Generate comprehensive documentation for: {}\n\n\
                     Documentation style: {}\n\n\
@@ -805,15 +840,19 @@ impl ServerHandler for WinxService {
                 )
             }
             "test_generator" => {
-                let source_file = param.arguments.as_ref()
+                let source_file = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("source_file"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("[source_file]");
-                let test_framework = param.arguments.as_ref()
+                let test_framework = param
+                    .arguments
+                    .as_ref()
                     .and_then(|args| args.get("test_framework"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("auto-detect");
-                
+
                 format!(
                     "Generate comprehensive unit tests for: {}\n\n\
                     Test framework: {}\n\n\
