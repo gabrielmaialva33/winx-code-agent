@@ -169,9 +169,12 @@ impl WinxService {
         structure.push_str("# Source Code Organization\n\n");
         
         // Try to read actual directory structure
-        if let Ok(entries) = tokio::fs::read_dir("src").await {
+        if let Ok(mut read_dir) = tokio::fs::read_dir("src").await {
             structure.push_str("## src/ Directory Contents\n");
-            let mut entries: Vec<_> = entries.collect::<Result<Vec<_>, _>>().await.unwrap_or_default();
+            let mut entries = Vec::new();
+            while let Some(entry) = read_dir.next_entry().await.unwrap_or(None) {
+                entries.push(entry);
+            }
             entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
             
             for entry in entries {
@@ -494,32 +497,44 @@ impl ServerHandler for WinxService {
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
             resources: vec![
-                Resource {
-                    uri: "file://project-structure".into(),
-                    name: Some("Project Structure".into()),
-                    description: Some("Overview of the project structure and files".into()),
-                    mime_type: Some("text/plain".into()),
+                Annotated {
+                    raw: RawResource {
+                        uri: "file://project-structure".into(),
+                        name: "Project Structure".into(),
+                        description: Some("Overview of the project structure and files".into()),
+                        mime_type: Some("text/plain".into()),
+                        size: None,
+                    },
                     annotations: None,
                 },
-                Resource {
-                    uri: "file://readme".into(),
-                    name: Some("README".into()),
-                    description: Some("Project README documentation".into()),
-                    mime_type: Some("text/markdown".into()),
+                Annotated {
+                    raw: RawResource {
+                        uri: "file://readme".into(),
+                        name: "README".into(),
+                        description: Some("Project README documentation".into()),
+                        mime_type: Some("text/markdown".into()),
+                        size: None,
+                    },
                     annotations: None,
                 },
-                Resource {
-                    uri: "file://cargo-toml".into(),
-                    name: Some("Cargo.toml".into()),
-                    description: Some("Project configuration and dependencies".into()),
-                    mime_type: Some("text/plain".into()),
+                Annotated {
+                    raw: RawResource {
+                        uri: "file://cargo-toml".into(),
+                        name: "Cargo.toml".into(),
+                        description: Some("Project configuration and dependencies".into()),
+                        mime_type: Some("text/plain".into()),
+                        size: None,
+                    },
                     annotations: None,
                 },
-                Resource {
-                    uri: "file://src-structure".into(),
-                    name: Some("Source Code Structure".into()),
-                    description: Some("Overview of the source code organization".into()),
-                    mime_type: Some("text/plain".into()),
+                Annotated {
+                    raw: RawResource {
+                        uri: "file://src-structure".into(),
+                        name: "Source Code Structure".into(),
+                        description: Some("Overview of the source code organization".into()),
+                        mime_type: Some("text/plain".into()),
+                        size: None,
+                    },
                     annotations: None,
                 },
             ],
@@ -535,23 +550,23 @@ impl ServerHandler for WinxService {
         let content = match param.uri.as_ref() {
             "file://project-structure" => {
                 let structure = self.get_project_structure().await?;
-                vec![ResourceContents::text(structure)]
+                vec![ResourceContents::text(structure, param.uri.clone())]
             }
             "file://readme" => {
                 match tokio::fs::read_to_string("README.md").await {
-                    Ok(content) => vec![ResourceContents::text(content)],
-                    Err(_) => vec![ResourceContents::text("README.md not found".to_string())],
+                    Ok(content) => vec![ResourceContents::text(content, param.uri.clone())],
+                    Err(_) => vec![ResourceContents::text("README.md not found".to_string(), param.uri.clone())],
                 }
             }
             "file://cargo-toml" => {
                 match tokio::fs::read_to_string("Cargo.toml").await {
-                    Ok(content) => vec![ResourceContents::text(content)],
-                    Err(_) => vec![ResourceContents::text("Cargo.toml not found".to_string())],
+                    Ok(content) => vec![ResourceContents::text(content, param.uri.clone())],
+                    Err(_) => vec![ResourceContents::text("Cargo.toml not found".to_string(), param.uri.clone())],
                 }
             }
             "file://src-structure" => {
                 let structure = self.get_src_structure().await?;
-                vec![ResourceContents::text(structure)]
+                vec![ResourceContents::text(structure, param.uri.clone())]
             }
             _ => {
                 return Err(McpError::invalid_request(
@@ -566,7 +581,7 @@ impl ServerHandler for WinxService {
 
     async fn list_prompts(
         &self,
-        _param: ListPromptsRequestParam,
+        _param: ListPromptsRequest,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
         Ok(ListPromptsResult {
@@ -825,8 +840,10 @@ impl ServerHandler for WinxService {
         Ok(GetPromptResult {
             description: Some(format!("Generated prompt for {}", param.name)),
             messages: vec![PromptMessage {
-                role: MessageRole::User,
-                content: MessageContent::Text { text: prompt_content },
+                role: PromptMessageRole::User,
+                content: PromptMessageContent::Text {
+                    text: prompt_content,
+                },
             }],
         })
     }
