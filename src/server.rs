@@ -1,7 +1,9 @@
 //! Winx MCP Server implementation using rmcp 0.5.0
 //! Enhanced server with NVIDIA AI integration
 
-use rmcp::{model::*, transport::stdio, ServerHandler, ServiceExt};
+use rmcp::{model::*, transport::stdio, tool, ServerHandler, ServiceExt};
+use serde_json::Value;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -79,6 +81,21 @@ impl ServerHandler for WinxService {
                 Provides shell execution, file management, and AI-powered code analysis capabilities.".into(),
             ),
         }
+    }
+}
+
+/// Test tool implementation
+impl WinxService {
+    /// Simple ping tool for testing connectivity
+    #[tool]
+    async fn ping(&self, message: Option<String>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+        let response = message.unwrap_or_else(|| "pong".to_string());
+        Ok(serde_json::json!({
+            "status": "success",
+            "message": response,
+            "server": "winx-code-agent",
+            "version": self.version
+        }))
     }
 }
 
