@@ -530,14 +530,16 @@ pub fn color_name_to_code(name: &str) -> Option<TermColor> {
         return Some(TermColor::Basic(*code));
     }
 
-    // Try as a hex color
-    if let Some(color) = parse_hex_color(name) {
-        return Some(color);
-    }
-
-    // Try as a color number
+    // Try as a color number first (before hex parsing)
     if let Ok(num) = u8::from_str(name) {
         return Some(TermColor::Color256(num));
+    }
+
+    // Try as a hex color (only if it starts with # or is clearly hex)
+    if name.starts_with('#') || (name.len() == 6 && name.chars().all(|c| c.is_ascii_hexdigit())) {
+        if let Some(color) = parse_hex_color(name) {
+            return Some(color);
+        }
     }
 
     None
