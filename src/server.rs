@@ -462,6 +462,105 @@ impl ServerHandler for WinxService {
                     annotations: None,
                 },
                 Tool {
+                    name: "multi_file_editor".into(),
+                    description: Some("Create and edit multiple files simultaneously with atomic operations".into()),
+                    input_schema: json_to_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "operations": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "oneOf": [
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": { "const": "create" },
+                                                "file_path": { "type": "string" },
+                                                "content": { "type": "string" },
+                                                "create_dirs": { "type": "boolean" }
+                                            },
+                                            "required": ["type", "file_path", "content"]
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": { "const": "replace" },
+                                                "file_path": { "type": "string" },
+                                                "content": { "type": "string" }
+                                            },
+                                            "required": ["type", "file_path", "content"]
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": { "const": "append" },
+                                                "file_path": { "type": "string" },
+                                                "content": { "type": "string" }
+                                            },
+                                            "required": ["type", "file_path", "content"]
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": { "const": "prepend" },
+                                                "file_path": { "type": "string" },
+                                                "content": { "type": "string" }
+                                            },
+                                            "required": ["type", "file_path", "content"]
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": { "const": "insert_at_line" },
+                                                "file_path": { "type": "string" },
+                                                "content": { "type": "string" },
+                                                "line_number": { "type": "integer", "minimum": 1 }
+                                            },
+                                            "required": ["type", "file_path", "content", "line_number"]
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "type": { "const": "search_replace" },
+                                                "file_path": { "type": "string" },
+                                                "search": { "type": "string" },
+                                                "replace": { "type": "string" },
+                                                "all_occurrences": { "type": "boolean" }
+                                            },
+                                            "required": ["type", "file_path", "search", "replace"]
+                                        }
+                                    ]
+                                },
+                                "description": "List of file operations to perform"
+                            },
+                            "create_backups": {
+                                "type": "boolean",
+                                "description": "Create backup files before modification (default: true)"
+                            },
+                            "atomic": {
+                                "type": "boolean",
+                                "description": "Perform operations atomically - all or nothing (default: true)"
+                            },
+                            "continue_on_error": {
+                                "type": "boolean",
+                                "description": "Continue processing on errors (default: false)"
+                            },
+                            "max_file_size": {
+                                "type": "integer",
+                                "description": "Maximum file size to process in bytes (default: 10MB)"
+                            },
+                            "dry_run": {
+                                "type": "boolean",
+                                "description": "Validate operations without executing (default: false)"
+                            }
+                        },
+                        "required": ["operations"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                },
+                Tool {
                     name: "ai_explain_code".into(),
                     description: Some("Get AI explanation and documentation for code".into()),
                     input_schema: json_to_schema(serde_json::json!({
@@ -905,6 +1004,7 @@ impl ServerHandler for WinxService {
             "code_analyzer" => self.handle_code_analyzer(args_value).await?,
             "ai_generate_code" => self.handle_ai_generate_code(args_value).await?,
             "ai_explain_code" => self.handle_ai_explain_code(args_value).await?,
+            "multi_file_editor" => self.handle_multi_file_editor(args_value).await?,
             _ => {
                 return Err(McpError::invalid_request(
                     format!("Unknown tool: {}", param.name),
@@ -1692,6 +1792,74 @@ impl WinxService {
 
         info!("Code explanation requested but all AI providers failed");
         Ok(CallToolResult::success(vec![Content::text(fallback)]))
+    }
+
+    async fn handle_multi_file_editor(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::tools::multi_file_editor::{MultiFileEditorTool, MultiFileEditor};
+        
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        
+        // Parse the configuration from arguments
+        let config: MultiFileEditor = serde_json::from_value(args)
+            .map_err(|e| McpError::invalid_request(
+                format!("Invalid arguments: {}", e),
+                None,
+            ))?;
+        
+        // Create the tool instance
+        let mut tool = MultiFileEditorTool::new(&config);
+        
+        // Execute the operations
+        match tool.execute(&config.operations).await {
+            Ok(result) => {
+                let mut content_parts = Vec::new();
+                
+                // Add summary
+                content_parts.push(format!(
+                    "## Multi-File Editor Results\n\n**Total Operations:** {}\n**Successful:** {}\n**Failed:** {}\n**Rollback Performed:** {}\n**Dry Run:** {}\n",
+                    result.total_operations,
+                    result.successful_operations,
+                    result.failed_operations,
+                    result.rollback_performed,
+                    result.dry_run
+                ));
+                
+                // Add operation details
+                for op_result in &result.results {
+                    let status = if op_result.success { "✅" } else { "❌" };
+                    content_parts.push(format!(
+                        "### Operation {} {}: {}\n**File:** {}\n**Message:** {}\n",
+                        op_result.operation_index + 1,
+                        status,
+                        if op_result.success { "Success" } else { "Failed" },
+                        op_result.file_path,
+                        op_result.message
+                    ));
+                    
+                    if let Some(backup_path) = &op_result.backup_path {
+                        content_parts.push(format!("**Backup:** {}\n", backup_path));
+                    }
+                    
+                    if let Some(bytes_written) = op_result.bytes_written {
+                        content_parts.push(format!("**Bytes Written:** {}\n", bytes_written));
+                    }
+                }
+                
+                Ok(CallToolResult::success(vec![Content::text(
+                    content_parts.join("\n")
+                )]))
+            }
+            Err(e) => {
+                warn!("Multi-file editor operation failed: {}", e);
+                Err(McpError::internal_error(
+                    format!("Multi-file editor operation failed: {}", e),
+                    None,
+                ))
+            }
+        }
     }
 }
 

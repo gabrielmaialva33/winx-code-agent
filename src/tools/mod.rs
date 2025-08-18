@@ -10,7 +10,7 @@ pub mod code_analyzer;
 pub mod command_suggestions;
 pub mod context_save;
 pub mod file_write_or_edit;
-pub mod initialize;
+pub mod multi_file_editor;
 pub mod read_files;
 pub mod read_image;
 
