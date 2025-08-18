@@ -16,6 +16,7 @@
 //! - Integration with Model Context Protocol (MCP)
 
 mod errors;
+mod dashscope;
 mod gemini;
 mod nvidia;
 mod server;
