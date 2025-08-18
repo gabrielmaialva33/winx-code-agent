@@ -26,7 +26,7 @@ impl Default for NvidiaConfig {
         Self {
             api_key: String::new(),
             base_url: "https://integrate.api.nvidia.com".to_string(),
-            default_model: "meta/llama-3.1-70b-instruct".to_string(),
+            default_model: "qwen/qwen3-235b-a22b".to_string(),
             timeout_seconds: 30,
             max_retries: 3,
             rate_limit_rpm: 60,
