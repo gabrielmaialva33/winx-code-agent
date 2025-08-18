@@ -9,11 +9,10 @@ use rmcp::{
     tool_router,
     tool_handler,
     transport::stdio,
-    handler::server::tool::ToolCallContext,
     handler::server::router::tool::ToolRouter,
     ServerHandler
 };
-use serde_json::Value;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
