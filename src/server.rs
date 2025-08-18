@@ -41,7 +41,6 @@ impl WinxService {
             bash_state: Arc::new(Mutex::new(None)),
             nvidia_client: Arc::new(Mutex::new(None)),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            tool_router: Self::tool_router(),
         }
     }
 
