@@ -167,36 +167,49 @@ impl WinxService {
     }
 
     /// Write or edit file contents
-    #[tool]
+    #[tool(description = "Write or edit file contents")]
     async fn file_write_or_edit(
         &self,
         path: String,
         content: String,
         create_if_missing: Option<bool>,
-    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<CallToolResult, McpError> {
         let create = create_if_missing.unwrap_or(true);
         
         if !create && !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("File does not exist: {}", path)
-            ) as std::io::Error) as Box<dyn std::error::Error + Send + Sync>);
+            return Err(McpError::invalid_request(&format!("File does not exist: {}", path)));
         }
 
         match tokio::fs::write(&path, &content).await {
             Ok(_) => {
                 info!("File written successfully: {}", path);
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "message": format!("File written successfully: {}", path),
-                    "path": path,
-                    "size": content.len()
-                }))
+                Ok(CallToolResult::success(vec![Content::text(
+                    format!("File written successfully: {} ({} bytes)", path, content.len())
+                )]))
             }
             Err(e) => {
                 warn!("Failed to write file {}: {}", path, e);
-                Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+                Err(McpError::internal_error(format!("Failed to write file {}: {}", path, e)))
             }
+        }
+    }
+}
+
+/// ServerHandler implementation with tool support
+#[tool_handler]
+impl ServerHandler for WinxService {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            server_info: Implementation {
+                name: "winx-code-agent".into(),
+                version: self.version.clone(),
+            },
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            instructions: Some(
+                "Winx is a high-performance Rust implementation of WCGW for code agents with NVIDIA AI integration. \
+                Provides shell execution, file management, and AI-powered code analysis capabilities.".into(),
+            ),
         }
     }
 }
