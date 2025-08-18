@@ -13,10 +13,11 @@ use crate::errors::{Result, WinxError};
 use crate::state::BashState;
 
 /// Conversation modes that define how Winx responds
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationMode {
     /// Casual conversation with more personality and humor
+    #[default]
     Casual,
     /// Technical focus with precise, detailed responses
     Technical,
@@ -28,12 +29,6 @@ pub enum ConversationMode {
     Creative,
     /// Mentor mode with teaching and best practices
     Mentor,
-}
-
-impl Default for ConversationMode {
-    fn default() -> Self {
-        ConversationMode::Casual
-    }
 }
 
 /// Configuration for a Winx chat session
@@ -584,7 +579,7 @@ impl WinxChatProcessor {
     /// Format system information for display
     fn format_system_info(&self, info: &SystemInfo) -> String {
         let mut result = String::new();
-        result.push_str(&format!("\n\n📊 **Status do Sistema:**"));
+        result.push_str("\n\n📊 **Status do Sistema:**");
         result.push_str(&format!("\n🔧 Ferramentas: {}", info.tools_count));
         result.push_str(&format!("\n⏱️ Uptime: {}", info.uptime));
 
