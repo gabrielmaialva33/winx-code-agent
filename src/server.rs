@@ -111,7 +111,7 @@ impl WinxService {
         #[tool(param)]
         #[schemars(description = "Temperature for creativity (0.0-1.0)")]
         temperature: Option<f32>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> String {
         match self.get_nvidia_client().await {
             Some(nvidia_client) => {
                 let request = crate::nvidia::models::CodeGenerationRequest {
@@ -124,20 +124,16 @@ impl WinxService {
 
                 match nvidia_client.generate_code(&request).await {
                     Ok(result) => {
-                        let json_result = serde_json::to_string_pretty(&result)
-                            .map_err(|e| McpError::Internal(format!("Failed to serialize result: {}", e)))?;
-                        
-                        Ok(CallToolResult::success(vec![Content::text(json_result)]))
+                        serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|e| format!("Error serializing result: {}", e))
                     }
                     Err(e) => {
-                        let error_msg = format!("AI code generation failed: {}", e);
-                        Ok(CallToolResult::error(error_msg))
+                        format!("AI code generation failed: {}", e)
                     }
                 }
             }
             None => {
-                let error_msg = "NVIDIA AI integration not available. Please set NVIDIA_API_KEY environment variable.";
-                Ok(CallToolResult::error(error_msg.to_string()))
+                "NVIDIA AI integration not available. Please set NVIDIA_API_KEY environment variable.".to_string()
             }
         }
     }
@@ -158,7 +154,7 @@ impl WinxService {
         #[tool(param)]
         #[schemars(description = "Level of detail (brief, detailed, comprehensive)")]
         detail_level: Option<String>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> String {
         match self.get_nvidia_client().await {
             Some(nvidia_client) => {
                 // Get code content
