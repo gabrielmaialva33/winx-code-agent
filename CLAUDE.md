@@ -59,7 +59,7 @@ export NVIDIA_API_KEY="your-nvidia-api-key-here"
 export NVAPI_KEY="your-nvidia-api-key-here"
 
 # Optional: Configure NVIDIA settings
-export NVIDIA_DEFAULT_MODEL="meta/llama-3.1-70b-instruct"
+export NVIDIA_DEFAULT_MODEL="qwen/qwen3-235b-a22b"
 export NVIDIA_TIMEOUT_SECONDS="30"
 export NVIDIA_MAX_RETRIES="3"
 export NVIDIA_RATE_LIMIT_RPM="60"
