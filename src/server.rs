@@ -369,7 +369,7 @@ impl WinxService {
         }
 
         let mut state = crate::state::BashState::new();
-        match state.init_interactive_bash() {
+        match state.init_interactive_bash().await {
             Ok(_) => {
                 *bash_state_guard = Some(state);
                 info!("Shell environment initialized with {}", shell);
