@@ -590,15 +590,25 @@ impl WinxService {
             .get("current_dir")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let previous_command = args
+        let last_command = args
             .get("previous_command")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        let max_suggestions = args
+            .get("max_suggestions")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(5) as usize;
+        let include_explanations = args
+            .get("include_explanations")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         let command_suggestions = CommandSuggestions {
             partial_command,
             current_dir,
-            previous_command,
+            last_command,
+            max_suggestions,
+            include_explanations,
         };
 
         match crate::tools::command_suggestions::handle_tool_call(&self.bash_state, command_suggestions).await {
