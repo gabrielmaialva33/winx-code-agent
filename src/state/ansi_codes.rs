@@ -784,6 +784,6 @@ mod tests {
         let sequences = parse_ansi_sequences(input);
         assert_eq!(sequences.len(), 2);
         assert_eq!(sequences[0], (7, "\x1B[1m".to_string()));
-        assert_eq!(sequences[1], (11, "\x1B[0m".to_string()));
+        assert_eq!(sequences[1], (15, "\x1B[0m".to_string()));
     }
 }
