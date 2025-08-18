@@ -316,7 +316,7 @@ impl WinxService {
             .unwrap_or(true);
         
         if !create && !tokio::fs::try_exists(path).await.unwrap_or(false) {
-            return Err(McpError::invalid_request(&format!("File does not exist: {}", path), None));
+            return Err(McpError::invalid_request(format!("File does not exist: {}", path), None));
         }
 
         match tokio::fs::write(path, content).await {
