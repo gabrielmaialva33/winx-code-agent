@@ -797,6 +797,154 @@ impl WinxService {
             Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
         }
     }
+
+    async fn handle_ai_generate_code(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+
+        let prompt = args
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_request("Missing prompt", None))?;
+        
+        let language = args.get("language").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let context = args.get("context").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let max_tokens = args.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32);
+        let temperature = args.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32);
+
+        if let Some(nvidia_client) = self.get_nvidia_client().await {
+            let request = crate::nvidia::models::CodeGenerationRequest {
+                prompt: prompt.to_string(),
+                language,
+                context,
+                max_tokens,
+                temperature,
+            };
+
+            match nvidia_client.generate_code(&request).await {
+                Ok(result) => {
+                    let formatted_result = format!(
+                        "## 🤖 AI Generated Code\n\n### Language: {}\n\n```{}\n{}\n```\n\n*Generated using NVIDIA AI*",
+                        result.language.as_deref().unwrap_or("auto-detected"),
+                        result.language.as_deref().unwrap_or(""),
+                        result.code
+                    );
+
+                    info!("AI code generation completed for prompt: '{}'", prompt);
+                    Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
+                }
+                Err(e) => {
+                    warn!("NVIDIA code generation failed: {}", e);
+                    let fallback = format!(
+                        "## ⚠️ Code Generation Failed\n\nNVIDIA AI code generation failed: {}\n\nPlease check your NVIDIA_API_KEY and try again.",
+                        e
+                    );
+                    Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                }
+            }
+        } else {
+            let fallback = format!(
+                "## 📝 Code Generation Not Available\n\nNVIDIA AI not available (missing NVIDIA_API_KEY).\n\nPrompt: {}\nLanguage: {}\n\nPlease set NVIDIA_API_KEY to use AI code generation.",
+                prompt,
+                language.as_deref().unwrap_or("not specified")
+            );
+            
+            info!("Code generation requested but NVIDIA not available");
+            Ok(CallToolResult::success(vec![Content::text(fallback)]))
+        }
+    }
+
+    async fn handle_ai_explain_code(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+
+        let file_path = args.get("file_path").and_then(|v| v.as_str());
+        let code_snippet = args.get("code").and_then(|v| v.as_str());
+        let language = args.get("language").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let detail_level = args.get("detail_level").and_then(|v| v.as_str()).unwrap_or("detailed");
+
+        // Must provide either file_path or code
+        if file_path.is_none() && code_snippet.is_none() {
+            return Err(McpError::invalid_request("Must provide either file_path or code", None));
+        }
+
+        if let Some(nvidia_client) = self.get_nvidia_client().await {
+            let (code, source_info) = if let Some(path) = file_path {
+                match tokio::fs::read_to_string(path).await {
+                    Ok(content) => (content, format!("file: {}", path)),
+                    Err(e) => {
+                        return Err(McpError::invalid_request(&format!("Failed to read file {}: {}", path, e), None));
+                    }
+                }
+            } else {
+                (code_snippet.unwrap().to_string(), "provided snippet".to_string())
+            };
+
+            let detail_prompt = match detail_level {
+                "basic" => "Provide a brief, high-level explanation of what this code does.",
+                "expert" => "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities.",
+                _ => "Provide a detailed explanation of this code including its purpose, how it works, and key concepts."
+            };
+
+            let system_prompt = format!(
+                "You are a code explanation expert. {}",
+                detail_prompt
+            );
+
+            let user_prompt = if let Some(lang) = &language {
+                format!("Explain this {} code:\n\n```{}\n{}\n```", lang, lang, code)
+            } else {
+                format!("Explain this code:\n\n```\n{}\n```", code)
+            };
+
+            let request = crate::nvidia::models::ChatCompletionRequest {
+                model: nvidia_client.recommend_model(crate::nvidia::models::TaskType::CodeExplanation).as_str().to_string(),
+                messages: vec![
+                    crate::nvidia::models::ChatMessage::system(system_prompt),
+                    crate::nvidia::models::ChatMessage::user(user_prompt),
+                ],
+                max_tokens: Some(1500),
+                temperature: Some(0.3),
+                top_p: None,
+                stream: Some(false),
+            };
+
+            match nvidia_client.chat_completion(&request).await {
+                Ok(response) => {
+                    if let Some(choice) = response.choices.first() {
+                        let explanation = choice.message.effective_content();
+                        let formatted_result = format!(
+                            "## 📚 AI Code Explanation\n\n**Source:** {}\n**Detail Level:** {}\n\n{}\n\n*Explained using: {}*",
+                            source_info,
+                            detail_level,
+                            explanation,
+                            request.model
+                        );
+
+                        info!("AI code explanation completed for: {}", source_info);
+                        Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
+                    } else {
+                        Err(McpError::internal_error("Empty response from NVIDIA API", None))
+                    }
+                }
+                Err(e) => {
+                    warn!("NVIDIA explanation failed: {}", e);
+                    let fallback = format!(
+                        "## ⚠️ Code Explanation Failed\n\nNVIDIA AI explanation failed: {}\n\nSource: {}\n\nPlease check your NVIDIA_API_KEY and try again.",
+                        e, source_info
+                    );
+                    Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                }
+            }
+        } else {
+            let fallback = format!(
+                "## 📖 Code Explanation Not Available\n\nNVIDIA AI not available (missing NVIDIA_API_KEY).\n\nSource: {}\nDetail Level: {}\n\nPlease set NVIDIA_API_KEY to use AI code explanation.",
+                file_path.unwrap_or("code snippet"),
+                detail_level
+            );
+            
+            info!("Code explanation requested but NVIDIA not available");
+            Ok(CallToolResult::success(vec![Content::text(fallback)]))
+        }
+    }
 }
 
 /// Create and start the Winx MCP server
