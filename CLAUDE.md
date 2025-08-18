@@ -142,6 +142,7 @@ Winx provides several key features:
    - Multi-language support
 
 3. **Intelligent Model Selection**:
+   - **Qwen3 235B A22B** (Default): Latest generation LLM with thinking mode, MoE architecture, and 100+ language support
    - **Codestral 22B**: For code generation and completion
    - **CodeGemma 7B**: For code analysis and bug detection
    - **Llama 3.1 70B**: For code explanation and documentation
@@ -231,7 +232,7 @@ Winx is designed to be used as a Model Context Protocol (MCP) server with Claude
 3. **Set Environment Variables**: For AI features, configure your NVIDIA API key:
    ```bash
    export NVIDIA_API_KEY="your-nvidia-api-key-here"
-   export NVIDIA_DEFAULT_MODEL="meta/llama-3.1-70b-instruct"  # optional
+   export NVIDIA_DEFAULT_MODEL="qwen/qwen3-235b-a22b"  # optional
    ```
 
 4. **Restart Claude Desktop**: After adding the configuration, restart Claude Desktop to load the Winx server.
