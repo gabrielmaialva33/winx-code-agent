@@ -758,14 +758,13 @@ impl WinxService {
                                 .unwrap_or_default();
 
                             let analysis_result = format!(
-                                "## 🔍 AI Code Analysis: {}\n\n**Summary:** {}\n\n### Issues Found ({}):\n{}{}{}\n\n*Analyzed using: {}*",
+                                "## 🔍 AI Code Analysis: {}\n\n**Summary:** {}\n\n### Issues Found ({}):\n{}{}{}\n\n*Analyzed using NVIDIA AI*",
                                 file_path,
                                 result.summary,
                                 result.issues.len(),
                                 issues_text,
                                 suggestions_text,
-                                complexity_text,
-                                result.model_used
+                                complexity_text
                             );
 
                             info!("AI code analysis completed for: {} ({} issues found)", file_path, result.issues.len());
@@ -782,7 +781,8 @@ impl WinxService {
                     }
                 }
                 Err(e) => {
-                    Err(McpError::invalid_request(&format!("Failed to read file {}: {}", file_path, e), None))
+                    let error_msg = format!("Failed to read file {}: {}", file_path, e);
+                    Err(McpError::invalid_request(error_msg.as_str(), None))
                 }
             }
         } else {
@@ -871,7 +871,8 @@ impl WinxService {
                 match tokio::fs::read_to_string(path).await {
                     Ok(content) => (content, format!("file: {}", path)),
                     Err(e) => {
-                        return Err(McpError::invalid_request(&format!("Failed to read file {}: {}", path, e), None));
+                        let error_msg = format!("Failed to read file {}: {}", path, e);
+                        return Err(McpError::invalid_request(error_msg.as_str(), None));
                     }
                 }
             } else {
