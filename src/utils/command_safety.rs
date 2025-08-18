@@ -136,11 +136,6 @@ impl CommandSafety {
     pub fn is_interactive(&self, command: &str) -> bool {
         let normalized = self.normalize_command(command);
 
-        // Check special cases first (they have priority over general rules)
-        if self.check_special_interactive_cases(&normalized) {
-            return true;
-        }
-
         // Check exact matches
         if self.interactive_commands.contains(&normalized) {
             return true;
@@ -152,12 +147,27 @@ impl CommandSafety {
                 // Check that it's a word boundary
                 let rest = &normalized[interactive_cmd.len()..];
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
+                    // For git commit, check if it has -m flag (non-interactive)
+                    if interactive_cmd == "git commit" {
+                        if normalized.contains("-m") || normalized.contains("--message") {
+                            return false;
+                        }
+                    }
+                    // For python, check if it has a script argument (non-interactive)
+                    if (interactive_cmd == "python" || interactive_cmd == "python3") {
+                        // If there's more than just "python" or "python3", it's likely a script
+                        let parts: Vec<&str> = normalized.split_whitespace().collect();
+                        if parts.len() > 1 && !parts[1].starts_with('-') {
+                            return false;
+                        }
+                    }
                     return true;
                 }
             }
         }
 
-        false
+        // Special cases for other interactive commands
+        self.check_special_interactive_cases(&normalized)
     }
 
     /// Check if a command might run for a long time
