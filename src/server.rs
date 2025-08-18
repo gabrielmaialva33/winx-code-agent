@@ -801,12 +801,35 @@ impl WinxService {
                             Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
                         }
                         Err(e) => {
-                            warn!("NVIDIA analysis failed for {}: {}", file_path, e);
-                            let fallback = format!(
-                                "## ⚠️ Code Analysis: {}\n\nNVIDIA AI analysis failed: {}\n\nFalling back to basic analysis: File exists and is readable.",
-                                file_path, e
-                            );
-                            Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                            warn!("NVIDIA analysis failed for {}: {}, trying Gemini fallback", file_path, e);
+                            
+                            // Try Gemini as fallback
+                            if let Some(gemini_client) = self.get_gemini_client().await {
+                                match gemini_client.analyze_code(&code, language.as_deref()).await {
+                                    Ok(gemini_result) => {
+                                        let analysis_result = format!(
+                                            "## 🔍 AI Code Analysis: {}\n\n{}\n\n*NVIDIA failed, analyzed using Gemini AI*\n\n**Note:** NVIDIA error: {}",
+                                            file_path, gemini_result, e
+                                        );
+                                        info!("Gemini fallback analysis completed for: {}", file_path);
+                                        Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
+                                    }
+                                    Err(gemini_e) => {
+                                        warn!("Both NVIDIA and Gemini analysis failed for {}: NVIDIA: {}, Gemini: {}", file_path, e, gemini_e);
+                                        let fallback = format!(
+                                            "## ⚠️ Code Analysis: {}\n\nBoth AI providers failed:\n- NVIDIA: {}\n- Gemini: {}\n\nFalling back to basic analysis: File exists and is readable.",
+                                            file_path, e, gemini_e
+                                        );
+                                        Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                                    }
+                                }
+                            } else {
+                                let fallback = format!(
+                                    "## ⚠️ Code Analysis: {}\n\nNVIDIA AI analysis failed: {}\nGemini fallback not available (missing GEMINI_API_KEY).\n\nFalling back to basic analysis: File exists and is readable.",
+                                    file_path, e
+                                );
+                                Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                            }
                         }
                     }
                 }
@@ -815,15 +838,44 @@ impl WinxService {
                 }
             }
         } else {
-            // Fallback without NVIDIA
-            let analysis_result = format!(
-                "## 📄 Basic Code Analysis: {}\n\nNVIDIA AI not available (missing NVIDIA_API_KEY).\nBasic analysis: File exists and appears to be valid {} code.",
-                file_path,
-                language.as_deref().unwrap_or("source")
-            );
-            
-            info!("Basic code analysis completed for: {}", file_path);
-            Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
+            // Try Gemini if NVIDIA is not available
+            if let Some(gemini_client) = self.get_gemini_client().await {
+                match tokio::fs::read_to_string(file_path).await {
+                    Ok(code) => {
+                        match gemini_client.analyze_code(&code, language.as_deref()).await {
+                            Ok(gemini_result) => {
+                                let analysis_result = format!(
+                                    "## 🔍 AI Code Analysis: {}\n\n{}\n\n*Analyzed using Gemini AI (NVIDIA not available)*",
+                                    file_path, gemini_result
+                                );
+                                info!("Gemini code analysis completed for: {}", file_path);
+                                Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
+                            }
+                            Err(e) => {
+                                warn!("Gemini analysis failed for {}: {}", file_path, e);
+                                let fallback = format!(
+                                    "## 📄 Basic Code Analysis: {}\n\nBoth AI providers unavailable:\n- NVIDIA: missing NVIDIA_API_KEY\n- Gemini: {}\n\nBasic analysis: File exists and appears to be valid {} code.",
+                                    file_path, e, language.as_deref().unwrap_or("source")
+                                );
+                                Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        Err(McpError::internal_error(format!("Failed to read file {}: {}", file_path, e), None))
+                    }
+                }
+            } else {
+                // Fallback without any AI
+                let analysis_result = format!(
+                    "## 📄 Basic Code Analysis: {}\n\nBoth AI providers unavailable:\n- NVIDIA: missing NVIDIA_API_KEY\n- Gemini: missing GEMINI_API_KEY\n\nBasic analysis: File exists and appears to be valid {} code.",
+                    file_path,
+                    language.as_deref().unwrap_or("source")
+                );
+                
+                info!("Basic code analysis completed for: {}", file_path);
+                Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
+            }
         }
     }
 
