@@ -102,6 +102,11 @@ impl WinxService {
         }
     }
 
+    /// Get DashScope client if available
+    pub async fn get_dashscope_client(&self) -> Option<DashScopeClient> {
+        self.dashscope_client.lock().unwrap().clone()
+    }
+
     /// Get NVIDIA client if available
     pub async fn get_nvidia_client(&self) -> Option<NvidiaClient> {
         self.nvidia_client.lock().unwrap().clone()
@@ -1173,10 +1178,21 @@ pub async fn start_winx_server() -> Result<(), Box<dyn std::error::Error>> {
     // Create service and initialize NVIDIA integration
     let service = WinxService::new();
 
-    // Initialize NVIDIA integration
+    // Initialize DashScope integration (primary)
+    if let Ok(enabled) = service.initialize_dashscope().await {
+        if enabled {
+            info!("DashScope AI integration enabled successfully (primary)");
+        } else {
+            warn!("DashScope AI features will be limited without valid DASHSCOPE_API_KEY");
+        }
+    } else {
+        warn!("Failed to initialize DashScope integration");
+    }
+
+    // Initialize NVIDIA integration (fallback 1)
     if let Ok(enabled) = service.initialize_nvidia().await {
         if enabled {
-            info!("NVIDIA AI integration enabled successfully");
+            info!("NVIDIA AI integration enabled successfully (fallback 1)");
         } else {
             warn!("NVIDIA AI features will be limited without valid NVIDIA_API_KEY");
         }
@@ -1184,10 +1200,10 @@ pub async fn start_winx_server() -> Result<(), Box<dyn std::error::Error>> {
         warn!("Failed to initialize NVIDIA integration");
     }
 
-    // Initialize Gemini integration as fallback
+    // Initialize Gemini integration (fallback 2)
     if let Ok(enabled) = service.initialize_gemini().await {
         if enabled {
-            info!("Gemini AI integration enabled successfully");
+            info!("Gemini AI integration enabled successfully (fallback 2)");
         } else {
             warn!("Gemini AI fallback features will be limited without valid GEMINI_API_KEY");
         }
