@@ -437,7 +437,7 @@ impl Screen {
         // Keep a reasonable amount at the beginning
         let beginning_lines = max_size / 10; // 10% of max size
 
-        if to_remove < current_size - beginning_lines * 2 {
+        if to_remove <= beginning_lines {
             // Simple case: just remove from the beginning
             for _ in 0..to_remove {
                 self.lines.pop_front();
