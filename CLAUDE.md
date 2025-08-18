@@ -172,10 +172,11 @@ The following AI-powered tools are available when NVIDIA_API_KEY is configured:
 **Note**: These tools are currently integrated into the Winx server but may not be fully exposed as MCP tools yet. The NVIDIA client library is ready and can be extended to provide full MCP tool integration.
 
 #### Core AI Capabilities:
-- **Code Analysis**: Using NVIDIA CodeGemma 7B model for bug detection, security scanning, and code quality assessment
-- **Code Generation**: Using NVIDIA Codestral 22B model for generating code from natural language
-- **Code Explanation**: Using NVIDIA Llama 3.1 70B model for detailed code explanations
-- **Smart Model Selection**: Automatically chooses the optimal NVIDIA model for each task
+- **Default Model**: Qwen3 235B A22B with thinking mode, MoE architecture (235B total, 22B activated), and multilingual support
+- **Code Analysis**: Advanced analysis with support for 100+ languages and thinking mode for complex reasoning
+- **Code Generation**: Context-aware generation with seamless switching between thinking and non-thinking modes
+- **Code Explanation**: Detailed explanations leveraging Qwen3's superior instruction-following capabilities
+- **Smart Model Selection**: Automatically chooses the optimal NVIDIA model for each task, defaulting to Qwen3
 
 #### Implementation Status:
 - ✅ NVIDIA API client with authentication and rate limiting
