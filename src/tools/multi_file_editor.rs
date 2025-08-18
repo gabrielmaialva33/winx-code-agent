@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::fs;
 use tracing::{debug, info, warn};
+use async_trait::async_trait;
 
 use crate::errors::{Result, WinxError};
 use crate::state::BashState;
@@ -176,6 +177,60 @@ impl MultiFileEditorTool {
             dry_run: config.dry_run.unwrap_or(false),
             backups: Vec::new(),
         }
+    }
+
+    /// Get available AI client with fallback system
+    async fn get_ai_client(&self) -> Option<Box<dyn AIProvider>> {
+        // Try DashScope first (primary)
+        if let Some(client) = self.get_dashscope_client().await {
+            debug!("Using DashScope AI client for smart operations");
+            return Some(Box::new(client));
+        }
+        
+        // Try NVIDIA as fallback 1
+        if let Some(client) = self.get_nvidia_client().await {
+            debug!("Using NVIDIA AI client for smart operations");
+            return Some(Box::new(client));
+        }
+        
+        // Try Gemini as fallback 2
+        if let Some(client) = self.get_gemini_client().await {
+            debug!("Using Gemini AI client for smart operations");
+            return Some(Box::new(client));
+        }
+        
+        warn!("No AI providers available for smart operations");
+        None
+    }
+
+    /// Get DashScope client if available
+    async fn get_dashscope_client(&self) -> Option<DashScopeClient> {
+        if let Ok(config) = DashScopeConfig::from_env() {
+            if let Ok(client) = DashScopeClient::new(config) {
+                return Some(client);
+            }
+        }
+        None
+    }
+
+    /// Get NVIDIA client if available  
+    async fn get_nvidia_client(&self) -> Option<NvidiaClient> {
+        if let Ok(config) = NvidiaConfig::from_env() {
+            if let Ok(client) = NvidiaClient::new(config) {
+                return Some(client);
+            }
+        }
+        None
+    }
+
+    /// Get Gemini client if available
+    async fn get_gemini_client(&self) -> Option<GeminiClient> {
+        if let Ok(config) = GeminiConfig::from_env() {
+            if let Ok(client) = GeminiClient::new(config) {
+                return Some(client);
+            }
+        }
+        None
     }
 
     /// Execute all file operations
