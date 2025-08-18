@@ -137,6 +137,66 @@ impl WinxService {
     pub async fn get_gemini_client(&self) -> Option<GeminiClient> {
         self.gemini_client.lock().unwrap().clone()
     }
+
+    /// Get project structure overview
+    async fn get_project_structure(&self) -> Result<String, McpError> {
+        let mut structure = String::new();
+        structure.push_str("# Winx Code Agent - Project Structure\n\n");
+        structure.push_str("## Root Files\n");
+        structure.push_str("- Cargo.toml - Project configuration and dependencies\n");
+        structure.push_str("- README.md - Project documentation\n");
+        structure.push_str("- CLAUDE.md - Claude integration guide\n\n");
+        structure.push_str("## Source Code Structure\n");
+        structure.push_str("- src/main.rs - Application entry point\n");
+        structure.push_str("- src/server.rs - MCP server implementation\n");
+        structure.push_str("- src/tools/ - MCP tools implementation\n");
+        structure.push_str("- src/state/ - Shell and terminal state management\n");
+        structure.push_str("- src/nvidia/ - NVIDIA AI integration\n");
+        structure.push_str("- src/dashscope/ - DashScope AI integration\n");
+        structure.push_str("- src/gemini/ - Google Gemini AI integration\n");
+        structure.push_str("- src/utils/ - Utility functions\n\n");
+        structure.push_str("## Key Features\n");
+        structure.push_str("- Multi-provider AI integration (DashScope, NVIDIA, Gemini)\n");
+        structure.push_str("- Shell command execution with state management\n");
+        structure.push_str("- File operations and context saving\n");
+        structure.push_str("- AI-powered code analysis and generation\n");
+        Ok(structure)
+    }
+
+    /// Get source code structure details
+    async fn get_src_structure(&self) -> Result<String, McpError> {
+        let mut structure = String::new();
+        structure.push_str("# Source Code Organization\n\n");
+        
+        // Try to read actual directory structure
+        if let Ok(entries) = tokio::fs::read_dir("src").await {
+            structure.push_str("## src/ Directory Contents\n");
+            let mut entries: Vec<_> = entries.collect::<Result<Vec<_>, _>>().await.unwrap_or_default();
+            entries.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+            
+            for entry in entries {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let is_dir = entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false);
+                if is_dir {
+                    structure.push_str(&format!("- {}/\n", name));
+                } else {
+                    structure.push_str(&format!("- {}\n", name));
+                }
+            }
+        } else {
+            structure.push_str("## Core Modules\n");
+            structure.push_str("- main.rs - Application entry point\n");
+            structure.push_str("- server.rs - MCP server implementation\n");
+            structure.push_str("- tools/ - MCP tools\n");
+            structure.push_str("- state/ - State management\n");
+            structure.push_str("- nvidia/ - NVIDIA integration\n");
+            structure.push_str("- dashscope/ - DashScope integration\n");
+            structure.push_str("- gemini/ - Gemini integration\n");
+            structure.push_str("- utils/ - Utilities\n");
+        }
+        
+        Ok(structure)
+    }
 }
 
 /// ServerHandler implementation with manual tool handling
@@ -151,6 +211,7 @@ impl ServerHandler for WinxService {
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+                .enable_prompts()
                 .build(),
             instructions: Some(
                 "Winx is a high-performance Rust implementation of WCGW for code agents with NVIDIA AI integration. \
