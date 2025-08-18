@@ -492,7 +492,7 @@ impl ServerHandler for WinxService {
 
     async fn list_resources(
         &self,
-        _param: ListResourcesRequestParam,
+        _param: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
@@ -581,7 +581,7 @@ impl ServerHandler for WinxService {
 
     async fn list_prompts(
         &self,
-        _param: ListPromptsRequest,
+        _param: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
         Ok(ListPromptsResult {
