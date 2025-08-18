@@ -952,14 +952,42 @@ impl WinxService {
                 }
             }
         } else {
-            let fallback = format!(
-                "## 📝 Code Generation Not Available\n\nNVIDIA AI not available (missing NVIDIA_API_KEY).\n\nPrompt: {}\nLanguage: {}\n\nPlease set NVIDIA_API_KEY to use AI code generation.",
-                prompt,
-                language.as_deref().unwrap_or("not specified")
-            );
-            
-            info!("Code generation requested but NVIDIA not available");
-            Ok(CallToolResult::success(vec![Content::text(fallback)]))
+            // Try Gemini if NVIDIA is not available
+            if let Some(gemini_client) = self.get_gemini_client().await {
+                match gemini_client.generate_code(
+                    prompt, 
+                    language.as_deref(), 
+                    context.as_deref(), 
+                    max_tokens, 
+                    temperature
+                ).await {
+                    Ok(gemini_result) => {
+                        let formatted_result = format!(
+                            "## 🤖 AI Generated Code\n\n{}\n\n*Generated using Gemini AI (NVIDIA not available)*",
+                            gemini_result
+                        );
+                        info!("Gemini code generation completed for prompt: '{}'", prompt);
+                        Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
+                    }
+                    Err(e) => {
+                        warn!("Gemini code generation failed: {}", e);
+                        let fallback = format!(
+                            "## 📝 Code Generation Not Available\n\nBoth AI providers unavailable:\n- NVIDIA: missing NVIDIA_API_KEY\n- Gemini: {}\n\nPrompt: {}\nLanguage: {}",
+                            e, prompt, language.as_deref().unwrap_or("not specified")
+                        );
+                        Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                    }
+                }
+            } else {
+                let fallback = format!(
+                    "## 📝 Code Generation Not Available\n\nBoth AI providers unavailable:\n- NVIDIA: missing NVIDIA_API_KEY\n- Gemini: missing GEMINI_API_KEY\n\nPrompt: {}\nLanguage: {}",
+                    prompt,
+                    language.as_deref().unwrap_or("not specified")
+                );
+                
+                info!("Code generation requested but no AI providers available");
+                Ok(CallToolResult::success(vec![Content::text(fallback)]))
+            }
         }
     }
 
