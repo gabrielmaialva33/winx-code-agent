@@ -1,7 +1,9 @@
 //! DashScope HTTP client implementation
 
+use crate::dashscope::{
+    ChatCompletionRequest, ChatCompletionResponse, ChatMessage, DashScopeConfig,
+};
 use crate::errors::{Result, WinxError};
-use crate::dashscope::{DashScopeConfig, ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -26,13 +28,13 @@ impl RateLimit {
 
     fn can_make_request(&mut self, max_rpm: u32) -> bool {
         let now = Instant::now();
-        
+
         // Reset window if it has passed
         if now.duration_since(self.window_start) >= self.window_duration {
             self.requests_count = 0;
             self.window_start = now;
         }
-        
+
         self.requests_count < max_rpm
     }
 
@@ -53,7 +55,7 @@ impl DashScopeClient {
     /// Create a new DashScope client
     pub fn new(config: DashScopeConfig) -> Result<Self> {
         config.validate()?;
-        
+
         let client = reqwest::Client::builder()
             .timeout(Duration::from_secs(config.timeout_seconds))
             .user_agent("Winx-Code-Agent/1.0")
@@ -63,7 +65,7 @@ impl DashScopeClient {
         let rate_limit = Arc::new(Mutex::new(RateLimit::new(config.rate_limit_rpm)));
 
         info!("DashScope client initialized with model: {}", config.model);
-        
+
         Ok(Self {
             config,
             client,
@@ -72,9 +74,12 @@ impl DashScopeClient {
     }
 
     /// Make a chat completion request
-    pub async fn chat_completion(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+    pub async fn chat_completion(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse> {
         let mut last_error = None;
-        
+
         for attempt in 1..=self.config.max_retries {
             // Check rate limit
             {
@@ -88,8 +93,11 @@ impl DashScopeClient {
                 rate_limit.record_request();
             }
 
-            debug!("DashScope API attempt {} of {}", attempt, self.config.max_retries);
-            
+            debug!(
+                "DashScope API attempt {} of {}",
+                attempt, self.config.max_retries
+            );
+
             match self.make_request(request).await {
                 Ok(response) => {
                     info!("DashScope API request successful on attempt {}", attempt);
@@ -98,7 +106,7 @@ impl DashScopeClient {
                 Err(e) => {
                     warn!("DashScope API attempt {} failed: {}", attempt, e);
                     last_error = Some(e);
-                    
+
                     if attempt < self.config.max_retries {
                         let delay = Duration::from_millis(1000 * attempt as u64);
                         tokio::time::sleep(delay).await;
@@ -106,19 +114,23 @@ impl DashScopeClient {
                 }
             }
         }
-        
+
         Err(last_error.unwrap_or_else(|| {
             WinxError::NetworkError("All DashScope API attempts failed".to_string())
         }))
     }
 
     /// Make a single request to the DashScope API
-    async fn make_request(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+    async fn make_request(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse> {
         let url = self.config.chat_completions_url();
-        
+
         debug!("Making DashScope API request to: {}", url);
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(&url)
             .header("Authorization", format!("Bearer {}", self.config.api_key))
             .header("Content-Type", "application/json")
@@ -133,22 +145,22 @@ impl DashScopeClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Unknown error".to_string());
-            
+
             error!("DashScope API error {}: {}", status, error_text);
             return Err(WinxError::NetworkError(format!(
-                "DashScope API error {}: {}", status, error_text
+                "DashScope API error {}: {}",
+                status, error_text
             )));
         }
 
-        let completion_response: ChatCompletionResponse = response
-            .json()
-            .await
-            .map_err(|e| WinxError::SerializationError(format!("Failed to parse response: {}", e)))?;
+        let completion_response: ChatCompletionResponse = response.json().await.map_err(|e| {
+            WinxError::SerializationError(format!("Failed to parse response: {}", e))
+        })?;
 
         if !completion_response.is_success() {
             warn!("DashScope response has no choices");
             return Err(WinxError::ApiError(
-                "Empty response from DashScope".to_string()
+                "Empty response from DashScope".to_string(),
             ));
         }
 
@@ -160,13 +172,13 @@ impl DashScopeClient {
         let request = ChatCompletionRequest::new_code_analysis(
             self.config.model.model_name().to_string(),
             code,
-            language
+            language,
         );
-        
+
         debug!("Analyzing code with DashScope model: {}", self.config.model);
-        
+
         let response = self.chat_completion(&request).await?;
-        
+
         response
             .get_content()
             .map(|s| s.to_string())
@@ -188,13 +200,16 @@ impl DashScopeClient {
             language,
             context,
             max_tokens,
-            temperature
+            temperature,
         );
-        
-        debug!("Generating code with DashScope model: {}", self.config.model);
-        
+
+        debug!(
+            "Generating code with DashScope model: {}",
+            self.config.model
+        );
+
         let response = self.chat_completion(&request).await?;
-        
+
         response
             .get_content()
             .map(|s| s.to_string())
@@ -212,13 +227,16 @@ impl DashScopeClient {
             self.config.model.model_name().to_string(),
             code,
             language,
-            detail_level
+            detail_level,
         );
-        
-        debug!("Explaining code with DashScope model: {}", self.config.model);
-        
+
+        debug!(
+            "Explaining code with DashScope model: {}",
+            self.config.model
+        );
+
         let response = self.chat_completion(&request).await?;
-        
+
         response
             .get_content()
             .map(|s| s.to_string())
@@ -227,21 +245,23 @@ impl DashScopeClient {
 
     /// Test the connection to DashScope API
     pub async fn test_connection(&self) -> Result<()> {
-        let messages = vec![ChatMessage::user("Hello, can you respond with 'OK'?".to_string())];
-        let test_request = ChatCompletionRequest::new(
-            self.config.model.model_name().to_string(),
-            messages
-        );
-        
+        let messages = vec![ChatMessage::user(
+            "Hello, can you respond with 'OK'?".to_string(),
+        )];
+        let test_request =
+            ChatCompletionRequest::new(self.config.model.model_name().to_string(), messages);
+
         debug!("Testing DashScope API connection");
-        
+
         let response = self.chat_completion(&test_request).await?;
-        
+
         if response.is_success() {
             info!("DashScope API connection test successful");
             Ok(())
         } else {
-            Err(WinxError::ApiError("DashScope connection test failed".to_string()))
+            Err(WinxError::ApiError(
+                "DashScope connection test failed".to_string(),
+            ))
         }
     }
 
@@ -264,13 +284,13 @@ mod tests {
     #[test]
     fn test_rate_limit() {
         let mut rate_limit = RateLimit::new(5);
-        
+
         // Should allow first 5 requests
         for _ in 0..5 {
             assert!(rate_limit.can_make_request(5));
             rate_limit.record_request();
         }
-        
+
         // Should deny 6th request
         assert!(!rate_limit.can_make_request(5));
     }
@@ -279,9 +299,9 @@ mod tests {
     fn test_dashscope_config_validation() {
         let mut config = DashScopeConfig::default();
         config.api_key = "sk-validkey123".to_string();
-        
+
         assert!(config.validate().is_ok());
-        
+
         // Test invalid API key
         config.api_key = "InvalidKey".to_string();
         assert!(config.validate().is_err());
@@ -291,7 +311,7 @@ mod tests {
     async fn test_client_creation() {
         let mut config = DashScopeConfig::default();
         config.api_key = "sk-testkey123".to_string();
-        
+
         let client = DashScopeClient::new(config);
         assert!(client.is_ok());
     }

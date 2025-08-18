@@ -152,11 +152,7 @@ impl ChatCompletionRequest {
     }
 
     /// Create a request for code analysis
-    pub fn new_code_analysis(
-        model: String,
-        code: &str,
-        language: Option<&str>,
-    ) -> Self {
+    pub fn new_code_analysis(model: String, code: &str, language: Option<&str>) -> Self {
         let analysis_prompt = if let Some(lang) = language {
             format!(
                 "Analyze this {} code for bugs, security issues, performance problems, and style violations. \
@@ -298,7 +294,9 @@ Code to analyze:
 impl ChatCompletionResponse {
     /// Get the content from the first choice
     pub fn get_content(&self) -> Option<&str> {
-        self.choices.first().map(|choice| choice.message.content.as_str())
+        self.choices
+            .first()
+            .map(|choice| choice.message.content.as_str())
     }
 
     /// Check if the response was successful

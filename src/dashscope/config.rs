@@ -76,8 +76,7 @@ impl DashScopeConfig {
         let api_key = env::var("DASHSCOPE_API_KEY")
             .map_err(|_| WinxError::ConfigurationError("DASHSCOPE_API_KEY not set".to_string()))?;
 
-        let model = env::var("DASHSCOPE_MODEL")
-            .unwrap_or_else(|_| "qwen3-coder-plus".to_string());
+        let model = env::var("DASHSCOPE_MODEL").unwrap_or_else(|_| "qwen3-coder-plus".to_string());
         let model = Self::parse_model(&model)?;
 
         let base_url = env::var("DASHSCOPE_BASE_URL")
@@ -86,22 +85,30 @@ impl DashScopeConfig {
         let timeout_seconds = env::var("DASHSCOPE_TIMEOUT_SECONDS")
             .unwrap_or_else(|_| "30".to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError("Invalid DASHSCOPE_TIMEOUT_SECONDS".to_string()))?;
+            .map_err(|_| {
+                WinxError::ConfigurationError("Invalid DASHSCOPE_TIMEOUT_SECONDS".to_string())
+            })?;
 
         let max_retries = env::var("DASHSCOPE_MAX_RETRIES")
             .unwrap_or_else(|_| "3".to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError("Invalid DASHSCOPE_MAX_RETRIES".to_string()))?;
+            .map_err(|_| {
+                WinxError::ConfigurationError("Invalid DASHSCOPE_MAX_RETRIES".to_string())
+            })?;
 
         let rate_limit_rpm = env::var("DASHSCOPE_RATE_LIMIT_RPM")
             .unwrap_or_else(|_| "60".to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError("Invalid DASHSCOPE_RATE_LIMIT_RPM".to_string()))?;
+            .map_err(|_| {
+                WinxError::ConfigurationError("Invalid DASHSCOPE_RATE_LIMIT_RPM".to_string())
+            })?;
 
         let temperature = env::var("DASHSCOPE_TEMPERATURE")
             .unwrap_or_else(|_| "1.0".to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError("Invalid DASHSCOPE_TEMPERATURE".to_string()))?;
+            .map_err(|_| {
+                WinxError::ConfigurationError("Invalid DASHSCOPE_TEMPERATURE".to_string())
+            })?;
 
         let top_p = env::var("DASHSCOPE_TOP_P")
             .unwrap_or_else(|_| "0.8".to_string())

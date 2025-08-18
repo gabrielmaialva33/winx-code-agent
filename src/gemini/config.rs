@@ -69,18 +69,19 @@ impl GeminiConfig {
         let api_key = env::var("GEMINI_API_KEY")
             .map_err(|_| WinxError::ConfigurationError("GEMINI_API_KEY not set".to_string()))?;
 
-        let model = env::var("GEMINI_MODEL")
-            .unwrap_or_else(|_| "gemini-2.5-pro".to_string());
+        let model = env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.5-pro".to_string());
         let model = Self::parse_model(&model)?;
 
-        let fallback_model = env::var("GEMINI_FALLBACK_MODEL")
-            .unwrap_or_else(|_| "gemini-2.5-flash".to_string());
+        let fallback_model =
+            env::var("GEMINI_FALLBACK_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string());
         let fallback_model = Self::parse_model(&fallback_model)?;
 
         let timeout_seconds = env::var("GEMINI_TIMEOUT_SECONDS")
             .unwrap_or_else(|_| "30".to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError("Invalid GEMINI_TIMEOUT_SECONDS".to_string()))?;
+            .map_err(|_| {
+                WinxError::ConfigurationError("Invalid GEMINI_TIMEOUT_SECONDS".to_string())
+            })?;
 
         let max_retries = env::var("GEMINI_MAX_RETRIES")
             .unwrap_or_else(|_| "3".to_string())
@@ -90,7 +91,9 @@ impl GeminiConfig {
         let rate_limit_rpm = env::var("GEMINI_RATE_LIMIT_RPM")
             .unwrap_or_else(|_| "60".to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError("Invalid GEMINI_RATE_LIMIT_RPM".to_string()))?;
+            .map_err(|_| {
+                WinxError::ConfigurationError("Invalid GEMINI_RATE_LIMIT_RPM".to_string())
+            })?;
 
         Ok(Self {
             api_key,

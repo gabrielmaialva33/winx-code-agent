@@ -13,8 +13,8 @@ use std::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::dashscope::{DashScopeClient, DashScopeConfig};
-use crate::nvidia::{NvidiaClient, NvidiaConfig};
 use crate::gemini::{GeminiClient, GeminiConfig};
+use crate::nvidia::{NvidiaClient, NvidiaConfig};
 use crate::state::BashState;
 use crate::types::{CommandSuggestions, ContextSave, ReadImage};
 
@@ -336,7 +336,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "code_analyzer".into(),
-                    description: Some("AI-powered code analysis for bugs, security, and performance".into()),
+                    description: Some(
+                        "AI-powered code analysis for bugs, security, and performance".into(),
+                    ),
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -356,7 +358,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "ai_generate_code".into(),
-                    description: Some("Generate code from natural language description using NVIDIA AI".into()),
+                    description: Some(
+                        "Generate code from natural language description using NVIDIA AI".into(),
+                    ),
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -790,23 +794,34 @@ impl WinxService {
         let code = match tokio::fs::read_to_string(file_path).await {
             Ok(content) => content,
             Err(e) => {
-                return Err(McpError::internal_error(format!("Failed to read file {}: {}", file_path, e), None));
+                return Err(McpError::internal_error(
+                    format!("Failed to read file {}: {}", file_path, e),
+                    None,
+                ));
             }
         };
 
         // Try DashScope first (primary)
         if let Some(dashscope_client) = self.get_dashscope_client().await {
-            match dashscope_client.analyze_code(&code, language.as_deref()).await {
+            match dashscope_client
+                .analyze_code(&code, language.as_deref())
+                .await
+            {
                 Ok(result) => {
                     let analysis_result = format!(
                         "## 🔍 AI Code Analysis: {}\n\n{}\n\n*Analyzed using DashScope/Qwen3 AI*",
                         file_path, result
                     );
                     info!("DashScope code analysis completed for: {}", file_path);
-                    return Ok(CallToolResult::success(vec![Content::text(analysis_result)]));
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        analysis_result,
+                    )]));
                 }
                 Err(e) => {
-                    warn!("DashScope analysis failed for {}: {}, trying NVIDIA fallback", file_path, e);
+                    warn!(
+                        "DashScope analysis failed for {}: {}, trying NVIDIA fallback",
+                        file_path, e
+                    );
                 }
             }
         }
@@ -818,7 +833,9 @@ impl WinxService {
                     let issues_text = if result.issues.is_empty() {
                         "No issues found.".to_string()
                     } else {
-                        result.issues.iter()
+                        result
+                            .issues
+                            .iter()
                             .map(|issue| format!("• [{}] {}", issue.severity, issue.message))
                             .collect::<Vec<_>>()
                             .join("\n")
@@ -827,14 +844,19 @@ impl WinxService {
                     let suggestions_text = if result.suggestions.is_empty() {
                         "".to_string()
                     } else {
-                        format!("\n\n### Suggestions:\n{}", 
-                            result.suggestions.iter()
+                        format!(
+                            "\n\n### Suggestions:\n{}",
+                            result
+                                .suggestions
+                                .iter()
                                 .map(|s| format!("• {}", s))
                                 .collect::<Vec<_>>()
-                                .join("\n"))
+                                .join("\n")
+                        )
                     };
 
-                    let complexity_text = result.complexity_score
+                    let complexity_text = result
+                        .complexity_score
                         .map(|score| format!("\n\n### Complexity Score: {}/100", score))
                         .unwrap_or_default();
 
@@ -848,11 +870,20 @@ impl WinxService {
                         complexity_text
                     );
 
-                    info!("NVIDIA fallback code analysis completed for: {} ({} issues found)", file_path, result.issues.len());
-                    return Ok(CallToolResult::success(vec![Content::text(analysis_result)]));
+                    info!(
+                        "NVIDIA fallback code analysis completed for: {} ({} issues found)",
+                        file_path,
+                        result.issues.len()
+                    );
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        analysis_result,
+                    )]));
                 }
                 Err(e) => {
-                    warn!("NVIDIA analysis failed for {}: {}, trying Gemini fallback", file_path, e);
+                    warn!(
+                        "NVIDIA analysis failed for {}: {}, trying Gemini fallback",
+                        file_path, e
+                    );
                 }
             }
         }
@@ -866,10 +897,15 @@ impl WinxService {
                         file_path, gemini_result
                     );
                     info!("Gemini fallback code analysis completed for: {}", file_path);
-                    return Ok(CallToolResult::success(vec![Content::text(analysis_result)]));
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        analysis_result,
+                    )]));
                 }
                 Err(e) => {
-                    warn!("All AI providers failed for analysis of {}: Gemini: {}", file_path, e);
+                    warn!(
+                        "All AI providers failed for analysis of {}: Gemini: {}",
+                        file_path, e
+                    );
                 }
             }
         }
@@ -880,43 +916,72 @@ impl WinxService {
             file_path,
             language.as_deref().unwrap_or("source")
         );
-        
-        info!("Basic code analysis completed for: {} (all AI providers failed)", file_path);
+
+        info!(
+            "Basic code analysis completed for: {} (all AI providers failed)",
+            file_path
+        );
         Ok(CallToolResult::success(vec![Content::text(fallback)]))
     }
 
-    async fn handle_ai_generate_code(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+    async fn handle_ai_generate_code(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
 
         let prompt = args
             .get("prompt")
             .and_then(|v| v.as_str())
             .ok_or_else(|| McpError::invalid_request("Missing prompt", None))?;
-        
-        let language = args.get("language").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let context = args.get("context").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let max_tokens = args.get("max_tokens").and_then(|v| v.as_u64()).map(|n| n as u32);
-        let temperature = args.get("temperature").and_then(|v| v.as_f64()).map(|f| f as f32);
+
+        let language = args
+            .get("language")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let context = args
+            .get("context")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let max_tokens = args
+            .get("max_tokens")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u32);
+        let temperature = args
+            .get("temperature")
+            .and_then(|v| v.as_f64())
+            .map(|f| f as f32);
 
         // Try DashScope first (primary)
         if let Some(dashscope_client) = self.get_dashscope_client().await {
-            match dashscope_client.generate_code(
-                prompt,
-                language.as_deref(),
-                context.as_deref(),
-                max_tokens,
-                temperature,
-            ).await {
+            match dashscope_client
+                .generate_code(
+                    prompt,
+                    language.as_deref(),
+                    context.as_deref(),
+                    max_tokens,
+                    temperature,
+                )
+                .await
+            {
                 Ok(result) => {
                     let formatted_result = format!(
                         "## 🤖 AI Generated Code\n\n{}\n\n*Generated using DashScope/Qwen3 AI*",
                         result
                     );
-                    info!("DashScope code generation completed for prompt: '{}'", prompt);
-                    return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
+                    info!(
+                        "DashScope code generation completed for prompt: '{}'",
+                        prompt
+                    );
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        formatted_result,
+                    )]));
                 }
                 Err(e) => {
-                    warn!("DashScope code generation failed: {}, trying NVIDIA fallback", e);
+                    warn!(
+                        "DashScope code generation failed: {}, trying NVIDIA fallback",
+                        e
+                    );
                 }
             }
         }
@@ -940,31 +1005,47 @@ impl WinxService {
                         result.code
                     );
 
-                    info!("NVIDIA fallback code generation completed for prompt: '{}'", prompt);
-                    return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
+                    info!(
+                        "NVIDIA fallback code generation completed for prompt: '{}'",
+                        prompt
+                    );
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        formatted_result,
+                    )]));
                 }
                 Err(e) => {
-                    warn!("NVIDIA code generation failed: {}, trying Gemini fallback", e);
+                    warn!(
+                        "NVIDIA code generation failed: {}, trying Gemini fallback",
+                        e
+                    );
                 }
             }
         }
 
         // Try Gemini as fallback 2
         if let Some(gemini_client) = self.get_gemini_client().await {
-            match gemini_client.generate_code(
-                prompt, 
-                language.as_deref(), 
-                context.as_deref(), 
-                max_tokens, 
-                temperature
-            ).await {
+            match gemini_client
+                .generate_code(
+                    prompt,
+                    language.as_deref(),
+                    context.as_deref(),
+                    max_tokens,
+                    temperature,
+                )
+                .await
+            {
                 Ok(gemini_result) => {
                     let formatted_result = format!(
                         "## 🤖 AI Generated Code\n\n{}\n\n*DashScope and NVIDIA failed, generated using Gemini AI*",
                         gemini_result
                     );
-                    info!("Gemini fallback code generation completed for prompt: '{}'", prompt);
-                    return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
+                    info!(
+                        "Gemini fallback code generation completed for prompt: '{}'",
+                        prompt
+                    );
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        formatted_result,
+                    )]));
                 }
                 Err(e) => {
                     warn!("All AI providers failed for code generation: Gemini: {}", e);
@@ -978,48 +1059,74 @@ impl WinxService {
             prompt,
             language.as_deref().unwrap_or("not specified")
         );
-        
+
         info!("Code generation requested but all AI providers failed");
         Ok(CallToolResult::success(vec![Content::text(fallback)]))
     }
 
-    async fn handle_ai_explain_code(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+    async fn handle_ai_explain_code(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
 
         let file_path = args.get("file_path").and_then(|v| v.as_str());
         let code_snippet = args.get("code").and_then(|v| v.as_str());
-        let language = args.get("language").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let detail_level = args.get("detail_level").and_then(|v| v.as_str()).unwrap_or("detailed");
+        let language = args
+            .get("language")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let detail_level = args
+            .get("detail_level")
+            .and_then(|v| v.as_str())
+            .unwrap_or("detailed");
 
         // Must provide either file_path or code
         if file_path.is_none() && code_snippet.is_none() {
-            return Err(McpError::invalid_request("Must provide either file_path or code", None));
+            return Err(McpError::invalid_request(
+                "Must provide either file_path or code",
+                None,
+            ));
         }
 
         let (code, source_info) = if let Some(path) = file_path {
             match tokio::fs::read_to_string(path).await {
                 Ok(content) => (content, format!("file: {}", path)),
                 Err(e) => {
-                    return Err(McpError::internal_error(format!("Failed to read file {}: {}", path, e), None));
+                    return Err(McpError::internal_error(
+                        format!("Failed to read file {}: {}", path, e),
+                        None,
+                    ));
                 }
             }
         } else {
-            (code_snippet.unwrap().to_string(), "provided snippet".to_string())
+            (
+                code_snippet.unwrap().to_string(),
+                "provided snippet".to_string(),
+            )
         };
 
         // Try DashScope first (primary)
         if let Some(dashscope_client) = self.get_dashscope_client().await {
-            match dashscope_client.explain_code(&code, language.as_deref(), detail_level).await {
+            match dashscope_client
+                .explain_code(&code, language.as_deref(), detail_level)
+                .await
+            {
                 Ok(result) => {
                     let formatted_result = format!(
                         "## 📚 AI Code Explanation\n\n**Source:** {}\n**Detail Level:** {}\n\n{}\n\n*Explained using DashScope/Qwen3 AI*",
                         source_info, detail_level, result
                     );
                     info!("DashScope code explanation completed for: {}", source_info);
-                    return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        formatted_result,
+                    )]));
                 }
                 Err(e) => {
-                    warn!("DashScope explanation failed: {}, trying NVIDIA fallback", e);
+                    warn!(
+                        "DashScope explanation failed: {}, trying NVIDIA fallback",
+                        e
+                    );
                 }
             }
         }
@@ -1032,10 +1139,7 @@ impl WinxService {
                 _ => "Provide a detailed explanation of this code including its purpose, how it works, and key concepts."
             };
 
-            let system_prompt = format!(
-                "You are a code explanation expert. {}",
-                detail_prompt
-            );
+            let system_prompt = format!("You are a code explanation expert. {}", detail_prompt);
 
             let user_prompt = if let Some(lang) = &language {
                 format!("Explain this {} code:\n\n```{}\n{}\n```", lang, lang, code)
@@ -1044,7 +1148,10 @@ impl WinxService {
             };
 
             let request = crate::nvidia::models::ChatCompletionRequest {
-                model: nvidia_client.recommend_model(crate::nvidia::models::TaskType::CodeExplanation).as_str().to_string(),
+                model: nvidia_client
+                    .recommend_model(crate::nvidia::models::TaskType::CodeExplanation)
+                    .as_str()
+                    .to_string(),
                 messages: vec![
                     crate::nvidia::models::ChatMessage::system(system_prompt),
                     crate::nvidia::models::ChatMessage::user(user_prompt),
@@ -1067,8 +1174,13 @@ impl WinxService {
                             request.model
                         );
 
-                        info!("NVIDIA fallback code explanation completed for: {}", source_info);
-                        return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
+                        info!(
+                            "NVIDIA fallback code explanation completed for: {}",
+                            source_info
+                        );
+                        return Ok(CallToolResult::success(vec![Content::text(
+                            formatted_result,
+                        )]));
                     } else {
                         warn!("Empty response from NVIDIA API, trying Gemini fallback");
                     }
@@ -1081,17 +1193,28 @@ impl WinxService {
 
         // Try Gemini as fallback 2
         if let Some(gemini_client) = self.get_gemini_client().await {
-            match gemini_client.explain_code(&code, language.as_deref(), detail_level).await {
+            match gemini_client
+                .explain_code(&code, language.as_deref(), detail_level)
+                .await
+            {
                 Ok(gemini_result) => {
                     let formatted_result = format!(
                         "## 📚 AI Code Explanation\n\n**Source:** {}\n**Detail Level:** {}\n\n{}\n\n*DashScope and NVIDIA failed, explained using Gemini AI*",
                         source_info, detail_level, gemini_result
                     );
-                    info!("Gemini fallback code explanation completed for: {}", source_info);
-                    return Ok(CallToolResult::success(vec![Content::text(formatted_result)]));
+                    info!(
+                        "Gemini fallback code explanation completed for: {}",
+                        source_info
+                    );
+                    return Ok(CallToolResult::success(vec![Content::text(
+                        formatted_result,
+                    )]));
                 }
                 Err(e) => {
-                    warn!("All AI providers failed for code explanation: Gemini: {}", e);
+                    warn!(
+                        "All AI providers failed for code explanation: Gemini: {}",
+                        e
+                    );
                 }
             }
         }
@@ -1102,7 +1225,7 @@ impl WinxService {
             source_info,
             detail_level
         );
-        
+
         info!("Code explanation requested but all AI providers failed");
         Ok(CallToolResult::success(vec![Content::text(fallback)]))
     }

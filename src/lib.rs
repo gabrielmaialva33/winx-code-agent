@@ -11,8 +11,8 @@
 //! Provides shell execution and file management capabilities for LLM code agents,
 //! designed to integrate with Claude and other LLMs via the Model Context Protocol (MCP).
 
-pub mod errors;
 pub mod dashscope;
+pub mod errors;
 pub mod gemini;
 pub mod nvidia;
 pub mod server;

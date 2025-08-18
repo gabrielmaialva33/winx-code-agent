@@ -15,8 +15,8 @@
 //! - Project workspace management
 //! - Integration with Model Context Protocol (MCP)
 
-mod errors;
 mod dashscope;
+mod errors;
 mod gemini;
 mod nvidia;
 mod server;

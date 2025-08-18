@@ -227,11 +227,7 @@ Code to analyze:
     }
 
     /// Create a request for code explanation
-    pub fn new_code_explanation(
-        code: &str,
-        language: Option<&str>,
-        detail_level: &str,
-    ) -> Self {
+    pub fn new_code_explanation(code: &str, language: Option<&str>, detail_level: &str) -> Self {
         let detail_instruction = match detail_level {
             "basic" => "Provide a brief, high-level explanation of what this code does.",
             "expert" => "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities.",
