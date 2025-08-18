@@ -279,7 +279,6 @@ impl DashScopeClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dashscope::config::DashScopeModel;
 
     #[test]
     fn test_rate_limit() {
