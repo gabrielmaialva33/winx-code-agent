@@ -215,6 +215,36 @@ context_save(
 )
 ```
 
+### 🤖 AI-Powered Tools (v0.1.5)
+
+- **code_analyzer**: AI-powered code analysis for bugs, security, and performance
+  ```
+  code_analyzer(
+    file_path="/path/to/code.rs",
+    language="Rust"
+  )
+  ```
+
+- **ai_generate_code**: Generate code from natural language description
+  ```
+  ai_generate_code(
+    prompt="Create a REST API for user management",
+    language="Rust",
+    context="Using Axum framework",
+    max_tokens=1000,
+    temperature=0.7
+  )
+  ```
+
+- **ai_explain_code**: Get AI explanation and documentation for code
+  ```
+  ai_explain_code(
+    file_path="/path/to/code.rs",
+    language="Rust",
+    detail_level="expert"
+  )
+  ```
+
 ---
 
 ## 👨‍💻 Usage Workflow
@@ -261,6 +291,29 @@ If you need help or have any questions about Winx, feel free to reach out via th
 - [GitHub Issues](https://github.com/gabrielmaialva33/winx-code-agent/issues/new?assignees=&labels=question&title=support%3A+):
   Open a support issue on GitHub.
 - Email: gabrielmaialva33@gmail.com
+
+---
+
+## 📝 Changelog
+
+### v0.1.5 (Latest) - Multi-Provider AI Integration
+
+**🚀 Major Features:**
+- **Multi-Provider AI System**: Primary DashScope, fallback to NVIDIA, then Gemini
+- **DashScope/Qwen3 Integration**: Alibaba Cloud's Qwen3-Coder-Plus as primary AI provider
+- **Smart Fallback System**: Automatic provider switching with comprehensive error handling
+- **3 New AI Tools**: `code_analyzer`, `ai_generate_code`, `ai_explain_code`
+
+**🎯 AI Providers:**
+- **DashScope**: Primary provider with OpenAI-compatible API format
+- **NVIDIA NIM**: Qwen3-235B-A22B with thinking mode and MoE architecture
+- **Google Gemini**: Gemini-1.5-Pro and Gemini-1.5-Flash models
+
+**🛠️ Technical Improvements:**
+- Rate limiting and retry logic for all AI providers
+- Comprehensive logging and error reporting
+- Environment-based configuration management
+- Full CI/CD quality checks (formatting, linting, testing)
 
 ---
 
