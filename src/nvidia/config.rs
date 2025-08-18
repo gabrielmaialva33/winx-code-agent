@@ -45,8 +45,10 @@ impl NvidiaConfig {
                 )
             })?;
 
-        let mut config = Self::default();
-        config.api_key = api_key;
+        let mut config = Self {
+            api_key,
+            ..Default::default()
+        };
 
         // Override defaults with environment variables if present
         if let Ok(base_url) = env::var("NVIDIA_BASE_URL") {
