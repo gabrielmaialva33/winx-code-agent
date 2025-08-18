@@ -260,6 +260,14 @@ impl ServerHandler for WinxService {
                             "previous_command": {
                                 "type": "string",
                                 "description": "Optional previous command"
+                            },
+                            "max_suggestions": {
+                                "type": "integer",
+                                "description": "Maximum number of suggestions to return (default: 5)"
+                            },
+                            "include_explanations": {
+                                "type": "boolean",
+                                "description": "Whether to include command explanations"
                             }
                         }
                     })),
