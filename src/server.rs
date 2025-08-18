@@ -129,7 +129,7 @@ impl WinxService {
         
         let mut bash_state_guard = self.bash_state.lock().await;
         if bash_state_guard.is_none() {
-            return Err(McpError::invalid_request("Shell not initialized. Call initialize first."));
+            return Err(McpError::invalid_request("Shell not initialized. Call initialize first.", None));
         }
 
         let bash_state = bash_state_guard.as_mut().unwrap();
@@ -142,7 +142,7 @@ impl WinxService {
             }
             Err(e) => {
                 warn!("Command execution failed: {}", e);
-                Err(McpError::internal_error(format!("Command execution failed: {}", e)))
+                Err(McpError::internal_error(format!("Command execution failed: {}", e), None))
             }
         }
     }
