@@ -17,6 +17,7 @@ use crate::gemini::{GeminiClient, GeminiConfig};
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
 use crate::state::BashState;
 use crate::types::{CommandSuggestions, ContextSave, ReadImage};
+use crate::tools::winx_chat::{WinxChat};
 
 /// Helper function to create JSON schema from serde_json::Value
 fn json_to_schema(value: Value) -> Arc<serde_json::Map<String, Value>> {
@@ -588,6 +589,45 @@ impl ServerHandler for WinxService {
                     output_schema: None,
                     annotations: None,
                 },
+                Tool {
+                    name: "winx_chat".into(),
+                    description: Some("Chat with Winx, your AI assistant fairy".into()),
+                    input_schema: json_to_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "message": {
+                                "type": "string",
+                                "description": "Your message to Winx"
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "Optional context about current work or project"
+                            },
+                            "conversation_mode": {
+                                "type": "string",
+                                "enum": ["casual", "technical", "help", "debug", "creative", "mentor"],
+                                "description": "Conversation mode (default: casual)"
+                            },
+                            "include_system_info": {
+                                "type": "boolean",
+                                "description": "Include current system information in response"
+                            },
+                            "personality_level": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 10,
+                                "description": "Personality level from 0 (formal) to 10 (very playful, default: 7)"
+                            },
+                            "session_id": {
+                                "type": "string",
+                                "description": "Session ID for conversation continuity"
+                            }
+                        },
+                        "required": ["message"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                },
             ],
             next_cursor: None,
         })
@@ -1004,6 +1044,7 @@ impl ServerHandler for WinxService {
             "code_analyzer" => self.handle_code_analyzer(args_value).await?,
             "ai_generate_code" => self.handle_ai_generate_code(args_value).await?,
             "ai_explain_code" => self.handle_ai_explain_code(args_value).await?,
+            "winx_chat" => self.handle_winx_chat(args_value).await?,
             "multi_file_editor" => self.handle_multi_file_editor(args_value).await?,
             _ => {
                 return Err(McpError::invalid_request(
@@ -1792,6 +1833,58 @@ impl WinxService {
 
         info!("Code explanation requested but all AI providers failed");
         Ok(CallToolResult::success(vec![Content::text(fallback)]))
+    }
+
+    async fn handle_winx_chat(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+
+        let message = args
+            .get("message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_request("Missing message", None))?;
+
+        let context = args.get("context").and_then(|v| v.as_str()).map(|s| s.to_string());
+        
+        let conversation_mode = args.get("conversation_mode")
+            .and_then(|v| v.as_str())
+            .and_then(|s| match s {
+                "casual" => Some(crate::tools::winx_chat::ConversationMode::Casual),
+                "technical" => Some(crate::tools::winx_chat::ConversationMode::Technical),
+                "help" => Some(crate::tools::winx_chat::ConversationMode::Help),
+                "debug" => Some(crate::tools::winx_chat::ConversationMode::Debug),
+                "creative" => Some(crate::tools::winx_chat::ConversationMode::Creative),
+                "mentor" => Some(crate::tools::winx_chat::ConversationMode::Mentor),
+                _ => None,
+            });
+
+        let include_system_info = args.get("include_system_info").and_then(|v| v.as_bool());
+        let personality_level = args.get("personality_level")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as u8);
+        let session_id = args.get("session_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+        let winx_chat = WinxChat {
+            message: message.to_string(),
+            context,
+            conversation_mode,
+            include_system_info,
+            personality_level,
+            session_id,
+        };
+
+        match crate::tools::winx_chat::handle_tool_call(&self.bash_state, winx_chat).await {
+            Ok(result) => {
+                info!("Winx chat completed successfully");
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            Err(e) => {
+                warn!("Winx chat failed: {}", e);
+                Err(McpError::internal_error(
+                    format!("Winx chat failed: {}", e),
+                    None,
+                ))
+            }
+        }
     }
 
     async fn handle_multi_file_editor(

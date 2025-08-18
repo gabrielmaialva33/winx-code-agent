@@ -13,6 +13,7 @@ pub mod file_write_or_edit;
 pub mod multi_file_editor;
 pub mod read_files;
 pub mod read_image;
+pub mod winx_chat;
 
 use std::sync::{Arc, Mutex};
 use tracing::info;
