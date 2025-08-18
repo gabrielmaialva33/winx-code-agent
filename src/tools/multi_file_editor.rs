@@ -528,6 +528,13 @@ impl MultiFileEditorTool {
             | FileOperation::Prepend { file_path, .. }
             | FileOperation::InsertAtLine { file_path, .. }
             | FileOperation::SearchReplace { file_path, .. } => file_path.clone(),
+            FileOperation::SmartSearchReplace { file_paths, .. } => {
+                if file_paths.is_empty() {
+                    "no_files".to_string()
+                } else {
+                    file_paths[0].clone()
+                }
+            },
         }
     }
 
