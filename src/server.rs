@@ -895,8 +895,8 @@ impl WinxService {
         if let Some(nvidia_client) = self.get_nvidia_client().await {
             let request = crate::nvidia::models::CodeGenerationRequest {
                 prompt: prompt.to_string(),
-                language,
-                context,
+                language: language.clone(),
+                context: context.clone(),
                 max_tokens,
                 temperature,
             };

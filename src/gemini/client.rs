@@ -16,7 +16,7 @@ struct RateLimit {
 }
 
 impl RateLimit {
-    fn new(rpm: u32) -> Self {
+    fn new(_rpm: u32) -> Self {
         Self {
             requests_count: 0,
             window_start: Instant::now(),
@@ -42,6 +42,7 @@ impl RateLimit {
 }
 
 /// Google Gemini HTTP client
+#[derive(Clone)]
 pub struct GeminiClient {
     config: GeminiConfig,
     client: reqwest::Client,
