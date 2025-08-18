@@ -78,20 +78,16 @@ impl WinxService {
             Some(nvidia_client) => {
                 match analyze_code_with_ai(&nvidia_client, params).await {
                     Ok(result) => {
-                        let json_result = serde_json::to_string_pretty(&result)
-                            .map_err(|e| McpError::Internal(format!("Failed to serialize result: {}", e)))?;
-                        
-                        Ok(CallToolResult::success(vec![Content::text(json_result)]))
+                        serde_json::to_string_pretty(&result)
+                            .unwrap_or_else(|e| format!("Error serializing result: {}", e))
                     }
                     Err(e) => {
-                        let error_msg = format!("AI code analysis failed: {}", e);
-                        Ok(CallToolResult::error(error_msg))
+                        format!("AI code analysis failed: {}", e)
                     }
                 }
             }
             None => {
-                let error_msg = "NVIDIA AI integration not available. Please set NVIDIA_API_KEY environment variable.";
-                Ok(CallToolResult::error(error_msg.to_string()))
+                "NVIDIA AI integration not available. Please set NVIDIA_API_KEY environment variable.".to_string()
             }
         }
     }
