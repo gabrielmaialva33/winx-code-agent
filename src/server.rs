@@ -111,8 +111,9 @@ impl WinxService {
             }));
         }
 
-        match crate::state::BashState::new(&shell).await {
-            Ok(state) => {
+        let mut state = crate::state::BashState::new();
+        match state.init_interactive_bash() {
+            Ok(_) => {
                 *bash_state_guard = Some(state);
                 info!("Shell environment initialized with {}", shell);
                 Ok(serde_json::json!({
@@ -126,7 +127,7 @@ impl WinxService {
                 Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     format!("Failed to initialize shell: {}", e)
-                )))
+                ) as std::io::Error) as Box<dyn std::error::Error + Send + Sync>)
             }
         }
     }
@@ -138,26 +139,24 @@ impl WinxService {
         command: String,
         timeout_seconds: Option<u64>,
     ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let timeout = std::time::Duration::from_secs(timeout_seconds.unwrap_or(30));
+        let timeout_secs = timeout_seconds.unwrap_or(30) as f32;
         
         let mut bash_state_guard = self.bash_state.lock().await;
         if bash_state_guard.is_none() {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "Shell not initialized. Call initialize first."
-            )));
+            ) as std::io::Error) as Box<dyn std::error::Error + Send + Sync>);
         }
 
         let bash_state = bash_state_guard.as_mut().unwrap();
         
-        match bash_state.execute_command(&command, timeout).await {
-            Ok(result) => {
+        match bash_state.execute_interactive(&command, timeout_secs).await {
+            Ok(output) => {
                 Ok(serde_json::json!({
                     "status": "success",
-                    "stdout": result.stdout,
-                    "stderr": result.stderr,
-                    "exit_code": result.exit_code,
-                    "working_directory": result.working_directory
+                    "output": output,
+                    "working_directory": bash_state.cwd.display().to_string()
                 }))
             }
             Err(e) => {
@@ -165,7 +164,7 @@ impl WinxService {
                 Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::Other,
                     format!("Command execution failed: {}", e)
-                )))
+                ) as std::io::Error) as Box<dyn std::error::Error + Send + Sync>)
             }
         }
     }
@@ -215,7 +214,7 @@ impl WinxService {
             return Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!("File does not exist: {}", path)
-            )));
+            ) as std::io::Error) as Box<dyn std::error::Error + Send + Sync>);
         }
 
         match tokio::fs::write(&path, &content).await {
@@ -230,7 +229,7 @@ impl WinxService {
             }
             Err(e) => {
                 warn!("Failed to write file {}: {}", path, e);
-                Err(Box::new(e))
+                Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
             }
         }
     }
