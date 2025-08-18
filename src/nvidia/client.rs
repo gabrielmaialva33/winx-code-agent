@@ -260,15 +260,15 @@ impl NvidiaClient {
         let response = self.chat_completion(&request).await?;
 
         if let Some(choice) = response.choices.first() {
+            let effective_content = choice.message.effective_content();
+            
             // Try to parse as JSON, fallback to plain text summary
-            if let Ok(analysis) =
-                serde_json::from_str::<CodeAnalysisResult>(&choice.message.content)
-            {
+            if let Ok(analysis) = serde_json::from_str::<CodeAnalysisResult>(&effective_content) {
                 Ok(analysis)
             } else {
                 // Fallback: create a simple analysis from the response
                 Ok(CodeAnalysisResult {
-                    summary: choice.message.content.clone(),
+                    summary: effective_content,
                     issues: vec![],
                     suggestions: vec![],
                     complexity_score: None,
@@ -322,7 +322,7 @@ impl NvidiaClient {
 
         if let Some(choice) = response.choices.first() {
             Ok(CodeGenerationResult {
-                code: choice.message.content.clone(),
+                code: choice.message.effective_content(),
                 language: request.language.clone(),
                 explanation: None,
                 tests: None,
