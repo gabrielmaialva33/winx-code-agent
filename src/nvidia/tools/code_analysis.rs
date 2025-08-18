@@ -87,9 +87,11 @@ pub async fn analyze_code_with_ai(
     // Get code content
     let (code_content, file_path, language) = get_code_and_metadata(&params).await?;
 
-    debug!("Analyzing {} characters of {} code", 
-           code_content.len(), 
-           language.as_deref().unwrap_or("unknown"));
+    debug!(
+        "Analyzing {} characters of {} code",
+        code_content.len(),
+        language.as_deref().unwrap_or("unknown")
+    );
 
     // Perform AI analysis
     let analysis_result = nvidia_client
@@ -97,7 +99,8 @@ pub async fn analyze_code_with_ai(
         .await?;
 
     // Convert to our result format
-    let issues = analysis_result.issues
+    let issues = analysis_result
+        .issues
         .into_iter()
         .filter(|issue| should_include_issue(&issue.severity.to_string(), &params.min_severity))
         .map(|issue| CodeIssueReport {
@@ -124,12 +127,16 @@ pub async fn analyze_code_with_ai(
         } else {
             None
         },
-        model_used: nvidia_client.recommend_model(crate::nvidia::models::TaskType::CodeAnalysis)
+        model_used: nvidia_client
+            .recommend_model(crate::nvidia::models::TaskType::CodeAnalysis)
             .as_str()
             .to_string(),
     };
 
-    info!("Code analysis completed. Found {} issues", result.issues.len());
+    info!(
+        "Code analysis completed. Found {} issues",
+        result.issues.len()
+    );
     Ok(result)
 }
 
@@ -140,23 +147,24 @@ async fn get_code_and_metadata(
     match (&params.file_path, &params.code) {
         (Some(file_path), _) => {
             // Read from file
-            let code = tokio::fs::read_to_string(file_path).await
-                .map_err(|e| WinxError::FileError(format!("Failed to read file {}: {}", file_path, e)))?;
-            
-            let language = params.language.clone()
+            let code = tokio::fs::read_to_string(file_path).await.map_err(|e| {
+                WinxError::FileError(format!("Failed to read file {}: {}", file_path, e))
+            })?;
+
+            let language = params
+                .language
+                .clone()
                 .or_else(|| detect_language_from_path(file_path));
-            
+
             Ok((code, Some(file_path.clone()), language))
         }
         (None, Some(code)) => {
             // Use provided code
             Ok((code.clone(), None, params.language.clone()))
         }
-        (None, None) => {
-            Err(WinxError::InvalidInput(
-                "Either file_path or code must be provided".to_string()
-            ))
-        }
+        (None, None) => Err(WinxError::InvalidInput(
+            "Either file_path or code must be provided".to_string(),
+        )),
     }
 }
 
@@ -164,7 +172,7 @@ async fn get_code_and_metadata(
 fn detect_language_from_path(file_path: &str) -> Option<String> {
     let path = Path::new(file_path);
     let extension = path.extension()?.to_str()?.to_lowercase();
-    
+
     match extension.as_str() {
         "rs" => Some("Rust".to_string()),
         "py" => Some("Python".to_string()),
@@ -206,10 +214,16 @@ fn detect_language_from_path(file_path: &str) -> Option<String> {
 /// Check if an issue should be included based on severity level
 fn should_include_issue(issue_severity: &str, min_severity: &str) -> bool {
     let severity_order = ["Info", "Warning", "Error", "Critical"];
-    
-    let issue_level = severity_order.iter().position(|&s| s == issue_severity).unwrap_or(0);
-    let min_level = severity_order.iter().position(|&s| s == min_severity).unwrap_or(1);
-    
+
+    let issue_level = severity_order
+        .iter()
+        .position(|&s| s == issue_severity)
+        .unwrap_or(0);
+    let min_level = severity_order
+        .iter()
+        .position(|&s| s == min_severity)
+        .unwrap_or(1);
+
     issue_level >= min_level
 }
 
@@ -219,9 +233,18 @@ mod tests {
 
     #[test]
     fn test_detect_language_from_path() {
-        assert_eq!(detect_language_from_path("main.rs"), Some("Rust".to_string()));
-        assert_eq!(detect_language_from_path("script.py"), Some("Python".to_string()));
-        assert_eq!(detect_language_from_path("app.js"), Some("JavaScript".to_string()));
+        assert_eq!(
+            detect_language_from_path("main.rs"),
+            Some("Rust".to_string())
+        );
+        assert_eq!(
+            detect_language_from_path("script.py"),
+            Some("Python".to_string())
+        );
+        assert_eq!(
+            detect_language_from_path("app.js"),
+            Some("JavaScript".to_string())
+        );
         assert_eq!(detect_language_from_path("component.tsx"), None); // TypeScript JSX not in our list
         assert_eq!(detect_language_from_path("noext"), None);
     }

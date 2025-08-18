@@ -26,10 +26,10 @@ pub async fn initialize(config: NvidiaConfig) -> Result<NvidiaClient> {
     }
 
     let client = NvidiaClient::new(config).await?;
-    
+
     // Test connectivity
     client.validate_connection().await?;
-    
+
     Ok(client)
 }
 

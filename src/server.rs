@@ -40,19 +40,17 @@ impl WinxService {
     /// Initialize NVIDIA integration if API key is available
     pub async fn initialize_nvidia(&self) -> crate::Result<bool> {
         match NvidiaConfig::from_env() {
-            Ok(config) => {
-                match crate::nvidia::initialize(config).await {
-                    Ok(client) => {
-                        *self.nvidia_client.lock().await = Some(client);
-                        info!("NVIDIA AI integration initialized successfully");
-                        Ok(true)
-                    }
-                    Err(e) => {
-                        warn!("Failed to initialize NVIDIA integration: {}", e);
-                        Ok(false)
-                    }
+            Ok(config) => match crate::nvidia::initialize(config).await {
+                Ok(client) => {
+                    *self.nvidia_client.lock().await = Some(client);
+                    info!("NVIDIA AI integration initialized successfully");
+                    Ok(true)
                 }
-            }
+                Err(e) => {
+                    warn!("Failed to initialize NVIDIA integration: {}", e);
+                    Ok(false)
+                }
+            },
             Err(e) => {
                 info!("NVIDIA integration not available: {}", e);
                 Ok(false)
@@ -90,7 +88,7 @@ pub async fn start_winx_server() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create service and initialize NVIDIA integration
     let service = WinxService::new();
-    
+
     // Attempt to initialize NVIDIA integration (non-blocking)
     if let Err(e) = service.initialize_nvidia().await {
         warn!("Could not initialize NVIDIA integration: {}", e);

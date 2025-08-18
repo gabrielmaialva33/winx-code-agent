@@ -103,6 +103,9 @@ impl NvidiaConfig {
 
     /// Get the chat completions endpoint URL
     pub fn chat_completions_url(&self) -> String {
-        format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'))
+        format!(
+            "{}/v1/chat/completions",
+            self.base_url.trim_end_matches('/')
+        )
     }
 }

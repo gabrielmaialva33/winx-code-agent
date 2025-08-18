@@ -3,12 +3,18 @@
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::nvidia::{models::*, config::NvidiaConfig};
+    use crate::nvidia::{config::NvidiaConfig, models::*};
 
     #[test]
     fn test_nvidia_model_as_str() {
-        assert_eq!(NvidiaModel::Llama31_70B.as_str(), "meta/llama-3.1-70b-instruct");
-        assert_eq!(NvidiaModel::Nemotron340B.as_str(), "nvidia/nemotron-4-340b-instruct");
+        assert_eq!(
+            NvidiaModel::Llama31_70B.as_str(),
+            "meta/llama-3.1-70b-instruct"
+        );
+        assert_eq!(
+            NvidiaModel::Nemotron340B.as_str(),
+            "nvidia/nemotron-4-340b-instruct"
+        );
         assert_eq!(NvidiaModel::CodeGemma7B.as_str(), "google/codegemma-7b");
     }
 
@@ -57,7 +63,10 @@ mod tests {
         assert_eq!(format!("{}", IssueCategory::Performance), "Performance");
         assert_eq!(format!("{}", IssueCategory::Security), "Security");
         assert_eq!(format!("{}", IssueCategory::Style), "Style");
-        assert_eq!(format!("{}", IssueCategory::Maintainability), "Maintainability");
+        assert_eq!(
+            format!("{}", IssueCategory::Maintainability),
+            "Maintainability"
+        );
         assert_eq!(format!("{}", IssueCategory::Documentation), "Documentation");
     }
 
@@ -75,23 +84,23 @@ mod tests {
     #[test]
     fn test_nvidia_config_validation() {
         let mut config = NvidiaConfig::default();
-        
+
         // Empty API key should fail validation
         assert!(config.validate().is_err());
-        
+
         // Valid config should pass
         config.api_key = "test-api-key".to_string();
         assert!(config.validate().is_ok());
-        
+
         // Empty base URL should fail
         config.base_url = String::new();
         assert!(config.validate().is_err());
-        
+
         // Zero timeout should fail
         config.base_url = "https://integrate.api.nvidia.com".to_string();
         config.timeout_seconds = 0;
         assert!(config.validate().is_err());
-        
+
         // Zero rate limit should fail
         config.timeout_seconds = 30;
         config.rate_limit_rpm = 0;
@@ -105,7 +114,7 @@ mod tests {
             config.chat_completions_url(),
             "https://integrate.api.nvidia.com/v1/chat/completions"
         );
-        
+
         let mut config_with_trailing_slash = config;
         config_with_trailing_slash.base_url = "https://integrate.api.nvidia.com/".to_string();
         assert_eq!(
@@ -160,6 +169,9 @@ mod tests {
         assert_eq!(format!("{}", issue.category), "Style");
         assert_eq!(issue.message, "Variable name should be snake_case");
         assert_eq!(issue.line, Some(42));
-        assert_eq!(issue.suggestion, Some("Rename camelCase to snake_case".to_string()));
+        assert_eq!(
+            issue.suggestion,
+            Some("Rename camelCase to snake_case".to_string())
+        );
     }
 }

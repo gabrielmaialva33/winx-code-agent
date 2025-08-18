@@ -1,10 +1,7 @@
 //! NVIDIA API client implementation
 
 use crate::errors::{Result, WinxError};
-use crate::nvidia::{
-    models::*,
-    config::NvidiaConfig,
-};
+use crate::nvidia::{config::NvidiaConfig, models::*};
 use reqwest::{header, Client, Response};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -31,7 +28,7 @@ impl RateLimiter {
 
     async fn check_rate_limit(&mut self, max_rpm: u32) -> Result<()> {
         let now = Instant::now();
-        
+
         // Reset counter if a minute has passed
         if now.duration_since(self.minute_start).as_secs() >= 60 {
             self.requests_this_minute = 0;
@@ -69,8 +66,9 @@ impl NvidiaClient {
         let mut headers = header::HeaderMap::new();
         headers.insert(
             header::AUTHORIZATION,
-            header::HeaderValue::from_str(&format!("Bearer {}", config.api_key))
-                .map_err(|e| WinxError::ConfigurationError(format!("Invalid API key format: {}", e)))?,
+            header::HeaderValue::from_str(&format!("Bearer {}", config.api_key)).map_err(|e| {
+                WinxError::ConfigurationError(format!("Invalid API key format: {}", e))
+            })?,
         );
         headers.insert(
             header::CONTENT_TYPE,
@@ -78,8 +76,11 @@ impl NvidiaClient {
         );
         headers.insert(
             header::USER_AGENT,
-            header::HeaderValue::from_str(&format!("winx-code-agent/{}", env!("CARGO_PKG_VERSION")))
-                .unwrap(),
+            header::HeaderValue::from_str(&format!(
+                "winx-code-agent/{}",
+                env!("CARGO_PKG_VERSION")
+            ))
+            .unwrap(),
         );
 
         let client = Client::builder()
@@ -88,7 +89,10 @@ impl NvidiaClient {
             .build()
             .map_err(|e| WinxError::NetworkError(format!("Failed to create HTTP client: {}", e)))?;
 
-        info!("NVIDIA client initialized with base URL: {}", config.base_url);
+        info!(
+            "NVIDIA client initialized with base URL: {}",
+            config.base_url
+        );
 
         Ok(Self {
             client,
@@ -100,7 +104,7 @@ impl NvidiaClient {
     /// Validate connection to NVIDIA API
     pub async fn validate_connection(&self) -> Result<()> {
         debug!("Validating NVIDIA API connection");
-        
+
         let request = ChatCompletionRequest {
             model: self.config.default_model.clone(),
             messages: vec![ChatMessage::user("Test connection - respond with 'OK'")],
@@ -123,8 +127,15 @@ impl NvidiaClient {
     }
 
     /// Make a chat completion request
-    pub async fn chat_completion(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse> {
-        self.rate_limiter.lock().await.check_rate_limit(self.config.rate_limit_rpm).await?;
+    pub async fn chat_completion(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse> {
+        self.rate_limiter
+            .lock()
+            .await
+            .check_rate_limit(self.config.rate_limit_rpm)
+            .await?;
 
         debug!("Making chat completion request to model: {}", request.model);
 
@@ -147,14 +158,20 @@ impl NvidiaClient {
             }
         }
 
-        Err(WinxError::NetworkError("All retry attempts failed".to_string()))
+        Err(WinxError::NetworkError(
+            "All retry attempts failed".to_string(),
+        ))
     }
 
     /// Make the actual HTTP request
-    async fn make_request(&self, request: &ChatCompletionRequest) -> Result<ChatCompletionResponse> {
+    async fn make_request(
+        &self,
+        request: &ChatCompletionRequest,
+    ) -> Result<ChatCompletionResponse> {
         let url = self.config.chat_completions_url();
-        
-        let response = self.client
+
+        let response = self
+            .client
             .post(&url)
             .json(request)
             .send()
@@ -167,7 +184,9 @@ impl NvidiaClient {
     /// Handle HTTP response and convert to ChatCompletionResponse
     async fn handle_response(&self, response: Response) -> Result<ChatCompletionResponse> {
         let status = response.status();
-        let response_text = response.text().await
+        let response_text = response
+            .text()
+            .await
             .map_err(|e| WinxError::NetworkError(format!("Failed to read response: {}", e)))?;
 
         if !status.is_success() {
@@ -175,15 +194,13 @@ impl NvidiaClient {
             if let Ok(api_error) = serde_json::from_str::<ApiError>(&response_text) {
                 return Err(WinxError::ApiError(format!(
                     "NVIDIA API error ({}): {}",
-                    status,
-                    api_error.error.message
+                    status, api_error.error.message
                 )));
             }
-            
+
             return Err(WinxError::ApiError(format!(
                 "HTTP error {}: {}",
-                status,
-                response_text
+                status, response_text
             )));
         }
 
@@ -192,9 +209,15 @@ impl NvidiaClient {
     }
 
     /// High-level method for code analysis
-    pub async fn analyze_code(&self, code: &str, language: Option<&str>) -> Result<CodeAnalysisResult> {
-        let language_context = language.map(|l| format!(" (written in {})", l)).unwrap_or_default();
-        
+    pub async fn analyze_code(
+        &self,
+        code: &str,
+        language: Option<&str>,
+    ) -> Result<CodeAnalysisResult> {
+        let language_context = language
+            .map(|l| format!(" (written in {})", l))
+            .unwrap_or_default();
+
         let system_prompt = "You are an expert code analyzer. Analyze the provided code and return your analysis in JSON format with the following structure:
 {
   \"summary\": \"Brief summary of what the code does\",
@@ -211,10 +234,15 @@ impl NvidiaClient {
   \"complexity_score\": 75
 }";
 
-        let user_prompt = format!("Analyze this code{}:\n\n```\n{}\n```", language_context, code);
+        let user_prompt = format!(
+            "Analyze this code{}:\n\n```\n{}\n```",
+            language_context, code
+        );
 
         let request = ChatCompletionRequest {
-            model: NvidiaModel::for_task(TaskType::CodeAnalysis).as_str().to_string(),
+            model: NvidiaModel::for_task(TaskType::CodeAnalysis)
+                .as_str()
+                .to_string(),
             messages: vec![
                 ChatMessage::system(system_prompt),
                 ChatMessage::user(user_prompt),
@@ -226,10 +254,12 @@ impl NvidiaClient {
         };
 
         let response = self.chat_completion(&request).await?;
-        
+
         if let Some(choice) = response.choices.first() {
             // Try to parse as JSON, fallback to plain text summary
-            if let Ok(analysis) = serde_json::from_str::<CodeAnalysisResult>(&choice.message.content) {
+            if let Ok(analysis) =
+                serde_json::from_str::<CodeAnalysisResult>(&choice.message.content)
+            {
                 Ok(analysis)
             } else {
                 // Fallback: create a simple analysis from the response
@@ -241,17 +271,26 @@ impl NvidiaClient {
                 })
             }
         } else {
-            Err(WinxError::ApiError("Empty response from NVIDIA API".to_string()))
+            Err(WinxError::ApiError(
+                "Empty response from NVIDIA API".to_string(),
+            ))
         }
     }
 
     /// High-level method for code generation
-    pub async fn generate_code(&self, request: &CodeGenerationRequest) -> Result<CodeGenerationResult> {
-        let language_context = request.language.as_ref()
+    pub async fn generate_code(
+        &self,
+        request: &CodeGenerationRequest,
+    ) -> Result<CodeGenerationResult> {
+        let language_context = request
+            .language
+            .as_ref()
             .map(|l| format!(" in {}", l))
             .unwrap_or_default();
 
-        let context_info = request.context.as_ref()
+        let context_info = request
+            .context
+            .as_ref()
             .map(|c| format!("\n\nContext: {}", c))
             .unwrap_or_default();
 
@@ -262,7 +301,9 @@ impl NvidiaClient {
         );
 
         let chat_request = ChatCompletionRequest {
-            model: NvidiaModel::for_task(TaskType::CodeGeneration).as_str().to_string(),
+            model: NvidiaModel::for_task(TaskType::CodeGeneration)
+                .as_str()
+                .to_string(),
             messages: vec![
                 ChatMessage::system(system_prompt),
                 ChatMessage::user(&request.prompt),
@@ -274,7 +315,7 @@ impl NvidiaClient {
         };
 
         let response = self.chat_completion(&chat_request).await?;
-        
+
         if let Some(choice) = response.choices.first() {
             Ok(CodeGenerationResult {
                 code: choice.message.content.clone(),
@@ -283,7 +324,9 @@ impl NvidiaClient {
                 tests: None,
             })
         } else {
-            Err(WinxError::ApiError("Empty response from NVIDIA API".to_string()))
+            Err(WinxError::ApiError(
+                "Empty response from NVIDIA API".to_string(),
+            ))
         }
     }
 
