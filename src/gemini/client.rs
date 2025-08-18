@@ -219,7 +219,7 @@ impl GeminiClient {
             info!("Gemini API connection test successful");
             Ok(())
         } else {
-            Err(WinxError::ExternalApiError("Gemini connection test failed".to_string()))
+            Err(WinxError::ApiError("Gemini connection test failed".to_string()))
         }
     }
 
