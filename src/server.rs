@@ -130,6 +130,7 @@ impl ServerHandler for WinxService {
                             }
                         }
                     })),
+                    output_schema: None,
                 },
                 Tool {
                     name: "bash_command".into(),
@@ -187,6 +188,7 @@ impl ServerHandler for WinxService {
                         },
                         "required": ["path", "content"]
                     })),
+                    output_schema: None,
                 },
             ],
         })
