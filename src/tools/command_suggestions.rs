@@ -57,13 +57,10 @@ pub async fn handle_tool_call(
             _ => {
                 // Create a separate scope for the lock to ensure it's dropped before we assign the result
                 let last_cmd = {
-                    if let Ok(bash_guard) = bash_state.interactive_bash.lock() {
-                        if let Some(bash) = bash_guard.as_ref() {
-                            if !bash.last_command.is_empty() {
-                                Some(bash.last_command.clone())
-                            } else {
-                                None
-                            }
+                    let bash_guard = bash_state.interactive_bash.lock().await;
+                    if let Some(bash) = bash_guard.as_ref() {
+                        if !bash.last_command.is_empty() {
+                            Some(bash.last_command.clone())
                         } else {
                             None
                         }
