@@ -254,7 +254,7 @@ impl GeminiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gemini::GeminiModel;
+    use crate::gemini::config::GeminiModel;
 
     #[test]
     fn test_rate_limit() {
