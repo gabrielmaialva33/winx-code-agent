@@ -92,6 +92,9 @@ pub struct ChatMessage {
     pub role: String,
     #[serde(default)]
     pub content: String,
+    /// Reasoning content for models that support thinking mode (like Qwen3)
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
 }
 
 impl ChatMessage {
@@ -99,6 +102,7 @@ impl ChatMessage {
         Self {
             role: "system".to_string(),
             content: content.into(),
+            reasoning_content: None,
         }
     }
 
@@ -106,6 +110,7 @@ impl ChatMessage {
         Self {
             role: "user".to_string(),
             content: content.into(),
+            reasoning_content: None,
         }
     }
 
@@ -113,6 +118,16 @@ impl ChatMessage {
         Self {
             role: "assistant".to_string(),
             content: content.into(),
+            reasoning_content: None,
+        }
+    }
+
+    /// Get the effective content, combining content and reasoning_content if available
+    pub fn effective_content(&self) -> String {
+        match (&self.content, &self.reasoning_content) {
+            (content, Some(reasoning)) if content.is_empty() => reasoning.clone(),
+            (content, Some(reasoning)) => format!("{}\n\nReasoning: {}", content, reasoning),
+            (content, None) => content.clone(),
         }
     }
 }
