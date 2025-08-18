@@ -4,8 +4,7 @@
 //! command history, usage patterns, and context.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tracing::debug;
 
 use crate::errors::WinxError;
@@ -38,7 +37,9 @@ pub async fn handle_tool_call(
     // Scope for the lock
     {
         // Get bash state guard
-        let bash_state_guard = bash_state.lock().await;
+        let bash_state_guard = bash_state.lock().map_err(|e| {
+            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
+        })?;
 
         // Check if bash state is initialized
         let bash_state = bash_state_guard
