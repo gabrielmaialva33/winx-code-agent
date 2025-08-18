@@ -2013,6 +2013,159 @@ impl WinxService {
             }
         }
     }
+
+    async fn handle_smart_search_replace(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::tools::multi_file_editor::{FileOperation, MultiFileEditorTool};
+
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+
+        // Extract arguments
+        let file_paths = args
+            .get("file_paths")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| McpError::invalid_request("Missing file_paths array", None))?
+            .iter()
+            .map(|v| {
+                v.as_str()
+                    .map(|s| s.to_string())
+                    .ok_or_else(|| McpError::invalid_request("Invalid file path in array", None))
+            })
+            .collect::<Result<Vec<String>, McpError>>()?;
+
+        let search_pattern = args
+            .get("search_pattern")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_request("Missing search_pattern", None))?
+            .to_string();
+
+        let replace_hint = args
+            .get("replace_hint")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_request("Missing replace_hint", None))?
+            .to_string();
+
+        let context = args
+            .get("context")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let use_ai_provider = args
+            .get("use_ai_provider")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let confidence_threshold = args
+            .get("confidence_threshold")
+            .and_then(|v| v.as_f64())
+            .map(|f| f as f32);
+
+        let preview_mode = args
+            .get("preview_mode")
+            .and_then(|v| v.as_bool());
+
+        // Create the SmartSearchReplace operation
+        let operation = FileOperation::SmartSearchReplace {
+            file_paths: file_paths.clone(),
+            search_pattern,
+            replace_hint,
+            context,
+            use_ai_provider,
+            confidence_threshold,
+            preview_mode,
+        };
+
+        // Create a minimal config for the tool
+        let config = crate::tools::multi_file_editor::MultiFileEditor {
+            operations: vec![operation],
+            create_backups: Some(true),
+            atomic: Some(true),
+            continue_on_error: Some(false),
+            max_file_size: Some(10 * 1024 * 1024), // 10MB
+            dry_run: Some(false),
+        };
+
+        // Create the tool instance
+        let mut tool = MultiFileEditorTool::new(&config);
+
+        // Execute the smart search and replace
+        match tool.execute(&config.operations).await {
+            Ok(result) => {
+                let mut content_parts = Vec::new();
+
+                // Add summary
+                content_parts.push(format!(
+                    "## 🧠 AI Smart Search & Replace Results\n\n**Files Processed:** {}\n**Matches Found:** {}\n**Replacements Made:** {}\n**Preview Mode:** {}\n",
+                    file_paths.len(),
+                    result.successful_operations,
+                    if result.dry_run { 0 } else { result.successful_operations },
+                    result.dry_run || preview_mode.unwrap_or(false)
+                ));
+
+                // Add operation details
+                for op_result in &result.results {
+                    let status = if op_result.success { "✅" } else { "❌" };
+                    content_parts.push(format!(
+                        "### File {} {}: {}\n**Path:** {}\n**Status:** {}\n",
+                        op_result.operation_index + 1,
+                        status,
+                        if op_result.success {
+                            "Success"
+                        } else {
+                            "Failed"
+                        },
+                        op_result.file_path,
+                        op_result.message
+                    ));
+
+                    if let Some(backup_path) = &op_result.backup_path {
+                        content_parts.push(format!("**Backup Created:** {}\n", backup_path));
+                    }
+
+                    if let Some(bytes_written) = op_result.bytes_written {
+                        content_parts.push(format!("**Bytes Modified:** {}\n", bytes_written));
+                    }
+                }
+
+                if result.failed_operations > 0 {
+                    content_parts.push(format!(
+                        "\n⚠️ **Warning:** {} operation(s) failed. Check error messages above.",
+                        result.failed_operations
+                    ));
+                }
+
+                if result.rollback_performed {
+                    content_parts.push("\n🔄 **Rollback performed** due to errors in atomic mode.".to_string());
+                }
+
+                let ai_provider_info = match (
+                    self.get_dashscope_client().await.is_some(),
+                    self.get_nvidia_client().await.is_some(),
+                    self.get_gemini_client().await.is_some(),
+                ) {
+                    (true, _, _) => "DashScope/Qwen3",
+                    (false, true, _) => "NVIDIA AI",
+                    (false, false, true) => "Gemini AI",
+                    _ => "No AI provider available"
+                };
+
+                content_parts.push(format!("\n*Powered by {}*", ai_provider_info));
+
+                Ok(CallToolResult::success(vec![Content::text(
+                    content_parts.join("\n"),
+                )]))
+            }
+            Err(e) => {
+                warn!("Smart search and replace operation failed: {}", e);
+                Err(McpError::internal_error(
+                    format!("Smart search and replace operation failed: {}", e),
+                    None,
+                ))
+            }
+        }
+    }
 }
 
 /// Create and start the Winx MCP server
