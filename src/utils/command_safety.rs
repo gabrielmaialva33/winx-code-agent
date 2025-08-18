@@ -136,6 +136,11 @@ impl CommandSafety {
     pub fn is_interactive(&self, command: &str) -> bool {
         let normalized = self.normalize_command(command);
 
+        // Check special cases first (they have priority over general rules)
+        if self.check_special_interactive_cases(&normalized) {
+            return true;
+        }
+
         // Check exact matches
         if self.interactive_commands.contains(&normalized) {
             return true;
@@ -152,8 +157,7 @@ impl CommandSafety {
             }
         }
 
-        // Special cases
-        self.check_special_interactive_cases(&normalized)
+        false
     }
 
     /// Check if a command might run for a long time
