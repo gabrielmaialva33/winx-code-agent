@@ -2,12 +2,10 @@
 //! Enhanced server with NVIDIA AI integration
 
 use rmcp::{
-    ErrorData as McpError,
-    ServiceExt, 
     model::*,
     service::{RequestContext, RoleServer},
     transport::stdio,
-    ServerHandler
+    ErrorData as McpError, ServerHandler, ServiceExt,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -207,14 +205,19 @@ impl ServerHandler for WinxService {
         param: CallToolRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let args_value = param.arguments.map(|map| Value::Object(map));
+        let args_value = param.arguments.map(Value::Object);
         let result = match param.name.as_ref() {
             "ping" => self.handle_ping(args_value.clone()).await?,
             "initialize" => self.handle_initialize(args_value.clone()).await?,
             "bash_command" => self.handle_bash_command(args_value.clone()).await?,
             "read_files" => self.handle_read_files(args_value.clone()).await?,
             "file_write_or_edit" => self.handle_file_write_or_edit(args_value).await?,
-            _ => return Err(McpError::invalid_request(format!("Unknown tool: {}", param.name), None)),
+            _ => {
+                return Err(McpError::invalid_request(
+                    format!("Unknown tool: {}", param.name),
+                    None,
+                ))
+            }
         };
 
         Ok(result)
@@ -226,14 +229,19 @@ impl WinxService {
         let message = args
             .and_then(|v| {
                 if let Value::Object(map) = v {
-                    map.get("message").and_then(|v| v.as_str()).map(|s| s.to_string())
+                    map.get("message")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
             })
             .unwrap_or_else(|| "pong".to_string());
-        
-        let content = format!("Server: winx-code-agent v{}\nResponse: {}", self.version, message);
+
+        let content = format!(
+            "Server: winx-code-agent v{}\nResponse: {}",
+            self.version, message
+        );
         Ok(CallToolResult::success(vec![Content::text(content)]))
     }
 
@@ -241,17 +249,19 @@ impl WinxService {
         let shell = args
             .and_then(|v| {
                 if let Value::Object(map) = v {
-                    map.get("shell").and_then(|v| v.as_str()).map(|s| s.to_string())
+                    map.get("shell")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
                 } else {
                     None
                 }
             })
             .unwrap_or_else(|| "bash".to_string());
-        
+
         let mut bash_state_guard = self.bash_state.lock().await;
         if bash_state_guard.is_some() {
             return Ok(CallToolResult::success(vec![Content::text(
-                "Shell environment is already initialized".to_string()
+                "Shell environment is already initialized".to_string(),
             )]));
         }
 
@@ -260,34 +270,46 @@ impl WinxService {
             Ok(_) => {
                 *bash_state_guard = Some(state);
                 info!("Shell environment initialized with {}", shell);
-                Ok(CallToolResult::success(vec![Content::text(
-                    format!("Shell environment initialized with {}", shell)
-                )]))
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Shell environment initialized with {}",
+                    shell
+                ))]))
             }
             Err(e) => {
                 warn!("Failed to initialize shell: {}", e);
-                Err(McpError::internal_error(format!("Failed to initialize shell: {}", e), None))
+                Err(McpError::internal_error(
+                    format!("Failed to initialize shell: {}", e),
+                    None,
+                ))
             }
         }
     }
 
     async fn handle_bash_command(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let command = args.get("command")
+        let command = args
+            .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| McpError::invalid_request("Missing command", None))?;
-        let timeout_seconds = args.get("timeout_seconds")
+        let timeout_seconds = args
+            .get("timeout_seconds")
             .and_then(|v| v.as_u64())
             .unwrap_or(30) as f32;
-        
+
         let mut bash_state_guard = self.bash_state.lock().await;
         if bash_state_guard.is_none() {
-            return Err(McpError::invalid_request("Shell not initialized. Call initialize first.", None));
+            return Err(McpError::invalid_request(
+                "Shell not initialized. Call initialize first.",
+                None,
+            ));
         }
 
         let bash_state = bash_state_guard.as_mut().unwrap();
-        
-        match bash_state.execute_interactive(command, timeout_seconds).await {
+
+        match bash_state
+            .execute_interactive(command, timeout_seconds)
+            .await
+        {
             Ok(output) => {
                 let working_dir = bash_state.cwd.display().to_string();
                 let content = format!("Working directory: {}\n\n{}", working_dir, output);
@@ -295,62 +317,88 @@ impl WinxService {
             }
             Err(e) => {
                 warn!("Command execution failed: {}", e);
-                Err(McpError::internal_error(format!("Command execution failed: {}", e), None))
+                Err(McpError::internal_error(
+                    format!("Command execution failed: {}", e),
+                    None,
+                ))
             }
         }
     }
 
     async fn handle_read_files(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let paths = args.get("paths")
+        let paths = args
+            .get("paths")
             .and_then(|v| v.as_array())
             .ok_or_else(|| McpError::invalid_request("Missing paths array", None))?;
-        
+
         let mut content_parts = Vec::new();
-        
+
         for path_value in paths {
-            let path = path_value.as_str()
+            let path = path_value
+                .as_str()
                 .ok_or_else(|| McpError::invalid_request("Invalid path in array", None))?;
-            
+
             match tokio::fs::read_to_string(path).await {
                 Ok(content) => {
-                    content_parts.push(format!("=== {} ({} bytes) ===\n{}\n", path, content.len(), content));
+                    content_parts.push(format!(
+                        "=== {} ({} bytes) ===\n{}\n",
+                        path,
+                        content.len(),
+                        content
+                    ));
                 }
                 Err(e) => {
                     content_parts.push(format!("=== {} ===\nERROR: {}\n", path, e));
                 }
             }
         }
-        
-        Ok(CallToolResult::success(vec![Content::text(content_parts.join("\n"))]))
+
+        Ok(CallToolResult::success(vec![Content::text(
+            content_parts.join("\n"),
+        )]))
     }
 
-    async fn handle_file_write_or_edit(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+    async fn handle_file_write_or_edit(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let path = args.get("path")
+        let path = args
+            .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| McpError::invalid_request("Missing path", None))?;
-        let content = args.get("content")
+        let content = args
+            .get("content")
             .and_then(|v| v.as_str())
             .ok_or_else(|| McpError::invalid_request("Missing content", None))?;
-        let create = args.get("create_if_missing")
+        let create = args
+            .get("create_if_missing")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
-        
+
         if !create && !tokio::fs::try_exists(path).await.unwrap_or(false) {
-            return Err(McpError::invalid_request(format!("File does not exist: {}", path), None));
+            return Err(McpError::invalid_request(
+                format!("File does not exist: {}", path),
+                None,
+            ));
         }
 
         match tokio::fs::write(path, content).await {
             Ok(_) => {
                 info!("File written successfully: {}", path);
-                Ok(CallToolResult::success(vec![Content::text(
-                    format!("File written successfully: {} ({} bytes)", path, content.len())
-                )]))
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "File written successfully: {} ({} bytes)",
+                    path,
+                    content.len()
+                ))]))
             }
             Err(e) => {
                 warn!("Failed to write file {}: {}", path, e);
-                Err(McpError::internal_error(format!("Failed to write file {}: {}", path, e), None))
+                Err(McpError::internal_error(
+                    format!("Failed to write file {}: {}", path, e),
+                    None,
+                ))
             }
         }
     }

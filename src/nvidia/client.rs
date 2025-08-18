@@ -261,7 +261,7 @@ impl NvidiaClient {
 
         if let Some(choice) = response.choices.first() {
             let effective_content = choice.message.effective_content();
-            
+
             // Try to parse as JSON, fallback to plain text summary
             if let Ok(analysis) = serde_json::from_str::<CodeAnalysisResult>(&effective_content) {
                 Ok(analysis)
