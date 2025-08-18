@@ -162,11 +162,11 @@ impl WinxService {
                     (Some(path), _) => {
                         match tokio::fs::read_to_string(path).await {
                             Ok(content) => content,
-                            Err(e) => return Ok(CallToolResult::error(format!("Failed to read file {}: {}", path, e))),
+                            Err(e) => return format!("Failed to read file {}: {}", path, e),
                         }
                     }
                     (None, Some(code)) => code.clone(),
-                    (None, None) => return Ok(CallToolResult::error("Either file_path or code must be provided".to_string())),
+                    (None, None) => return "Either file_path or code must be provided".to_string(),
                 };
 
                 let detail = detail_level.as_deref().unwrap_or("detailed");
@@ -198,20 +198,18 @@ impl WinxService {
                 match nvidia_client.chat_completion(&request).await {
                     Ok(response) => {
                         if let Some(choice) = response.choices.first() {
-                            Ok(CallToolResult::success(vec![Content::text(choice.message.content.clone())]))
+                            choice.message.content.clone()
                         } else {
-                            Ok(CallToolResult::error("Empty response from NVIDIA API".to_string()))
+                            "Empty response from NVIDIA API".to_string()
                         }
                     }
                     Err(e) => {
-                        let error_msg = format!("AI code explanation failed: {}", e);
-                        Ok(CallToolResult::error(error_msg))
+                        format!("AI code explanation failed: {}", e)
                     }
                 }
             }
             None => {
-                let error_msg = "NVIDIA AI integration not available. Please set NVIDIA_API_KEY environment variable.";
-                Ok(CallToolResult::error(error_msg.to_string()))
+                "NVIDIA AI integration not available. Please set NVIDIA_API_KEY environment variable.".to_string()
             }
         }
     }
