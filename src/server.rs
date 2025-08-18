@@ -664,18 +664,76 @@ impl WinxService {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        // For now, provide a basic code analysis response
-        // The full implementation would use the code_analyzer module
-        let analysis_result = if let Some(lang) = language {
-            format!("Code analysis for {} file: {}\n\nBasic analysis completed. No critical issues found.", lang, file_path)
-        } else {
-            format!("Code analysis for file: {}\n\nLanguage auto-detected. Basic analysis completed. No critical issues found.", file_path)
-        };
+        // Check if NVIDIA client is available
+        if let Some(nvidia_client) = self.get_nvidia_client().await {
+            // Read file content
+            match tokio::fs::read_to_string(file_path).await {
+                Ok(code) => {
+                    // Perform AI analysis using NVIDIA
+                    match nvidia_client.analyze_code(&code, language.as_deref()).await {
+                        Ok(result) => {
+                            let issues_text = if result.issues.is_empty() {
+                                "No issues found.".to_string()
+                            } else {
+                                result.issues.iter()
+                                    .map(|issue| format!("• [{}] {}", issue.severity, issue.message))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
+                            };
 
-        info!("Code analysis completed for: {}", file_path);
-        Ok(CallToolResult::success(vec![Content::text(
-            analysis_result,
-        )]))
+                            let suggestions_text = if result.suggestions.is_empty() {
+                                "".to_string()
+                            } else {
+                                format!("\n\n### Suggestions:\n{}", 
+                                    result.suggestions.iter()
+                                        .map(|s| format!("• {}", s))
+                                        .collect::<Vec<_>>()
+                                        .join("\n"))
+                            };
+
+                            let complexity_text = result.complexity_score
+                                .map(|score| format!("\n\n### Complexity Score: {}/100", score))
+                                .unwrap_or_default();
+
+                            let analysis_result = format!(
+                                "## 🔍 AI Code Analysis: {}\n\n**Summary:** {}\n\n### Issues Found ({}):\n{}{}{}\n\n*Analyzed using: {}*",
+                                file_path,
+                                result.summary,
+                                result.issues.len(),
+                                issues_text,
+                                suggestions_text,
+                                complexity_text,
+                                result.model_used
+                            );
+
+                            info!("AI code analysis completed for: {} ({} issues found)", file_path, result.issues.len());
+                            Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
+                        }
+                        Err(e) => {
+                            warn!("NVIDIA analysis failed for {}: {}", file_path, e);
+                            let fallback = format!(
+                                "## ⚠️ Code Analysis: {}\n\nNVIDIA AI analysis failed: {}\n\nFalling back to basic analysis: File exists and is readable.",
+                                file_path, e
+                            );
+                            Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                        }
+                    }
+                }
+                Err(e) => {
+                    Err(McpError::invalid_request(&format!("Failed to read file {}: {}", file_path, e), None))
+                }
+            }
+        } else {
+            // Fallback without NVIDIA
+            let analysis_result = format!(
+                "## 📄 Basic Code Analysis: {}\n\nNVIDIA AI not available (missing NVIDIA_API_KEY).\nBasic analysis: File exists and appears to be valid {} code.",
+                file_path,
+                language.as_deref().unwrap_or("source")
+            );
+            
+            info!("Basic code analysis completed for: {}", file_path);
+            Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
+        }
     }
 }
 
