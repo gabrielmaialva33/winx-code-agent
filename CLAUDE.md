@@ -178,10 +178,17 @@ The following AI-powered tools are available when NVIDIA_API_KEY is configured:
 - **Code Explanation**: Detailed explanations leveraging Qwen3's superior instruction-following capabilities
 - **Smart Model Selection**: Automatically chooses the optimal NVIDIA model for each task, defaulting to Qwen3
 
+#### Qwen3-235B-A22B Features:
+- **Thinking Mode**: Switch between thinking mode (complex reasoning) and non-thinking mode (efficient dialogue)
+- **MoE Architecture**: 235B total parameters with 22B activated for optimal performance
+- **Extended Context**: 32K native context, extendable to 131K with YaRN
+- **Multilingual**: Support for 100+ languages and dialects
+- **Optimal Sampling**: Temperature=0.6-0.7, TopP=0.8-0.95, TopK=20 for best results
+
 #### Implementation Status:
 - ✅ NVIDIA API client with authentication and rate limiting
-- ✅ Multi-model support (5 specialized models)
-- ✅ Code analysis engine with 20+ language support
+- ✅ Multi-model support (6 specialized models including Qwen3)
+- ✅ Code analysis engine with 100+ language support via Qwen3
 - ✅ Comprehensive error handling and retry logic
 - ✅ Configuration via environment variables
 - 🔄 MCP tool registration (planned for next release)
