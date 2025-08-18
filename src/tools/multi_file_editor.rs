@@ -14,6 +14,9 @@ use tracing::{debug, info, warn};
 
 use crate::errors::{Result, WinxError};
 use crate::state::BashState;
+use crate::dashscope::{DashScopeClient, DashScopeConfig, ChatCompletionRequest, ChatMessage};
+use crate::nvidia::{NvidiaClient, NvidiaConfig};
+use crate::gemini::{GeminiClient, GeminiConfig};
 
 /// Represents different types of file operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +46,16 @@ pub enum FileOperation {
         search: String,
         replace: String,
         all_occurrences: Option<bool>,
+    },
+    /// AI-powered smart search and replace with context understanding
+    SmartSearchReplace {
+        file_paths: Vec<String>,
+        search_pattern: String,
+        replace_hint: String,
+        context: Option<String>,
+        use_ai_provider: Option<String>,
+        confidence_threshold: Option<f32>,
+        preview_mode: Option<bool>,
     },
 }
 
