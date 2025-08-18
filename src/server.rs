@@ -563,9 +563,10 @@ impl WinxService {
         };
 
         match crate::tools::read_image::handle_tool_call(&self.bash_state, read_image).await {
-            Ok(result) => {
+            Ok((mime_type, base64_data)) => {
                 info!("Image read successfully: {}", file_path);
-                Ok(CallToolResult::success(vec![Content::text(result)]))
+                let result_text = format!("Image: {}\nMIME Type: {}\nBase64 Data: {}", file_path, mime_type, base64_data);
+                Ok(CallToolResult::success(vec![Content::text(result_text)]))
             }
             Err(e) => {
                 warn!("Failed to read image {}: {}", file_path, e);
