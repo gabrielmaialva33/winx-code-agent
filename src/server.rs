@@ -2062,9 +2062,7 @@ impl WinxService {
             .and_then(|v| v.as_f64())
             .map(|f| f as f32);
 
-        let preview_mode = args
-            .get("preview_mode")
-            .and_then(|v| v.as_bool());
+        let preview_mode = args.get("preview_mode").and_then(|v| v.as_bool());
 
         // Create the SmartSearchReplace operation
         let operation = FileOperation::SmartSearchReplace {
@@ -2137,7 +2135,9 @@ impl WinxService {
                 }
 
                 if result.rollback_performed {
-                    content_parts.push("\n🔄 **Rollback performed** due to errors in atomic mode.".to_string());
+                    content_parts.push(
+                        "\n🔄 **Rollback performed** due to errors in atomic mode.".to_string(),
+                    );
                 }
 
                 let ai_provider_info = match (
@@ -2148,7 +2148,7 @@ impl WinxService {
                     (true, _, _) => "DashScope/Qwen3",
                     (false, true, _) => "NVIDIA AI",
                     (false, false, true) => "Gemini AI",
-                    _ => "No AI provider available"
+                    _ => "No AI provider available",
                 };
 
                 content_parts.push(format!("\n*Powered by {}*", ai_provider_info));

@@ -12,11 +12,11 @@ use std::sync::{Arc, Mutex};
 use tokio::fs;
 use tracing::{debug, info, warn};
 
+use crate::dashscope::{ChatCompletionRequest, ChatMessage, DashScopeClient, DashScopeConfig};
 use crate::errors::{Result, WinxError};
-use crate::state::BashState;
-use crate::dashscope::{DashScopeClient, DashScopeConfig, ChatCompletionRequest, ChatMessage};
-use crate::nvidia::{NvidiaClient, NvidiaConfig};
 use crate::gemini::{GeminiClient, GeminiConfig};
+use crate::nvidia::{NvidiaClient, NvidiaConfig};
+use crate::state::BashState;
 
 /// Represents different types of file operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,7 +192,7 @@ impl AIProvider for DashScopeClient {
         };
 
         let response = self.chat_completion(&request).await?;
-        
+
         if let Some(message) = response.choices.first() {
             self.parse_ai_response(&message.message.content, content)
         } else {
@@ -206,37 +206,61 @@ impl DashScopeClient {
     fn parse_ai_response(&self, response: &str, _file_content: &str) -> Result<AIAnalysisResult> {
         // Try to parse JSON response
         if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(response) {
-            let matches = json_value.get("matches")
+            let matches = json_value
+                .get("matches")
                 .and_then(|m| m.as_array())
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|item| {
                             Some(SmartMatch {
                                 line_number: item.get("line_number")?.as_u64()? as usize,
-                                column_start: item.get("column_start")?.as_u64().unwrap_or(0) as usize,
+                                column_start: item.get("column_start")?.as_u64().unwrap_or(0)
+                                    as usize,
                                 column_end: item.get("column_end")?.as_u64().unwrap_or(0) as usize,
                                 original_text: item.get("original_text")?.as_str()?.to_string(),
-                                replacement_text: item.get("replacement_text")?.as_str()?.to_string(),
-                                context_before: item.get("context_before")?.as_str().unwrap_or("").to_string(),
-                                context_after: item.get("context_after")?.as_str().unwrap_or("").to_string(),
-                                confidence_score: item.get("confidence_score")?.as_f64().unwrap_or(0.5) as f32,
-                                reasoning: item.get("reasoning")?.as_str().unwrap_or("").to_string(),
+                                replacement_text: item
+                                    .get("replacement_text")?
+                                    .as_str()?
+                                    .to_string(),
+                                context_before: item
+                                    .get("context_before")?
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
+                                context_after: item
+                                    .get("context_after")?
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
+                                confidence_score: item
+                                    .get("confidence_score")?
+                                    .as_f64()
+                                    .unwrap_or(0.5)
+                                    as f32,
+                                reasoning: item
+                                    .get("reasoning")?
+                                    .as_str()
+                                    .unwrap_or("")
+                                    .to_string(),
                             })
                         })
                         .collect()
                 })
                 .unwrap_or_default();
 
-            let confidence = json_value.get("confidence")
+            let confidence = json_value
+                .get("confidence")
                 .and_then(|c| c.as_f64())
                 .unwrap_or(0.5) as f32;
 
-            let explanation = json_value.get("explanation")
+            let explanation = json_value
+                .get("explanation")
                 .and_then(|e| e.as_str())
                 .unwrap_or("AI analysis completed")
                 .to_string();
 
-            let suggested_replacement = json_value.get("suggested_replacement")
+            let suggested_replacement = json_value
+                .get("suggested_replacement")
                 .and_then(|s| s.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -348,19 +372,19 @@ impl MultiFileEditorTool {
             debug!("Using DashScope AI client for smart operations");
             return Some(Box::new(client));
         }
-        
+
         // Try NVIDIA as fallback 1
         if let Some(client) = self.get_nvidia_client().await {
             debug!("Using NVIDIA AI client for smart operations");
             return Some(Box::new(client));
         }
-        
+
         // Try Gemini as fallback 2
         if let Some(client) = self.get_gemini_client().await {
             debug!("Using Gemini AI client for smart operations");
             return Some(Box::new(client));
         }
-        
+
         warn!("No AI providers available for smart operations");
         None
     }
@@ -756,7 +780,7 @@ impl MultiFileEditorTool {
                 } else {
                     file_paths[0].clone()
                 }
-            },
+            }
         }
     }
 
@@ -1087,12 +1111,10 @@ impl MultiFileEditorTool {
             };
 
             // Analyze with AI
-            let analysis = match ai_client.analyze_code(
-                &content,
-                search_pattern,
-                replace_hint,
-                context,
-            ).await {
+            let analysis = match ai_client
+                .analyze_code(&content, search_pattern, replace_hint, context)
+                .await
+            {
                 Ok(analysis) => analysis,
                 Err(e) => {
                     warn!("AI analysis failed for {}: {}", file_path, e);
@@ -1101,7 +1123,8 @@ impl MultiFileEditorTool {
             };
 
             // Filter matches by confidence threshold
-            let valid_matches: Vec<_> = analysis.matches
+            let valid_matches: Vec<_> = analysis
+                .matches
                 .into_iter()
                 .filter(|m| m.confidence_score >= confidence_threshold)
                 .collect();
@@ -1155,14 +1178,16 @@ impl MultiFileEditorTool {
         } else {
             format!(
                 "Smart search/replace completed: {} replacements in {} files",
-                total_replacements,
-                processed_files
+                total_replacements, processed_files
             )
         };
 
         Ok(OperationResult {
             operation_index: index,
-            file_path: file_paths.first().unwrap_or(&"multiple_files".to_string()).clone(),
+            file_path: file_paths
+                .first()
+                .unwrap_or(&"multiple_files".to_string())
+                .clone(),
             success: true,
             message,
             backup_path: None,
@@ -1171,20 +1196,19 @@ impl MultiFileEditorTool {
     }
 
     /// Apply smart replacements to content
-    fn apply_smart_replacements(
-        &self,
-        content: &str,
-        matches: &[SmartMatch],
-    ) -> Result<String> {
+    fn apply_smart_replacements(&self, content: &str, matches: &[SmartMatch]) -> Result<String> {
         let mut lines: Vec<&str> = content.lines().collect();
-        
+
         // Sort matches by line number in reverse order to avoid index shifting
         let mut sorted_matches = matches.to_vec();
         sorted_matches.sort_by(|a, b| b.line_number.cmp(&a.line_number));
 
         for smart_match in sorted_matches {
             if smart_match.line_number == 0 || smart_match.line_number > lines.len() {
-                warn!("Invalid line number {} in smart match", smart_match.line_number);
+                warn!(
+                    "Invalid line number {} in smart match",
+                    smart_match.line_number
+                );
                 continue;
             }
 
@@ -1192,10 +1216,8 @@ impl MultiFileEditorTool {
             let original_line = lines[line_index];
 
             // Replace the specific text in the line
-            let new_line = original_line.replace(
-                &smart_match.original_text,
-                &smart_match.replacement_text
-            );
+            let new_line =
+                original_line.replace(&smart_match.original_text, &smart_match.replacement_text);
 
             lines[line_index] = Box::leak(new_line.into_boxed_str());
         }
@@ -1496,11 +1518,14 @@ mod tests {
     async fn test_smart_search_replace_basic() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.rs");
-        
+
         // Create initial file with Rust code
-        fs::write(&file_path, "fn old_function() {\n    println!(\"Hello\");\n}")
-            .await
-            .unwrap();
+        fs::write(
+            &file_path,
+            "fn old_function() {\n    println!(\"Hello\");\n}",
+        )
+        .await
+        .unwrap();
 
         let operation = FileOperation::SmartSearchReplace {
             file_paths: vec![file_path.to_string_lossy().to_string()],
@@ -1533,7 +1558,7 @@ mod tests {
     async fn test_smart_search_replace_preview() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.js");
-        
+
         // Create initial file
         fs::write(&file_path, "var oldVar = 'test';\nconsole.log(oldVar);")
             .await
@@ -1562,7 +1587,7 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.total_operations, 1);
-        
+
         // File should not be modified in preview mode
         let content = fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, "var oldVar = 'test';\nconsole.log(oldVar);");
@@ -1591,14 +1616,16 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.failed_operations, 1);
-        assert!(result.results[0].message.contains("requires at least one file path"));
+        assert!(result.results[0]
+            .message
+            .contains("requires at least one file path"));
     }
 
     #[tokio::test]
     async fn test_smart_search_replace_confidence_threshold() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.py");
-        
+
         fs::write(&file_path, "def test_function():\n    pass")
             .await
             .unwrap();
@@ -1627,7 +1654,9 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.failed_operations, 1);
-        assert!(result.results[0].message.contains("Confidence threshold must be between 0.0 and 1.0"));
+        assert!(result.results[0]
+            .message
+            .contains("Confidence threshold must be between 0.0 and 1.0"));
     }
 
     #[test]
@@ -1653,7 +1682,7 @@ mod tests {
         // Should serialize and deserialize correctly
         let json = serde_json::to_string(&analysis).unwrap();
         let deserialized: AIAnalysisResult = serde_json::from_str(&json).unwrap();
-        
+
         assert_eq!(analysis.file_path, deserialized.file_path);
         assert_eq!(analysis.matches.len(), deserialized.matches.len());
         assert_eq!(analysis.confidence, deserialized.confidence);
