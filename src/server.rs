@@ -71,21 +71,146 @@ impl WinxService {
     }
 }
 
-/// Core tool implementations with proper rmcp 0.5.0 pattern
-#[tool_router]
+/// ServerHandler implementation with manual tool handling
+impl ServerHandler for WinxService {
+    fn get_info(&self) -> ServerInfo {
+        ServerInfo {
+            server_info: Implementation {
+                name: "winx-code-agent".into(),
+                version: self.version.clone(),
+            },
+            protocol_version: ProtocolVersion::V_2024_11_05,
+            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            instructions: Some(
+                "Winx is a high-performance Rust implementation of WCGW for code agents with NVIDIA AI integration. \
+                Provides shell execution, file management, and AI-powered code analysis capabilities.".into(),
+            ),
+        }
+    }
+
+    async fn list_tools(&self, _: ListToolsRequestParam) -> Result<ListToolsResponse, McpError> {
+        Ok(ListToolsResponse {
+            tools: vec![
+                Tool {
+                    name: "ping".into(),
+                    description: Some("Test server connectivity".into()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "message": {
+                                "type": "string",
+                                "description": "Optional message to echo back"
+                            }
+                        }
+                    }),
+                },
+                Tool {
+                    name: "initialize".into(),
+                    description: Some("Initialize the bash shell environment".into()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "shell": {
+                                "type": "string",
+                                "description": "Shell to use (default: bash)"
+                            }
+                        }
+                    }),
+                },
+                Tool {
+                    name: "bash_command".into(),
+                    description: Some("Execute a command in the bash shell".into()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "command": {
+                                "type": "string",
+                                "description": "Command to execute"
+                            },
+                            "timeout_seconds": {
+                                "type": "integer",
+                                "description": "Timeout in seconds (default: 30)"
+                            }
+                        },
+                        "required": ["command"]
+                    }),
+                },
+                Tool {
+                    name: "read_files".into(),
+                    description: Some("Read contents of one or more files".into()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "paths": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "File paths to read"
+                            }
+                        },
+                        "required": ["paths"]
+                    }),
+                },
+                Tool {
+                    name: "file_write_or_edit".into(),
+                    description: Some("Write or edit file contents".into()),
+                    input_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "path": {
+                                "type": "string",
+                                "description": "File path to write"
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Content to write"
+                            },
+                            "create_if_missing": {
+                                "type": "boolean",
+                                "description": "Create file if it doesn't exist (default: true)"
+                            }
+                        },
+                        "required": ["path", "content"]
+                    }),
+                },
+            ],
+        })
+    }
+
+    async fn call_tool(&self, param: CallToolRequestParam) -> Result<CallToolResponse, McpError> {
+        let result = match param.name.as_str() {
+            "ping" => self.handle_ping(param.arguments).await?,
+            "initialize" => self.handle_initialize(param.arguments).await?,
+            "bash_command" => self.handle_bash_command(param.arguments).await?,
+            "read_files" => self.handle_read_files(param.arguments).await?,
+            "file_write_or_edit" => self.handle_file_write_or_edit(param.arguments).await?,
+            _ => return Err(McpError::invalid_request(&format!("Unknown tool: {}", param.name), None)),
+        };
+
+        Ok(CallToolResponse {
+            content: result.content,
+            is_error: Some(result.is_error.unwrap_or(false)),
+        })
+    }
+}
+
 impl WinxService {
-    /// Simple ping tool for testing connectivity
-    #[tool(description = "Test server connectivity")]
-    async fn ping(&self, message: Option<String>) -> Result<CallToolResult, McpError> {
-        let response = message.unwrap_or_else(|| "pong".to_string());
-        let content = format!("Server: winx-code-agent v{}\nResponse: {}", self.version, response);
+    async fn handle_ping(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let message = args
+            .and_then(|v| v.get("message"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("pong");
+        
+        let content = format!("Server: winx-code-agent v{}\nResponse: {}", self.version, message);
         Ok(CallToolResult::success(vec![Content::text(content)]))
     }
 
-    /// Initialize the bash shell environment
-    #[tool(description = "Initialize the bash shell environment")]
-    async fn initialize(&self, shell: Option<String>) -> Result<CallToolResult, McpError> {
-        let shell = shell.unwrap_or_else(|| "bash".to_string());
+    async fn handle_initialize(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let shell = args
+            .and_then(|v| v.get("shell"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("bash");
         
         let mut bash_state_guard = self.bash_state.lock().await;
         if bash_state_guard.is_some() {
@@ -110,14 +235,14 @@ impl WinxService {
         }
     }
 
-    /// Execute a bash command
-    #[tool(description = "Execute a command in the bash shell")]
-    async fn bash_command(
-        &self,
-        command: String,
-        timeout_seconds: Option<u64>,
-    ) -> Result<CallToolResult, McpError> {
-        let timeout_secs = timeout_seconds.unwrap_or(30) as f32;
+    async fn handle_bash_command(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let command = args.get("command")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_request("Missing command", None))?;
+        let timeout_seconds = args.get("timeout_seconds")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(30) as f32;
         
         let mut bash_state_guard = self.bash_state.lock().await;
         if bash_state_guard.is_none() {
@@ -126,7 +251,7 @@ impl WinxService {
 
         let bash_state = bash_state_guard.as_mut().unwrap();
         
-        match bash_state.execute_interactive(&command, timeout_secs).await {
+        match bash_state.execute_interactive(command, timeout_seconds).await {
             Ok(output) => {
                 let working_dir = bash_state.cwd.display().to_string();
                 let content = format!("Working directory: {}\n\n{}", working_dir, output);
@@ -139,13 +264,19 @@ impl WinxService {
         }
     }
 
-    /// Read file contents
-    #[tool(description = "Read contents of one or more files")]
-    async fn read_files(&self, paths: Vec<String>) -> Result<CallToolResult, McpError> {
+    async fn handle_read_files(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let paths = args.get("paths")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| McpError::invalid_request("Missing paths array", None))?;
+        
         let mut content_parts = Vec::new();
         
-        for path in paths {
-            match tokio::fs::read_to_string(&path).await {
+        for path_value in paths {
+            let path = path_value.as_str()
+                .ok_or_else(|| McpError::invalid_request("Invalid path in array", None))?;
+            
+            match tokio::fs::read_to_string(path).await {
                 Ok(content) => {
                     content_parts.push(format!("=== {} ({} bytes) ===\n{}\n", path, content.len(), content));
                 }
@@ -158,21 +289,23 @@ impl WinxService {
         Ok(CallToolResult::success(vec![Content::text(content_parts.join("\n"))]))
     }
 
-    /// Write or edit file contents
-    #[tool(description = "Write or edit file contents")]
-    async fn file_write_or_edit(
-        &self,
-        path: String,
-        content: String,
-        create_if_missing: Option<bool>,
-    ) -> Result<CallToolResult, McpError> {
-        let create = create_if_missing.unwrap_or(true);
+    async fn handle_file_write_or_edit(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let path = args.get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_request("Missing path", None))?;
+        let content = args.get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_request("Missing content", None))?;
+        let create = args.get("create_if_missing")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
         
-        if !create && !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        if !create && !tokio::fs::try_exists(path).await.unwrap_or(false) {
             return Err(McpError::invalid_request(&format!("File does not exist: {}", path), None));
         }
 
-        match tokio::fs::write(&path, &content).await {
+        match tokio::fs::write(path, content).await {
             Ok(_) => {
                 info!("File written successfully: {}", path);
                 Ok(CallToolResult::success(vec![Content::text(
@@ -183,25 +316,6 @@ impl WinxService {
                 warn!("Failed to write file {}: {}", path, e);
                 Err(McpError::internal_error(format!("Failed to write file {}: {}", path, e), None))
             }
-        }
-    }
-}
-
-/// ServerHandler implementation with tool support
-#[tool_handler]
-impl ServerHandler for WinxService {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            server_info: Implementation {
-                name: "winx-code-agent".into(),
-                version: self.version.clone(),
-            },
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
-            instructions: Some(
-                "Winx is a high-performance Rust implementation of WCGW for code agents with NVIDIA AI integration. \
-                Provides shell execution, file management, and AI-powered code analysis capabilities.".into(),
-            ),
         }
     }
 }
