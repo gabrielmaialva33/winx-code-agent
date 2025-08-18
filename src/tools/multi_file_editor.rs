@@ -1062,6 +1062,7 @@ impl MultiFileEditorTool {
     }
 
     /// Execute smart AI-powered search and replace operation
+    #[allow(clippy::too_many_arguments)]
     async fn execute_smart_search_replace(
         &mut self,
         index: usize,
