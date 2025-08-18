@@ -151,6 +151,8 @@ impl ServerHandler for WinxService {
                         },
                         "required": ["command"]
                     })),
+                    output_schema: None,
+                    annotations: None,
                 },
                 Tool {
                     name: "read_files".into(),
@@ -220,9 +222,14 @@ impl ServerHandler for WinxService {
 impl WinxService {
     async fn handle_ping(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let message = args
-            .and_then(|v| v.get("message"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("pong");
+            .and_then(|v| {
+                if let Value::Object(map) = v {
+                    map.get("message").and_then(|v| v.as_str()).map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "pong".to_string());
         
         let content = format!("Server: winx-code-agent v{}\nResponse: {}", self.version, message);
         Ok(CallToolResult::success(vec![Content::text(content)]))
@@ -230,9 +237,14 @@ impl WinxService {
 
     async fn handle_initialize(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let shell = args
-            .and_then(|v| v.get("shell"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("bash");
+            .and_then(|v| {
+                if let Value::Object(map) = v {
+                    map.get("shell").and_then(|v| v.as_str()).map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| "bash".to_string());
         
         let mut bash_state_guard = self.bash_state.lock().await;
         if bash_state_guard.is_some() {
