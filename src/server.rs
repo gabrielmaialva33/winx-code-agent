@@ -16,8 +16,8 @@ use crate::dashscope::{DashScopeClient, DashScopeConfig};
 use crate::gemini::{GeminiClient, GeminiConfig};
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
 use crate::state::BashState;
+use crate::tools::winx_chat::WinxChat;
 use crate::types::{CommandSuggestions, ContextSave, ReadImage};
-use crate::tools::winx_chat::{WinxChat};
 
 /// Helper function to create JSON schema from serde_json::Value
 fn json_to_schema(value: Value) -> Arc<serde_json::Map<String, Value>> {
@@ -464,7 +464,10 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "multi_file_editor".into(),
-                    description: Some("Create and edit multiple files simultaneously with atomic operations".into()),
+                    description: Some(
+                        "Create and edit multiple files simultaneously with atomic operations"
+                            .into(),
+                    ),
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -1843,9 +1846,13 @@ impl WinxService {
             .and_then(|v| v.as_str())
             .ok_or_else(|| McpError::invalid_request("Missing message", None))?;
 
-        let context = args.get("context").and_then(|v| v.as_str()).map(|s| s.to_string());
-        
-        let conversation_mode = args.get("conversation_mode")
+        let context = args
+            .get("context")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let conversation_mode = args
+            .get("conversation_mode")
             .and_then(|v| v.as_str())
             .and_then(|s| match s {
                 "casual" => Some(crate::tools::winx_chat::ConversationMode::Casual),
@@ -1858,10 +1865,14 @@ impl WinxService {
             });
 
         let include_system_info = args.get("include_system_info").and_then(|v| v.as_bool());
-        let personality_level = args.get("personality_level")
+        let personality_level = args
+            .get("personality_level")
             .and_then(|v| v.as_u64())
             .map(|n| n as u8);
-        let session_id = args.get("session_id").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let session_id = args
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         let winx_chat = WinxChat {
             message: message.to_string(),
@@ -1891,25 +1902,22 @@ impl WinxService {
         &self,
         args: Option<Value>,
     ) -> Result<CallToolResult, McpError> {
-        use crate::tools::multi_file_editor::{MultiFileEditorTool, MultiFileEditor};
-        
+        use crate::tools::multi_file_editor::{MultiFileEditor, MultiFileEditorTool};
+
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        
+
         // Parse the configuration from arguments
         let config: MultiFileEditor = serde_json::from_value(args)
-            .map_err(|e| McpError::invalid_request(
-                format!("Invalid arguments: {}", e),
-                None,
-            ))?;
-        
+            .map_err(|e| McpError::invalid_request(format!("Invalid arguments: {}", e), None))?;
+
         // Create the tool instance
         let mut tool = MultiFileEditorTool::new(&config);
-        
+
         // Execute the operations
         match tool.execute(&config.operations).await {
             Ok(result) => {
                 let mut content_parts = Vec::new();
-                
+
                 // Add summary
                 content_parts.push(format!(
                     "## Multi-File Editor Results\n\n**Total Operations:** {}\n**Successful:** {}\n**Failed:** {}\n**Rollback Performed:** {}\n**Dry Run:** {}\n",
@@ -1919,7 +1927,7 @@ impl WinxService {
                     result.rollback_performed,
                     result.dry_run
                 ));
-                
+
                 // Add operation details
                 for op_result in &result.results {
                     let status = if op_result.success { "✅" } else { "❌" };
@@ -1927,22 +1935,26 @@ impl WinxService {
                         "### Operation {} {}: {}\n**File:** {}\n**Message:** {}\n",
                         op_result.operation_index + 1,
                         status,
-                        if op_result.success { "Success" } else { "Failed" },
+                        if op_result.success {
+                            "Success"
+                        } else {
+                            "Failed"
+                        },
                         op_result.file_path,
                         op_result.message
                     ));
-                    
+
                     if let Some(backup_path) = &op_result.backup_path {
                         content_parts.push(format!("**Backup:** {}\n", backup_path));
                     }
-                    
+
                     if let Some(bytes_written) = op_result.bytes_written {
                         content_parts.push(format!("**Bytes Written:** {}\n", bytes_written));
                     }
                 }
-                
+
                 Ok(CallToolResult::success(vec![Content::text(
-                    content_parts.join("\n")
+                    content_parts.join("\n"),
                 )]))
             }
             Err(e) => {

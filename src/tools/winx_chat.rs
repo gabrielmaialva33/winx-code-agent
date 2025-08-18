@@ -160,13 +160,36 @@ impl WinxPersonality {
     /// Default easter egg responses
     fn default_easter_eggs() -> HashMap<String, String> {
         let mut eggs = HashMap::new();
-        eggs.insert("oi winx".to_string(), "✨ Oi! Sou a Winx, sua fada digital do código! 🧚‍♀️".to_string());
-        eggs.insert("como você está".to_string(), "Estou ótima! Processando dados a velocidade da luz! ⚡".to_string());
-        eggs.insert("conte uma piada".to_string(), "Por que os programadores preferem modo escuro? Porque a luz atrai bugs! 🐛😄".to_string());
-        eggs.insert("rust".to_string(), "🦀 Rust é incrível! Zero-cost abstractions e memory safety! 💚".to_string());
-        eggs.insert("help".to_string(), "🆘 Claro! Sou especialista em ajudar com código, debugging e operações do sistema!".to_string());
-        eggs.insert("obrigado".to_string(), "✨ De nada! Estou sempre aqui para ajudar! 💫".to_string());
-        eggs.insert("winx é legal".to_string(), "🥰 Obrigada! Você também é legal por trabalhar comigo! 💖".to_string());
+        eggs.insert(
+            "oi winx".to_string(),
+            "✨ Oi! Sou a Winx, sua fada digital do código! 🧚‍♀️".to_string(),
+        );
+        eggs.insert(
+            "como você está".to_string(),
+            "Estou ótima! Processando dados a velocidade da luz! ⚡".to_string(),
+        );
+        eggs.insert(
+            "conte uma piada".to_string(),
+            "Por que os programadores preferem modo escuro? Porque a luz atrai bugs! 🐛😄"
+                .to_string(),
+        );
+        eggs.insert(
+            "rust".to_string(),
+            "🦀 Rust é incrível! Zero-cost abstractions e memory safety! 💚".to_string(),
+        );
+        eggs.insert(
+            "help".to_string(),
+            "🆘 Claro! Sou especialista em ajudar com código, debugging e operações do sistema!"
+                .to_string(),
+        );
+        eggs.insert(
+            "obrigado".to_string(),
+            "✨ De nada! Estou sempre aqui para ajudar! 💫".to_string(),
+        );
+        eggs.insert(
+            "winx é legal".to_string(),
+            "🥰 Obrigada! Você também é legal por trabalhar comigo! 💖".to_string(),
+        );
         eggs
     }
 
@@ -178,7 +201,8 @@ impl WinxPersonality {
         let index = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
-            .as_nanos() as usize % self.tips_database.len();
+            .as_nanos() as usize
+            % self.tips_database.len();
         self.tips_database.get(index)
     }
 
@@ -195,7 +219,8 @@ impl WinxPersonality {
 
     /// Add to conversation history
     pub fn add_to_history(&mut self, user_message: String, winx_response: String) {
-        self.conversation_history.push((user_message, winx_response));
+        self.conversation_history
+            .push((user_message, winx_response));
         // Keep only last 10 conversations for context
         if self.conversation_history.len() > 10 {
             self.conversation_history.remove(0);
@@ -218,26 +243,66 @@ impl WinxPersonality {
 impl Default for WinxKnowledge {
     fn default() -> Self {
         let mut tools_info = HashMap::new();
-        tools_info.insert("bash_command".to_string(), "Executa comandos shell com estado persistente".to_string());
-        tools_info.insert("read_files".to_string(), "Lê conteúdo de arquivos com suporte a ranges".to_string());
-        tools_info.insert("file_write_or_edit".to_string(), "Escreve ou edita arquivos".to_string());
-        tools_info.insert("code_analyzer".to_string(), "Análise de código com IA para bugs e performance".to_string());
-        tools_info.insert("ai_generate_code".to_string(), "Gera código a partir de descrições naturais".to_string());
-        tools_info.insert("ai_explain_code".to_string(), "Explica código com detalhes".to_string());
-        tools_info.insert("multi_file_editor".to_string(), "Editor avançado para múltiplos arquivos".to_string());
-        tools_info.insert("context_save".to_string(), "Salva contexto de tarefas para resumir depois".to_string());
-        tools_info.insert("read_image".to_string(), "Processa imagens como base64".to_string());
-        tools_info.insert("command_suggestions".to_string(), "Sugere comandos baseado no contexto".to_string());
+        tools_info.insert(
+            "bash_command".to_string(),
+            "Executa comandos shell com estado persistente".to_string(),
+        );
+        tools_info.insert(
+            "read_files".to_string(),
+            "Lê conteúdo de arquivos com suporte a ranges".to_string(),
+        );
+        tools_info.insert(
+            "file_write_or_edit".to_string(),
+            "Escreve ou edita arquivos".to_string(),
+        );
+        tools_info.insert(
+            "code_analyzer".to_string(),
+            "Análise de código com IA para bugs e performance".to_string(),
+        );
+        tools_info.insert(
+            "ai_generate_code".to_string(),
+            "Gera código a partir de descrições naturais".to_string(),
+        );
+        tools_info.insert(
+            "ai_explain_code".to_string(),
+            "Explica código com detalhes".to_string(),
+        );
+        tools_info.insert(
+            "multi_file_editor".to_string(),
+            "Editor avançado para múltiplos arquivos".to_string(),
+        );
+        tools_info.insert(
+            "context_save".to_string(),
+            "Salva contexto de tarefas para resumir depois".to_string(),
+        );
+        tools_info.insert(
+            "read_image".to_string(),
+            "Processa imagens como base64".to_string(),
+        );
+        tools_info.insert(
+            "command_suggestions".to_string(),
+            "Sugere comandos baseado no contexto".to_string(),
+        );
 
         let mut architecture_info = HashMap::new();
-        architecture_info.insert("fallback_system".to_string(), "DashScope → NVIDIA → Gemini com fallback automático".to_string());
-        architecture_info.insert("mcp_protocol".to_string(), "Usa Model Context Protocol para comunicação com Claude".to_string());
-        architecture_info.insert("async_runtime".to_string(), "Runtime Tokio para operações assíncronas".to_string());
+        architecture_info.insert(
+            "fallback_system".to_string(),
+            "DashScope → NVIDIA → Gemini com fallback automático".to_string(),
+        );
+        architecture_info.insert(
+            "mcp_protocol".to_string(),
+            "Usa Model Context Protocol para comunicação com Claude".to_string(),
+        );
+        architecture_info.insert(
+            "async_runtime".to_string(),
+            "Runtime Tokio para operações assíncronas".to_string(),
+        );
 
         Self {
             tools_info,
             programming_tips: vec![
-                "Use `unwrap_or_else` em vez de `unwrap()` para melhor tratamento de erros".to_string(),
+                "Use `unwrap_or_else` em vez de `unwrap()` para melhor tratamento de erros"
+                    .to_string(),
                 "Prefira `&str` sobre `String` em parâmetros de função quando possível".to_string(),
                 "Use `cargo test` para executar todos os testes do projeto".to_string(),
             ],
@@ -267,28 +332,40 @@ impl WinxChatProcessor {
     }
 
     /// Process a chat message and generate Winx's response
-    pub async fn process_chat(&self, chat: &WinxChat, system_info: Option<SystemInfo>) -> Result<WinxResponse> {
+    pub async fn process_chat(
+        &self,
+        chat: &WinxChat,
+        system_info: Option<SystemInfo>,
+    ) -> Result<WinxResponse> {
         let mode = chat.conversation_mode.clone().unwrap_or_default();
         let personality_level = chat.personality_level.unwrap_or(7);
         let include_system_info = chat.include_system_info.unwrap_or(false);
         let session_id = chat.session_id.clone().unwrap_or_else(|| {
-            format!("winx_{}", std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos())
+            format!(
+                "winx_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )
         });
 
-        debug!("Processing Winx chat: mode={:?}, personality={}", mode, personality_level);
+        debug!(
+            "Processing Winx chat: mode={:?}, personality={}",
+            mode, personality_level
+        );
 
         // Generate response based on conversation mode and personality
-        let response_message = self.generate_response(
-            &chat.message,
-            &mode,
-            personality_level,
-            chat.context.as_deref(),
-            system_info.as_ref(),
-            include_system_info,
-        ).await?;
+        let response_message = self
+            .generate_response(
+                &chat.message,
+                &mode,
+                personality_level,
+                chat.context.as_deref(),
+                system_info.as_ref(),
+                include_system_info,
+            )
+            .await?;
 
         // Get suggestions based on mode
         let suggestions = self.generate_suggestions(&mode, chat.context.as_deref());
@@ -332,7 +409,9 @@ impl WinxChatProcessor {
         }
 
         // Build base response based on mode
-        let mut response = self.build_mode_response(message, mode, personality_level).await?;
+        let mut response = self
+            .build_mode_response(message, mode, personality_level)
+            .await?;
 
         // Add context information if provided
         if let Some(ctx) = context {
@@ -356,30 +435,38 @@ impl WinxChatProcessor {
     }
 
     /// Build response based on conversation mode
-    async fn build_mode_response(&self, message: &str, mode: &ConversationMode, personality_level: u8) -> Result<String> {
+    async fn build_mode_response(
+        &self,
+        message: &str,
+        mode: &ConversationMode,
+        personality_level: u8,
+    ) -> Result<String> {
         let response = match mode {
             ConversationMode::Casual => {
                 if personality_level >= 7 {
-                    format!("✨ {} Que legal conversar contigo! 😊", self.process_casual_message(message))
+                    format!(
+                        "✨ {} Que legal conversar contigo! 😊",
+                        self.process_casual_message(message)
+                    )
                 } else {
                     self.process_casual_message(message)
                 }
-            },
+            }
             ConversationMode::Technical => {
                 format!("🔧 {}", self.process_technical_message(message))
-            },
+            }
             ConversationMode::Help => {
                 format!("🆘 {}", self.process_help_message(message))
-            },
+            }
             ConversationMode::Debug => {
                 format!("🐛 {}", self.process_debug_message(message))
-            },
+            }
             ConversationMode::Creative => {
                 format!("💡 {}", self.process_creative_message(message))
-            },
+            }
             ConversationMode::Mentor => {
                 format!("🧙‍♀️ {}", self.process_mentor_message(message))
-            },
+            }
         };
 
         Ok(response)
@@ -389,10 +476,15 @@ impl WinxChatProcessor {
     fn process_casual_message(&self, message: &str) -> String {
         if message.to_lowercase().contains("como") && message.to_lowercase().contains("você") {
             "Estou ótima! Sempre pronta para ajudar com código e conversar! Como posso te ajudar hoje?".to_string()
-        } else if message.to_lowercase().contains("obrigado") || message.to_lowercase().contains("valeu") {
+        } else if message.to_lowercase().contains("obrigado")
+            || message.to_lowercase().contains("valeu")
+        {
             "De nada! Foi um prazer ajudar! 💖".to_string()
         } else {
-            format!("Interessante! Sobre '{}' - deixe-me pensar... Como posso te ajudar com isso?", message)
+            format!(
+                "Interessante! Sobre '{}' - deixe-me pensar... Como posso te ajudar com isso?",
+                message
+            )
         }
     }
 
@@ -411,9 +503,13 @@ impl WinxChatProcessor {
 
     /// Process help requests
     fn process_help_message(&self, message: &str) -> String {
-        if message.to_lowercase().contains("ferramentas") || message.to_lowercase().contains("tools") {
+        if message.to_lowercase().contains("ferramentas")
+            || message.to_lowercase().contains("tools")
+        {
             "Tenho 11 ferramentas disponíveis: bash_command, read_files, file_write_or_edit, code_analyzer, ai_generate_code, ai_explain_code, multi_file_editor, context_save, read_image, command_suggestions e winx_chat! Qual te interessa?".to_string()
-        } else if message.to_lowercase().contains("começar") || message.to_lowercase().contains("iniciar") {
+        } else if message.to_lowercase().contains("começar")
+            || message.to_lowercase().contains("iniciar")
+        {
             "Para começar, recomendo usar 'initialize' para configurar o ambiente, depois 'bash_command' para explorar o projeto e 'read_files' para entender o código!".to_string()
         } else {
             format!("Vou te ajudar com: '{}'. Que tipo de assistência você precisa? Posso explicar, executar comandos, analisar código ou ensinar conceitos!", message)
@@ -438,7 +534,8 @@ impl WinxChatProcessor {
 
     /// Process mentor mode
     fn process_mentor_message(&self, message: &str) -> String {
-        if message.to_lowercase().contains("aprender") || message.to_lowercase().contains("ensinar") {
+        if message.to_lowercase().contains("aprender") || message.to_lowercase().contains("ensinar")
+        {
             "Excelente! Aprender é uma jornada contínua. Qual conceito você gostaria de explorar? Posso ensinar desde fundamentos até técnicas avançadas.".to_string()
         } else {
             format!("Como seu mentor digital, vou te guiar através de: '{}'. Lembre-se: a prática leva à perfeição, e erros são oportunidades de aprendizado!", message)
@@ -446,7 +543,11 @@ impl WinxChatProcessor {
     }
 
     /// Generate suggestions based on mode
-    fn generate_suggestions(&self, mode: &ConversationMode, _context: Option<&str>) -> Option<Vec<String>> {
+    fn generate_suggestions(
+        &self,
+        mode: &ConversationMode,
+        _context: Option<&str>,
+    ) -> Option<Vec<String>> {
         let suggestions = match mode {
             ConversationMode::Technical => vec![
                 "Use 'cargo clippy' para análise estática do código".to_string(),
@@ -486,13 +587,16 @@ impl WinxChatProcessor {
         result.push_str(&format!("\n\n📊 **Status do Sistema:**"));
         result.push_str(&format!("\n🔧 Ferramentas: {}", info.tools_count));
         result.push_str(&format!("\n⏱️ Uptime: {}", info.uptime));
-        
+
         if let Some(dir) = &info.current_dir {
             result.push_str(&format!("\n📁 Diretório: {}", dir));
         }
 
         if !info.ai_providers.is_empty() {
-            result.push_str(&format!("\n🤖 Provedores AI: {}", info.ai_providers.join(", ")));
+            result.push_str(&format!(
+                "\n🤖 Provedores AI: {}",
+                info.ai_providers.join(", ")
+            ));
         }
 
         result
@@ -507,14 +611,20 @@ pub async fn handle_tool_call(
     info!("Processing Winx chat: {:?}", chat.conversation_mode);
 
     let processor = WinxChatProcessor::new();
-    
+
     // Gather system information if requested
     let system_info = if chat.include_system_info.unwrap_or(false) {
         Some(SystemInfo {
-            tools_count: 11, // Current number of registered tools
+            tools_count: 11,              // Current number of registered tools
             uptime: "Active".to_string(), // Could get real uptime
-            current_dir: std::env::current_dir().ok().map(|p| p.display().to_string()),
-            ai_providers: vec!["DashScope".to_string(), "NVIDIA".to_string(), "Gemini".to_string()],
+            current_dir: std::env::current_dir()
+                .ok()
+                .map(|p| p.display().to_string()),
+            ai_providers: vec![
+                "DashScope".to_string(),
+                "NVIDIA".to_string(),
+                "Gemini".to_string(),
+            ],
             stats: HashMap::new(),
         })
     } else {
@@ -604,18 +714,24 @@ mod tests {
             stats: HashMap::new(),
         };
 
-        let response = processor.process_chat(&chat, Some(system_info)).await.unwrap();
+        let response = processor
+            .process_chat(&chat, Some(system_info))
+            .await
+            .unwrap();
         assert!(response.included_system_info);
-        assert!(response.message.contains("Status do Sistema") || response.message.contains("Ferramentas"));
+        assert!(
+            response.message.contains("Status do Sistema")
+                || response.message.contains("Ferramentas")
+        );
     }
 
     #[test]
     fn test_personality_mood_emoji() {
         let mut personality = WinxPersonality::default();
-        
+
         personality.mood = WinxMood::Cheerful;
         assert_eq!(personality.mood_emoji(), "😊");
-        
+
         personality.mood = WinxMood::Focused;
         assert_eq!(personality.mood_emoji(), "🎯");
     }
@@ -623,11 +739,11 @@ mod tests {
     #[test]
     fn test_easter_egg_detection() {
         let personality = WinxPersonality::default();
-        
+
         let response = personality.check_easter_egg("oi winx");
         assert!(response.is_some());
         assert!(response.unwrap().contains("fada digital"));
-        
+
         let no_response = personality.check_easter_egg("mensagem aleatória");
         assert!(no_response.is_none());
     }

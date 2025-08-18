@@ -26,20 +26,11 @@ pub enum FileOperation {
         create_dirs: Option<bool>,
     },
     /// Replace entire file content
-    Replace {
-        file_path: String,
-        content: String,
-    },
+    Replace { file_path: String, content: String },
     /// Append content to end of file
-    Append {
-        file_path: String,
-        content: String,
-    },
+    Append { file_path: String, content: String },
     /// Prepend content to beginning of file
-    Prepend {
-        file_path: String,
-        content: String,
-    },
+    Prepend { file_path: String, content: String },
     /// Insert content at specific line number
     InsertAtLine {
         file_path: String,
@@ -233,9 +224,11 @@ impl MultiFileEditorTool {
     /// Validate a single operation
     async fn validate_operation(&self, operation: &FileOperation) -> Result<()> {
         match operation {
-            FileOperation::Create { file_path, content, .. } => {
+            FileOperation::Create {
+                file_path, content, ..
+            } => {
                 let path = Path::new(file_path);
-                
+
                 // Check if file already exists
                 if path.exists() {
                     return Err(WinxError::FileAccessError {
@@ -247,10 +240,10 @@ impl MultiFileEditorTool {
                 // Check content size
                 if content.len() > self.max_file_size {
                     return Err(WinxError::FileTooLarge {
-                    path: PathBuf::from(file_path),
-                    size: content.len() as u64,
-                    max_size: self.max_file_size as u64,
-                });
+                        path: PathBuf::from(file_path),
+                        size: content.len() as u64,
+                        max_size: self.max_file_size as u64,
+                    });
                 }
 
                 // Check if parent directory exists or can be created
@@ -265,7 +258,7 @@ impl MultiFileEditorTool {
             | FileOperation::Append { file_path, content }
             | FileOperation::Prepend { file_path, content } => {
                 let path = Path::new(file_path);
-                
+
                 // Check if file exists
                 if !path.exists() {
                     return Err(WinxError::FileAccessError {
@@ -285,9 +278,9 @@ impl MultiFileEditorTool {
 
                 // Check file size
                 let metadata = fs::metadata(path).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to get file metadata: {}", e))
-        })?;
-                
+                    WinxError::FileError(format!("Failed to get file metadata: {}", e))
+                })?;
+
                 if metadata.len() as usize > self.max_file_size {
                     return Err(WinxError::FileTooLarge {
                         path: path.to_path_buf(),
@@ -296,9 +289,13 @@ impl MultiFileEditorTool {
                     });
                 }
             }
-            FileOperation::InsertAtLine { file_path, content, line_number } => {
+            FileOperation::InsertAtLine {
+                file_path,
+                content,
+                line_number,
+            } => {
                 let path = Path::new(file_path);
-                
+
                 if !path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
@@ -316,12 +313,19 @@ impl MultiFileEditorTool {
 
                 // Validate line number
                 if *line_number == 0 {
-                    return Err(WinxError::InvalidInput("Line number must be >= 1".to_string()));
+                    return Err(WinxError::InvalidInput(
+                        "Line number must be >= 1".to_string(),
+                    ));
                 }
             }
-            FileOperation::SearchReplace { file_path, search, replace, .. } => {
+            FileOperation::SearchReplace {
+                file_path,
+                search,
+                replace,
+                ..
+            } => {
                 let path = Path::new(file_path);
-                
+
                 if !path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
@@ -330,7 +334,9 @@ impl MultiFileEditorTool {
                 }
 
                 if search.is_empty() {
-                    return Err(WinxError::InvalidInput("Search string cannot be empty".to_string()));
+                    return Err(WinxError::InvalidInput(
+                        "Search string cannot be empty".to_string(),
+                    ));
                 }
 
                 if replace.len() > self.max_file_size {
@@ -353,7 +359,7 @@ impl MultiFileEditorTool {
         operation: &FileOperation,
     ) -> Result<OperationResult> {
         let file_path = self.get_operation_file_path(operation);
-        
+
         if self.dry_run {
             return Ok(OperationResult {
                 operation_index: index,
@@ -366,8 +372,13 @@ impl MultiFileEditorTool {
         }
 
         match operation {
-            FileOperation::Create { file_path, content, create_dirs } => {
-                self.execute_create(index, file_path, content, create_dirs.unwrap_or(true)).await
+            FileOperation::Create {
+                file_path,
+                content,
+                create_dirs,
+            } => {
+                self.execute_create(index, file_path, content, create_dirs.unwrap_or(true))
+                    .await
             }
             FileOperation::Replace { file_path, content } => {
                 self.execute_replace(index, file_path, content).await
@@ -378,11 +389,28 @@ impl MultiFileEditorTool {
             FileOperation::Prepend { file_path, content } => {
                 self.execute_prepend(index, file_path, content).await
             }
-            FileOperation::InsertAtLine { file_path, content, line_number } => {
-                self.execute_insert_at_line(index, file_path, content, *line_number).await
+            FileOperation::InsertAtLine {
+                file_path,
+                content,
+                line_number,
+            } => {
+                self.execute_insert_at_line(index, file_path, content, *line_number)
+                    .await
             }
-            FileOperation::SearchReplace { file_path, search, replace, all_occurrences } => {
-                self.execute_search_replace(index, file_path, search, replace, all_occurrences.unwrap_or(false)).await
+            FileOperation::SearchReplace {
+                file_path,
+                search,
+                replace,
+                all_occurrences,
+            } => {
+                self.execute_search_replace(
+                    index,
+                    file_path,
+                    search,
+                    replace,
+                    all_occurrences.unwrap_or(false),
+                )
+                .await
             }
         }
     }
@@ -418,9 +446,9 @@ impl MultiFileEditorTool {
 
         // Create backup file
         let backup_path = format!("{}.backup.{}", file_path, chrono::Utc::now().timestamp());
-        fs::copy(file_path, &backup_path).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to create backup: {}", e))
-        })?;
+        fs::copy(file_path, &backup_path)
+            .await
+            .map_err(|e| WinxError::FileError(format!("Failed to create backup: {}", e)))?;
 
         self.backups.push(BackupInfo {
             original_path: path.to_path_buf(),
@@ -449,13 +477,18 @@ impl MultiFileEditorTool {
                 }
             } else if let Some(backup_path) = &backup.backup_path {
                 // File was modified, restore from backup
-                fs::copy(backup_path, &backup.original_path).await.map_err(|e| {
-                    WinxError::FileError(format!(
-                        "Failed to restore file from backup during rollback: {}",
-                        e
-                    ))
-                })?;
-                debug!("Restored file: {:?} from {:?}", backup.original_path, backup_path);
+                fs::copy(backup_path, &backup.original_path)
+                    .await
+                    .map_err(|e| {
+                        WinxError::FileError(format!(
+                            "Failed to restore file from backup during rollback: {}",
+                            e
+                        ))
+                    })?;
+                debug!(
+                    "Restored file: {:?} from {:?}",
+                    backup.original_path, backup_path
+                );
 
                 // Clean up backup file
                 let _ = fs::remove_file(backup_path).await;
@@ -490,9 +523,9 @@ impl MultiFileEditorTool {
         let backup_path = self.create_backup(file_path).await?;
 
         // Write file
-        fs::write(file_path, content).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to create file: {}", e))
-        })?;
+        fs::write(file_path, content)
+            .await
+            .map_err(|e| WinxError::FileError(format!("Failed to create file: {}", e)))?;
 
         Ok(OperationResult {
             operation_index: index,
@@ -513,9 +546,9 @@ impl MultiFileEditorTool {
     ) -> Result<OperationResult> {
         let backup_path = self.create_backup(file_path).await?;
 
-        fs::write(file_path, content).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to replace file content: {}", e))
-        })?;
+        fs::write(file_path, content)
+            .await
+            .map_err(|e| WinxError::FileError(format!("Failed to replace file content: {}", e)))?;
 
         Ok(OperationResult {
             operation_index: index,
@@ -536,15 +569,15 @@ impl MultiFileEditorTool {
     ) -> Result<OperationResult> {
         let backup_path = self.create_backup(file_path).await?;
 
-        let mut existing_content = fs::read_to_string(file_path).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to read existing file: {}", e))
-        })?;
+        let mut existing_content = fs::read_to_string(file_path)
+            .await
+            .map_err(|e| WinxError::FileError(format!("Failed to read existing file: {}", e)))?;
 
         existing_content.push_str(content);
 
-        fs::write(file_path, &existing_content).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to append to file: {}", e))
-        })?;
+        fs::write(file_path, &existing_content)
+            .await
+            .map_err(|e| WinxError::FileError(format!("Failed to append to file: {}", e)))?;
 
         Ok(OperationResult {
             operation_index: index,
@@ -565,15 +598,15 @@ impl MultiFileEditorTool {
     ) -> Result<OperationResult> {
         let backup_path = self.create_backup(file_path).await?;
 
-        let existing_content = fs::read_to_string(file_path).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to read existing file: {}", e))
-        })?;
+        let existing_content = fs::read_to_string(file_path)
+            .await
+            .map_err(|e| WinxError::FileError(format!("Failed to read existing file: {}", e)))?;
 
         let new_content = format!("{}{}", content, existing_content);
 
-        fs::write(file_path, &new_content).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to prepend to file: {}", e))
-        })?;
+        fs::write(file_path, &new_content)
+            .await
+            .map_err(|e| WinxError::FileError(format!("Failed to prepend to file: {}", e)))?;
 
         Ok(OperationResult {
             operation_index: index,
@@ -595,12 +628,12 @@ impl MultiFileEditorTool {
     ) -> Result<OperationResult> {
         let backup_path = self.create_backup(file_path).await?;
 
-        let existing_content = fs::read_to_string(file_path).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to read existing file: {}", e))
-        })?;
+        let existing_content = fs::read_to_string(file_path)
+            .await
+            .map_err(|e| WinxError::FileError(format!("Failed to read existing file: {}", e)))?;
 
         let mut lines: Vec<&str> = existing_content.lines().collect();
-        
+
         // Insert at specified line (1-based indexing)
         let insert_index = if line_number > lines.len() {
             lines.len()
@@ -636,9 +669,9 @@ impl MultiFileEditorTool {
     ) -> Result<OperationResult> {
         let backup_path = self.create_backup(file_path).await?;
 
-        let existing_content = fs::read_to_string(file_path).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to read existing file: {}", e))
-        })?;
+        let existing_content = fs::read_to_string(file_path)
+            .await
+            .map_err(|e| WinxError::FileError(format!("Failed to read existing file: {}", e)))?;
 
         let new_content = if all_occurrences {
             existing_content.replace(search, replace)
@@ -648,8 +681,10 @@ impl MultiFileEditorTool {
 
         let replacements = if all_occurrences {
             existing_content.matches(search).count()
+        } else if existing_content.contains(search) {
+            1
         } else {
-            if existing_content.contains(search) { 1 } else { 0 }
+            0
         };
 
         fs::write(file_path, &new_content).await.map_err(|e| {
@@ -660,7 +695,10 @@ impl MultiFileEditorTool {
             operation_index: index,
             file_path: file_path.to_string(),
             success: true,
-            message: format!("Search/replace completed: {} replacements made", replacements),
+            message: format!(
+                "Search/replace completed: {} replacements made",
+                replacements
+            ),
             backup_path,
             bytes_written: Some(new_content.len()),
         })
@@ -676,9 +714,8 @@ pub async fn handle_tool_call(
     let result = tool.execute(&multi_file_editor.operations).await?;
 
     // Format result as JSON for better readability
-    let result_json = serde_json::to_string_pretty(&result).map_err(|e| {
-        WinxError::SerializationError(format!("Failed to serialize result: {}", e))
-    })?;
+    let result_json = serde_json::to_string_pretty(&result)
+        .map_err(|e| WinxError::SerializationError(format!("Failed to serialize result: {}", e)))?;
 
     Ok(result_json)
 }
@@ -692,7 +729,7 @@ mod tests {
     async fn test_create_file() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
-        
+
         let operation = FileOperation::Create {
             file_path: file_path.to_string_lossy().to_string(),
             content: "Hello, World!".to_string(),
@@ -714,7 +751,7 @@ mod tests {
         assert_eq!(result.successful_operations, 1);
         assert_eq!(result.failed_operations, 0);
         assert!(file_path.exists());
-        
+
         let content = fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, "Hello, World!");
     }
@@ -723,7 +760,7 @@ mod tests {
     async fn test_dry_run() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
-        
+
         let operation = FileOperation::Create {
             file_path: file_path.to_string_lossy().to_string(),
             content: "Hello, World!".to_string(),
@@ -753,7 +790,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file1_path = temp_dir.path().join("test1.txt");
         let file2_path = temp_dir.path().join("nonexistent/test2.txt"); // This will fail
-        
+
         let operations = vec![
             FileOperation::Create {
                 file_path: file1_path.to_string_lossy().to_string(),
@@ -787,10 +824,10 @@ mod tests {
     async fn test_append_operation() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
-        
+
         // Create initial file
         fs::write(&file_path, "Initial content").await.unwrap();
-        
+
         let operation = FileOperation::Append {
             file_path: file_path.to_string_lossy().to_string(),
             content: "\nAppended content".to_string(),
@@ -809,7 +846,7 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.successful_operations, 1);
-        
+
         let content = fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, "Initial content\nAppended content");
     }
@@ -818,10 +855,10 @@ mod tests {
     async fn test_prepend_operation() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
-        
+
         // Create initial file
         fs::write(&file_path, "Original content").await.unwrap();
-        
+
         let operation = FileOperation::Prepend {
             file_path: file_path.to_string_lossy().to_string(),
             content: "Prepended content\n".to_string(),
@@ -840,7 +877,7 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.successful_operations, 1);
-        
+
         let content = fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, "Prepended content\nOriginal content");
     }
@@ -849,10 +886,12 @@ mod tests {
     async fn test_search_replace_operation() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
-        
+
         // Create initial file
-        fs::write(&file_path, "Hello world! Hello universe!").await.unwrap();
-        
+        fs::write(&file_path, "Hello world! Hello universe!")
+            .await
+            .unwrap();
+
         let operation = FileOperation::SearchReplace {
             file_path: file_path.to_string_lossy().to_string(),
             search: "Hello".to_string(),
@@ -873,7 +912,7 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.successful_operations, 1);
-        
+
         let content = fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, "Hi world! Hi universe!");
     }
@@ -882,10 +921,12 @@ mod tests {
     async fn test_insert_at_line_operation() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("test.txt");
-        
+
         // Create initial file with multiple lines
-        fs::write(&file_path, "Line 1\nLine 2\nLine 3").await.unwrap();
-        
+        fs::write(&file_path, "Line 1\nLine 2\nLine 3")
+            .await
+            .unwrap();
+
         let operation = FileOperation::InsertAtLine {
             file_path: file_path.to_string_lossy().to_string(),
             content: "Inserted line".to_string(),
@@ -905,7 +946,7 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.successful_operations, 1);
-        
+
         let content = fs::read_to_string(&file_path).await.unwrap();
         assert_eq!(content, "Line 1\nInserted line\nLine 2\nLine 3");
     }
@@ -915,7 +956,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let file1_path = temp_dir.path().join("test1.txt");
         let file2_path = temp_dir.path().join("test2.txt");
-        
+
         let operations = vec![
             FileOperation::Create {
                 file_path: file1_path.to_string_lossy().to_string(),
@@ -945,7 +986,7 @@ mod tests {
         assert_eq!(result.failed_operations, 0);
         assert!(file1_path.exists());
         assert!(file2_path.exists());
-        
+
         let content1 = fs::read_to_string(&file1_path).await.unwrap();
         let content2 = fs::read_to_string(&file2_path).await.unwrap();
         assert_eq!(content1, "File 1 content");
