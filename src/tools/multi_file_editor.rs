@@ -106,6 +106,42 @@ struct BackupInfo {
     was_created: bool, // True if file was created (didn't exist before)
 }
 
+/// AI analysis result for smart search and replace
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AIAnalysisResult {
+    pub file_path: String,
+    pub matches: Vec<SmartMatch>,
+    pub confidence: f32,
+    pub explanation: String,
+    pub suggested_replacement: String,
+}
+
+/// A smart match found by AI analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SmartMatch {
+    pub line_number: usize,
+    pub column_start: usize,
+    pub column_end: usize,
+    pub original_text: String,
+    pub replacement_text: String,
+    pub context_before: String,
+    pub context_after: String,
+    pub confidence_score: f32,
+    pub reasoning: String,
+}
+
+/// AI provider trait for abstraction
+#[async_trait::async_trait]
+pub trait AIProvider: Send + Sync {
+    async fn analyze_code(
+        &self,
+        content: &str,
+        search_pattern: &str,
+        replace_hint: &str,
+        context: Option<&str>,
+    ) -> Result<AIAnalysisResult>;
+}
+
 /// Multi-file editor implementation
 pub struct MultiFileEditorTool {
     create_backups: bool,
