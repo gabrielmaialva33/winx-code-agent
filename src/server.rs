@@ -148,34 +148,22 @@ impl WinxService {
     }
 
     /// Read file contents
-    #[tool]
-    async fn read_files(&self, paths: Vec<String>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let mut results = Vec::new();
+    #[tool(description = "Read contents of one or more files")]
+    async fn read_files(&self, paths: Vec<String>) -> Result<CallToolResult, McpError> {
+        let mut content_parts = Vec::new();
         
         for path in paths {
             match tokio::fs::read_to_string(&path).await {
                 Ok(content) => {
-                    results.push(serde_json::json!({
-                        "path": path,
-                        "status": "success",
-                        "content": content,
-                        "size": content.len()
-                    }));
+                    content_parts.push(format!("=== {} ({} bytes) ===\n{}\n", path, content.len(), content));
                 }
                 Err(e) => {
-                    results.push(serde_json::json!({
-                        "path": path,
-                        "status": "error",
-                        "error": e.to_string()
-                    }));
+                    content_parts.push(format!("=== {} ===\nERROR: {}\n", path, e));
                 }
             }
         }
         
-        Ok(serde_json::json!({
-            "status": "success",
-            "files": results
-        }))
+        Ok(CallToolResult::success(vec![Content::text(content_parts.join("\n"))]))
     }
 
     /// Write or edit file contents
