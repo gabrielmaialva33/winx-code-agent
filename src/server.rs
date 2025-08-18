@@ -81,6 +81,32 @@ impl WinxService {
     pub async fn get_nvidia_client(&self) -> Option<NvidiaClient> {
         self.nvidia_client.lock().unwrap().clone()
     }
+
+    /// Initialize Gemini integration if API key is available
+    pub async fn initialize_gemini(&self) -> crate::Result<bool> {
+        match GeminiConfig::from_env() {
+            Ok(config) => match GeminiClient::new(config) {
+                Ok(client) => {
+                    *self.gemini_client.lock().unwrap() = Some(client);
+                    info!("Gemini AI integration initialized successfully");
+                    Ok(true)
+                }
+                Err(e) => {
+                    warn!("Failed to initialize Gemini integration: {}", e);
+                    Ok(false)
+                }
+            },
+            Err(e) => {
+                info!("Gemini integration not available: {}", e);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Get Gemini client if available
+    pub async fn get_gemini_client(&self) -> Option<GeminiClient> {
+        self.gemini_client.lock().unwrap().clone()
+    }
 }
 
 /// ServerHandler implementation with manual tool handling
