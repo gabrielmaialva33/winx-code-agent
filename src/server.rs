@@ -116,6 +116,7 @@ impl ServerHandler for WinxService {
                             }
                         }
                     })),
+                    output_schema: None,
                 },
                 Tool {
                     name: "initialize".into(),
