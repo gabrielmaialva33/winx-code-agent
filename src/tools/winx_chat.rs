@@ -13,7 +13,7 @@ use crate::errors::{Result, WinxError};
 use crate::state::BashState;
 
 /// Conversation modes that define how Winx responds
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ConversationMode {
     /// Casual conversation with more personality and humor
