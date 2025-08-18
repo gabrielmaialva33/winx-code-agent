@@ -12,6 +12,7 @@
 //! designed to integrate with Claude and other LLMs via the Model Context Protocol (MCP).
 
 pub mod errors;
+pub mod gemini;
 pub mod nvidia;
 pub mod server;
 pub mod state;
