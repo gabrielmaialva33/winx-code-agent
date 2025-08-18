@@ -13,6 +13,7 @@ use std::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
+use crate::gemini::{GeminiClient, GeminiConfig};
 use crate::state::BashState;
 use crate::types::{CommandSuggestions, ContextSave, ReadImage};
 
@@ -24,13 +25,15 @@ fn json_to_schema(value: Value) -> Arc<serde_json::Map<String, Value>> {
     }
 }
 
-/// Winx service with shared bash state and NVIDIA AI integration
+/// Winx service with shared bash state and AI integration (NVIDIA + Gemini)
 #[derive(Clone)]
 pub struct WinxService {
     /// Shared state for the bash shell environment
     pub bash_state: Arc<Mutex<Option<BashState>>>,
-    /// NVIDIA client for AI-powered features (optional)
+    /// NVIDIA client for AI-powered features (primary)
     pub nvidia_client: Arc<Mutex<Option<NvidiaClient>>>,
+    /// Gemini client for AI-powered features (fallback)
+    pub gemini_client: Arc<Mutex<Option<GeminiClient>>>,
     /// Version information for the service
     pub version: String,
 }
@@ -48,6 +51,7 @@ impl WinxService {
         Self {
             bash_state: Arc::new(Mutex::new(None)),
             nvidia_client: Arc::new(Mutex::new(None)),
+            gemini_client: Arc::new(Mutex::new(None)),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
