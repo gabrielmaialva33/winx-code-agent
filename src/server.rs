@@ -9,7 +9,7 @@ use rmcp::{
 };
 use serde_json::Value;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
@@ -57,7 +57,7 @@ impl WinxService {
         match NvidiaConfig::from_env() {
             Ok(config) => match crate::nvidia::initialize(config).await {
                 Ok(client) => {
-                    *self.nvidia_client.lock().await = Some(client);
+                    *self.nvidia_client.lock().unwrap() = Some(client);
                     info!("NVIDIA AI integration initialized successfully");
                     Ok(true)
                 }
@@ -75,7 +75,7 @@ impl WinxService {
 
     /// Get NVIDIA client if available
     pub async fn get_nvidia_client(&self) -> Option<NvidiaClient> {
-        self.nvidia_client.lock().await.clone()
+        self.nvidia_client.lock().unwrap().clone()
     }
 }
 
