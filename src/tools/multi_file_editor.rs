@@ -1491,4 +1491,171 @@ mod tests {
         assert_eq!(content1, "File 1 content");
         assert_eq!(content2, "File 2 content");
     }
+
+    #[tokio::test]
+    async fn test_smart_search_replace_basic() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.rs");
+        
+        // Create initial file with Rust code
+        fs::write(&file_path, "fn old_function() {\n    println!(\"Hello\");\n}")
+            .await
+            .unwrap();
+
+        let operation = FileOperation::SmartSearchReplace {
+            file_paths: vec![file_path.to_string_lossy().to_string()],
+            search_pattern: "old_function".to_string(),
+            replace_hint: "Rename to new_function".to_string(),
+            context: Some("Rust function renaming".to_string()),
+            use_ai_provider: None,
+            confidence_threshold: Some(0.5),
+            preview_mode: Some(false),
+        };
+
+        let config = MultiFileEditor {
+            operations: vec![operation],
+            create_backups: Some(false),
+            atomic: Some(false),
+            continue_on_error: Some(false),
+            max_file_size: None,
+            dry_run: Some(false),
+        };
+
+        let mut tool = MultiFileEditorTool::new(&config);
+        let result = tool.execute(&config.operations).await.unwrap();
+
+        // Should succeed even if no AI provider is available
+        assert_eq!(result.total_operations, 1);
+        // May fail if no AI provider, but shouldn't crash
+    }
+
+    #[tokio::test]
+    async fn test_smart_search_replace_preview() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.js");
+        
+        // Create initial file
+        fs::write(&file_path, "var oldVar = 'test';\nconsole.log(oldVar);")
+            .await
+            .unwrap();
+
+        let operation = FileOperation::SmartSearchReplace {
+            file_paths: vec![file_path.to_string_lossy().to_string()],
+            search_pattern: "var".to_string(),
+            replace_hint: "Replace with let or const".to_string(),
+            context: Some("JavaScript modernization".to_string()),
+            use_ai_provider: None,
+            confidence_threshold: Some(0.7),
+            preview_mode: Some(true), // Preview mode
+        };
+
+        let config = MultiFileEditor {
+            operations: vec![operation],
+            create_backups: Some(false),
+            atomic: Some(false),
+            continue_on_error: Some(false),
+            max_file_size: None,
+            dry_run: Some(false),
+        };
+
+        let mut tool = MultiFileEditorTool::new(&config);
+        let result = tool.execute(&config.operations).await.unwrap();
+
+        assert_eq!(result.total_operations, 1);
+        
+        // File should not be modified in preview mode
+        let content = fs::read_to_string(&file_path).await.unwrap();
+        assert_eq!(content, "var oldVar = 'test';\nconsole.log(oldVar);");
+    }
+
+    #[tokio::test]
+    async fn test_smart_search_replace_validation() {
+        let config = MultiFileEditor {
+            operations: vec![FileOperation::SmartSearchReplace {
+                file_paths: vec![], // Empty file paths - should fail validation
+                search_pattern: "test".to_string(),
+                replace_hint: "replace".to_string(),
+                context: None,
+                use_ai_provider: None,
+                confidence_threshold: Some(0.5),
+                preview_mode: Some(false),
+            }],
+            create_backups: Some(false),
+            atomic: Some(false),
+            continue_on_error: Some(false),
+            max_file_size: None,
+            dry_run: Some(false),
+        };
+
+        let mut tool = MultiFileEditorTool::new(&config);
+        let result = tool.execute(&config.operations).await.unwrap();
+
+        assert_eq!(result.failed_operations, 1);
+        assert!(result.results[0].message.contains("requires at least one file path"));
+    }
+
+    #[tokio::test]
+    async fn test_smart_search_replace_confidence_threshold() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.py");
+        
+        fs::write(&file_path, "def test_function():\n    pass")
+            .await
+            .unwrap();
+
+        // Test with invalid confidence threshold
+        let operation = FileOperation::SmartSearchReplace {
+            file_paths: vec![file_path.to_string_lossy().to_string()],
+            search_pattern: "test".to_string(),
+            replace_hint: "replace".to_string(),
+            context: None,
+            use_ai_provider: None,
+            confidence_threshold: Some(1.5), // Invalid - should be 0.0-1.0
+            preview_mode: Some(false),
+        };
+
+        let config = MultiFileEditor {
+            operations: vec![operation],
+            create_backups: Some(false),
+            atomic: Some(false),
+            continue_on_error: Some(false),
+            max_file_size: None,
+            dry_run: Some(false),
+        };
+
+        let mut tool = MultiFileEditorTool::new(&config);
+        let result = tool.execute(&config.operations).await.unwrap();
+
+        assert_eq!(result.failed_operations, 1);
+        assert!(result.results[0].message.contains("Confidence threshold must be between 0.0 and 1.0"));
+    }
+
+    #[test]
+    fn test_ai_analysis_result_serialization() {
+        let analysis = AIAnalysisResult {
+            file_path: "test.rs".to_string(),
+            matches: vec![SmartMatch {
+                line_number: 1,
+                column_start: 0,
+                column_end: 10,
+                original_text: "old_func".to_string(),
+                replacement_text: "new_func".to_string(),
+                context_before: "".to_string(),
+                context_after: "() {".to_string(),
+                confidence_score: 0.9,
+                reasoning: "Function name modernization".to_string(),
+            }],
+            confidence: 0.9,
+            explanation: "Analysis completed successfully".to_string(),
+            suggested_replacement: "new_func".to_string(),
+        };
+
+        // Should serialize and deserialize correctly
+        let json = serde_json::to_string(&analysis).unwrap();
+        let deserialized: AIAnalysisResult = serde_json::from_str(&json).unwrap();
+        
+        assert_eq!(analysis.file_path, deserialized.file_path);
+        assert_eq!(analysis.matches.len(), deserialized.matches.len());
+        assert_eq!(analysis.confidence, deserialized.confidence);
+    }
 }
