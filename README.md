@@ -295,7 +295,13 @@ context_save(
    bash_command(action_json={"command": "cargo test"}, chat_id="i1234")
    ```
 
-6. **Save context for later**
+6. **Chat with Winx for help**
+   ```
+   winx_chat(message="Winx, posso ter ajuda para otimizar este código?", 
+   conversation_mode="mentor", include_system_info=true)
+   ```
+
+7. **Save context for later**
    ```
    context_save(id="my_task", project_root_path="/path/to/project", 
    description="Implementation of feature X", relevant_file_globs=["src/**/*.rs"])
