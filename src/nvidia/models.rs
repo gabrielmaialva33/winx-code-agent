@@ -5,6 +5,9 @@ use serde::{Deserialize, Serialize};
 /// Supported NVIDIA models for different tasks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NvidiaModel {
+    /// Qwen3 235B A22B - Latest generation LLM with thinking mode and MoE architecture
+    #[serde(rename = "qwen/qwen3-235b-a22b")]
+    Qwen3_235B,
     /// Meta Llama 3.1 70B Instruct - Good for general coding tasks
     #[serde(rename = "meta/llama-3.1-70b-instruct")]
     Llama31_70B,
@@ -24,7 +27,7 @@ pub enum NvidiaModel {
 
 impl Default for NvidiaModel {
     fn default() -> Self {
-        Self::Llama31_70B
+        Self::Qwen3_235B
     }
 }
 
