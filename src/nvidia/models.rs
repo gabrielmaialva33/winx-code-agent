@@ -90,8 +90,8 @@ pub struct ChatCompletionRequest {
 pub struct ChatMessage {
     #[serde(default)]
     pub role: String,
-    #[serde(default)]
-    pub content: String,
+    /// Content can be null for thinking models like Qwen3
+    pub content: Option<String>,
     /// Reasoning content for models that support thinking mode (like Qwen3)
     #[serde(default)]
     pub reasoning_content: Option<String>,
@@ -101,7 +101,7 @@ impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: "system".to_string(),
-            content: content.into(),
+            content: Some(content.into()),
             reasoning_content: None,
         }
     }
@@ -109,7 +109,7 @@ impl ChatMessage {
     pub fn user(content: impl Into<String>) -> Self {
         Self {
             role: "user".to_string(),
-            content: content.into(),
+            content: Some(content.into()),
             reasoning_content: None,
         }
     }
@@ -117,7 +117,7 @@ impl ChatMessage {
     pub fn assistant(content: impl Into<String>) -> Self {
         Self {
             role: "assistant".to_string(),
-            content: content.into(),
+            content: Some(content.into()),
             reasoning_content: None,
         }
     }
@@ -125,9 +125,10 @@ impl ChatMessage {
     /// Get the effective content, combining content and reasoning_content if available
     pub fn effective_content(&self) -> String {
         match (&self.content, &self.reasoning_content) {
-            (content, Some(reasoning)) if content.is_empty() => reasoning.clone(),
-            (content, Some(reasoning)) => format!("{}\n\nReasoning: {}", content, reasoning),
-            (content, None) => content.clone(),
+            (Some(content), Some(reasoning)) => format!("{}\n\nReasoning: {}", content, reasoning),
+            (Some(content), None) => content.clone(),
+            (None, Some(reasoning)) => reasoning.clone(),
+            (None, None) => String::new(),
         }
     }
 }
