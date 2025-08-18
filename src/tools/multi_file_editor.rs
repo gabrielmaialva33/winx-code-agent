@@ -874,6 +874,172 @@ impl MultiFileEditorTool {
             bytes_written: Some(new_content.len()),
         })
     }
+
+    /// Execute smart AI-powered search and replace operation
+    async fn execute_smart_search_replace(
+        &mut self,
+        index: usize,
+        file_paths: &[String],
+        search_pattern: &str,
+        replace_hint: &str,
+        context: Option<&str>,
+        _use_ai_provider: Option<&str>,
+        confidence_threshold: f32,
+        preview_mode: bool,
+    ) -> Result<OperationResult> {
+        info!(
+            "Starting smart search/replace on {} files with pattern: '{}'",
+            file_paths.len(),
+            search_pattern
+        );
+
+        // Get AI client
+        let ai_client = match self.get_ai_client().await {
+            Some(client) => client,
+            None => {
+                return Ok(OperationResult {
+                    operation_index: index,
+                    file_path: file_paths.first().unwrap_or(&"unknown".to_string()).clone(),
+                    success: false,
+                    message: "No AI providers available for smart search/replace".to_string(),
+                    backup_path: None,
+                    bytes_written: None,
+                });
+            }
+        };
+
+        let mut total_matches = 0;
+        let mut total_replacements = 0;
+        let mut processed_files = 0;
+        let mut preview_results = Vec::new();
+
+        // Process each file
+        for file_path in file_paths {
+            // Read file content
+            let content = match fs::read_to_string(file_path).await {
+                Ok(content) => content,
+                Err(e) => {
+                    warn!("Failed to read file {}: {}", file_path, e);
+                    continue;
+                }
+            };
+
+            // Analyze with AI
+            let analysis = match ai_client.analyze_code(
+                &content,
+                search_pattern,
+                replace_hint,
+                context,
+            ).await {
+                Ok(analysis) => analysis,
+                Err(e) => {
+                    warn!("AI analysis failed for {}: {}", file_path, e);
+                    continue;
+                }
+            };
+
+            // Filter matches by confidence threshold
+            let valid_matches: Vec<_> = analysis.matches
+                .into_iter()
+                .filter(|m| m.confidence_score >= confidence_threshold)
+                .collect();
+
+            if valid_matches.is_empty() {
+                debug!("No valid matches found in {}", file_path);
+                continue;
+            }
+
+            total_matches += valid_matches.len();
+
+            if preview_mode {
+                // Store preview information
+                preview_results.push(format!(
+                    "File: {}\nMatches: {}\nExplanation: {}\n",
+                    file_path,
+                    valid_matches.len(),
+                    analysis.explanation
+                ));
+                continue;
+            }
+
+            // Create backup
+            let backup_path = self.create_backup(file_path).await?;
+
+            // Apply replacements
+            let new_content = self.apply_smart_replacements(&content, &valid_matches)?;
+
+            // Write the modified content
+            fs::write(file_path, &new_content).await.map_err(|e| {
+                WinxError::FileError(format!("Failed to write smart replacements: {}", e))
+            })?;
+
+            total_replacements += valid_matches.len();
+            processed_files += 1;
+
+            info!(
+                "Applied {} smart replacements in {}",
+                valid_matches.len(),
+                file_path
+            );
+        }
+
+        let message = if preview_mode {
+            format!(
+                "Preview: Found {} potential matches in {} files\n{}",
+                total_matches,
+                file_paths.len(),
+                preview_results.join("\n")
+            )
+        } else {
+            format!(
+                "Smart search/replace completed: {} replacements in {} files",
+                total_replacements,
+                processed_files
+            )
+        };
+
+        Ok(OperationResult {
+            operation_index: index,
+            file_path: file_paths.first().unwrap_or(&"multiple_files".to_string()).clone(),
+            success: true,
+            message,
+            backup_path: None,
+            bytes_written: Some(total_replacements),
+        })
+    }
+
+    /// Apply smart replacements to content
+    fn apply_smart_replacements(
+        &self,
+        content: &str,
+        matches: &[SmartMatch],
+    ) -> Result<String> {
+        let mut lines: Vec<&str> = content.lines().collect();
+        
+        // Sort matches by line number in reverse order to avoid index shifting
+        let mut sorted_matches = matches.to_vec();
+        sorted_matches.sort_by(|a, b| b.line_number.cmp(&a.line_number));
+
+        for smart_match in sorted_matches {
+            if smart_match.line_number == 0 || smart_match.line_number > lines.len() {
+                warn!("Invalid line number {} in smart match", smart_match.line_number);
+                continue;
+            }
+
+            let line_index = smart_match.line_number - 1; // Convert to 0-based index
+            let original_line = lines[line_index];
+
+            // Replace the specific text in the line
+            let new_line = original_line.replace(
+                &smart_match.original_text,
+                &smart_match.replacement_text
+            );
+
+            lines[line_index] = Box::leak(new_line.into_boxed_str());
+        }
+
+        Ok(lines.join("\n"))
+    }
 }
 
 /// Handle multi-file editor tool call
