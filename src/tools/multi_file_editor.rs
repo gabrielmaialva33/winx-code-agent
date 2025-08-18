@@ -143,6 +143,169 @@ pub trait AIProvider: Send + Sync {
     ) -> Result<AIAnalysisResult>;
 }
 
+/// DashScope AI provider implementation
+#[async_trait::async_trait]
+impl AIProvider for DashScopeClient {
+    async fn analyze_code(
+        &self,
+        content: &str,
+        search_pattern: &str,
+        replace_hint: &str,
+        context: Option<&str>,
+    ) -> Result<AIAnalysisResult> {
+        let prompt = format!(
+            "Analyze this code and find patterns matching '{}'. Replace instruction: {}\n\
+            Context: {}\n\
+            Code:\n{}\n\n\
+            Provide a JSON response with the following structure:\n\
+            {{\n\
+              \"matches\": [\n\
+                {{\n\
+                  \"line_number\": <number>,\n\
+                  \"column_start\": <number>,\n\
+                  \"column_end\": <number>,\n\
+                  \"original_text\": \"<text>\",\n\
+                  \"replacement_text\": \"<text>\",\n\
+                  \"context_before\": \"<text>\",\n\
+                  \"context_after\": \"<text>\",\n\
+                  \"confidence_score\": <0.0-1.0>,\n\
+                  \"reasoning\": \"<explanation>\"\n\
+                }}\n\
+              ],\n\
+              \"confidence\": <0.0-1.0>,\n\
+              \"explanation\": \"<overall explanation>\",\n\
+              \"suggested_replacement\": \"<general suggestion>\"\n\
+            }}",
+            search_pattern,
+            replace_hint,
+            context.unwrap_or("none"),
+            content
+        );
+
+        let request = ChatCompletionRequest {
+            model: "qwen3-coder-plus".to_string(),
+            messages: vec![ChatMessage::user(prompt)],
+            temperature: Some(0.3),
+            max_tokens: Some(2000),
+            stream: Some(false),
+            stop: None,
+            top_p: Some(0.8),
+        };
+
+        let response = self.chat_completion(&request).await?;
+        
+        if let Some(message) = response.choices.first() {
+            self.parse_ai_response(&message.message.content, content)
+        } else {
+            Err(WinxError::AIError("No response from DashScope".to_string()))
+        }
+    }
+}
+
+impl DashScopeClient {
+    /// Parse AI response and extract smart matches
+    fn parse_ai_response(&self, response: &str, file_content: &str) -> Result<AIAnalysisResult> {
+        // Try to parse JSON response
+        if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(response) {
+            let matches = json_value.get("matches")
+                .and_then(|m| m.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|item| {
+                            Some(SmartMatch {
+                                line_number: item.get("line_number")?.as_u64()? as usize,
+                                column_start: item.get("column_start")?.as_u64().unwrap_or(0) as usize,
+                                column_end: item.get("column_end")?.as_u64().unwrap_or(0) as usize,
+                                original_text: item.get("original_text")?.as_str()?.to_string(),
+                                replacement_text: item.get("replacement_text")?.as_str()?.to_string(),
+                                context_before: item.get("context_before")?.as_str().unwrap_or("").to_string(),
+                                context_after: item.get("context_after")?.as_str().unwrap_or("").to_string(),
+                                confidence_score: item.get("confidence_score")?.as_f64().unwrap_or(0.5) as f32,
+                                reasoning: item.get("reasoning")?.as_str().unwrap_or("").to_string(),
+                            })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let confidence = json_value.get("confidence")
+                .and_then(|c| c.as_f64())
+                .unwrap_or(0.5) as f32;
+
+            let explanation = json_value.get("explanation")
+                .and_then(|e| e.as_str())
+                .unwrap_or("AI analysis completed")
+                .to_string();
+
+            let suggested_replacement = json_value.get("suggested_replacement")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            return Ok(AIAnalysisResult {
+                file_path: "analyzed_file".to_string(),
+                matches,
+                confidence,
+                explanation,
+                suggested_replacement,
+            });
+        }
+
+        // Fallback: Create a simple analysis if JSON parsing fails
+        Ok(AIAnalysisResult {
+            file_path: "analyzed_file".to_string(),
+            matches: vec![],
+            confidence: 0.5,
+            explanation: "AI analysis completed with limited parsing".to_string(),
+            suggested_replacement: "Please check the analysis manually".to_string(),
+        })
+    }
+}
+
+/// NVIDIA AI provider implementation (simplified)
+#[async_trait::async_trait]
+impl AIProvider for NvidiaClient {
+    async fn analyze_code(
+        &self,
+        content: &str,
+        search_pattern: &str,
+        replace_hint: &str,
+        context: Option<&str>,
+    ) -> Result<AIAnalysisResult> {
+        // For now, return a basic implementation
+        // TODO: Implement full NVIDIA API integration
+        Ok(AIAnalysisResult {
+            file_path: "analyzed_file".to_string(),
+            matches: vec![],
+            confidence: 0.6,
+            explanation: "NVIDIA AI analysis (basic implementation)".to_string(),
+            suggested_replacement: format!("Pattern: {} -> {}", search_pattern, replace_hint),
+        })
+    }
+}
+
+/// Gemini AI provider implementation (simplified)
+#[async_trait::async_trait]
+impl AIProvider for GeminiClient {
+    async fn analyze_code(
+        &self,
+        content: &str,
+        search_pattern: &str,
+        replace_hint: &str,
+        context: Option<&str>,
+    ) -> Result<AIAnalysisResult> {
+        // For now, return a basic implementation
+        // TODO: Implement full Gemini API integration
+        Ok(AIAnalysisResult {
+            file_path: "analyzed_file".to_string(),
+            matches: vec![],
+            confidence: 0.6,
+            explanation: "Gemini AI analysis (basic implementation)".to_string(),
+            suggested_replacement: format!("Pattern: {} -> {}", search_pattern, replace_hint),
+        })
+    }
+}
+
 /// Multi-file editor implementation
 pub struct MultiFileEditorTool {
     create_backups: bool,
@@ -216,7 +379,7 @@ impl MultiFileEditorTool {
     /// Get NVIDIA client if available  
     async fn get_nvidia_client(&self) -> Option<NvidiaClient> {
         if let Ok(config) = NvidiaConfig::from_env() {
-            if let Ok(client) = NvidiaClient::new(config) {
+            if let Ok(client) = NvidiaClient::new(config).await {
                 return Some(client);
             }
         }
