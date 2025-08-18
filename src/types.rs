@@ -756,7 +756,7 @@ pub struct FileWriteOrEdit {
     /// If percentage_to_change > 50%, this is the entire file content.
     /// If percentage_to_change <= 50%, this contains search/replace blocks
     /// in the format:
-    /// ```
+    /// ```text
     /// <<<<<<< SEARCH
     /// old content to find
     /// =======

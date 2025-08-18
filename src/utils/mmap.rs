@@ -108,8 +108,19 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
         // Pre-allocate an exact-sized buffer
         let mut buffer = Vec::with_capacity(file_size as usize);
 
+        // Create a mutable file handle and seek to the beginning
+        let mut file_handle = file.try_clone().map_err(|e| WinxError::FileAccessError {
+            path: path.to_path_buf(),
+            message: format!("Error cloning file handle: {}", e),
+        })?;
+        
+        file_handle.seek(SeekFrom::Start(0)).map_err(|e| WinxError::FileAccessError {
+            path: path.to_path_buf(),
+            message: format!("Error seeking to start of file: {}", e),
+        })?;
+
         // Use a BufReader with an appropriate buffer size (4K-64K)
-        let mut reader = BufReader::with_capacity(min(file_size as usize, 64 * 1024), file);
+        let mut reader = BufReader::with_capacity(min(file_size as usize, 64 * 1024), file_handle);
 
         // Read directly to the end
         reader
@@ -124,7 +135,19 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
 
     // For larger files, use a chunked reading approach with progress tracking
     let mut buffer = Vec::with_capacity(file_size as usize);
-    let mut reader = BufReader::with_capacity(262_144, file); // 256KB buffer
+    
+    // Create a mutable file handle and seek to the beginning
+    let mut file_handle = file.try_clone().map_err(|e| WinxError::FileAccessError {
+        path: path.to_path_buf(),
+        message: format!("Error cloning file handle: {}", e),
+    })?;
+    
+    file_handle.seek(SeekFrom::Start(0)).map_err(|e| WinxError::FileAccessError {
+        path: path.to_path_buf(),
+        message: format!("Error seeking to start of file: {}", e),
+    })?;
+    
+    let mut reader = BufReader::with_capacity(262_144, file_handle); // 256KB buffer
 
     const CHUNK_SIZE: usize = 1_048_576; // 1MB chunks
     let mut chunk = vec![0; CHUNK_SIZE];

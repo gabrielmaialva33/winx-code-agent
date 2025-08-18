@@ -428,7 +428,9 @@ mod tests {
         let relevant_files = "# file contents here";
         let formatted = memory_system.format_memory(&context_save, relevant_files);
 
-        assert!(formatted.contains("# PROJECT ROOT = \"/path/to/project\""));
+        // The shell_quote function only adds quotes if the path contains special characters
+        // Since "/path/to/project" doesn't contain spaces, it won't be quoted
+        assert!(formatted.contains("# PROJECT ROOT = /path/to/project"));
         assert!(formatted.contains("Test task description"));
         assert!(formatted.contains("*.rs"));
         assert!(formatted.contains("# file contents here"));
