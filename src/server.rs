@@ -276,7 +276,7 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "code_analyzer".into(),
-                    description: Some("Analyze code for issues and suggestions".into()),
+                    description: Some("AI-powered code analysis for bugs, security, and performance".into()),
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -290,6 +290,66 @@ impl ServerHandler for WinxService {
                             }
                         },
                         "required": ["file_path"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                },
+                Tool {
+                    name: "ai_generate_code".into(),
+                    description: Some("Generate code from natural language description using NVIDIA AI".into()),
+                    input_schema: json_to_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "prompt": {
+                                "type": "string",
+                                "description": "Natural language description of the code to generate"
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "Target programming language (e.g., 'Rust', 'Python', 'JavaScript')"
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "Additional context or requirements"
+                            },
+                            "max_tokens": {
+                                "type": "integer",
+                                "description": "Maximum tokens to generate (default: 1000)"
+                            },
+                            "temperature": {
+                                "type": "number",
+                                "description": "Creativity level 0.0-1.0 (default: 0.7)"
+                            }
+                        },
+                        "required": ["prompt"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                },
+                Tool {
+                    name: "ai_explain_code".into(),
+                    description: Some("Get AI explanation and documentation for code".into()),
+                    input_schema: json_to_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "file_path": {
+                                "type": "string",
+                                "description": "Path to the code file to explain"
+                            },
+                            "code": {
+                                "type": "string",
+                                "description": "Code snippet to explain (alternative to file_path)"
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "Programming language (optional, auto-detected if not provided)"
+                            },
+                            "detail_level": {
+                                "type": "string",
+                                "enum": ["basic", "detailed", "expert"],
+                                "description": "Level of detail for explanation (default: detailed)"
+                            }
+                        }
                     })),
                     output_schema: None,
                     annotations: None,
@@ -315,6 +375,8 @@ impl ServerHandler for WinxService {
             "read_image" => self.handle_read_image(args_value.clone()).await?,
             "command_suggestions" => self.handle_command_suggestions(args_value.clone()).await?,
             "code_analyzer" => self.handle_code_analyzer(args_value).await?,
+            "ai_generate_code" => self.handle_ai_generate_code(args_value).await?,
+            "ai_explain_code" => self.handle_ai_explain_code(args_value).await?,
             _ => {
                 return Err(McpError::invalid_request(
                     format!("Unknown tool: {}", param.name),
