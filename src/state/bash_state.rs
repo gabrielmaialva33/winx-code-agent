@@ -956,7 +956,7 @@ impl BashState {
     }
 
     /// Initialize the interactive bash process
-    pub fn init_interactive_bash(&mut self) -> Result<()> {
+    pub async fn init_interactive_bash(&mut self) -> Result<()> {
         let restricted_mode = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
 
         debug!(
@@ -968,10 +968,7 @@ impl BashState {
         let bash = InteractiveBash::new(&self.cwd, restricted_mode)?;
 
         // Update the state
-        let mut guard = self
-            .interactive_bash
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
+        let mut guard = self.interactive_bash.lock().await;
 
         *guard = Some(bash);
 
