@@ -2,8 +2,7 @@ use glob::glob;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, warn};
 
 use crate::errors::{Result, WinxError};
@@ -29,7 +28,9 @@ pub async fn handle_tool_call(
     args: ContextSave,
 ) -> Result<String> {
     // Ensure bash state is initialized
-    let bash_state_guard = bash_state.lock().await;
+    let bash_state_guard = bash_state
+        .lock()
+        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
 
     let bash_state = bash_state_guard
         .as_ref()

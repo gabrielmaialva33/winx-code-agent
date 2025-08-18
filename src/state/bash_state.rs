@@ -8,8 +8,7 @@ use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
@@ -956,7 +955,7 @@ impl BashState {
     }
 
     /// Initialize the interactive bash process
-    pub async fn init_interactive_bash(&mut self) -> Result<()> {
+    pub fn init_interactive_bash(&mut self) -> Result<()> {
         let restricted_mode = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
 
         debug!(
@@ -968,7 +967,10 @@ impl BashState {
         let bash = InteractiveBash::new(&self.cwd, restricted_mode)?;
 
         // Update the state
-        let mut guard = self.interactive_bash.lock().await;
+        let mut guard = self
+            .interactive_bash
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
 
         *guard = Some(bash);
 
