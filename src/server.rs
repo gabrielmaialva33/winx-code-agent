@@ -117,6 +117,7 @@ impl ServerHandler for WinxService {
                         }
                     })),
                     output_schema: None,
+                    annotations: None,
                 },
                 Tool {
                     name: "initialize".into(),
@@ -131,6 +132,7 @@ impl ServerHandler for WinxService {
                         }
                     })),
                     output_schema: None,
+                    annotations: None,
                 },
                 Tool {
                     name: "bash_command".into(),
@@ -189,8 +191,10 @@ impl ServerHandler for WinxService {
                         "required": ["path", "content"]
                     })),
                     output_schema: None,
+                    annotations: None,
                 },
             ],
+            next_cursor: None,
         })
     }
 
@@ -199,7 +203,7 @@ impl ServerHandler for WinxService {
         param: CallToolRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let result = match param.name.as_str() {
+        let result = match param.name.as_ref() {
             "ping" => self.handle_ping(param.arguments).await?,
             "initialize" => self.handle_initialize(param.arguments).await?,
             "bash_command" => self.handle_bash_command(param.arguments).await?,
