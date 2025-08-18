@@ -177,7 +177,7 @@ impl WinxService {
         let create = create_if_missing.unwrap_or(true);
         
         if !create && !tokio::fs::try_exists(&path).await.unwrap_or(false) {
-            return Err(McpError::invalid_request(&format!("File does not exist: {}", path)));
+            return Err(McpError::invalid_request(&format!("File does not exist: {}", path), None));
         }
 
         match tokio::fs::write(&path, &content).await {
@@ -189,7 +189,7 @@ impl WinxService {
             }
             Err(e) => {
                 warn!("Failed to write file {}: {}", path, e);
-                Err(McpError::internal_error(format!("Failed to write file {}: {}", path, e)))
+                Err(McpError::internal_error(format!("Failed to write file {}: {}", path, e), None))
             }
         }
     }
