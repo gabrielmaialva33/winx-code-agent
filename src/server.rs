@@ -5,15 +5,10 @@ use rmcp::{
     ErrorData as McpError,
     ServiceExt, 
     model::*, 
-    tool, 
-    tool_router,
-    tool_handler,
     transport::stdio,
-    handler::server::router::tool::ToolRouter,
     ServerHandler
 };
 use serde_json::Value;
-use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -30,8 +25,6 @@ pub struct WinxService {
     pub nvidia_client: Arc<Mutex<Option<NvidiaClient>>>,
     /// Version information for the service
     pub version: String,
-    /// Tool router for handling tool calls
-    pub tool_router: ToolRouter<Self>,
 }
 
 impl Default for WinxService {
