@@ -170,6 +170,8 @@ impl ServerHandler for WinxService {
                         },
                         "required": ["paths"]
                     })),
+                    output_schema: None,
+                    annotations: None,
                 },
                 Tool {
                     name: "file_write_or_edit".into(),
