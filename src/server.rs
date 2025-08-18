@@ -91,16 +91,15 @@ impl WinxService {
     }
 
     /// Initialize the bash shell environment
-    #[tool]
-    async fn initialize(&self, shell: Option<String>) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    #[tool(description = "Initialize the bash shell environment")]
+    async fn initialize(&self, shell: Option<String>) -> Result<CallToolResult, McpError> {
         let shell = shell.unwrap_or_else(|| "bash".to_string());
         
         let mut bash_state_guard = self.bash_state.lock().await;
         if bash_state_guard.is_some() {
-            return Ok(serde_json::json!({
-                "status": "already_initialized",
-                "message": "Shell environment is already initialized"
-            }));
+            return Ok(CallToolResult::success(vec![Content::text(
+                "Shell environment is already initialized".to_string()
+            )]));
         }
 
         let mut state = crate::state::BashState::new();
@@ -108,55 +107,42 @@ impl WinxService {
             Ok(_) => {
                 *bash_state_guard = Some(state);
                 info!("Shell environment initialized with {}", shell);
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "message": format!("Shell environment initialized with {}", shell),
-                    "shell": shell
-                }))
+                Ok(CallToolResult::success(vec![Content::text(
+                    format!("Shell environment initialized with {}", shell)
+                )]))
             }
             Err(e) => {
                 warn!("Failed to initialize shell: {}", e);
-                Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to initialize shell: {}", e)
-                ) as std::io::Error) as Box<dyn std::error::Error + Send + Sync>)
+                Err(McpError::internal_error(format!("Failed to initialize shell: {}", e)))
             }
         }
     }
 
     /// Execute a bash command
-    #[tool]
+    #[tool(description = "Execute a command in the bash shell")]
     async fn bash_command(
         &self,
         command: String,
         timeout_seconds: Option<u64>,
-    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<CallToolResult, McpError> {
         let timeout_secs = timeout_seconds.unwrap_or(30) as f32;
         
         let mut bash_state_guard = self.bash_state.lock().await;
         if bash_state_guard.is_none() {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "Shell not initialized. Call initialize first."
-            ) as std::io::Error) as Box<dyn std::error::Error + Send + Sync>);
+            return Err(McpError::invalid_request("Shell not initialized. Call initialize first."));
         }
 
         let bash_state = bash_state_guard.as_mut().unwrap();
         
         match bash_state.execute_interactive(&command, timeout_secs).await {
             Ok(output) => {
-                Ok(serde_json::json!({
-                    "status": "success",
-                    "output": output,
-                    "working_directory": bash_state.cwd.display().to_string()
-                }))
+                let working_dir = bash_state.cwd.display().to_string();
+                let content = format!("Working directory: {}\n\n{}", working_dir, output);
+                Ok(CallToolResult::success(vec![Content::text(content)]))
             }
             Err(e) => {
                 warn!("Command execution failed: {}", e);
-                Err(Box::new(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Command execution failed: {}", e)
-                ) as std::io::Error) as Box<dyn std::error::Error + Send + Sync>)
+                Err(McpError::internal_error(format!("Command execution failed: {}", e)))
             }
         }
     }
