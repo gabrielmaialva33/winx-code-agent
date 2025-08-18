@@ -53,9 +53,31 @@ impl WinxService {
         info!("Creating new WinxService instance");
         Self {
             bash_state: Arc::new(Mutex::new(None)),
+            dashscope_client: Arc::new(Mutex::new(None)),
             nvidia_client: Arc::new(Mutex::new(None)),
             gemini_client: Arc::new(Mutex::new(None)),
             version: env!("CARGO_PKG_VERSION").to_string(),
+        }
+    }
+
+    /// Initialize DashScope integration if API key is available
+    pub async fn initialize_dashscope(&self) -> crate::Result<bool> {
+        match DashScopeConfig::from_env() {
+            Ok(config) => match DashScopeClient::new(config) {
+                Ok(client) => {
+                    *self.dashscope_client.lock().unwrap() = Some(client);
+                    info!("DashScope AI integration initialized successfully");
+                    Ok(true)
+                }
+                Err(e) => {
+                    warn!("Failed to initialize DashScope integration: {}", e);
+                    Ok(false)
+                }
+            },
+            Err(e) => {
+                info!("DashScope integration not available: {}", e);
+                Ok(false)
+            }
         }
     }
 
