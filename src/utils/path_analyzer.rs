@@ -38,7 +38,7 @@ use crate::errors::WinxError;
 /// recently accessed files, which improves relevance scoring by assigning
 /// higher scores to paths that match the current project context.
 ///
-/// ```rust,no_run
+/// ```text
 /// // Example: Creating a context-aware path scorer
 /// let recent_files = vec!["src/main.rs".to_string(), "src/lib.rs".to_string()];
 /// let context_scorer = create_context_aware_path_scorer(&recent_files, None)?;
@@ -48,7 +48,7 @@ use crate::errors::WinxError;
 /// Different file extensions can be assigned different weights, allowing
 /// certain file types to be prioritized over others in the ranking.
 ///
-/// ```rust,no_run
+/// ```text
 /// // Example: Setting custom extension weights
 /// let mut scorer = create_default_path_scorer()?;
 /// scorer.set_extension_weight("rs", 1.5); // Boost Rust files
@@ -719,7 +719,7 @@ pub fn create_default_path_scorer() -> Result<PathScorer> {
 ///
 /// # Examples
 ///
-/// ```rust
+/// ```text
 /// // Create a context-aware scorer using recently accessed files
 /// let workspace_stats = get_workspace_stats();
 /// let recent_files = workspace_stats.get_most_active_files(50);
