@@ -30,6 +30,8 @@ pub struct WinxService {
     pub nvidia_client: Arc<Mutex<Option<NvidiaClient>>>,
     /// Version information for the service
     pub version: String,
+    /// Tool router for handling tool calls
+    pub tool_router: ToolRouter<Self>,
 }
 
 impl Default for WinxService {
@@ -46,6 +48,7 @@ impl WinxService {
             bash_state: Arc::new(Mutex::new(None)),
             nvidia_client: Arc::new(Mutex::new(None)),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            tool_router: Self::tool_router(),
         }
     }
 
