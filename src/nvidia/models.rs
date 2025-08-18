@@ -35,6 +35,7 @@ impl NvidiaModel {
     /// Get the model string for API calls
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Qwen3_235B => "qwen/qwen3-235b-a22b",
             Self::Llama31_70B => "meta/llama-3.1-70b-instruct",
             Self::Nemotron340B => "nvidia/nemotron-4-340b-instruct",
             Self::Phi3Medium => "microsoft/phi-3-medium-128k-instruct",
@@ -46,10 +47,10 @@ impl NvidiaModel {
     /// Get recommended model for specific task types
     pub fn for_task(task: TaskType) -> Self {
         match task {
-            TaskType::CodeGeneration | TaskType::CodeCompletion => Self::Codestral22B,
-            TaskType::CodeAnalysis | TaskType::BugDetection => Self::CodeGemma7B,
-            TaskType::CodeExplanation | TaskType::Documentation => Self::Llama31_70B,
-            TaskType::ComplexReasoning | TaskType::Refactoring => Self::Nemotron340B,
+            TaskType::CodeGeneration | TaskType::CodeCompletion => Self::Qwen3_235B,
+            TaskType::CodeAnalysis | TaskType::BugDetection => Self::Qwen3_235B,
+            TaskType::CodeExplanation | TaskType::Documentation => Self::Qwen3_235B,
+            TaskType::ComplexReasoning | TaskType::Refactoring => Self::Qwen3_235B,
             TaskType::FastResponse => Self::Phi3Medium,
         }
     }
