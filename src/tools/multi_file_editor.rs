@@ -451,6 +451,45 @@ impl MultiFileEditorTool {
                     });
                 }
             }
+            FileOperation::SmartSearchReplace {
+                file_paths,
+                search_pattern,
+                confidence_threshold,
+                ..
+            } => {
+                // Validate file paths
+                if file_paths.is_empty() {
+                    return Err(WinxError::InvalidInput(
+                        "SmartSearchReplace requires at least one file path".to_string(),
+                    ));
+                }
+
+                for file_path in file_paths {
+                    let path = Path::new(file_path);
+                    if !path.exists() {
+                        return Err(WinxError::FileAccessError {
+                            path: path.to_path_buf(),
+                            message: "File not found".to_string(),
+                        });
+                    }
+                }
+
+                // Validate search pattern
+                if search_pattern.is_empty() {
+                    return Err(WinxError::InvalidInput(
+                        "Search pattern cannot be empty".to_string(),
+                    ));
+                }
+
+                // Validate confidence threshold
+                if let Some(threshold) = confidence_threshold {
+                    if *threshold < 0.0 || *threshold > 1.0 {
+                        return Err(WinxError::InvalidInput(
+                            "Confidence threshold must be between 0.0 and 1.0".to_string(),
+                        ));
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -513,6 +552,27 @@ impl MultiFileEditorTool {
                     search,
                     replace,
                     all_occurrences.unwrap_or(false),
+                )
+                .await
+            }
+            FileOperation::SmartSearchReplace {
+                file_paths,
+                search_pattern,
+                replace_hint,
+                context,
+                use_ai_provider,
+                confidence_threshold,
+                preview_mode,
+            } => {
+                self.execute_smart_search_replace(
+                    index,
+                    file_paths,
+                    search_pattern,
+                    replace_hint,
+                    context.as_deref(),
+                    use_ai_provider.as_deref(),
+                    confidence_threshold.unwrap_or(0.7),
+                    preview_mode.unwrap_or(false),
                 )
                 .await
             }
