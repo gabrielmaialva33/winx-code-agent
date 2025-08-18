@@ -781,8 +781,7 @@ impl WinxService {
                     }
                 }
                 Err(e) => {
-                    let error_msg = format!("Failed to read file {}: {}", file_path, e);
-                    Err(McpError::invalid_request(error_msg.as_str(), None))
+                    Err(McpError::internal_error(&format!("Failed to read file {}: {}", file_path, e), None))
                 }
             }
         } else {
@@ -871,8 +870,7 @@ impl WinxService {
                 match tokio::fs::read_to_string(path).await {
                     Ok(content) => (content, format!("file: {}", path)),
                     Err(e) => {
-                        let error_msg = format!("Failed to read file {}: {}", path, e);
-                        return Err(McpError::invalid_request(error_msg.as_str(), None));
+                        return Err(McpError::internal_error(&format!("Failed to read file {}: {}", path, e), None));
                     }
                 }
             } else {
