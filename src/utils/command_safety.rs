@@ -148,7 +148,9 @@ impl CommandSafety {
                 let rest = &normalized[interactive_cmd.len()..];
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
                     // For git commit, check if it has -m flag (non-interactive)
-                    if interactive_cmd == "git commit" && (normalized.contains("-m") || normalized.contains("--message")) {
+                    if interactive_cmd == "git commit"
+                        && (normalized.contains("-m") || normalized.contains("--message"))
+                    {
                         return false;
                     }
                     // For python, check if it has a script argument (non-interactive)
