@@ -41,15 +41,15 @@ mod tests {
     fn test_chat_message_creation() {
         let system_msg = ChatMessage::system("You are a helpful assistant");
         assert_eq!(system_msg.role, "system");
-        assert_eq!(system_msg.content, "You are a helpful assistant");
+        assert_eq!(system_msg.content, Some("You are a helpful assistant".to_string()));
 
         let user_msg = ChatMessage::user("Hello, world!");
         assert_eq!(user_msg.role, "user");
-        assert_eq!(user_msg.content, "Hello, world!");
+        assert_eq!(user_msg.content, Some("Hello, world!".to_string()));
 
         let assistant_msg = ChatMessage::assistant("Hello! How can I help you?");
         assert_eq!(assistant_msg.role, "assistant");
-        assert_eq!(assistant_msg.content, "Hello! How can I help you?");
+        assert_eq!(assistant_msg.content, Some("Hello! How can I help you?".to_string()));
     }
 
     #[test]
