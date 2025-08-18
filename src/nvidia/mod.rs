@@ -13,7 +13,6 @@ pub mod tests;
 
 pub use client::NvidiaClient;
 pub use config::NvidiaConfig;
-pub use models::*;
 
 use crate::errors::{Result, WinxError};
 
