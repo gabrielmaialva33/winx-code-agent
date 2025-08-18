@@ -1,18 +1,16 @@
 //! Winx MCP Server implementation using rmcp 0.5.0
 //! Enhanced server with NVIDIA AI integration
 
-use rmcp::{model::*, transport::stdio, ServerHandler, ServiceExt, tool, ErrorData as McpError, schemars};
+use rmcp::{model::*, transport::stdio, ServerHandler, ServiceExt};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
-use crate::nvidia::tools::code_analysis::{analyze_code_with_ai, AnalyzeCodeParams};
 use crate::state::BashState;
 
 /// Winx service with shared bash state and NVIDIA AI integration
 #[derive(Clone)]
-#[tool(tool_box)]
 pub struct WinxService {
     /// Shared state for the bash shell environment
     pub bash_state: Arc<Mutex<Option<BashState>>>,
