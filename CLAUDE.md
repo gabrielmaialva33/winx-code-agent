@@ -59,7 +59,7 @@ export NVIDIA_API_KEY="your-nvidia-api-key-here"
 export NVAPI_KEY="your-nvidia-api-key-here"
 
 # Optional: Configure NVIDIA settings
-export NVIDIA_DEFAULT_MODEL="qwen3-235b-a22b"
+export NVIDIA_DEFAULT_MODEL="qwen/qwen3-235b-a22b"
 export NVIDIA_TIMEOUT_SECONDS="30"
 export NVIDIA_MAX_RETRIES="3"
 export NVIDIA_RATE_LIMIT_RPM="60"
@@ -240,7 +240,7 @@ Winx is designed to be used as a Model Context Protocol (MCP) server with Claude
 3. **Set Environment Variables**: For AI features, configure your NVIDIA API key:
    ```bash
    export NVIDIA_API_KEY="your-nvidia-api-key-here"
-   export NVIDIA_DEFAULT_MODEL="qwen3-235b-a22b"  # optional
+   export NVIDIA_DEFAULT_MODEL="qwen/qwen3-235b-a22b"  # optional
    ```
 
 4. **Restart Claude Desktop**: After adding the configuration, restart Claude Desktop to load the Winx server.
