@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::fs;
 use tracing::{debug, info, warn};
-use async_trait::async_trait;
 
 use crate::errors::{Result, WinxError};
 use crate::state::BashState;
@@ -267,10 +266,10 @@ impl DashScopeClient {
 impl AIProvider for NvidiaClient {
     async fn analyze_code(
         &self,
-        content: &str,
+        _content: &str,
         search_pattern: &str,
         replace_hint: &str,
-        context: Option<&str>,
+        _context: Option<&str>,
     ) -> Result<AIAnalysisResult> {
         // For now, return a basic implementation
         // TODO: Implement full NVIDIA API integration
@@ -289,10 +288,10 @@ impl AIProvider for NvidiaClient {
 impl AIProvider for GeminiClient {
     async fn analyze_code(
         &self,
-        content: &str,
+        _content: &str,
         search_pattern: &str,
         replace_hint: &str,
-        context: Option<&str>,
+        _context: Option<&str>,
     ) -> Result<AIAnalysisResult> {
         // For now, return a basic implementation
         // TODO: Implement full Gemini API integration
@@ -1126,7 +1125,7 @@ impl MultiFileEditorTool {
             }
 
             // Create backup
-            let backup_path = self.create_backup(file_path).await?;
+            let _backup_path = self.create_backup(file_path).await?;
 
             // Apply replacements
             let new_content = self.apply_smart_replacements(&content, &valid_matches)?;
