@@ -1,9 +1,19 @@
 //! Winx MCP Server implementation using rmcp 0.5.0
 //! Enhanced server with NVIDIA AI integration
 
-use rmcp::{model::*, transport::stdio, tool, ServerHandler, ServiceExt};
+use rmcp::{
+    ErrorData as McpError,
+    ServiceExt, 
+    model::*, 
+    tool, 
+    tool_router,
+    tool_handler,
+    transport::stdio,
+    handler::server::tool::ToolCallContext,
+    handler::server::router::tool::ToolRouter,
+    ServerHandler
+};
 use serde_json::Value;
-use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
