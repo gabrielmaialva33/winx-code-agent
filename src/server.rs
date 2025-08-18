@@ -148,7 +148,10 @@ impl ServerHandler for WinxService {
                 version: self.version.clone(),
             },
             protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
             instructions: Some(
                 "Winx is a high-performance Rust implementation of WCGW for code agents with NVIDIA AI integration. \
                 Provides shell execution, file management, and AI-powered code analysis capabilities.".into(),
@@ -421,6 +424,83 @@ impl ServerHandler for WinxService {
             ],
             next_cursor: None,
         })
+    }
+
+    async fn list_resources(
+        &self,
+        _param: ListResourcesRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        Ok(ListResourcesResult {
+            resources: vec![
+                Resource {
+                    uri: "file://project-structure".into(),
+                    name: Some("Project Structure".into()),
+                    description: Some("Overview of the project structure and files".into()),
+                    mime_type: Some("text/plain".into()),
+                    annotations: None,
+                },
+                Resource {
+                    uri: "file://readme".into(),
+                    name: Some("README".into()),
+                    description: Some("Project README documentation".into()),
+                    mime_type: Some("text/markdown".into()),
+                    annotations: None,
+                },
+                Resource {
+                    uri: "file://cargo-toml".into(),
+                    name: Some("Cargo.toml".into()),
+                    description: Some("Project configuration and dependencies".into()),
+                    mime_type: Some("text/plain".into()),
+                    annotations: None,
+                },
+                Resource {
+                    uri: "file://src-structure".into(),
+                    name: Some("Source Code Structure".into()),
+                    description: Some("Overview of the source code organization".into()),
+                    mime_type: Some("text/plain".into()),
+                    annotations: None,
+                },
+            ],
+            next_cursor: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        param: ReadResourceRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        let content = match param.uri.as_ref() {
+            "file://project-structure" => {
+                let structure = self.get_project_structure().await?;
+                vec![ResourceContents::text(structure)]
+            }
+            "file://readme" => {
+                match tokio::fs::read_to_string("README.md").await {
+                    Ok(content) => vec![ResourceContents::text(content)],
+                    Err(_) => vec![ResourceContents::text("README.md not found".to_string())],
+                }
+            }
+            "file://cargo-toml" => {
+                match tokio::fs::read_to_string("Cargo.toml").await {
+                    Ok(content) => vec![ResourceContents::text(content)],
+                    Err(_) => vec![ResourceContents::text("Cargo.toml not found".to_string())],
+                }
+            }
+            "file://src-structure" => {
+                let structure = self.get_src_structure().await?;
+                vec![ResourceContents::text(structure)]
+            }
+            _ => {
+                return Err(McpError::invalid_request(
+                    format!("Unknown resource URI: {}", param.uri),
+                    None,
+                ));
+            }
+        };
+
+        Ok(ReadResourceResult { contents: content })
     }
 
     async fn call_tool(
