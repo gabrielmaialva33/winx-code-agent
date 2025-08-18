@@ -33,6 +33,14 @@ and other LLMs via the Model Context Protocol (MCP).
 ## 🌟 Features
 
 - ⚡ **High Performance**: Implemented in Rust for maximum efficiency
+- 🤖 **Multi-Provider AI Integration** (v0.1.5):
+    - 🎯 **DashScope/Qwen3**: Primary AI provider with Alibaba Cloud's Qwen3-Coder-Plus model
+    - 🔄 **NVIDIA NIM**: Fallback 1 with Qwen3-235B-A22B model and thinking mode
+    - 💎 **Google Gemini**: Fallback 2 with Gemini-1.5-Pro and Gemini-1.5-Flash models
+    - 🔧 **AI-Powered Code Analysis**: Detect bugs, security issues, and performance problems
+    - 🚀 **AI Code Generation**: Generate code from natural language descriptions
+    - 📚 **AI Code Explanation**: Get detailed explanations of complex code
+    - 🛡️ **Smart Fallback System**: Automatic provider switching on failures
 - 📁 **Advanced File Operations**:
     - 📖 Read files with line range support
     - ✏️ Write new files with syntax validation
@@ -104,7 +112,13 @@ Winx is designed to work seamlessly with Claude via the MCP interface:
          "command": "/path/to/winx-code-agent",
          "args": [],
          "env": {
-           "RUST_LOG": "info"
+           "RUST_LOG": "info",
+           "DASHSCOPE_API_KEY": "your-dashscope-api-key",
+           "DASHSCOPE_MODEL": "qwen3-coder-plus",
+           "NVIDIA_API_KEY": "your-nvidia-api-key",
+           "NVIDIA_DEFAULT_MODEL": "qwen/qwen3-235b-a22b",
+           "GEMINI_API_KEY": "your-gemini-api-key",
+           "GEMINI_MODEL": "gemini-1.5-pro"
          }
        }
      }
