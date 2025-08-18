@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NvidiaModel {
     /// Qwen3 235B A22B - Latest generation LLM with thinking mode and MoE architecture
-    #[serde(rename = "qwen/qwen3-235b-a22b")]
+    #[serde(rename = "qwen3-235b-a22b")]
     Qwen3_235B,
     /// Meta Llama 3.1 70B Instruct - Good for general coding tasks
     #[serde(rename = "meta/llama-3.1-70b-instruct")]
@@ -35,7 +35,7 @@ impl NvidiaModel {
     /// Get the model string for API calls
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Qwen3_235B => "qwen/qwen3-235b-a22b",
+            Self::Qwen3_235B => "qwen3-235b-a22b",
             Self::Llama31_70B => "meta/llama-3.1-70b-instruct",
             Self::Nemotron340B => "nvidia/nemotron-4-340b-instruct",
             Self::Phi3Medium => "microsoft/phi-3-medium-128k-instruct",
