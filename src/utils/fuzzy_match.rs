@@ -991,7 +991,9 @@ mod tests {
 
         // Should find at least one match with NormalizedWhitespace type
         assert!(!matches.is_empty());
-        assert!(matches.iter().any(|m| m.match_type == MatchType::NormalizedWhitespace));
+        assert!(matches
+            .iter()
+            .any(|m| m.match_type == MatchType::NormalizedWhitespace));
     }
 
     #[test]
