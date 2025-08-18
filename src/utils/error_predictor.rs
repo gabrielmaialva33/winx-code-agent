@@ -871,6 +871,7 @@ impl SharedErrorPredictor {
             WinxError::ParseError(_) => "parse_error",
             WinxError::InvalidInput(_) => "invalid_input",
             WinxError::FileError(_) => "file_error",
+            WinxError::AIError(_) => "ai_error",
         };
 
         let message = format!("{}", error);
