@@ -204,7 +204,7 @@ impl AIProvider for DashScopeClient {
 
 impl DashScopeClient {
     /// Parse AI response and extract smart matches
-    fn parse_ai_response(&self, response: &str, file_content: &str) -> Result<AIAnalysisResult> {
+    fn parse_ai_response(&self, response: &str, _file_content: &str) -> Result<AIAnalysisResult> {
         // Try to parse JSON response
         if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(response) {
             let matches = json_value.get("matches")

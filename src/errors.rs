@@ -183,6 +183,10 @@ pub enum WinxError {
     /// File error for file operations
     #[error("File error: {0}")]
     FileError(String),
+
+    /// AI provider error
+    #[error("AI error: {0}")]
+    AIError(String),
 }
 
 /// Type alias for Result with WinxError
@@ -528,6 +532,7 @@ impl Clone for WinxError {
             Self::ParseError(msg) => Self::ParseError(msg.clone()),
             Self::InvalidInput(msg) => Self::InvalidInput(msg.clone()),
             Self::FileError(msg) => Self::FileError(msg.clone()),
+            Self::AIError(msg) => Self::AIError(msg.clone()),
         }
     }
 }
