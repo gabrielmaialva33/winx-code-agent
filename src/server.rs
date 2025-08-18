@@ -914,12 +914,41 @@ impl WinxService {
                     Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
                 }
                 Err(e) => {
-                    warn!("NVIDIA code generation failed: {}", e);
-                    let fallback = format!(
-                        "## ⚠️ Code Generation Failed\n\nNVIDIA AI code generation failed: {}\n\nPlease check your NVIDIA_API_KEY and try again.",
-                        e
-                    );
-                    Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                    warn!("NVIDIA code generation failed: {}, trying Gemini fallback", e);
+                    
+                    // Try Gemini as fallback
+                    if let Some(gemini_client) = self.get_gemini_client().await {
+                        match gemini_client.generate_code(
+                            prompt, 
+                            language.as_deref(), 
+                            context.as_deref(), 
+                            max_tokens, 
+                            temperature
+                        ).await {
+                            Ok(gemini_result) => {
+                                let formatted_result = format!(
+                                    "## 🤖 AI Generated Code\n\n{}\n\n*NVIDIA failed, generated using Gemini AI*\n\n**Note:** NVIDIA error: {}",
+                                    gemini_result, e
+                                );
+                                info!("Gemini fallback code generation completed for prompt: '{}'", prompt);
+                                Ok(CallToolResult::success(vec![Content::text(formatted_result)]))
+                            }
+                            Err(gemini_e) => {
+                                warn!("Both NVIDIA and Gemini code generation failed: NVIDIA: {}, Gemini: {}", e, gemini_e);
+                                let fallback = format!(
+                                    "## ⚠️ Code Generation Failed\n\nBoth AI providers failed:\n- NVIDIA: {}\n- Gemini: {}\n\nPlease check your API keys and try again.",
+                                    e, gemini_e
+                                );
+                                Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                            }
+                        }
+                    } else {
+                        let fallback = format!(
+                            "## ⚠️ Code Generation Failed\n\nNVIDIA AI code generation failed: {}\nGemini fallback not available (missing GEMINI_API_KEY).\n\nPlease check your NVIDIA_API_KEY and try again.",
+                            e
+                        );
+                        Ok(CallToolResult::success(vec![Content::text(fallback)]))
+                    }
                 }
             }
         } else {
