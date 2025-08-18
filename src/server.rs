@@ -4,7 +4,8 @@
 use rmcp::{
     ErrorData as McpError,
     ServiceExt, 
-    model::*, 
+    model::*,
+    service::{RequestContext, RoleServer},
     transport::stdio,
     ServerHandler
 };
@@ -15,6 +16,14 @@ use tracing::{info, warn};
 
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
 use crate::state::BashState;
+
+/// Helper function to create JSON schema from serde_json::Value
+fn json_to_schema(value: Value) -> Arc<serde_json::Map<String, Value>> {
+    match value {
+        Value::Object(map) => Arc::new(map),
+        _ => Arc::new(serde_json::Map::new()),
+    }
+}
 
 /// Winx service with shared bash state and NVIDIA AI integration
 #[derive(Clone)]
@@ -88,13 +97,17 @@ impl ServerHandler for WinxService {
         }
     }
 
-    async fn list_tools(&self, _: ListToolsRequestParam) -> Result<ListToolsResponse, McpError> {
-        Ok(ListToolsResponse {
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult {
             tools: vec![
                 Tool {
                     name: "ping".into(),
                     description: Some("Test server connectivity".into()),
-                    input_schema: serde_json::json!({
+                    input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
                             "message": {
@@ -102,12 +115,12 @@ impl ServerHandler for WinxService {
                                 "description": "Optional message to echo back"
                             }
                         }
-                    }),
+                    })),
                 },
                 Tool {
                     name: "initialize".into(),
                     description: Some("Initialize the bash shell environment".into()),
-                    input_schema: serde_json::json!({
+                    input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
                             "shell": {
@@ -115,12 +128,12 @@ impl ServerHandler for WinxService {
                                 "description": "Shell to use (default: bash)"
                             }
                         }
-                    }),
+                    })),
                 },
                 Tool {
                     name: "bash_command".into(),
                     description: Some("Execute a command in the bash shell".into()),
-                    input_schema: serde_json::json!({
+                    input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
                             "command": {
@@ -133,12 +146,12 @@ impl ServerHandler for WinxService {
                             }
                         },
                         "required": ["command"]
-                    }),
+                    })),
                 },
                 Tool {
                     name: "read_files".into(),
                     description: Some("Read contents of one or more files".into()),
-                    input_schema: serde_json::json!({
+                    input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
                             "paths": {
@@ -150,12 +163,12 @@ impl ServerHandler for WinxService {
                             }
                         },
                         "required": ["paths"]
-                    }),
+                    })),
                 },
                 Tool {
                     name: "file_write_or_edit".into(),
                     description: Some("Write or edit file contents".into()),
-                    input_schema: serde_json::json!({
+                    input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
                             "path": {
@@ -172,26 +185,27 @@ impl ServerHandler for WinxService {
                             }
                         },
                         "required": ["path", "content"]
-                    }),
+                    })),
                 },
             ],
         })
     }
 
-    async fn call_tool(&self, param: CallToolRequestParam) -> Result<CallToolResponse, McpError> {
+    async fn call_tool(
+        &self,
+        param: CallToolRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
         let result = match param.name.as_str() {
             "ping" => self.handle_ping(param.arguments).await?,
             "initialize" => self.handle_initialize(param.arguments).await?,
             "bash_command" => self.handle_bash_command(param.arguments).await?,
             "read_files" => self.handle_read_files(param.arguments).await?,
             "file_write_or_edit" => self.handle_file_write_or_edit(param.arguments).await?,
-            _ => return Err(McpError::invalid_request(&format!("Unknown tool: {}", param.name), None)),
+            _ => return Err(McpError::invalid_request(format!("Unknown tool: {}", param.name), None)),
         };
 
-        Ok(CallToolResponse {
-            content: result.content,
-            is_error: Some(result.is_error.unwrap_or(false)),
-        })
+        Ok(result)
     }
 }
 
