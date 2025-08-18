@@ -88,7 +88,9 @@ pub struct ChatCompletionRequest {
 /// Chat message for conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
+    #[serde(default)]
     pub role: String,
+    #[serde(default)]
     pub content: String,
 }
 
@@ -118,9 +120,11 @@ impl ChatMessage {
 /// Response from NVIDIA chat completion API
 #[derive(Debug, Deserialize)]
 pub struct ChatCompletionResponse {
+    #[serde(default)]
     pub id: String,
     pub choices: Vec<Choice>,
     pub usage: Option<Usage>,
+    #[serde(default)]
     pub model: String,
 }
 
