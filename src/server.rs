@@ -564,6 +564,273 @@ impl ServerHandler for WinxService {
         Ok(ReadResourceResult { contents: content })
     }
 
+    async fn list_prompts(
+        &self,
+        _param: ListPromptsRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        Ok(ListPromptsResult {
+            prompts: vec![
+                Prompt {
+                    name: "code_review".into(),
+                    description: Some("Comprehensive code review and analysis".into()),
+                    arguments: Some(vec![
+                        PromptArgument {
+                            name: "file_path".into(),
+                            description: Some("Path to the code file to review".into()),
+                            required: Some(true),
+                        },
+                        PromptArgument {
+                            name: "focus_areas".into(),
+                            description: Some("Specific areas to focus on (security, performance, bugs, style)".into()),
+                            required: Some(false),
+                        },
+                    ]),
+                },
+                Prompt {
+                    name: "bug_fix_assistant".into(),
+                    description: Some("AI-powered bug detection and fix suggestions".into()),
+                    arguments: Some(vec![
+                        PromptArgument {
+                            name: "error_message".into(),
+                            description: Some("Error message or description of the bug".into()),
+                            required: Some(true),
+                        },
+                        PromptArgument {
+                            name: "code_context".into(),
+                            description: Some("Relevant code context or file path".into()),
+                            required: Some(false),
+                        },
+                    ]),
+                },
+                Prompt {
+                    name: "performance_optimizer".into(),
+                    description: Some("Performance analysis and optimization suggestions".into()),
+                    arguments: Some(vec![
+                        PromptArgument {
+                            name: "code_snippet".into(),
+                            description: Some("Code snippet or file path to optimize".into()),
+                            required: Some(true),
+                        },
+                        PromptArgument {
+                            name: "target_language".into(),
+                            description: Some("Programming language (auto-detected if not provided)".into()),
+                            required: Some(false),
+                        },
+                    ]),
+                },
+                Prompt {
+                    name: "security_analyzer".into(),
+                    description: Some("Security vulnerability analysis and recommendations".into()),
+                    arguments: Some(vec![
+                        PromptArgument {
+                            name: "file_path".into(),
+                            description: Some("Path to the code file to analyze for security issues".into()),
+                            required: Some(true),
+                        },
+                    ]),
+                },
+                Prompt {
+                    name: "documentation_generator".into(),
+                    description: Some("Generate comprehensive documentation for code".into()),
+                    arguments: Some(vec![
+                        PromptArgument {
+                            name: "code_file".into(),
+                            description: Some("Path to the code file to document".into()),
+                            required: Some(true),
+                        },
+                        PromptArgument {
+                            name: "doc_style".into(),
+                            description: Some("Documentation style (rustdoc, jsdoc, sphinx, etc.)".into()),
+                            required: Some(false),
+                        },
+                    ]),
+                },
+                Prompt {
+                    name: "test_generator".into(),
+                    description: Some("Generate unit tests for code functions and modules".into()),
+                    arguments: Some(vec![
+                        PromptArgument {
+                            name: "source_file".into(),
+                            description: Some("Path to the source code file to generate tests for".into()),
+                            required: Some(true),
+                        },
+                        PromptArgument {
+                            name: "test_framework".into(),
+                            description: Some("Testing framework to use (auto-detected if not provided)".into()),
+                            required: Some(false),
+                        },
+                    ]),
+                },
+            ],
+            next_cursor: None,
+        })
+    }
+
+    async fn get_prompt(
+        &self,
+        param: GetPromptRequestParam,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        let prompt_content = match param.name.as_ref() {
+            "code_review" => {
+                let file_path = param.arguments.as_ref()
+                    .and_then(|args| args.get("file_path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[file_path]");
+                let focus_areas = param.arguments.as_ref()
+                    .and_then(|args| args.get("focus_areas"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("all areas");
+                
+                format!(
+                    "Please perform a comprehensive code review of the file: {}\n\n\
+                    Focus areas: {}\n\n\
+                    Please analyze the code for:\n\
+                    - Code quality and maintainability\n\
+                    - Potential bugs and logic errors\n\
+                    - Security vulnerabilities\n\
+                    - Performance issues\n\
+                    - Code style and best practices\n\
+                    - Documentation completeness\n\n\
+                    Provide specific suggestions for improvement with code examples where applicable.",
+                    file_path, focus_areas
+                )
+            }
+            "bug_fix_assistant" => {
+                let error_message = param.arguments.as_ref()
+                    .and_then(|args| args.get("error_message"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[error_message]");
+                let code_context = param.arguments.as_ref()
+                    .and_then(|args| args.get("code_context"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[code_context]");
+                
+                format!(
+                    "Help me fix this bug:\n\n\
+                    Error: {}\n\n\
+                    Code context: {}\n\n\
+                    Please:\n\
+                    1. Analyze the error message and identify the root cause\n\
+                    2. Examine the code context for potential issues\n\
+                    3. Provide a step-by-step solution\n\
+                    4. Suggest code fixes with examples\n\
+                    5. Recommend preventive measures to avoid similar issues",
+                    error_message, code_context
+                )
+            }
+            "performance_optimizer" => {
+                let code_snippet = param.arguments.as_ref()
+                    .and_then(|args| args.get("code_snippet"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[code_snippet]");
+                let target_language = param.arguments.as_ref()
+                    .and_then(|args| args.get("target_language"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto-detect");
+                
+                format!(
+                    "Optimize this code for better performance:\n\n\
+                    Code: {}\n\n\
+                    Language: {}\n\n\
+                    Please:\n\
+                    1. Identify performance bottlenecks\n\
+                    2. Suggest algorithmic improvements\n\
+                    3. Recommend data structure optimizations\n\
+                    4. Provide optimized code examples\n\
+                    5. Explain the performance gains expected",
+                    code_snippet, target_language
+                )
+            }
+            "security_analyzer" => {
+                let file_path = param.arguments.as_ref()
+                    .and_then(|args| args.get("file_path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[file_path]");
+                
+                format!(
+                    "Perform a security analysis of the file: {}\n\n\
+                    Please check for:\n\
+                    - Input validation vulnerabilities\n\
+                    - SQL injection risks\n\
+                    - Cross-site scripting (XSS) vulnerabilities\n\
+                    - Authentication and authorization issues\n\
+                    - Data exposure risks\n\
+                    - Cryptographic weaknesses\n\
+                    - Buffer overflow possibilities\n\
+                    - Dependency vulnerabilities\n\n\
+                    Provide specific recommendations and secure code examples.",
+                    file_path
+                )
+            }
+            "documentation_generator" => {
+                let code_file = param.arguments.as_ref()
+                    .and_then(|args| args.get("code_file"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[code_file]");
+                let doc_style = param.arguments.as_ref()
+                    .and_then(|args| args.get("doc_style"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto-detect");
+                
+                format!(
+                    "Generate comprehensive documentation for: {}\n\n\
+                    Documentation style: {}\n\n\
+                    Please create:\n\
+                    - Module/class overview\n\
+                    - Function/method documentation\n\
+                    - Parameter descriptions\n\
+                    - Return value documentation\n\
+                    - Usage examples\n\
+                    - Error handling information\n\
+                    - Performance considerations\n\n\
+                    Follow the appropriate documentation standards for the language.",
+                    code_file, doc_style
+                )
+            }
+            "test_generator" => {
+                let source_file = param.arguments.as_ref()
+                    .and_then(|args| args.get("source_file"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[source_file]");
+                let test_framework = param.arguments.as_ref()
+                    .and_then(|args| args.get("test_framework"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("auto-detect");
+                
+                format!(
+                    "Generate comprehensive unit tests for: {}\n\n\
+                    Test framework: {}\n\n\
+                    Please create tests that:\n\
+                    - Cover all public functions/methods\n\
+                    - Test edge cases and error conditions\n\
+                    - Include positive and negative test cases\n\
+                    - Test boundary conditions\n\
+                    - Mock external dependencies\n\
+                    - Follow testing best practices\n\
+                    - Include setup and teardown if needed\n\n\
+                    Provide complete, runnable test code with explanations.",
+                    source_file, test_framework
+                )
+            }
+            _ => {
+                return Err(McpError::invalid_request(
+                    format!("Unknown prompt: {}", param.name),
+                    None,
+                ));
+            }
+        };
+
+        Ok(GetPromptResult {
+            description: Some(format!("Generated prompt for {}", param.name)),
+            messages: vec![PromptMessage {
+                role: MessageRole::User,
+                content: MessageContent::Text { text: prompt_content },
+            }],
+        })
+    }
+
     async fn call_tool(
         &self,
         param: CallToolRequestParam,
