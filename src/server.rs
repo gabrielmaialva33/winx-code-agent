@@ -361,7 +361,7 @@ impl WinxService {
             })
             .unwrap_or_else(|| "bash".to_string());
 
-        let mut bash_state_guard = self.bash_state.lock().await;
+        let mut bash_state_guard = self.bash_state.lock().unwrap();
         if bash_state_guard.is_some() {
             return Ok(CallToolResult::success(vec![Content::text(
                 "Shell environment is already initialized".to_string(),
@@ -399,22 +399,29 @@ impl WinxService {
             .and_then(|v| v.as_u64())
             .unwrap_or(30) as f32;
 
-        let mut bash_state_guard = self.bash_state.lock().await;
-        if bash_state_guard.is_none() {
-            return Err(McpError::invalid_request(
-                "Shell not initialized. Call initialize first.",
-                None,
-            ));
-        }
+        // Clone the bash state to avoid holding the mutex across await
+        let mut bash_state_clone = {
+            let bash_state_guard = self.bash_state.lock().unwrap();
+            if bash_state_guard.is_none() {
+                return Err(McpError::invalid_request(
+                    "Shell not initialized. Call initialize first.",
+                    None,
+                ));
+            }
+            bash_state_guard.as_ref().unwrap().clone()
+        };
 
-        let bash_state = bash_state_guard.as_mut().unwrap();
-
-        match bash_state
+        match bash_state_clone
             .execute_interactive(command, timeout_seconds)
             .await
         {
             Ok(output) => {
-                let working_dir = bash_state.cwd.display().to_string();
+                // Update the original state with any changes
+                {
+                    let mut bash_state_guard = self.bash_state.lock().unwrap();
+                    *bash_state_guard = Some(bash_state_clone.clone());
+                }
+                let working_dir = bash_state_clone.cwd.display().to_string();
                 let content = format!("Working directory: {}\n\n{}", working_dir, output);
                 Ok(CallToolResult::success(vec![Content::text(content)]))
             }
