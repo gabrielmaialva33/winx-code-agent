@@ -686,12 +686,16 @@ pub async fn start_winx_server() -> Result<(), Box<dyn std::error::Error>> {
     // Create service and initialize NVIDIA integration
     let service = WinxService::new();
 
-    // Temporarily disable NVIDIA initialization to debug MCP issues
-    // TODO: Re-enable after fixing the connection issue
-    // if let Err(e) = service.initialize_nvidia().await {
-    //     warn!("Could not initialize NVIDIA integration: {}", e);
-    // }
-    info!("NVIDIA integration temporarily disabled for debugging");
+    // Initialize NVIDIA integration
+    if let Ok(enabled) = service.initialize_nvidia().await {
+        if enabled {
+            info!("NVIDIA AI integration enabled successfully");
+        } else {
+            warn!("NVIDIA AI features will be limited without valid NVIDIA_API_KEY");
+        }
+    } else {
+        warn!("Failed to initialize NVIDIA integration");
+    }
 
     // Create and run the server with STDIO transport
     let server = service.serve(stdio()).await.inspect_err(|e| {
