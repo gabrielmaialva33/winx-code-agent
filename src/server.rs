@@ -12,6 +12,7 @@ use rmcp::{
     handler::server::router::tool::ToolRouter,
     ServerHandler
 };
+use serde_json::Value;
 use std::future::Future;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -112,7 +113,7 @@ impl WinxService {
             }
             Err(e) => {
                 warn!("Failed to initialize shell: {}", e);
-                Err(McpError::internal_error(format!("Failed to initialize shell: {}", e)))
+                Err(McpError::internal_error(format!("Failed to initialize shell: {}", e), None))
             }
         }
     }
