@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
 use crate::state::BashState;
-use crate::types::{ContextSave, ReadImage, CommandSuggestions};
+use crate::types::{CommandSuggestions, ContextSave, ReadImage};
 
 /// Helper function to create JSON schema from serde_json::Value
 fn json_to_schema(value: Value) -> Arc<serde_json::Map<String, Value>> {
@@ -515,7 +515,7 @@ impl WinxService {
 
     async fn handle_context_save(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        
+
         let id = args
             .get("id")
             .and_then(|v| v.as_str())
@@ -567,7 +567,7 @@ impl WinxService {
 
     async fn handle_read_image(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        
+
         let file_path = args
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -580,7 +580,10 @@ impl WinxService {
         match crate::tools::read_image::handle_tool_call(&self.bash_state, read_image).await {
             Ok((mime_type, base64_data)) => {
                 info!("Image read successfully: {}", file_path);
-                let result_text = format!("Image: {}\nMIME Type: {}\nBase64 Data: {}", file_path, mime_type, base64_data);
+                let result_text = format!(
+                    "Image: {}\nMIME Type: {}\nBase64 Data: {}",
+                    file_path, mime_type, base64_data
+                );
                 Ok(CallToolResult::success(vec![Content::text(result_text)]))
             }
             Err(e) => {
@@ -593,9 +596,12 @@ impl WinxService {
         }
     }
 
-    async fn handle_command_suggestions(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+    async fn handle_command_suggestions(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
         let args = args.unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        
+
         let partial_command = args
             .get("partial_command")
             .and_then(|v| v.as_str())
@@ -626,7 +632,12 @@ impl WinxService {
             include_explanations,
         };
 
-        match crate::tools::command_suggestions::handle_tool_call(&self.bash_state, command_suggestions).await {
+        match crate::tools::command_suggestions::handle_tool_call(
+            &self.bash_state,
+            command_suggestions,
+        )
+        .await
+        {
             Ok(result) => {
                 info!("Command suggestions generated");
                 Ok(CallToolResult::success(vec![Content::text(result)]))
@@ -643,7 +654,7 @@ impl WinxService {
 
     async fn handle_code_analyzer(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        
+
         let file_path = args
             .get("file_path")
             .and_then(|v| v.as_str())
@@ -662,7 +673,9 @@ impl WinxService {
         };
 
         info!("Code analysis completed for: {}", file_path);
-        Ok(CallToolResult::success(vec![Content::text(analysis_result)]))
+        Ok(CallToolResult::success(vec![Content::text(
+            analysis_result,
+        )]))
     }
 }
 
