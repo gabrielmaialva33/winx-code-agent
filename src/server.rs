@@ -631,6 +631,52 @@ impl ServerHandler for WinxService {
                     output_schema: None,
                     annotations: None,
                 },
+                Tool {
+                    name: "smart_search_replace".into(),
+                    description: Some("AI-powered smart search and replace across multiple files with context understanding".into()),
+                    input_schema: json_to_schema(serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "file_paths": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "List of file paths to perform smart search and replace on"
+                            },
+                            "search_pattern": {
+                                "type": "string",
+                                "description": "Pattern to search for (can be literal text or regex pattern)"
+                            },
+                            "replace_hint": {
+                                "type": "string",
+                                "description": "Natural language description of how to replace the found patterns"
+                            },
+                            "context": {
+                                "type": "string",
+                                "description": "Optional context about the codebase or replacement intent"
+                            },
+                            "use_ai_provider": {
+                                "type": "string",
+                                "enum": ["dashscope", "nvidia", "gemini", "auto"],
+                                "description": "AI provider to use (auto tries DashScope->NVIDIA->Gemini, default: auto)"
+                            },
+                            "confidence_threshold": {
+                                "type": "number",
+                                "minimum": 0.0,
+                                "maximum": 1.0,
+                                "description": "Minimum confidence score for AI suggestions (default: 0.7)"
+                            },
+                            "preview_mode": {
+                                "type": "boolean",
+                                "description": "Preview changes without applying them (default: false)"
+                            }
+                        },
+                        "required": ["file_paths", "search_pattern", "replace_hint"]
+                    })),
+                    output_schema: None,
+                    annotations: None,
+                },
             ],
             next_cursor: None,
         })
@@ -1049,6 +1095,7 @@ impl ServerHandler for WinxService {
             "ai_explain_code" => self.handle_ai_explain_code(args_value).await?,
             "winx_chat" => self.handle_winx_chat(args_value).await?,
             "multi_file_editor" => self.handle_multi_file_editor(args_value).await?,
+            "smart_search_replace" => self.handle_smart_search_replace(args_value).await?,
             _ => {
                 return Err(McpError::invalid_request(
                     format!("Unknown tool: {}", param.name),
