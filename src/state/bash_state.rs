@@ -1129,6 +1129,20 @@ impl BashState {
 
         // Handle command already running case
         if let Some((running_command, elapsed)) = command_running_info {
+            // Additional recovery: check if process is dead or stuck and forcibly reset
+            let process_alive = {
+                let bash_guard = self.interactive_bash.lock().unwrap();
+                bash_guard.as_ref().map_or(false, |b| b.is_alive())
+            };
+            if !process_alive {
+                // Reset state and reinitialize if process is dead
+                let mut bash_guard = self.interactive_bash.lock().unwrap();
+                if let Some(bash) = bash_guard.as_mut() {
+                    bash.command_state = CommandState::Idle;
+                }
+                // Optionally, reinitialize bash process
+                let _ = self.init_interactive_bash();
+            }
             // Check if this is a status check request
             if command.trim().is_empty() || command == "status_check" {
                 debug!(
@@ -1173,7 +1187,7 @@ impl BashState {
             } else {
                 // A command is already running and user wants to run another
                 return Err(anyhow!(
-                    "{}\n\nA command is already running: '{}' (for {:.2?}).\nUse status_check to see current output, or send_text/send_specials to interact with it.",
+                    "{}\n\nA command is already running: '{}' (for {:.2?}).\nUse status_check to see current output, or send_text/send_specials to interact with it.\nIf you believe this is a bug, use the manual 'reset' command to force recovery.",
                     WAITING_INPUT_MESSAGE,
                     running_command,
                     elapsed
