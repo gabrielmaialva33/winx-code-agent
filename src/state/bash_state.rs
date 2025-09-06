@@ -1131,14 +1131,16 @@ impl BashState {
         if let Some((running_command, elapsed)) = command_running_info {
             // Additional recovery: check if process is dead or stuck and forcibly reset
             let process_alive = {
-                let bash_guard = self.interactive_bash.lock().unwrap();
-                bash_guard.as_ref().map_or(false, |b| b.is_alive())
+                let mut bash_guard = self.interactive_bash.lock().unwrap();
+                bash_guard.as_mut().map_or(false, |b| b.is_alive())
             };
             if !process_alive {
                 // Reset state and reinitialize if process is dead
-                let mut bash_guard = self.interactive_bash.lock().unwrap();
-                if let Some(bash) = bash_guard.as_mut() {
-                    bash.command_state = CommandState::Idle;
+                {
+                    let mut bash_guard = self.interactive_bash.lock().unwrap();
+                    if let Some(bash) = bash_guard.as_mut() {
+                        bash.command_state = CommandState::Idle;
+                    }
                 }
                 // Optionally, reinitialize bash process
                 let _ = self.init_interactive_bash();
