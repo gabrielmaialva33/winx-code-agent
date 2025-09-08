@@ -50,7 +50,7 @@ vte = "0.15"
 rand = "0.9"
 
 # NLP processing
-tokenizers = "0.21.4"
+tokenizers = "0.22.0"
 
 # HTTP client for NVIDIA API integration
 reqwest = { version = "0.12", features = ["json", "stream"] }
