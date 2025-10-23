@@ -14,3 +14,4 @@ Cargo.lock
 tmp
 .claude
 target/
+.github/instructions/
