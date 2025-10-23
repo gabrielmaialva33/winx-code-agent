@@ -99,8 +99,8 @@ impl FileStats {
             + (self.write_count as f64 * 1.5);
 
         // Apply a recency factor if we have access times
-        if let Some(last_access) = self.last_accessed {
-            if let Ok(duration) = last_access.elapsed() {
+        if let Some(last_access) = self.last_accessed
+            && let Ok(duration) = last_access.elapsed() {
                 // Reduce importance for files not accessed recently
                 // But never below 20% of its base value
                 let seconds = duration.as_secs() as f64;
@@ -109,7 +109,6 @@ impl FileStats {
                 self.importance_score = base_score * recency_factor;
                 return;
             }
-        }
 
         // Default case if we can't calculate recency
         self.importance_score = base_score;
@@ -117,11 +116,10 @@ impl FileStats {
 
     /// Get recent access flag - true if accessed in the last hour
     pub fn is_recently_accessed(&self) -> bool {
-        if let Some(last_access) = self.last_accessed {
-            if let Ok(duration) = last_access.elapsed() {
+        if let Some(last_access) = self.last_accessed
+            && let Ok(duration) = last_access.elapsed() {
                 return duration < Duration::from_secs(3600); // 1 hour
             }
-        }
 
         false
     }
@@ -531,11 +529,10 @@ impl FileCache {
 
     /// Pin a file in memory to prevent eviction
     pub fn pin_file(&self, path: &Path) {
-        if let Ok(mut entries) = self.entries.write() {
-            if let Some(entry) = entries.get_mut(path) {
+        if let Ok(mut entries) = self.entries.write()
+            && let Some(entry) = entries.get_mut(path) {
                 entry.is_pinned = true;
             }
-        }
 
         if let Ok(mut pinned) = self.pinned_files.write() {
             pinned.insert(path.to_path_buf());
@@ -544,11 +541,10 @@ impl FileCache {
 
     /// Unpin a file, allowing it to be evicted
     pub fn unpin_file(&self, path: &Path) {
-        if let Ok(mut entries) = self.entries.write() {
-            if let Some(entry) = entries.get_mut(path) {
+        if let Ok(mut entries) = self.entries.write()
+            && let Some(entry) = entries.get_mut(path) {
                 entry.is_pinned = false;
             }
-        }
 
         if let Ok(mut pinned) = self.pinned_files.write() {
             pinned.remove(path);
@@ -651,19 +647,17 @@ impl FileCache {
         }
 
         // Update memory usage
-        if memory_freed > 0 {
-            if let Ok(mut usage) = self.memory_usage.write() {
+        if memory_freed > 0
+            && let Ok(mut usage) = self.memory_usage.write() {
                 *usage = usage.saturating_sub(memory_freed);
                 debug!("Freed {} bytes from expired cache entries", memory_freed);
             }
-        }
 
         // Update access order list
-        if !removed_paths.is_empty() {
-            if let Ok(mut access_order) = self.access_order.write() {
+        if !removed_paths.is_empty()
+            && let Ok(mut access_order) = self.access_order.write() {
                 access_order.retain(|path| !removed_paths.contains(path));
             }
-        }
     }
 
     /// Check memory pressure and perform eviction if needed
@@ -763,11 +757,10 @@ impl FileCache {
                     // Set target to get below 70% of budget
                     if let Ok(budget) = self.memory_budget.read() {
                         let target_usage = (*budget * 7) / 10;
-                        if let Ok(usage) = self.memory_usage.read() {
-                            if *usage > target_usage {
+                        if let Ok(usage) = self.memory_usage.read()
+                            && *usage > target_usage {
                                 memory_to_free = *usage - target_usage;
                             }
-                        }
                     }
                 } else if pressure_level == 2 {
                     unload_content = true;
@@ -926,16 +919,14 @@ impl FileCache {
     #[allow(dead_code)]
     pub fn get_metadata(&self, path: &Path) -> Result<fs::Metadata> {
         // Check if we have a cached entry
-        if let Ok(entries) = self.entries.read() {
-            if let Some(entry) = entries.get(path) {
+        if let Ok(entries) = self.entries.read()
+            && let Some(entry) = entries.get(path) {
                 // Check if the file has been modified
-                if let Ok(metadata) = fs::metadata(path) {
-                    if metadata.modified()? == entry.last_modified {
+                if let Ok(metadata) = fs::metadata(path)
+                    && metadata.modified()? == entry.last_modified {
                         return Ok(metadata);
                     }
-                }
             }
-        }
 
         // Not in cache or modified, get fresh metadata
         fs::metadata(path).with_context(|| format!("Failed to get metadata for {}", path.display()))
@@ -945,16 +936,14 @@ impl FileCache {
     #[allow(dead_code)]
     pub fn calculate_hash(&self, path: &Path) -> Result<String> {
         // Check if we have a cached entry with content
-        if let Ok(entries) = self.entries.read() {
-            if let Some(entry) = entries.get(path) {
+        if let Ok(entries) = self.entries.read()
+            && let Some(entry) = entries.get(path) {
                 // Check if the file has been modified
-                if let Ok(metadata) = fs::metadata(path) {
-                    if metadata.modified()? == entry.last_modified {
+                if let Ok(metadata) = fs::metadata(path)
+                    && metadata.modified()? == entry.last_modified {
                         return Ok(entry.hash.clone());
                     }
-                }
             }
-        }
 
         // Not in cache or modified, calculate hash
         let content = fs::read(path)
@@ -983,9 +972,9 @@ impl FileCache {
                 Ok(entries) => {
                     if let Some(entry) = entries.get(path) {
                         // Check if the file has been modified
-                        if let Ok(metadata) = fs::metadata(path) {
-                            if let Ok(last_mod) = metadata.modified() {
-                                if last_mod == entry.last_modified {
+                        if let Ok(metadata) = fs::metadata(path)
+                            && let Ok(last_mod) = metadata.modified()
+                                && last_mod == entry.last_modified {
                                     // Return cached content if available
                                     if let Some(content) = &entry.content {
                                         trace!("Returning cached content for {}", path.display());
@@ -997,11 +986,10 @@ impl FileCache {
                                             cache_ref.update_lru_order(&path_copy);
 
                                             // Then update entry (write lock)
-                                            if let Ok(mut entries) = cache_ref.entries.write() {
-                                                if let Some(entry) = entries.get_mut(&path_copy) {
+                                            if let Ok(mut entries) = cache_ref.entries.write()
+                                                && let Some(entry) = entries.get_mut(&path_copy) {
                                                     entry.touch();
                                                 }
-                                            }
                                         });
 
                                         return Ok(content.clone());
@@ -1014,8 +1002,6 @@ impl FileCache {
                                         // Fall through to load from disk but use existing entry
                                     }
                                 }
-                            }
-                        }
                     }
                     Ok(None)
                 }
@@ -1436,11 +1422,10 @@ impl FileCache {
         }
 
         // Update access order list to remove evicted entries
-        if !removed_paths.is_empty() {
-            if let Ok(mut access_order) = self.access_order.write() {
+        if !removed_paths.is_empty()
+            && let Ok(mut access_order) = self.access_order.write() {
                 access_order.retain(|path| !removed_paths.contains(path));
             }
-        }
     }
 
     /// Record that a range of lines has been read from a file
@@ -1501,11 +1486,10 @@ impl FileCache {
     /// Record a file edit operation
     pub fn record_file_edit(&self, path: &Path) -> Result<()> {
         // Update the cache entry
-        if let Ok(mut entries) = self.entries.write() {
-            if let Some(entry) = entries.get_mut(path) {
+        if let Ok(mut entries) = self.entries.write()
+            && let Some(entry) = entries.get_mut(path) {
                 entry.record_edit();
             }
-        }
 
         // Update workspace stats
         self.update_workspace_stats_file_edit(path);
@@ -1516,11 +1500,10 @@ impl FileCache {
     /// Record a file write operation
     pub fn record_file_write(&self, path: &Path) -> Result<()> {
         // Update the cache entry
-        if let Ok(mut entries) = self.entries.write() {
-            if let Some(entry) = entries.get_mut(path) {
+        if let Ok(mut entries) = self.entries.write()
+            && let Some(entry) = entries.get_mut(path) {
                 entry.record_write();
             }
-        }
 
         // Update workspace stats
         self.update_workspace_stats_file_edit(path);
@@ -1532,31 +1515,28 @@ impl FileCache {
     fn update_workspace_stats_file_access(&self, path: &Path) {
         let path_str = path.to_string_lossy().to_string();
 
-        if let Ok(mut ws_guard) = self.workspace_stats.write() {
-            if let Some(stats) = ws_guard.as_mut() {
+        if let Ok(mut ws_guard) = self.workspace_stats.write()
+            && let Some(stats) = ws_guard.as_mut() {
                 stats.record_file_access(&path_str);
             }
-        }
     }
 
     /// Update workspace stats with file edit
     fn update_workspace_stats_file_edit(&self, path: &Path) {
         let path_str = path.to_string_lossy().to_string();
 
-        if let Ok(mut ws_guard) = self.workspace_stats.write() {
-            if let Some(stats) = ws_guard.as_mut() {
+        if let Ok(mut ws_guard) = self.workspace_stats.write()
+            && let Some(stats) = ws_guard.as_mut() {
                 stats.record_file_edit(&path_str);
             }
-        }
     }
 
     /// Get file statistics for a particular file
     pub fn get_file_stats(&self, path: &Path) -> Option<FileStats> {
-        if let Ok(entries) = self.entries.read() {
-            if let Some(entry) = entries.get(path) {
+        if let Ok(entries) = self.entries.read()
+            && let Some(entry) = entries.get(path) {
                 return Some(entry.stats.clone());
             }
-        }
 
         None
     }
@@ -1589,11 +1569,10 @@ impl FileCache {
     /// Check if a file has been fully read
     #[allow(dead_code)]
     pub fn is_file_fully_read(&self, path: &Path) -> bool {
-        if let Ok(entries) = self.entries.read() {
-            if let Some(entry) = entries.get(path) {
+        if let Ok(entries) = self.entries.read()
+            && let Some(entry) = entries.get(path) {
                 return entry.fully_read;
             }
-        }
 
         false
     }
@@ -1601,25 +1580,23 @@ impl FileCache {
     /// Check if a file has been read enough (>=99%)
     #[allow(dead_code)]
     pub fn is_file_read_enough(&self, path: &Path) -> bool {
-        if let Ok(entries) = self.entries.read() {
-            if let Some(entry) = entries.get(path) {
+        if let Ok(entries) = self.entries.read()
+            && let Some(entry) = entries.get(path) {
                 return entry.is_read_enough();
             }
-        }
 
         false
     }
 
     /// Get the unread ranges for a file
     pub fn get_unread_ranges(&self, path: &Path) -> Vec<(usize, usize)> {
-        if let Ok(entries) = self.entries.read() {
-            if let Some(entry) = entries.get(path) {
+        if let Ok(entries) = self.entries.read()
+            && let Some(entry) = entries.get(path) {
                 return entry.get_unread_ranges();
             }
-        }
 
-        if let Ok(metadata) = fs::metadata(path) {
-            if metadata.is_file() {
+        if let Ok(metadata) = fs::metadata(path)
+            && metadata.is_file() {
                 // File exists but not in cache, consider the whole file unread
                 if let Ok(content) = fs::read(path) {
                     let total_lines = count_lines(&content);
@@ -1628,7 +1605,6 @@ impl FileCache {
                     }
                 }
             }
-        }
 
         Vec::new()
     }
@@ -1636,14 +1612,12 @@ impl FileCache {
     /// Check if a file has changed since it was last cached
     #[allow(dead_code)]
     pub fn has_file_changed(&self, path: &Path) -> Result<bool> {
-        if let Ok(entries) = self.entries.read() {
-            if let Some(entry) = entries.get(path) {
-                if let Ok(metadata) = fs::metadata(path) {
+        if let Ok(entries) = self.entries.read()
+            && let Some(entry) = entries.get(path)
+                && let Ok(metadata) = fs::metadata(path) {
                     let current_modified = metadata.modified()?;
                     return Ok(current_modified != entry.last_modified);
                 }
-            }
-        }
 
         // Not in cache or can't get metadata, consider changed
         Ok(true)
@@ -1651,11 +1625,10 @@ impl FileCache {
 
     /// Get the hash for a file from the cache
     pub fn get_cached_hash(&self, path: &Path) -> Option<String> {
-        if let Ok(entries) = self.entries.read() {
-            if let Some(entry) = entries.get(path) {
+        if let Ok(entries) = self.entries.read()
+            && let Some(entry) = entries.get(path) {
                 return Some(entry.hash.clone());
             }
-        }
 
         None
     }
