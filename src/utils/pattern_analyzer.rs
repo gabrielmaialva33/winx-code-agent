@@ -107,9 +107,9 @@ impl PatternAnalyzer {
         }
 
         // Update file patterns if this is a file operation
-        if let Some(file_path) = self.extract_file_path(command) {
-            if let Some(file_ext) = Path::new(&file_path).extension() {
-                if let Some(ext_str) = file_ext.to_str() {
+        if let Some(file_path) = self.extract_file_path(command)
+            && let Some(file_ext) = Path::new(&file_path).extension()
+                && let Some(ext_str) = file_ext.to_str() {
                     let file_type = format!(".{}", ext_str);
                     let file_commands = self.file_patterns.entry(file_type).or_default();
 
@@ -122,8 +122,6 @@ impl PatternAnalyzer {
                         }
                     }
                 }
-            }
-        }
 
         Ok(())
     }
@@ -147,8 +145,8 @@ impl PatternAnalyzer {
         }
 
         // Suggestions based on sequence patterns (what comes after the last command)
-        if let Some(last) = last_command {
-            if let Some(next_commands) = self.sequence_patterns.get(last) {
+        if let Some(last) = last_command
+            && let Some(next_commands) = self.sequence_patterns.get(last) {
                 let total: usize = next_commands.values().sum();
                 for (cmd, count) in next_commands {
                     if cmd.starts_with(partial_command) {
@@ -157,7 +155,6 @@ impl PatternAnalyzer {
                     }
                 }
             }
-        }
 
         // Suggestions based on directory context
         if let Some(dir_commands) = self.directory_context.get(current_dir) {
