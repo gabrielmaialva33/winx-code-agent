@@ -413,7 +413,7 @@ impl ErrorPredictor {
                 }
 
                 // Find the most common error
-                if let Some((pattern, count)) = error_counts.iter().max_by_key(|(_, &count)| count)
+                if let Some((pattern, count)) = error_counts.iter().max_by_key(|(_, count)| *count)
                 {
                     let frequency = *count as f64 / errors.len() as f64;
                     if frequency >= ERROR_FREQUENCY_THRESHOLD {
@@ -476,7 +476,7 @@ impl ErrorPredictor {
                 }
 
                 // Find the most common error
-                if let Some((pattern, count)) = error_counts.iter().max_by_key(|(_, &count)| count)
+                if let Some((pattern, count)) = error_counts.iter().max_by_key(|(_, count)| *count)
                 {
                     let frequency = *count as f64 / errors.len() as f64;
                     if frequency >= ERROR_FREQUENCY_THRESHOLD {
