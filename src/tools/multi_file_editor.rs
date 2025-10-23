@@ -391,31 +391,28 @@ impl MultiFileEditorTool {
 
     /// Get DashScope client if available
     async fn get_dashscope_client(&self) -> Option<DashScopeClient> {
-        if let Ok(config) = DashScopeConfig::from_env() {
-            if let Ok(client) = DashScopeClient::new(config) {
+        if let Ok(config) = DashScopeConfig::from_env()
+            && let Ok(client) = DashScopeClient::new(config) {
                 return Some(client);
             }
-        }
         None
     }
 
     /// Get NVIDIA client if available  
     async fn get_nvidia_client(&self) -> Option<NvidiaClient> {
-        if let Ok(config) = NvidiaConfig::from_env() {
-            if let Ok(client) = NvidiaClient::new(config).await {
+        if let Ok(config) = NvidiaConfig::from_env()
+            && let Ok(client) = NvidiaClient::new(config).await {
                 return Some(client);
             }
-        }
         None
     }
 
     /// Get Gemini client if available
     async fn get_gemini_client(&self) -> Option<GeminiClient> {
-        if let Ok(config) = GeminiConfig::from_env() {
-            if let Ok(client) = GeminiClient::new(config) {
+        if let Ok(config) = GeminiConfig::from_env()
+            && let Ok(client) = GeminiClient::new(config) {
                 return Some(client);
             }
-        }
         None
     }
 
@@ -537,12 +534,11 @@ impl MultiFileEditorTool {
                 }
 
                 // Check if parent directory exists or can be created
-                if let Some(parent) = path.parent() {
-                    if !parent.exists() {
+                if let Some(parent) = path.parent()
+                    && !parent.exists() {
                         // This is okay if create_dirs is true
                         debug!("Parent directory {:?} does not exist", parent);
                     }
-                }
             }
             FileOperation::Replace { file_path, content }
             | FileOperation::Append { file_path, content }
@@ -668,13 +664,12 @@ impl MultiFileEditorTool {
                 }
 
                 // Validate confidence threshold
-                if let Some(threshold) = confidence_threshold {
-                    if *threshold < 0.0 || *threshold > 1.0 {
+                if let Some(threshold) = confidence_threshold
+                    && (*threshold < 0.0 || *threshold > 1.0) {
                         return Err(WinxError::InvalidInput(
                             "Confidence threshold must be between 0.0 and 1.0".to_string(),
                         ));
                     }
-                }
             }
         }
 
@@ -868,13 +863,12 @@ impl MultiFileEditorTool {
         let path = Path::new(file_path);
 
         // Create parent directories if needed
-        if create_dirs {
-            if let Some(parent) = path.parent() {
+        if create_dirs
+            && let Some(parent) = path.parent() {
                 fs::create_dir_all(parent).await.map_err(|e| {
                     WinxError::FileError(format!("Failed to create directories: {}", e))
                 })?;
             }
-        }
 
         // Create backup (will record that file was created)
         let backup_path = self.create_backup(file_path).await?;
