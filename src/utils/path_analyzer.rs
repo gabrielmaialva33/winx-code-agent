@@ -889,7 +889,7 @@ mod tests {
         assert!(scorer.context_tokens.contains("config"));
 
         // Check the size of the context tokens set
-        assert!(scorer.context_tokens.len() > 0);
+        assert!(!scorer.context_tokens.is_empty());
     }
 
     // Test for RelevanceLevel grouping
