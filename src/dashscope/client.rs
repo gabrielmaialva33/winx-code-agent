@@ -4,6 +4,7 @@ use crate::dashscope::{
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, DashScopeConfig,
 };
 use crate::errors::{Result, WinxError};
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -12,34 +13,35 @@ use tracing::{debug, error, info, warn};
 /// Rate limiting information
 #[derive(Debug)]
 struct RateLimit {
-    requests_count: u32,
-    window_start: Instant,
-    window_duration: Duration,
+    timestamps: VecDeque<Instant>,
+    rpm: u32,
 }
 
 impl RateLimit {
-    fn new(_rpm: u32) -> Self {
+    fn new(rpm: u32) -> Self {
         Self {
-            requests_count: 0,
-            window_start: Instant::now(),
-            window_duration: Duration::from_secs(60),
+            timestamps: VecDeque::new(),
+            rpm,
         }
     }
 
-    fn can_make_request(&mut self, max_rpm: u32) -> bool {
+    fn can_make_request(&mut self) -> bool {
         let now = Instant::now();
 
-        // Reset window if it has passed
-        if now.duration_since(self.window_start) >= self.window_duration {
-            self.requests_count = 0;
-            self.window_start = now;
+        // Remove timestamps older than 60 seconds
+        while let Some(&front) = self.timestamps.front() {
+            if now.duration_since(front) > Duration::from_secs(60) {
+                self.timestamps.pop_front();
+            } else {
+                break;
+            }
         }
 
-        self.requests_count < max_rpm
+        self.timestamps.len() < self.rpm as usize
     }
 
     fn record_request(&mut self) {
-        self.requests_count += 1;
+        self.timestamps.push_back(Instant::now());
     }
 }
 
@@ -84,7 +86,7 @@ impl DashScopeClient {
             // Check rate limit
             {
                 let mut rate_limit = self.rate_limit.lock().await;
-                if !rate_limit.can_make_request(self.config.rate_limit_rpm) {
+                if !rate_limit.can_make_request() {
                     warn!("Rate limit exceeded, waiting...");
                     drop(rate_limit);
                     tokio::time::sleep(Duration::from_secs(1)).await;
@@ -286,12 +288,12 @@ mod tests {
 
         // Should allow first 5 requests
         for _ in 0..5 {
-            assert!(rate_limit.can_make_request(5));
+            assert!(rate_limit.can_make_request());
             rate_limit.record_request();
         }
 
         // Should deny 6th request
-        assert!(!rate_limit.can_make_request(5));
+        assert!(!rate_limit.can_make_request());
     }
 
     #[test]
