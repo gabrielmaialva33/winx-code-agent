@@ -344,28 +344,24 @@ impl ErrorPredictor {
         let mut pattern = message.to_string();
 
         // Replace specific file paths with placeholders
-        pattern = regex::Regex::new(r"[/\\][^\s:;,]+")
-            .unwrap_or_else(|_| regex::Regex::new(r"xxx").unwrap())
-            .replace_all(&pattern, "[PATH]")
-            .to_string();
+        if let Ok(re) = regex::Regex::new(r"[/\\][^\s:;,]+") {
+            pattern = re.replace_all(&pattern, "[PATH]").to_string();
+        }
 
         // Replace numbers with placeholders
-        pattern = regex::Regex::new(r"\b\d+\b")
-            .unwrap_or_else(|_| regex::Regex::new(r"xxx").unwrap())
-            .replace_all(&pattern, "[NUM]")
-            .to_string();
+        if let Ok(re) = regex::Regex::new(r"\b\d+\b") {
+            pattern = re.replace_all(&pattern, "[NUM]").to_string();
+        }
 
         // Replace specific function or error names
-        pattern = regex::Regex::new(r"'[^']+'")
-            .unwrap_or_else(|_| regex::Regex::new(r"xxx").unwrap())
-            .replace_all(&pattern, "'[NAME]'")
-            .to_string();
+        if let Ok(re) = regex::Regex::new(r"'[^']+'") {
+            pattern = re.replace_all(&pattern, "'[NAME]'").to_string();
+        }
 
         // Replace quoted strings with placeholders
-        pattern = regex::Regex::new(r#""[^"]+""#)
-            .unwrap_or_else(|_| regex::Regex::new(r"xxx").unwrap())
-            .replace_all(&pattern, "\"[STRING]\"")
-            .to_string();
+        if let Ok(re) = regex::Regex::new(r#""[^"]+""#) {
+            pattern = re.replace_all(&pattern, "\"[STRING]\"").to_string();
+        }
 
         pattern
     }
