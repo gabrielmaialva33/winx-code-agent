@@ -1140,8 +1140,8 @@ fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, Winx
                     .push("**JavaScript/TypeScript dependencies (package.json):**".to_string());
 
                 // Very basic JSON parsing
-                if let Some(deps_start) = content.find("\"dependencies\"") {
-                    if let Some(deps_content) = content[deps_start..].find('{') {
+                if let Some(deps_start) = content.find("\"dependencies\"")
+                    && let Some(deps_content) = content[deps_start..].find('{') {
                         let start_idx = deps_start + deps_content;
                         let mut brace_count = 1;
                         let mut end_idx = start_idx + 1;
@@ -1167,7 +1167,6 @@ fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, Winx
                             }
                         }
                     }
-                }
             }
         }
         "python" => {
@@ -1337,8 +1336,8 @@ fn format_analysis_results(
     }
 
     // Complexity metrics section
-    if params.include_complexity {
-        if let Some(complexity) = &result.complexity {
+    if params.include_complexity
+        && let Some(complexity) = &result.complexity {
             output.push_str("## Complexity Metrics\n\n");
             output.push_str(&format!(
                 "- **Cyclomatic Complexity**: {}\n",
@@ -1393,7 +1392,6 @@ fn format_analysis_results(
 
             output.push('\n');
         }
-    }
 
     Ok(output)
 }
