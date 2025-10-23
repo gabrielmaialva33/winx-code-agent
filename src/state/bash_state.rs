@@ -307,14 +307,13 @@ impl TerminalState {
         self.last_pending_output = output.to_string();
 
         // For large outputs, use limited buffer mode if configured
-        if self.limit_buffer && output.len() > TERMINAL_MAX_OUTPUT_SIZE {
-            if let Ok(mut emulator) = self.terminal_emulator.lock() {
+        if self.limit_buffer && output.len() > TERMINAL_MAX_OUTPUT_SIZE
+            && let Ok(mut emulator) = self.terminal_emulator.lock() {
                 // Process with limited buffer
                 emulator.process_with_limited_buffer(output, self.max_buffer_lines);
                 let display = emulator.display();
                 return display.join("\n");
             }
-        }
 
         // Process the output with the terminal emulator
         if let Ok(mut emulator) = self.terminal_emulator.lock() {
@@ -361,11 +360,10 @@ impl TerminalState {
 
     /// Smart truncate the terminal output if it gets too large
     pub fn smart_truncate(&mut self, max_size: usize) {
-        if let Ok(screen) = self.terminal_emulator.lock() {
-            if let Ok(mut screen_guard) = screen.get_screen().lock() {
+        if let Ok(screen) = self.terminal_emulator.lock()
+            && let Ok(mut screen_guard) = screen.get_screen().lock() {
                 screen_guard.smart_truncate(max_size);
             }
-        }
     }
 }
 
@@ -989,14 +987,13 @@ impl BashState {
             self.cwd = path.to_path_buf();
 
             // Update cwd in interactive bash if it exists
-            if let Ok(mut bash_guard) = self.interactive_bash.lock() {
-                if let Some(bash) = bash_guard.as_mut() {
+            if let Ok(mut bash_guard) = self.interactive_bash.lock()
+                && let Some(bash) = bash_guard.as_mut() {
                     // Send cd command to bash
                     bash.send_command(&format!("cd \"{}\"", path.display()))?;
                     // Wait briefly and read output to process the cd command
                     let _ = bash.read_output(0.5)?;
                 }
-            }
 
             Ok(())
         } else {
@@ -1301,7 +1298,7 @@ impl BashState {
                 }
 
                 // Log progress
-                if elapsed > 5.0 && (elapsed as usize) % 5 == 0 {
+                if elapsed > 5.0 && (elapsed as usize).is_multiple_of(5) {
                     debug!(
                         "Still waiting for command completion - elapsed: {:.2?}s",
                         elapsed
