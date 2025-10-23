@@ -305,19 +305,17 @@ impl ErrorPredictor {
     fn extract_file_pattern(&self, file_path: &str) -> String {
         let path = Path::new(file_path);
 
-        if let Some(extension) = path.extension() {
-            if let Some(ext_str) = extension.to_str() {
+        if let Some(extension) = path.extension()
+            && let Some(ext_str) = extension.to_str() {
                 // For files, we often care about the extension
                 return format!("*.{}", ext_str);
             }
-        }
 
         // If no extension or error, use a more generic pattern
-        if let Some(file_name) = path.file_name() {
-            if let Some(name) = file_name.to_str() {
+        if let Some(file_name) = path.file_name()
+            && let Some(name) = file_name.to_str() {
                 return name.to_string();
             }
-        }
 
         // Fallback
         "*".to_string()
@@ -328,11 +326,10 @@ impl ErrorPredictor {
         let path = Path::new(directory);
 
         // We often care about the last component of the directory
-        if let Some(last_component) = path.file_name() {
-            if let Some(name) = last_component.to_str() {
+        if let Some(last_component) = path.file_name()
+            && let Some(name) = last_component.to_str() {
                 return format!("*/{}", name);
             }
-        }
 
         // Fallback
         "*".to_string()
@@ -427,8 +424,8 @@ impl ErrorPredictor {
 
         // Check patterns
         for pattern in &self.error_patterns {
-            if let Some(cmd_pattern) = &pattern.command_pattern {
-                if self.pattern_matches(cmd_pattern, command) {
+            if let Some(cmd_pattern) = &pattern.command_pattern
+                && self.pattern_matches(cmd_pattern, command) {
                     // This pattern might apply to this command
                     let suggestion =
                         self.get_suggestion_for_error(command, &pattern.message_pattern);
@@ -450,7 +447,6 @@ impl ErrorPredictor {
                         });
                     }
                 }
-            }
         }
 
         predictions
@@ -492,8 +488,8 @@ impl ErrorPredictor {
         // Check patterns
         let file_pattern = self.extract_file_pattern(file_path);
         for pattern in &self.error_patterns {
-            if let Some(pat) = &pattern.file_pattern {
-                if self.pattern_matches(pat, &file_pattern) {
+            if let Some(pat) = &pattern.file_pattern
+                && self.pattern_matches(pat, &file_pattern) {
                     // This pattern might apply to this file
                     let suggestion = self.get_suggestion_for_file_error(
                         file_path,
@@ -518,7 +514,6 @@ impl ErrorPredictor {
                         });
                     }
                 }
-            }
         }
 
         // Check for common file operation errors
@@ -611,9 +606,9 @@ impl ErrorPredictor {
                 }
 
                 // Check if parent directory exists for new files
-                if !file_exists {
-                    if let Some(parent) = path.parent() {
-                        if !parent.exists() {
+                if !file_exists
+                    && let Some(parent) = path.parent()
+                        && !parent.exists() {
                             predictions.push(ErrorPrediction {
                                 error_type: "directory_not_found".to_string(),
                                 message_pattern: "Directory not found".to_string(),
@@ -621,8 +616,6 @@ impl ErrorPredictor {
                                 prevention: format!("The parent directory for '{}' does not exist. Create it first with mkdir -p.", parent.display()),
                             });
                         }
-                    }
-                }
             }
             _ => {}
         }
@@ -732,11 +725,10 @@ impl ErrorPredictor {
                 if error_pattern.contains("directory") {
                     return format!("'{}' is a directory, not a file", file_path);
                 }
-                if error_pattern.contains("No such file or directory") {
-                    if let Some(parent) = path.parent() {
+                if error_pattern.contains("No such file or directory")
+                    && let Some(parent) = path.parent() {
                         return format!("Create the parent directory '{}' first", parent.display());
                     }
-                }
             }
             _ => {}
         }
