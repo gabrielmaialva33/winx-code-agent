@@ -186,7 +186,12 @@ impl ResourceAllocator {
         if request.file_size > LARGE_FILE_MEMORY as u64 {
             allocation.should_use_streaming = true;
             allocation.chunk_size = Some(1024 * 1024); // 1MB chunks
-            allocation.allocated_memory = allocation.chunk_size.unwrap() * 2; // Double buffer
+            // Safely use the chunk size if present; otherwise fall back to doubling current allocation.
+            allocation.allocated_memory = if let Some(chunk) = allocation.chunk_size {
+                chunk.saturating_mul(2) // Double buffer, using saturating to avoid overflow
+            } else {
+                allocation.allocated_memory.saturating_mul(2)
+            };
         }
 
         // Try to acquire resources
@@ -246,40 +251,44 @@ impl ResourceAllocator {
 
     /// Check if we can allocate the requested memory
     async fn can_allocate(&self, requested_memory: usize) -> bool {
-        let allocations = self.allocations.lock().unwrap();
-        let current_total: usize = allocations.values().sum();
-
-        current_total + requested_memory <= self.max_total_memory
+        if let Ok(allocations) = self.allocations.lock() {
+            let current_total: usize = allocations.values().sum();
+            current_total + requested_memory <= self.max_total_memory
+        } else {
+            false
+        }
     }
 
     /// Allocate resources for a file read
     async fn allocate_resources(&self, file_path: &Path, memory: usize) {
-        let mut allocations = self.allocations.lock().unwrap();
-        allocations.insert(file_path.to_path_buf(), memory);
+        if let Ok(mut allocations) = self.allocations.lock() {
+            allocations.insert(file_path.to_path_buf(), memory);
 
-        let mut stats = self.stats.lock().unwrap();
-        stats.total_allocated += memory;
-        stats.active_reads += 1;
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.total_allocated += memory;
+                stats.active_reads += 1;
 
-        debug!("Allocated {} bytes for: {:?}", memory, file_path);
+                debug!("Allocated {} bytes for: {:?}", memory, file_path);
+            }
+        }
     }
 
     /// Release resources after file read completion
     pub async fn release_allocation(&self, file_path: &Path) -> Result<()> {
         // Release allocation and update stats in separate blocks
-        let memory_released = {
-            let mut allocations = self.allocations.lock().unwrap();
+        let memory_released = if let Ok(mut allocations) = self.allocations.lock() {
             allocations.remove(file_path)
+        } else {
+            None
         };
 
         if let Some(memory) = memory_released {
-            {
-                let mut stats = self.stats.lock().unwrap();
+            if let Ok(mut stats) = self.stats.lock() {
                 stats.total_allocated = stats.total_allocated.saturating_sub(memory);
                 stats.active_reads = stats.active_reads.saturating_sub(1);
-            }
 
-            debug!("Released {} bytes for: {:?}", memory, file_path);
+                debug!("Released {} bytes for: {:?}", memory, file_path);
+            }
         }
 
         // Process pending queue
@@ -290,16 +299,16 @@ impl ResourceAllocator {
 
     /// Check cache for allocation
     async fn check_cache(&self, file_path: &Path) -> Option<CacheEntry> {
-        let mut cache = self.cache.lock().unwrap();
-
-        if let Some(entry) = cache.get_mut(file_path) {
-            // Check if entry is still valid
-            if entry.created_at.elapsed() < CACHE_TTL {
-                entry.access_count += 1;
-                return Some(entry.clone());
-            } else {
-                // Remove expired entry
-                cache.remove(file_path);
+        if let Ok(mut cache) = self.cache.lock() {
+            if let Some(entry) = cache.get_mut(file_path) {
+                // Check if entry is still valid
+                if entry.created_at.elapsed() < CACHE_TTL {
+                    entry.access_count += 1;
+                    return Some(entry.clone());
+                } else {
+                    // Remove expired entry
+                    cache.remove(file_path);
+                }
             }
         }
 
@@ -308,19 +317,20 @@ impl ResourceAllocator {
 
     /// Cache an allocation decision
     async fn cache_allocation(&self, file_path: &Path, allocation: Allocation) {
-        let mut cache = self.cache.lock().unwrap();
-        cache.insert(
-            file_path.to_path_buf(),
-            CacheEntry {
-                allocation,
-                created_at: Instant::now(),
-                access_count: 1,
-            },
-        );
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(
+                file_path.to_path_buf(),
+                CacheEntry {
+                    allocation,
+                    created_at: Instant::now(),
+                    access_count: 1,
+                },
+            );
 
-        // Cleanup old entries if cache is getting large
-        if cache.len() > 1000 {
-            self.cleanup_cache(&mut cache);
+            // Cleanup old entries if cache is getting large
+            if cache.len() > 1000 {
+                self.cleanup_cache(&mut cache);
+            }
         }
     }
 
@@ -332,18 +342,19 @@ impl ResourceAllocator {
 
     /// Add request to pending queue
     async fn queue_request(&self, request: AllocationRequest) {
-        let mut queue = self.pending_queue.lock().unwrap();
+        if let Ok(mut queue) = self.pending_queue.lock() {
+            // Insert in priority order
+            let insert_pos = queue
+                .iter()
+                .position(|req| req.priority < request.priority)
+                .unwrap_or(queue.len());
 
-        // Insert in priority order
-        let insert_pos = queue
-            .iter()
-            .position(|req| req.priority < request.priority)
-            .unwrap_or(queue.len());
+            queue.insert(insert_pos, request);
 
-        queue.insert(insert_pos, request);
-
-        let mut stats = self.stats.lock().unwrap();
-        stats.pending_requests += 1;
+            if let Ok(mut stats) = self.stats.lock() {
+                stats.pending_requests += 1;
+            }
+        }
     }
 
     /// Process pending allocation requests
@@ -352,9 +363,10 @@ impl ResourceAllocator {
 
         loop {
             // Take next request without holding the lock across await
-            let request = {
-                let mut queue = self.pending_queue.lock().unwrap();
+            let request = if let Ok(mut queue) = self.pending_queue.lock() {
                 queue.pop_front()
+            } else {
+                None
             };
 
             if let Some(request) = request {
@@ -367,8 +379,9 @@ impl ResourceAllocator {
                         processed.push(request.file_path);
                     } else {
                         // Put back in queue and stop processing
-                        let mut queue = self.pending_queue.lock().unwrap();
-                        queue.push_front(request);
+                        if let Ok(mut queue) = self.pending_queue.lock() {
+                            queue.push_front(request);
+                        }
                         break;
                     }
                 }
@@ -383,44 +396,68 @@ impl ResourceAllocator {
     }
 
     /// Acquire read permit (for concurrent operation limiting)
-    pub async fn acquire_read_permit(&self) -> tokio::sync::SemaphorePermit<'_> {
-        self.read_semaphore.acquire().await.unwrap()
+    pub async fn acquire_read_permit(&self) -> Result<tokio::sync::SemaphorePermit<'_>> {
+        self.read_semaphore
+            .acquire()
+            .await
+            .map_err(|e| WinxError::ResourceAllocationError {
+                message: format!("Failed to acquire read permit: {}", e),
+            })
     }
 
     /// Mark read operation as successful
     pub async fn mark_read_success(&self) {
-        let mut stats = self.stats.lock().unwrap();
-        stats.successful_reads += 1;
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.successful_reads += 1;
+        }
     }
 
     /// Mark read operation as failed
     pub async fn mark_read_failure(&self) {
-        let mut stats = self.stats.lock().unwrap();
-        stats.failed_reads += 1;
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.failed_reads += 1;
+        }
     }
 
     /// Update cache hit statistics
     async fn update_cache_hit(&self) {
-        let mut stats = self.stats.lock().unwrap();
-        stats.cache_hits += 1;
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.cache_hits += 1;
+        }
     }
 
     /// Update cache miss statistics
     async fn update_cache_miss(&self) {
-        let mut stats = self.stats.lock().unwrap();
-        stats.cache_misses += 1;
+        if let Ok(mut stats) = self.stats.lock() {
+            stats.cache_misses += 1;
+        }
     }
 
     /// Get current resource usage statistics
     pub async fn get_stats(&self) -> ResourceStats {
-        self.stats.lock().unwrap().clone()
+        if let Ok(stats) = self.stats.lock() {
+            stats.clone()
+        } else {
+            ResourceStats {
+                total_allocated: 0,
+                active_reads: 0,
+                pending_requests: 0,
+                successful_reads: 0,
+                failed_reads: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+            }
+        }
     }
 
     /// Get memory usage percentage
     pub async fn get_memory_usage_percent(&self) -> f64 {
-        let allocations = self.allocations.lock().unwrap();
-        let current_total: usize = allocations.values().sum();
-        (current_total as f64 / self.max_total_memory as f64) * 100.0
+        if let Ok(allocations) = self.allocations.lock() {
+            let current_total: usize = allocations.values().sum();
+            (current_total as f64 / self.max_total_memory as f64) * 100.0
+        } else {
+            0.0
+        }
     }
 
     /// Check if system is under memory pressure
@@ -430,14 +467,16 @@ impl ResourceAllocator {
 
     /// Force cleanup of unused allocations
     pub async fn cleanup_unused_allocations(&self) {
-        let mut cache = self.cache.lock().unwrap();
-        self.cleanup_cache(&mut cache);
+        if let Ok(mut cache) = self.cache.lock() {
+            self.cleanup_cache(&mut cache);
 
-        // Also cleanup any stale allocations
-        let mut allocations = self.allocations.lock().unwrap();
-        allocations.retain(|path, _| cache.contains_key(path));
+            // Also cleanup any stale allocations
+            if let Ok(mut allocations) = self.allocations.lock() {
+                allocations.retain(|path, _| cache.contains_key(path));
+            }
 
-        info!("Performed cleanup of unused allocations");
+            info!("Performed cleanup of unused allocations");
+        }
     }
 }
 
@@ -477,14 +516,13 @@ pub struct AllocationGuard {
 
 impl AllocationGuard {
     /// Create a new allocation guard
-    pub async fn new(file_path: PathBuf, _allocation: Allocation) -> Self {
+    pub async fn new(file_path: PathBuf, _allocation: Allocation) -> Result<Self> {
         let allocator = get_global_allocator();
-        let permit = allocator.acquire_read_permit().await;
-
-        Self {
+        let permit = allocator.acquire_read_permit().await?;
+        Ok(Self {
             file_path,
             _permit: permit,
-        }
+        })
     }
 }
 
