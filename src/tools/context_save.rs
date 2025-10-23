@@ -401,8 +401,8 @@ fn try_open_file(file_path: &str) -> Result<()> {
                 .stderr(std::process::Stdio::null())
                 .status();
 
-            if let Ok(status) = status {
-                if status.success() {
+            if let Ok(status) = status
+                && status.success() {
                     // Found an available command, use it
                     let _ = std::process::Command::new(cmd)
                         .arg(file_path)
@@ -417,7 +417,6 @@ fn try_open_file(file_path: &str) -> Result<()> {
                     // We don't wait for the command to complete
                     return Ok(());
                 }
-            }
         }
 
         // If no command is available, just return success
