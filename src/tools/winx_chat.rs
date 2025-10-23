@@ -414,11 +414,10 @@ impl WinxChatProcessor {
         }
 
         // Add system information if requested
-        if include_system_info {
-            if let Some(info) = system_info {
+        if include_system_info
+            && let Some(info) = system_info {
                 response.push_str(&self.format_system_info(info));
             }
-        }
 
         // Add personality touches based on level
         if personality_level >= 5 {
