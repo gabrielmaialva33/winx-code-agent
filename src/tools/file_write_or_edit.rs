@@ -187,51 +187,53 @@ impl SearchReplaceHelper {
             ));
 
             // Try fuzzy matching if enabled
-            if self.use_fuzzy_matching && self.fuzzy_matcher.is_some() {
-                let mut fuzzy_matcher = self.fuzzy_matcher.as_ref().unwrap().clone();
-                let matches = fuzzy_matcher.find_matches(search, &content);
+            if self.use_fuzzy_matching && self.fuzzy_matcher.is_some()
+                && let Some(ref matcher) = self.fuzzy_matcher {
+                    let mut fuzzy_matcher = matcher.clone();
+                    let matches = fuzzy_matcher.find_matches(search, &content);
 
-                if !matches.is_empty() {
-                    let best_match = &matches[0];
-                    self.debug_info.push(format!(
-                        "Best fuzzy match for block {} (similarity: {:.2})",
-                        i + 1,
-                        best_match.similarity
-                    ));
-
-                    // If confidence is high enough and auto-apply is enabled, perform the replacement
-                    if best_match.similarity >= self.fuzzy_threshold && self.auto_apply_fuzzy_fixes
-                    {
+                    if !matches.is_empty() {
+                        let best_match = &matches[0];
                         self.debug_info.push(format!(
-                            "Auto-applying fuzzy fix for block {} (similarity: {:.2})",
+                            "Best fuzzy match for block {} (similarity: {:.2})",
                             i + 1,
                             best_match.similarity
                         ));
 
-                        // Replace the matched text with the replacement text
-                        let before = &content[..best_match.start_pos];
-                        let after = &content[best_match.end_pos..];
-                        content = format!("{}{}{}", before, replace, after);
-                        _success_count += 1;
-                        continue;
-                    }
+                        // If confidence is high enough and auto-apply is enabled, perform the replacement
+                        if best_match.similarity >= self.fuzzy_threshold
+                            && self.auto_apply_fuzzy_fixes
+                        {
+                            self.debug_info.push(format!(
+                                "Auto-applying fuzzy fix for block {} (similarity: {:.2})",
+                                i + 1,
+                                best_match.similarity
+                            ));
 
-                    // Add suggestions if the match wasn't automatically applied
-                    for (j, m) in matches.iter().enumerate().take(self.max_suggestions) {
-                        self.debug_info.push(format!(
-                            "Suggestion {}: similarity={:.2}, match_type={:?}, text={}",
-                            j + 1,
-                            m.similarity,
-                            m.match_type,
-                            if m.text.len() > 100 {
-                                format!("{}...", &m.text[..100])
-                            } else {
-                                m.text.clone()
-                            }
-                        ));
+                            // Replace the matched text with the replacement text
+                            let before = &content[..best_match.start_pos];
+                            let after = &content[best_match.end_pos..];
+                            content = format!("{}{}{}", before, replace, after);
+                            _success_count += 1;
+                            continue;
+                        }
+
+                        // Add suggestions if the match wasn't automatically applied
+                        for (j, m) in matches.iter().enumerate().take(self.max_suggestions) {
+                            self.debug_info.push(format!(
+                                "Suggestion {}: similarity={:.2}, match_type={:?}, text={}",
+                                j + 1,
+                                m.similarity,
+                                m.match_type,
+                                if m.text.len() > 100 {
+                                    format!("{}...", &m.text[..100])
+                                } else {
+                                    m.text.clone()
+                                }
+                            ));
+                        }
                     }
                 }
-            }
 
             // Try to find approximate matches using the legacy approach
             let suggestion = self
