@@ -303,12 +303,11 @@ impl WorkspaceStats {
 
         // Process file metadata
         for file_path in files {
-            if let Ok(metadata) = fs::metadata(&file_path) {
-                if let Ok(modified) = metadata.modified() {
+            if let Ok(metadata) = fs::metadata(&file_path)
+                && let Ok(modified) = metadata.modified() {
                     let path_str = file_path.to_string_lossy().to_string();
                     self.update_file_modified_time(&path_str, modified);
                 }
-            }
         }
 
         Ok(())
@@ -361,11 +360,10 @@ impl WorkspaceStats {
             .file_modified_times
             .iter()
             .filter_map(|(file, time)| {
-                if let Ok(duration) = now.duration_since(*time) {
-                    if duration <= max_age {
+                if let Ok(duration) = now.duration_since(*time)
+                    && duration <= max_age {
                         return Some((file.clone(), *time));
                     }
-                }
                 None
             })
             .collect();
