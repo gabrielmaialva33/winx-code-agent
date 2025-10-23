@@ -4,6 +4,7 @@ use crate::dashscope::{
     ChatCompletionRequest, ChatCompletionResponse, ChatMessage, DashScopeConfig,
 };
 use crate::errors::{Result, WinxError};
+use backoff::ExponentialBackoff;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,7 +26,7 @@ impl RateLimit {
         }
     }
 
-    fn can_make_request(&mut self) -> bool {
+    fn can_make_request(&mut self) -> Option<Duration> {
         let now = Instant::now();
 
         // Remove timestamps older than 60 seconds
@@ -37,7 +38,18 @@ impl RateLimit {
             }
         }
 
-        self.timestamps.len() < self.rpm as usize
+        if self.timestamps.len() < self.rpm as usize {
+            Some(Duration::from_secs(0))
+        } else {
+            // Calculate wait time until the oldest request expires
+            let oldest = self
+                .timestamps
+                .front()
+                .expect("Timestamps should not be empty when len >= rpm");
+            let elapsed = now.duration_since(*oldest);
+            let remaining = Duration::from_secs(60).saturating_sub(elapsed);
+            Some(remaining)
+        }
     }
 
     fn record_request(&mut self) {
@@ -80,18 +92,27 @@ impl DashScopeClient {
         &self,
         request: &ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse> {
+        let mut backoff = ExponentialBackoff::default();
         let mut last_error = None;
 
         for attempt in 1..=self.config.max_retries {
             // Check rate limit
-            {
+            let wait_time = {
                 let mut rate_limit = self.rate_limit.lock().await;
-                if !rate_limit.can_make_request() {
-                    warn!("Rate limit exceeded, waiting...");
-                    drop(rate_limit);
-                    tokio::time::sleep(Duration::from_secs(1)).await;
+                rate_limit.can_make_request()
+            };
+
+            if let Some(wait) = wait_time {
+                if !wait.is_zero() {
+                    warn!("Rate limit exceeded, waiting for {:?}", wait);
+                    tokio::time::sleep(wait).await;
                     continue;
                 }
+            }
+
+            // Record the request
+            {
+                let mut rate_limit = self.rate_limit.lock().await;
                 rate_limit.record_request();
             }
 
@@ -110,7 +131,7 @@ impl DashScopeClient {
                     last_error = Some(e);
 
                     if attempt < self.config.max_retries {
-                        let delay = Duration::from_millis(1000 * attempt as u64);
+                        let delay = backoff.next_backoff().unwrap_or(Duration::from_secs(1));
                         tokio::time::sleep(delay).await;
                     }
                 }
@@ -288,12 +309,13 @@ mod tests {
 
         // Should allow first 5 requests
         for _ in 0..5 {
-            assert!(rate_limit.can_make_request());
+            assert_eq!(rate_limit.can_make_request(), Some(Duration::from_secs(0)));
             rate_limit.record_request();
         }
 
-        // Should deny 6th request
-        assert!(!rate_limit.can_make_request());
+        // Should deny 6th request and return wait time
+        let wait = rate_limit.can_make_request();
+        assert!(wait.is_some() && wait.unwrap() > Duration::from_secs(0));
     }
 
     #[test]
