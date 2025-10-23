@@ -852,8 +852,8 @@ pub async fn handle_tool_call(
         let whitelist_data: HashMap<String, Vec<(usize, usize)>> = file_ranges_dict.clone();
 
         move || {
-            if let Ok(mut bash_state_guard) = bash_state_arc.lock() {
-                if let Some(bash_state) = bash_state_guard.as_mut() {
+            if let Ok(mut bash_state_guard) = bash_state_arc.lock()
+                && let Some(bash_state) = bash_state_guard.as_mut() {
                     for (file_path, ranges) in whitelist_data {
                         // The cache already has the file hash and metadata,
                         // so we just need to ensure it's in the whitelist
@@ -914,7 +914,6 @@ pub async fn handle_tool_call(
                         }
                     }
                 }
-            }
         }
     });
 
