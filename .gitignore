@@ -13,3 +13,4 @@ Cargo.lock
 **/.claude/settings.local.json
 tmp
 .claude
+target/
