@@ -421,8 +421,8 @@ impl SearchReplaceHelper {
         }
 
         // Strategy 3: Longest common substring detection
-        if let Some(common) = self.find_longest_common_substring(search, content) {
-            if common.len() >= 20 {
+        if let Some(common) = self.find_longest_common_substring(search, content)
+            && common.len() >= 20 {
                 // Only show substantial matches
                 let preview = if common.len() > 40 {
                     format!("{}...", &common[..40])
@@ -436,7 +436,6 @@ impl SearchReplaceHelper {
                     preview
                 ));
             }
-        }
 
         // Strategy 4: Check for case sensitivity issues
         let search_lower = search.to_lowercase();
@@ -1666,9 +1665,9 @@ pub async fn handle_tool_call(
 
             // Record the error for future prediction
             let bash_state_guard = bash_state_arc.lock().ok();
-            if let Some(guard) = bash_state_guard {
-                if let Some(bash_state) = guard.as_ref() {
-                    if let Err(record_err) = bash_state.error_predictor.record_error(
+            if let Some(guard) = bash_state_guard
+                && let Some(bash_state) = guard.as_ref()
+                    && let Err(record_err) = bash_state.error_predictor.record_error(
                         "file_write",
                         &format!("Failed to write file: {}", e),
                         None,
@@ -1683,8 +1682,6 @@ pub async fn handle_tool_call(
                     ) {
                         warn!("Failed to record error for prediction: {}", record_err);
                     }
-                }
-            }
 
             return Err(WinxError::FileWriteError {
                 path: file_path_obj.to_path_buf(),
