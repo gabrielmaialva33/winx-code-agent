@@ -282,14 +282,13 @@ impl ResourceAllocator {
             None
         };
 
-        if let Some(memory) = memory_released {
-            if let Ok(mut stats) = self.stats.lock() {
+        if let Some(memory) = memory_released
+            && let Ok(mut stats) = self.stats.lock() {
                 stats.total_allocated = stats.total_allocated.saturating_sub(memory);
                 stats.active_reads = stats.active_reads.saturating_sub(1);
 
                 debug!("Released {} bytes for: {:?}", memory, file_path);
             }
-        }
 
         // Process pending queue
         self.process_pending_queue().await;
@@ -299,8 +298,8 @@ impl ResourceAllocator {
 
     /// Check cache for allocation
     async fn check_cache(&self, file_path: &Path) -> Option<CacheEntry> {
-        if let Ok(mut cache) = self.cache.lock() {
-            if let Some(entry) = cache.get_mut(file_path) {
+        if let Ok(mut cache) = self.cache.lock()
+            && let Some(entry) = cache.get_mut(file_path) {
                 // Check if entry is still valid
                 if entry.created_at.elapsed() < CACHE_TTL {
                     entry.access_count += 1;
@@ -310,7 +309,6 @@ impl ResourceAllocator {
                     cache.remove(file_path);
                 }
             }
-        }
 
         None
     }
