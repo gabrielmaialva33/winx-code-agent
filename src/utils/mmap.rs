@@ -782,7 +782,7 @@ mod tests {
 
     #[test]
     fn test_mmap_read() {
-        let size = 1 * 1024 * 1024; // 1MB
+        let size = 1024 * 1024; // 1MB
         let (file, expected_data) = create_test_file(size);
 
         let result = read_mmap(file.as_file(), file.path()).unwrap();
@@ -791,7 +791,7 @@ mod tests {
 
     #[test]
     fn test_file_segment_read() {
-        let size = 1 * 1024 * 1024; // 1MB
+        let size = 1024 * 1024; // 1MB
         let (file, data) = create_test_file(size);
 
         // Read a segment from the middle
