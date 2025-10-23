@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context as AnyhowContext, Result};
+use anyhow::{Context as AnyhowContext, Result, anyhow};
 use glob;
 use rand::Rng;
 use regex;
@@ -15,8 +15,8 @@ use tracing::{debug, info, warn};
 
 use crate::state::terminal::MAX_OUTPUT_SIZE as TERMINAL_MAX_OUTPUT_SIZE;
 use crate::state::terminal::{
-    incremental_text, render_terminal_output, TerminalEmulator, TerminalOutputDiff,
-    DEFAULT_MAX_SCREEN_LINES,
+    DEFAULT_MAX_SCREEN_LINES, TerminalEmulator, TerminalOutputDiff, incremental_text,
+    render_terminal_output,
 };
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
@@ -792,7 +792,9 @@ impl InteractiveBash {
                                 #[cfg(unix)]
                                 {
                                     // CommandExt not needed
-                                    debug!("Process still running, attempting to terminate with SIGTERM");
+                                    debug!(
+                                        "Process still running, attempting to terminate with SIGTERM"
+                                    );
                                     unsafe {
                                         // Get process ID
                                         let pid = self.process.id();
@@ -819,7 +821,9 @@ impl InteractiveBash {
                                 #[cfg(not(unix))]
                                 {
                                     // Process might be waiting for more input or ignoring the interrupt
-                                    debug!("Process still running after interrupt, may be ignoring Ctrl+C");
+                                    debug!(
+                                        "Process still running after interrupt, may be ignoring Ctrl+C"
+                                    );
                                     self.last_output.push_str(
                                         "\n(Sent interrupt signals, but process is still running)",
                                     );
@@ -1114,7 +1118,7 @@ impl BashState {
                 Some(bash) => match &bash.command_state {
                     CommandState::Running {
                         start_time,
-                        command: ref running_command,
+                        command: running_command,
                     } => {
                         let elapsed = start_time
                             .elapsed()
