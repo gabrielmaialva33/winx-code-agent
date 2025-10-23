@@ -1301,11 +1301,10 @@ impl TerminalEmulator {
         self.process(data);
 
         // After processing, check if we need to smart truncate
-        if let Ok(mut screen) = self.screen.lock() {
-            if screen.lines.len() > max_lines {
+        if let Ok(mut screen) = self.screen.lock()
+            && screen.lines.len() > max_lines {
                 screen.smart_truncate(max_lines);
             }
-        }
     }
 
     /// Get the current screen state
@@ -1369,13 +1368,11 @@ impl TerminalCache {
 
     /// Get a cached value if available and not expired
     fn get(&self, key: &str) -> Option<Vec<String>> {
-        if let Ok(entries) = self.entries.read() {
-            if let Some((value, timestamp)) = entries.get(key) {
-                if timestamp.elapsed().as_secs() < self.ttl {
+        if let Ok(entries) = self.entries.read()
+            && let Some((value, timestamp)) = entries.get(key)
+                && timestamp.elapsed().as_secs() < self.ttl {
                     return Some(value.clone());
                 }
-            }
-        }
         None
     }
 
@@ -1598,7 +1595,7 @@ pub fn render_terminal_output(text: &str) -> Vec<String> {
     }
 
     // Periodically clean up expired cache entries
-    if rand::random::<u32>() % 100 == 0 {
+    if rand::random::<u32>().is_multiple_of(100) {
         TERMINAL_CACHE.cleanup();
     }
 
