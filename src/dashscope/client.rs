@@ -296,8 +296,10 @@ mod tests {
 
     #[test]
     fn test_dashscope_config_validation() {
-        let mut config = DashScopeConfig::default();
-        config.api_key = "sk-validkey123".to_string();
+        let mut config = DashScopeConfig {
+            api_key: "sk-validkey123".to_string(),
+            ..Default::default()
+        };
 
         assert!(config.validate().is_ok());
 
@@ -308,8 +310,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_creation() {
-        let mut config = DashScopeConfig::default();
-        config.api_key = "sk-testkey123".to_string();
+        let config = DashScopeConfig {
+            api_key: "sk-testkey123".to_string(),
+            ..Default::default()
+        };
 
         let client = DashScopeClient::new(config);
         assert!(client.is_ok());
