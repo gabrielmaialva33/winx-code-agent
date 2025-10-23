@@ -251,11 +251,11 @@ mod tests {
 
     #[test]
     fn test_should_include_issue() {
-        assert_eq!(should_include_issue("Critical", "Warning"), true);
-        assert_eq!(should_include_issue("Error", "Warning"), true);
-        assert_eq!(should_include_issue("Warning", "Warning"), true);
-        assert_eq!(should_include_issue("Info", "Warning"), false);
-        assert_eq!(should_include_issue("Critical", "Critical"), true);
-        assert_eq!(should_include_issue("Error", "Critical"), false);
+        assert!(should_include_issue("Critical", "Warning"));
+        assert!(should_include_issue("Error", "Warning"));
+        assert!(should_include_issue("Warning", "Warning"));
+        assert!(!should_include_issue("Info", "Warning"));
+        assert!(should_include_issue("Critical", "Critical"));
+        assert!(!should_include_issue("Error", "Critical"));
     }
 }
