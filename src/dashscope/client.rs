@@ -5,6 +5,7 @@ use crate::dashscope::{
 };
 use crate::errors::{Result, WinxError};
 use backoff::ExponentialBackoff;
+use backoff::backoff::Backoff;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
