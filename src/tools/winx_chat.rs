@@ -414,10 +414,9 @@ impl WinxChatProcessor {
         }
 
         // Add system information if requested
-        if include_system_info
-            && let Some(info) = system_info {
-                response.push_str(&self.format_system_info(info));
-            }
+        if include_system_info && let Some(info) = system_info {
+            response.push_str(&self.format_system_info(info));
+        }
 
         // Add personality touches based on level
         if personality_level >= 5 {
@@ -491,7 +490,10 @@ impl WinxChatProcessor {
         } else if message.to_lowercase().contains("fallback") {
             "Nosso sistema de fallback funciona em cascata: DashScope (primário) → NVIDIA → Gemini. Se um provedor falha, automaticamente tentamos o próximo.".to_string()
         } else {
-            format!("Analisando tecnicamente: '{}'. Posso fornecer detalhes específicos sobre implementação, arquitetura ou debugging.", message)
+            format!(
+                "Analisando tecnicamente: '{}'. Posso fornecer detalhes específicos sobre implementação, arquitetura ou debugging.",
+                message
+            )
         }
     }
 
@@ -506,7 +508,10 @@ impl WinxChatProcessor {
         {
             "Para começar, recomendo usar 'initialize' para configurar o ambiente, depois 'bash_command' para explorar o projeto e 'read_files' para entender o código!".to_string()
         } else {
-            format!("Vou te ajudar com: '{}'. Que tipo de assistência você precisa? Posso explicar, executar comandos, analisar código ou ensinar conceitos!", message)
+            format!(
+                "Vou te ajudar com: '{}'. Que tipo de assistência você precisa? Posso explicar, executar comandos, analisar código ou ensinar conceitos!",
+                message
+            )
         }
     }
 
@@ -517,13 +522,19 @@ impl WinxChatProcessor {
         } else if message.to_lowercase().contains("não funciona") {
             "Problemas acontecem! Vamos investigar passo a passo: 1) Verificar logs, 2) Reproduzir o erro, 3) Isolar a causa, 4) Aplicar a solução.".to_string()
         } else {
-            format!("Debuggando: '{}'. Vou te ajudar a encontrar e resolver o problema. Quer que eu analise algum código específico?", message)
+            format!(
+                "Debuggando: '{}'. Vou te ajudar a encontrar e resolver o problema. Quer que eu analise algum código específico?",
+                message
+            )
         }
     }
 
     /// Process creative requests
     fn process_creative_message(&self, message: &str) -> String {
-        format!("Que ideia interessante! Para '{}', posso sugerir várias abordagens criativas. Vamos explorar possibilidades inovadoras juntos!", message)
+        format!(
+            "Que ideia interessante! Para '{}', posso sugerir várias abordagens criativas. Vamos explorar possibilidades inovadoras juntos!",
+            message
+        )
     }
 
     /// Process mentor mode
@@ -532,7 +543,10 @@ impl WinxChatProcessor {
         {
             "Excelente! Aprender é uma jornada contínua. Qual conceito você gostaria de explorar? Posso ensinar desde fundamentos até técnicas avançadas.".to_string()
         } else {
-            format!("Como seu mentor digital, vou te guiar através de: '{}'. Lembre-se: a prática leva à perfeição, e erros são oportunidades de aprendizado!", message)
+            format!(
+                "Como seu mentor digital, vou te guiar através de: '{}'. Lembre-se: a prática leva à perfeição, e erros são oportunidades de aprendizado!",
+                message
+            )
         }
     }
 
@@ -723,7 +737,6 @@ mod tests {
     fn test_personality_mood_emoji() {
         let mut personality = WinxPersonality::default();
 
-        personality.mood = WinxMood::Cheerful;
         assert_eq!(personality.mood_emoji(), "😊");
 
         personality.mood = WinxMood::Focused;
