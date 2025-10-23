@@ -220,11 +220,10 @@ impl RepoTraverser {
     /// Check if a path should be ignored
     fn is_path_ignored(&self, path: &str) -> bool {
         // Check git ignore first
-        if let Some(ref git) = self.git_analyzer {
-            if git.is_ignored(path) {
+        if let Some(ref git) = self.git_analyzer
+            && git.is_ignored(path) {
                 return true;
             }
-        }
 
         // Check against our ignore patterns
         for pattern in &self.ignored_patterns {
