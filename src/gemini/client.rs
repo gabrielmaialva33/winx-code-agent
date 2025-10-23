@@ -271,8 +271,10 @@ mod tests {
 
     #[test]
     fn test_gemini_config_validation() {
-        let mut config = GeminiConfig::default();
-        config.api_key = "AIzaValidKey".to_string();
+        let mut config = GeminiConfig {
+            api_key: "AIzaValidKey".to_string(),
+            ..Default::default()
+        };
 
         assert!(config.validate().is_ok());
 
@@ -283,8 +285,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_creation() {
-        let mut config = GeminiConfig::default();
-        config.api_key = "AIzaTestKey".to_string();
+        let config = GeminiConfig {
+            api_key: "AIzaTestKey".to_string(),
+            ..Default::default()
+        };
 
         let client = GeminiClient::new(config);
         assert!(client.is_ok());
