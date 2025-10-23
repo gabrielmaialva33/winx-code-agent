@@ -24,21 +24,21 @@ use crate::utils::path::expand_user;
 // Create these with caching to improve performance
 fn search_marker() -> &'static Regex {
     lazy_static::lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"^<<<<<<+\s*SEARCH\s*$").unwrap();
+        static ref REGEX: Regex = Regex::new(r"^<<<<<<+\s*SEARCH\s*$").expect("Invalid regex pattern for search marker");
     }
     &REGEX
 }
 
 fn divider_marker() -> &'static Regex {
     lazy_static::lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"^======*\s*$").unwrap();
+        static ref REGEX: Regex = Regex::new(r"^======*\s*$").expect("Invalid regex pattern for divider marker");
     }
     &REGEX
 }
 
 fn replace_marker() -> &'static Regex {
     lazy_static::lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"^>>>>>>+\s*REPLACE\s*$").unwrap();
+        static ref REGEX: Regex = Regex::new(r"^>>>>>>+\s*REPLACE\s*$").expect("Invalid regex pattern for replace marker");
     }
     &REGEX
 }
@@ -243,7 +243,10 @@ impl SearchReplaceHelper {
             // Create a more detailed error message
             let error_message = format!(
                 "Search block {} of {} not found in content:\n```\n{}\n```\n\n{}\n\nThis might be due to:\n- Mismatched whitespace or line endings\n- Different indentation or formatting\n- The code has been significantly changed\n- Case sensitivity differences\n\nConsider using percentage_to_change > 50 to replace the entire file instead.",
-                i + 1, total_blocks, search.trim(), suggestion
+                i + 1,
+                total_blocks,
+                search.trim(),
+                suggestion
             );
 
             return Err(WinxError::SearchBlockNotFound(error_message));
@@ -265,7 +268,7 @@ impl SearchReplaceHelper {
             None => {
                 return Err(WinxError::SearchBlockNotFound(
                     "Fuzzy matching not available".to_string(),
-                ))
+                ));
             }
         };
 
@@ -422,20 +425,21 @@ impl SearchReplaceHelper {
 
         // Strategy 3: Longest common substring detection
         if let Some(common) = self.find_longest_common_substring(search, content)
-            && common.len() >= 20 {
-                // Only show substantial matches
-                let preview = if common.len() > 40 {
-                    format!("{}...", &common[..40])
-                } else {
-                    common.clone()
-                };
+            && common.len() >= 20
+        {
+            // Only show substantial matches
+            let preview = if common.len() > 40 {
+                format!("{}...", &common[..40])
+            } else {
+                common.clone()
+            };
 
-                suggestions.push(format!(
-                    "Found a matching section of {} characters: '{}'",
-                    common.len(),
-                    preview
-                ));
-            }
+            suggestions.push(format!(
+                "Found a matching section of {} characters: '{}'",
+                common.len(),
+                preview
+            ));
+        }
 
         // Strategy 4: Check for case sensitivity issues
         let search_lower = search.to_lowercase();
@@ -1373,11 +1377,7 @@ fn detect_file_changes(original: &str, new: &str) -> Option<String> {
     // Parse output
     let diff = String::from_utf8_lossy(&output.stdout).to_string();
 
-    if diff.is_empty() {
-        None
-    } else {
-        Some(diff)
-    }
+    if diff.is_empty() { None } else { Some(diff) }
 }
 
 /// Handle the FileWriteOrEdit tool call
@@ -1588,7 +1588,10 @@ pub async fn handle_tool_call(
                 tracing::error!("Failed to read file for search/replace edit: {}", e);
                 return Err(WinxError::FileAccessError {
                     path: file_path_obj.to_path_buf(),
-                    message: format!("Failed to read file: {}. The file might be binary or have encoding issues.", e),
+                    message: format!(
+                        "Failed to read file: {}. The file might be binary or have encoding issues.",
+                        e
+                    ),
                 });
             }
         };
@@ -1667,21 +1670,22 @@ pub async fn handle_tool_call(
             let bash_state_guard = bash_state_arc.lock().ok();
             if let Some(guard) = bash_state_guard
                 && let Some(bash_state) = guard.as_ref()
-                    && let Err(record_err) = bash_state.error_predictor.record_error(
-                        "file_write",
-                        &format!("Failed to write file: {}", e),
-                        None,
-                        Some(&file_path),
-                        Some(
-                            file_path_obj
-                                .parent()
-                                .unwrap_or_else(|| Path::new("."))
-                                .to_string_lossy()
-                                .as_ref(),
-                        ),
-                    ) {
-                        warn!("Failed to record error for prediction: {}", record_err);
-                    }
+                && let Err(record_err) = bash_state.error_predictor.record_error(
+                    "file_write",
+                    &format!("Failed to write file: {}", e),
+                    None,
+                    Some(&file_path),
+                    Some(
+                        file_path_obj
+                            .parent()
+                            .unwrap_or_else(|| Path::new("."))
+                            .to_string_lossy()
+                            .as_ref(),
+                    ),
+                )
+            {
+                warn!("Failed to record error for prediction: {}", record_err);
+            }
 
             return Err(WinxError::FileWriteError {
                 path: file_path_obj.to_path_buf(),
@@ -1761,15 +1765,18 @@ pub async fn handle_tool_call(
         }
 
         // Generate diff if requested and file exists
-        let diff_info =
-            if file_write_or_edit.show_diff.unwrap_or(false) && original_content.is_some() {
-                match detect_file_changes(original_content.as_ref().unwrap(), content) {
+        let diff_info = if file_write_or_edit.show_diff.unwrap_or(false) {
+            if let Some(orig) = &original_content {
+                match detect_file_changes(orig, content) {
                     Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
                     None => "".to_string(),
                 }
             } else {
                 "".to_string()
-            };
+            }
+        } else {
+            "".to_string()
+        };
 
         // Write the content to the file
         if let Err(e) = write_to_file(file_path_obj, content) {
