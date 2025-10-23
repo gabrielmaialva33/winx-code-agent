@@ -359,7 +359,11 @@ impl PathScorer {
         }
 
         // Extract the extension from the path
-        let extension = path.split('.').next_back().unwrap_or("");
+        let extension = if let Some(i) = path.rfind('.') {
+            &path[i + 1..]
+        } else {
+            ""
+        };
 
         // Get the extension weight or default to 1.0
         let weight = self
@@ -753,9 +757,9 @@ mod tests {
     use tempfile::TempDir;
 
     // Helper to create a test vocabulary file
-    fn create_test_vocab_file(dir: &TempDir) -> PathBuf {
+    fn create_test_vocab_file(dir: &TempDir) -> Result<PathBuf> {
         let vocab_path = dir.path().join("test.vocab");
-        let mut file = File::create(&vocab_path).unwrap();
+        let mut file = File::create(&vocab_path)?;
 
         // Write some test vocab entries
         let test_data = "src 0.5\n\
@@ -769,8 +773,8 @@ mod tests {
              lib 0.3\n\
              app 0.1\n";
 
-        file.write_all(test_data.as_bytes()).unwrap();
-        vocab_path
+        file.write_all(test_data.as_bytes())?;
+        Ok(vocab_path)
     }
 
     // Helper function to create a minimal mock PathScorer for testing
@@ -923,7 +927,6 @@ mod tests {
         let _medium_relevance_files = &grouped.medium;
         let _low_relevance_files = &grouped.low;
 
-        // Basic structure test passing means the function didn't panic
-        assert!(true);
+        // The test passes if the function completes without panicking
     }
 }
