@@ -2,11 +2,10 @@ use std::path::Path;
 
 /// Expands a path that starts with ~ to the user's home directory
 pub fn expand_user(path: &str) -> String {
-    if path.starts_with('~') {
-        if let Some(home_dir) = home::home_dir() {
+    if path.starts_with('~')
+        && let Some(home_dir) = home::home_dir() {
             return path.replacen('~', home_dir.to_str().unwrap_or(""), 1);
         }
-    }
     path.to_string()
 }
 
