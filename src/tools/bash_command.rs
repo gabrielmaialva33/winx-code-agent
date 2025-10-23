@@ -1370,8 +1370,8 @@ async fn execute_interactive_command(
                 WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
             })?;
 
-            if let Some(ref bash) = *bash_guard {
-                if let CommandState::Running {
+            if let Some(ref bash) = *bash_guard
+                && let CommandState::Running {
                     command: current_cmd,
                     start_time,
                 } = &bash.command_state
@@ -1382,7 +1382,6 @@ async fn execute_interactive_command(
                         duration_seconds: duration,
                     });
                 }
-            }
         }
 
         // Validate command safety
