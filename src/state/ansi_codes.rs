@@ -536,11 +536,10 @@ pub fn color_name_to_code(name: &str) -> Option<TermColor> {
     }
 
     // Try as a hex color (only if it starts with # or is clearly hex)
-    if name.starts_with('#') || (name.len() == 6 && name.chars().all(|c| c.is_ascii_hexdigit())) {
-        if let Some(color) = parse_hex_color(name) {
+    if (name.starts_with('#') || (name.len() == 6 && name.chars().all(|c| c.is_ascii_hexdigit())))
+        && let Some(color) = parse_hex_color(name) {
             return Some(color);
         }
-    }
 
     None
 }
@@ -700,11 +699,10 @@ fn extract_color_from_seq(seq: &str) -> String {
     if seq.starts_with("\x1B[38;5;") || seq.starts_with("\x1B[48;5;") {
         // 8-bit color
         let parts: Vec<&str> = seq.split(';').collect();
-        if parts.len() >= 3 {
-            if let Some(color_part) = parts[2].strip_suffix('m') {
+        if parts.len() >= 3
+            && let Some(color_part) = parts[2].strip_suffix('m') {
                 return format!("color-{}", color_part);
             }
-        }
     } else if seq.starts_with("\x1B[38;2;") || seq.starts_with("\x1B[48;2;") {
         // 24-bit color
         let parts: Vec<&str> = seq.split(';').collect();
