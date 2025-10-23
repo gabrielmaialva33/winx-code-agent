@@ -189,16 +189,15 @@ impl WinxPersonality {
     }
 
     /// Get a random tip
-    pub fn get_random_tip(&self) -> Option<&String> {
+    pub fn get_random_tip(&self) -> Result<Option<&String>> {
         if self.tips_database.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let index = std::time::SystemTime::now()
+        let duration = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos() as usize
-            % self.tips_database.len();
-        self.tips_database.get(index)
+            .map_err(|e| WinxError::DataLoadingError(format!("Time error: {}", e)))?;
+        let index = (duration.as_nanos() as usize) % self.tips_database.len();
+        Ok(self.tips_database.get(index))
     }
 
     /// Check for easter egg response
@@ -296,8 +295,7 @@ impl Default for WinxKnowledge {
         Self {
             tools_info,
             programming_tips: vec![
-                "Use `unwrap_or_else` em vez de `unwrap()` para melhor tratamento de erros"
-                    .to_string(),
+                "Use proper error handling with Result<T, E>".to_string(),
                 "Prefira `&str` sobre `String` em parâmetros de função quando possível".to_string(),
                 "Use `cargo test` para executar todos os testes do projeto".to_string(),
             ],
@@ -335,15 +333,13 @@ impl WinxChatProcessor {
         let mode = chat.conversation_mode.clone().unwrap_or_default();
         let personality_level = chat.personality_level.unwrap_or(7);
         let include_system_info = chat.include_system_info.unwrap_or(false);
-        let session_id = chat.session_id.clone().unwrap_or_else(|| {
-            format!(
-                "winx_{}",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            )
-        });
+        let duration = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| WinxError::DataLoadingError(format!("Time error: {}", e)))?;
+        let session_id = chat
+            .session_id
+            .clone()
+            .unwrap_or_else(|| format!("winx_{}", duration.as_nanos()));
 
         debug!(
             "Processing Winx chat: mode={:?}, personality={}",
@@ -366,11 +362,14 @@ impl WinxChatProcessor {
         let suggestions = self.generate_suggestions(&mode, chat.context.as_deref());
 
         // Get a random fun fact
-        let fun_fact = self.get_fun_fact(personality_level);
+        let fun_fact = self.get_fun_fact(personality_level)?;
 
         // Update conversation history
         {
-            let mut personality = self.personality.lock().unwrap();
+            let mut personality = self
+                .personality
+                .lock()
+                .map_err(|e| WinxError::DataLoadingError(format!("Mutex lock error: {}", e)))?;
             personality.add_to_history(chat.message.clone(), response_message.clone());
         }
 
@@ -397,7 +396,10 @@ impl WinxChatProcessor {
     ) -> Result<String> {
         // Check for easter eggs first
         {
-            let personality = self.personality.lock().unwrap();
+            let personality = self
+                .personality
+                .lock()
+                .map_err(|e| WinxError::DataLoadingError(format!("Mutex lock error: {}", e)))?;
             if let Some(easter_egg) = personality.check_easter_egg(message) {
                 return Ok(easter_egg.clone());
             }
@@ -420,7 +422,10 @@ impl WinxChatProcessor {
 
         // Add personality touches based on level
         if personality_level >= 5 {
-            let personality = self.personality.lock().unwrap();
+            let personality = self
+                .personality
+                .lock()
+                .map_err(|e| WinxError::DataLoadingError(format!("Mutex lock error: {}", e)))?;
             response.push_str(&format!(" {}", personality.mood_emoji()));
         }
 
@@ -580,13 +585,16 @@ impl WinxChatProcessor {
     }
 
     /// Get a fun fact based on personality level
-    fn get_fun_fact(&self, personality_level: u8) -> Option<String> {
+    fn get_fun_fact(&self, personality_level: u8) -> Result<Option<String>> {
         if personality_level < 6 {
-            return None;
+            return Ok(None);
         }
 
-        let personality = self.personality.lock().unwrap();
-        personality.get_random_tip().cloned()
+        let personality = self
+            .personality
+            .lock()
+            .map_err(|e| WinxError::DataLoadingError(format!("Mutex lock error: {}", e)))?;
+        personality.get_random_tip().map(|opt| opt.cloned())
     }
 
     /// Format system information for display
@@ -663,7 +671,10 @@ mod tests {
             session_id: None,
         };
 
-        let response = processor.process_chat(&chat, None).await.unwrap();
+        let response = processor
+            .process_chat(&chat, None)
+            .await
+            .expect("Failed to process chat");
         assert_eq!(response.mode, ConversationMode::Casual);
         assert_eq!(response.personality_level, 8);
         assert!(response.message.contains("Estou ótima") || response.message.contains("✨"));
@@ -681,7 +692,10 @@ mod tests {
             session_id: None,
         };
 
-        let response = processor.process_chat(&chat, None).await.unwrap();
+        let response = processor
+            .process_chat(&chat, None)
+            .await
+            .expect("Failed to process chat");
         assert_eq!(response.mode, ConversationMode::Technical);
         assert!(response.message.contains("fallback") || response.message.contains("DashScope"));
     }
@@ -698,7 +712,10 @@ mod tests {
             session_id: None,
         };
 
-        let response = processor.process_chat(&chat, None).await.unwrap();
+        let response = processor
+            .process_chat(&chat, None)
+            .await
+            .expect("Failed to process chat");
         assert!(response.message.contains("✨") && response.message.contains("fada digital"));
     }
 
@@ -725,7 +742,7 @@ mod tests {
         let response = processor
             .process_chat(&chat, Some(system_info))
             .await
-            .unwrap();
+            .expect("Failed to process chat");
         assert!(response.included_system_info);
         assert!(
             response.message.contains("Status do Sistema")
