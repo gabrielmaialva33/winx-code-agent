@@ -2,10 +2,10 @@
 //! Enhanced server with NVIDIA AI integration
 
 use rmcp::{
+    ErrorData as McpError, ServerHandler, ServiceExt,
     model::*,
     service::{RequestContext, RoleServer},
     transport::stdio,
-    ErrorData as McpError, ServerHandler, ServiceExt,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -214,6 +214,9 @@ impl ServerHandler for WinxService {
             server_info: Implementation {
                 name: "winx-code-agent".into(),
                 version: self.version.clone(),
+                title: Some("Winx Code Agent".to_string()),
+                icons: None,
+                website_url: None,
             },
             protocol_version: ProtocolVersion::V_2024_11_05,
             capabilities: ServerCapabilities::builder()
@@ -237,7 +240,9 @@ impl ServerHandler for WinxService {
             tools: vec![
                 Tool {
                     name: "ping".into(),
+                    title: Some("Ping".to_string()),
                     description: Some("Test server connectivity".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -252,7 +257,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "initialize".into(),
+                    title: Some("Initialize".to_string()),
                     description: Some("Initialize the bash shell environment".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -267,7 +274,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "bash_command".into(),
+                    title: Some("Bash Command".to_string()),
                     description: Some("Execute a command in the bash shell".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -287,7 +296,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "read_files".into(),
+                    title: Some("Read Files".to_string()),
                     description: Some("Read contents of one or more files".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -306,7 +317,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "file_write_or_edit".into(),
+                    title: Some("File Write/Edit".to_string()),
                     description: Some("Write or edit file contents".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -330,7 +343,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "context_save".into(),
+                    title: Some("Context Save".to_string()),
                     description: Some("Save task context to a file for resumption".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -361,7 +376,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "read_image".into(),
+                    title: Some("Read Image".to_string()),
                     description: Some("Read image file and return as base64".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -377,7 +394,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "command_suggestions".into(),
+                    title: Some("Command Suggestions".to_string()),
                     description: Some("Get command suggestions based on context".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -408,9 +427,11 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "code_analyzer".into(),
+                    title: Some("Code Analyzer".to_string()),
                     description: Some(
                         "AI-powered code analysis for bugs, security, and performance".into(),
                     ),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -430,9 +451,11 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "ai_generate_code".into(),
+                    title: Some("AI Generate Code".to_string()),
                     description: Some(
                         "Generate code from natural language description using NVIDIA AI".into(),
                     ),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -464,10 +487,12 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "multi_file_editor".into(),
+                    title: Some("Multi File Editor".to_string()),
                     description: Some(
                         "Create and edit multiple files simultaneously with atomic operations"
                             .into(),
                     ),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -566,7 +591,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "ai_explain_code".into(),
+                    title: Some("AI Explain Code".to_string()),
                     description: Some("Get AI explanation and documentation for code".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -594,7 +621,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "winx_chat".into(),
+                    title: Some("Winx Chat".to_string()),
                     description: Some("Chat with Winx, your AI assistant fairy".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -633,7 +662,9 @@ impl ServerHandler for WinxService {
                 },
                 Tool {
                     name: "smart_search_replace".into(),
+                    title: Some("Smart Search Replace".to_string()),
                     description: Some("AI-powered smart search and replace across multiple files with context understanding".into()),
+                    icons: None,
                     input_schema: json_to_schema(serde_json::json!({
                         "type": "object",
                         "properties": {
@@ -693,7 +724,9 @@ impl ServerHandler for WinxService {
                     raw: RawResource {
                         uri: "file://project-structure".into(),
                         name: "Project Structure".into(),
+                        title: Some("Project Structure".to_string()),
                         description: Some("Overview of the project structure and files".into()),
+                        icons: None,
                         mime_type: Some("text/plain".into()),
                         size: None,
                     },
@@ -703,7 +736,9 @@ impl ServerHandler for WinxService {
                     raw: RawResource {
                         uri: "file://readme".into(),
                         name: "README".into(),
+                        title: Some("README".to_string()),
                         description: Some("Project README documentation".into()),
+                        icons: None,
                         mime_type: Some("text/markdown".into()),
                         size: None,
                     },
@@ -713,7 +748,9 @@ impl ServerHandler for WinxService {
                     raw: RawResource {
                         uri: "file://cargo-toml".into(),
                         name: "Cargo.toml".into(),
+                        title: Some("Cargo.toml".to_string()),
                         description: Some("Project configuration and dependencies".into()),
+                        icons: None,
                         mime_type: Some("text/plain".into()),
                         size: None,
                     },
@@ -723,7 +760,9 @@ impl ServerHandler for WinxService {
                     raw: RawResource {
                         uri: "file://src-structure".into(),
                         name: "Source Code Structure".into(),
+                        title: Some("Source Code Structure".to_string()),
                         description: Some("Overview of the source code organization".into()),
+                        icons: None,
                         mime_type: Some("text/plain".into()),
                         size: None,
                     },
@@ -782,15 +821,19 @@ impl ServerHandler for WinxService {
             prompts: vec![
                 Prompt {
                     name: "code_review".into(),
+                    title: Some("Code Review".to_string()),
                     description: Some("Comprehensive code review and analysis".into()),
+                    icons: None,
                     arguments: Some(vec![
                         PromptArgument {
                             name: "file_path".into(),
+                            title: Some("File Path".to_string()),
                             description: Some("Path to the code file to review".into()),
                             required: Some(true),
                         },
                         PromptArgument {
                             name: "focus_areas".into(),
+                            title: Some("Focus Areas".to_string()),
                             description: Some(
                                 "Specific areas to focus on (security, performance, bugs, style)"
                                     .into(),
@@ -801,15 +844,19 @@ impl ServerHandler for WinxService {
                 },
                 Prompt {
                     name: "bug_fix_assistant".into(),
+                    title: Some("Bug Fix Assistant".to_string()),
                     description: Some("AI-powered bug detection and fix suggestions".into()),
+                    icons: None,
                     arguments: Some(vec![
                         PromptArgument {
                             name: "error_message".into(),
+                            title: Some("Error Message".to_string()),
                             description: Some("Error message or description of the bug".into()),
                             required: Some(true),
                         },
                         PromptArgument {
                             name: "code_context".into(),
+                            title: Some("Code Context".to_string()),
                             description: Some("Relevant code context or file path".into()),
                             required: Some(false),
                         },
@@ -817,15 +864,19 @@ impl ServerHandler for WinxService {
                 },
                 Prompt {
                     name: "performance_optimizer".into(),
+                    title: Some("Performance Optimizer".to_string()),
                     description: Some("Performance analysis and optimization suggestions".into()),
+                    icons: None,
                     arguments: Some(vec![
                         PromptArgument {
                             name: "code_snippet".into(),
+                            title: Some("Code Snippet".to_string()),
                             description: Some("Code snippet or file path to optimize".into()),
                             required: Some(true),
                         },
                         PromptArgument {
                             name: "target_language".into(),
+                            title: Some("Target Language".to_string()),
                             description: Some(
                                 "Programming language (auto-detected if not provided)".into(),
                             ),
@@ -835,9 +886,12 @@ impl ServerHandler for WinxService {
                 },
                 Prompt {
                     name: "security_analyzer".into(),
+                    title: Some("Security Analyzer".to_string()),
                     description: Some("Security vulnerability analysis and recommendations".into()),
+                    icons: None,
                     arguments: Some(vec![PromptArgument {
                         name: "file_path".into(),
+                        title: Some("File Path".to_string()),
                         description: Some(
                             "Path to the code file to analyze for security issues".into(),
                         ),
@@ -846,15 +900,19 @@ impl ServerHandler for WinxService {
                 },
                 Prompt {
                     name: "documentation_generator".into(),
+                    title: Some("Documentation Generator".to_string()),
                     description: Some("Generate comprehensive documentation for code".into()),
+                    icons: None,
                     arguments: Some(vec![
                         PromptArgument {
                             name: "code_file".into(),
+                            title: Some("Code File".to_string()),
                             description: Some("Path to the code file to document".into()),
                             required: Some(true),
                         },
                         PromptArgument {
                             name: "doc_style".into(),
+                            title: Some("Documentation Style".to_string()),
                             description: Some(
                                 "Documentation style (rustdoc, jsdoc, sphinx, etc.)".into(),
                             ),
@@ -864,10 +922,13 @@ impl ServerHandler for WinxService {
                 },
                 Prompt {
                     name: "test_generator".into(),
+                    title: Some("Test Generator".to_string()),
                     description: Some("Generate unit tests for code functions and modules".into()),
+                    icons: None,
                     arguments: Some(vec![
                         PromptArgument {
                             name: "source_file".into(),
+                            title: Some("Source File".to_string()),
                             description: Some(
                                 "Path to the source code file to generate tests for".into(),
                             ),
@@ -875,6 +936,7 @@ impl ServerHandler for WinxService {
                         },
                         PromptArgument {
                             name: "test_framework".into(),
+                            title: Some("Test Framework".to_string()),
                             description: Some(
                                 "Testing framework to use (auto-detected if not provided)".into(),
                             ),
@@ -1100,7 +1162,7 @@ impl ServerHandler for WinxService {
                 return Err(McpError::invalid_request(
                     format!("Unknown tool: {}", param.name),
                     None,
-                ))
+                ));
             }
         };
 
@@ -1790,8 +1852,12 @@ impl WinxService {
         if let Some(nvidia_client) = self.get_nvidia_client().await {
             let detail_prompt = match detail_level {
                 "basic" => "Provide a brief, high-level explanation of what this code does.",
-                "expert" => "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities.",
-                _ => "Provide a detailed explanation of this code including its purpose, how it works, and key concepts."
+                "expert" => {
+                    "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities."
+                }
+                _ => {
+                    "Provide a detailed explanation of this code including its purpose, how it works, and key concepts."
+                }
             };
 
             let system_prompt = format!("You are a code explanation expert. {}", detail_prompt);
@@ -1823,10 +1889,7 @@ impl WinxService {
                         let explanation = choice.message.effective_content();
                         let formatted_result = format!(
                             "## 📚 AI Code Explanation\n\n**Source:** {}\n**Detail Level:** {}\n\n{}\n\n*DashScope failed, explained using: {}*",
-                            source_info,
-                            detail_level,
-                            explanation,
-                            request.model
+                            source_info, detail_level, explanation, request.model
                         );
 
                         info!(
@@ -1877,8 +1940,7 @@ impl WinxService {
         // All AI providers failed
         let fallback = format!(
             "## 📖 Code Explanation Not Available\n\nAll AI providers unavailable:\n- DashScope: missing DASHSCOPE_API_KEY or failed\n- NVIDIA: missing NVIDIA_API_KEY or failed\n- Gemini: missing GEMINI_API_KEY or failed\n\nSource: {}\nDetail Level: {}",
-            source_info,
-            detail_level
+            source_info, detail_level
         );
 
         info!("Code explanation requested but all AI providers failed");
