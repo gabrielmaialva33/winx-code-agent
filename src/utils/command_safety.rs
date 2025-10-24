@@ -4,6 +4,7 @@
 //! that might hang, require interaction, or cause other issues. Based on WCGW's
 //! command safety patterns.
 
+use lazy_static::lazy_static;
 use std::collections::HashSet;
 use std::time::Duration;
 
@@ -99,34 +100,25 @@ static BACKGROUND_COMMANDS: &[&str] = &[
     "service start",
 ];
 
-/// Command safety analyzer
-#[derive(Debug, Clone)]
-pub struct CommandSafety {
-    interactive_commands: HashSet<&'static str>,
-    long_running_commands: HashSet<&'static str>,
-    background_commands: HashSet<&'static str>,
+lazy_static! {
+    /// Pre-computed HashSet for interactive commands
+    static ref INTERACTIVE_COMMANDS_SET: HashSet<&'static str> = INTERACTIVE_COMMANDS.iter().cloned().collect();
+
+    /// Pre-computed HashSet for long-running commands
+    static ref LONG_RUNNING_COMMANDS_SET: HashSet<&'static str> = LONG_RUNNING_COMMANDS.iter().cloned().collect();
+
+    /// Pre-computed HashSet for background commands
+    static ref BACKGROUND_COMMANDS_SET: HashSet<&'static str> = BACKGROUND_COMMANDS.iter().cloned().collect();
 }
 
-impl Default for CommandSafety {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Command safety analyzer with efficient lookups
+#[derive(Debug, Clone, Default)]
+pub struct CommandSafety;
 
 impl CommandSafety {
     /// Create a new command safety analyzer
     pub fn new() -> Self {
-        let interactive_commands = INTERACTIVE_COMMANDS.iter().cloned().collect();
-
-        let long_running_commands = LONG_RUNNING_COMMANDS.iter().cloned().collect();
-
-        let background_commands = BACKGROUND_COMMANDS.iter().cloned().collect();
-
-        Self {
-            interactive_commands,
-            long_running_commands,
-            background_commands,
-        }
+        Self
     }
 
     /// Check if a command is potentially interactive
@@ -134,24 +126,24 @@ impl CommandSafety {
         let normalized = self.normalize_command(command);
 
         // Check exact matches
-        if self.interactive_commands.contains(&normalized) {
+        if INTERACTIVE_COMMANDS_SET.contains(&normalized.as_str()) {
             return true;
         }
 
         // Check if command starts with any interactive command
-        for interactive_cmd in &self.interactive_commands {
+        for interactive_cmd in INTERACTIVE_COMMANDS.iter() {
             if normalized.starts_with(interactive_cmd) {
                 // Check that it's a word boundary
                 let rest = &normalized[interactive_cmd.len()..];
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
                     // For git commit, check if it has -m flag (non-interactive)
-                    if interactive_cmd == "git commit"
+                    if *interactive_cmd == "git commit"
                         && (normalized.contains("-m") || normalized.contains("--message"))
                     {
                         return false;
                     }
                     // For python, check if it has a script argument (non-interactive)
-                    if interactive_cmd == "python" || interactive_cmd == "python3" {
+                    if *interactive_cmd == "python" || *interactive_cmd == "python3" {
                         // If there's more than just "python" or "python3", it's likely a script
                         let parts: Vec<&str> = normalized.split_whitespace().collect();
                         if parts.len() > 1 && !parts[1].starts_with('-') {
@@ -171,7 +163,7 @@ impl CommandSafety {
     pub fn is_long_running(&self, command: &str) -> bool {
         let normalized = self.normalize_command(command);
 
-        for long_cmd in &self.long_running_commands {
+        for long_cmd in LONG_RUNNING_COMMANDS.iter() {
             if normalized.starts_with(long_cmd) {
                 let rest = &normalized[long_cmd.len()..];
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
@@ -192,7 +184,7 @@ impl CommandSafety {
             return true;
         }
 
-        for bg_cmd in &self.background_commands {
+        for bg_cmd in BACKGROUND_COMMANDS.iter() {
             if normalized.starts_with(bg_cmd) {
                 let rest = &normalized[bg_cmd.len()..];
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
