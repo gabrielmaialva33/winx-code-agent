@@ -106,7 +106,7 @@ impl CodeWriterConfig {
                         format!("{}/{}", workspace_root, glob)
                     }
                 })
-                .collect();
+                .collect::<HashSet<_>>();
 
             self.allowed_globs = AllowedGlobs::List(updated_globs);
         }

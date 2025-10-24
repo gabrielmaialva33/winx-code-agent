@@ -74,7 +74,7 @@ pub fn code_writer_prompt(
             } else {
                 format!(
                     "    - You are allowed to edit files for files matching only the following globs: {}\n",
-                    globs.join(", ")
+                    globs.iter().cloned().collect::<Vec<_>>().join(", ")
                 )
             }
         }
@@ -92,7 +92,7 @@ pub fn code_writer_prompt(
             } else {
                 format!(
                     "    - You are allowed to write files files matching only the following globs: {}\n",
-                    globs.join(", ")
+                    globs.iter().cloned().collect::<Vec<_>>().join(", ")
                 )
             }
         }
@@ -113,7 +113,7 @@ pub fn code_writer_prompt(
             } else {
                 format!(
                     "    - You are only allowed to run the following commands: {}\n{}",
-                    commands.join(", "),
+                    commands.iter().cloned().collect::<Vec<_>>().join(", "),
                     COMMAND_COMMON_INSTRUCTIONS
                 )
             }
@@ -230,9 +230,11 @@ mod tests {
 
     #[test]
     fn test_code_writer_prompt_generation() {
-        let edit_globs = AllowedGlobs::List(vec!["*.rs".to_string(), "*.toml".to_string()]);
-        let write_globs = AllowedGlobs::List(vec!["src/**".to_string()]);
-        let commands = AllowedCommands::List(vec!["cargo".to_string(), "git".to_string()]);
+        let edit_globs =
+            AllowedGlobs::List(HashSet::from(["*.rs".to_string(), "*.toml".to_string()]));
+        let write_globs = AllowedGlobs::List(HashSet::from(["src/**".to_string()]));
+        let commands =
+            AllowedCommands::List(HashSet::from(["cargo".to_string(), "git".to_string()]));
 
         let prompt = code_writer_prompt(&edit_globs, &write_globs, &commands);
 

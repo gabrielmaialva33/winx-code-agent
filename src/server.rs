@@ -1297,24 +1297,21 @@ impl WinxService {
             .ok_or_else(|| McpError::invalid_request("Missing or invalid paths array", None))?;
 
         // Create futures for parallel file reading
-        let read_futures: Vec<_> = paths.iter().map(|path_value| {
-            let path = path_value
-                .as_str()
-                .ok_or_else(|| McpError::invalid_request("Invalid path in array", None))
-                .map(|s| s.to_string());
+        let read_futures: Vec<_> = paths
+            .iter()
+            .map(|path_value| {
+                let path = path_value.as_str().to_string();
 
-            async move {
-                match path {
-                    Ok(path) => match tokio::fs::read_to_string(&path).await {
+                async move {
+                    match tokio::fs::read_to_string(&path).await {
                         Ok(content) => {
                             format!("=== {} ({} bytes) ===\n{}\n", path, content.len(), content)
                         }
                         Err(e) => format!("=== {} ===\nERROR: {}\n", path, e),
-                    },
-                    Err(e) => format!("ERROR: {}\n", e),
+                    }
                 }
-            }
-        });
+            })
+            .collect::<Vec<_>>();
 
         // Execute all reads in parallel
         let results = futures::future::join_all(read_futures).await;
@@ -1392,8 +1389,8 @@ impl WinxService {
             .iter()
             .map(|v| {
                 v.as_str()
-                    .map(|s| s.to_string())
                     .ok_or_else(|| McpError::invalid_request("Invalid glob in array", None))
+                    .map(|s| s.to_string())
             })
             .collect();
         let globs = globs?;
@@ -2128,8 +2125,8 @@ impl WinxService {
             .iter()
             .map(|v| {
                 v.as_str()
-                    .map(|s| s.to_string())
                     .ok_or_else(|| McpError::invalid_request("Invalid file path in array", None))
+                    .map(|s| s.to_string())
             })
             .collect::<Result<Vec<String>, McpError>>()?;
 
