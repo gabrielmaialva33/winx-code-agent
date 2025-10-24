@@ -1,6 +1,7 @@
 //! Winx MCP Server implementation using rmcp 0.5.0
 //! Enhanced server with NVIDIA AI integration
 
+use futures::future::join_all;
 use lazy_static::lazy_static;
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
@@ -1290,7 +1291,7 @@ impl WinxService {
             .ok_or_else(|| McpError::invalid_request("Missing paths array", None))?;
 
         // Create futures for parallel file reading
-        let read_futures = paths.iter().map(|path_value| {
+        let read_futures: Vec<_> = paths.iter().map(|path_value| {
             let path = path_value
                 .as_str()
                 .ok_or_else(|| McpError::invalid_request("Invalid path in array", None))

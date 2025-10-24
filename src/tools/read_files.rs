@@ -522,7 +522,9 @@ pub async fn handle_tool_call(
     // Lock bash state to extract data
     {
         let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(Arc::new(format!("Failed to lock bash state: {}", e)))
+            WinxError::BashStateLockError {
+                message: Arc::new(format!("Failed to lock bash state: {}", e)),
+            }
         })?;
 
         // Ensure bash state is initialized
@@ -711,7 +713,8 @@ pub async fn handle_tool_call(
         for task in chunk_tasks {
             file_read_tasks.push(task.await.unwrap_or_else(|e| FileReadInfo {
                 original_path: "unknown".to_string(),
-                result: Err(WinxError::CommandExecutionError(Arc::new(format!(
+                result: Err(WinxError::CommandExecutionError {
+                    message: Arc::new(format!(
                     "Task panicked: {}",
                     e
                 )))),

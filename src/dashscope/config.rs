@@ -35,7 +35,7 @@ const ERR_TOP_P_RANGE: &str = "Top-p must be between 0.0 and 1.0";
 
 lazy_static::lazy_static! {
     /// Cached default chat completions URL for DashScope
-    static ref DEFAULT_DASHSCOPE_CHAT_COMPLETIONS_URL: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions";
+    static ref DEFAULT_DASHSCOPE_CHAT_COMPLETIONS_URL: &'static str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions";
 }
 
 /// Available DashScope models
