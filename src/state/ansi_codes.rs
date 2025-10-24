@@ -9,6 +9,12 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::str::FromStr;
 
+lazy_static! {
+    /// Precompiled regex for ANSI escape sequences
+    static ref ANSI_REGEX: Regex =
+        Regex::new(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])").unwrap();
+}
+
 /// Basic ANSI control codes
 pub mod control {
     /// Bell
@@ -489,11 +495,6 @@ impl TermColor {
 ///
 /// A vector of (position, sequence) tuples
 pub fn parse_ansi_sequences(text: &str) -> Vec<(usize, String)> {
-    lazy_static! {
-        static ref ANSI_REGEX: Regex =
-            Regex::new(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])").unwrap();
-    }
-
     ANSI_REGEX
         .find_iter(text)
         .map(|m| (m.start(), m.as_str().to_string()))
@@ -639,11 +640,6 @@ pub fn format_ansi_text(
 ///
 /// The text with all ANSI sequences removed
 pub fn strip_ansi_codes(text: &str) -> String {
-    lazy_static! {
-        static ref ANSI_REGEX: Regex =
-            Regex::new(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])").unwrap();
-    }
-
     ANSI_REGEX.replace_all(text, "").to_string()
 }
 
