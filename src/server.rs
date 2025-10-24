@@ -1289,30 +1289,31 @@ impl WinxService {
             .and_then(|v| v.as_array())
             .ok_or_else(|| McpError::invalid_request("Missing paths array", None))?;
 
-        let mut content_parts = Vec::new();
-
-        for path_value in paths {
+        // Create futures for parallel file reading
+        let read_futures = paths.iter().map(|path_value| {
             let path = path_value
                 .as_str()
-                .ok_or_else(|| McpError::invalid_request("Invalid path in array", None))?;
+                .ok_or_else(|| McpError::invalid_request("Invalid path in array", None))
+                .map(|s| s.to_string());
 
-            match tokio::fs::read_to_string(path).await {
-                Ok(content) => {
-                    content_parts.push(format!(
-                        "=== {} ({} bytes) ===\n{}\n",
-                        path,
-                        content.len(),
-                        content
-                    ));
-                }
-                Err(e) => {
-                    content_parts.push(format!("=== {} ===\nERROR: {}\n", path, e));
+            async move {
+                match path {
+                    Ok(path) => match tokio::fs::read_to_string(&path).await {
+                        Ok(content) => {
+                            format!("=== {} ({} bytes) ===\n{}\n", path, content.len(), content)
+                        }
+                        Err(e) => format!("=== {} ===\nERROR: {}\n", path, e),
+                    },
+                    Err(e) => format!("ERROR: {}\n", e),
                 }
             }
-        }
+        });
+
+        // Execute all reads in parallel
+        let results = futures::future::join_all(read_futures).await;
 
         Ok(CallToolResult::success(vec![Content::text(
-            content_parts.join("\n"),
+            results.join("\n"),
         )]))
     }
 
