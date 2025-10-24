@@ -312,7 +312,7 @@ impl CommandContext {
     pub fn should_allow_execution(&self) -> Result<(), crate::errors::WinxError> {
         if self.is_interactive {
             return Err(crate::errors::WinxError::InteractiveCommandDetected {
-                command: self.command.clone(),
+                command: Arc::new(self.command.clone()),
             });
         }
 

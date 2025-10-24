@@ -832,7 +832,10 @@ impl SharedErrorPredictor {
         directory: Option<&str>,
     ) -> Result<(), WinxError> {
         let mut predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock error predictor: {}", e))
+            WinxError::BashStateLockError(Arc::new(format!(
+                "Failed to lock error predictor: {}",
+                e
+            )))
         })?;
 
         predictor.record_error(error_type, message, command, file_path, directory);
@@ -909,7 +912,10 @@ impl SharedErrorPredictor {
     /// Predict potential errors for a command
     pub fn predict_command_errors(&self, command: &str) -> Result<Vec<ErrorPrediction>, WinxError> {
         let predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock error predictor: {}", e))
+            WinxError::BashStateLockError(Arc::new(format!(
+                "Failed to lock error predictor: {}",
+                e
+            )))
         })?;
 
         Ok(predictor.predict_command_errors(command))
@@ -922,7 +928,10 @@ impl SharedErrorPredictor {
         operation: &str,
     ) -> Result<Vec<ErrorPrediction>, WinxError> {
         let predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock error predictor: {}", e))
+            WinxError::BashStateLockError(Arc::new(format!(
+                "Failed to lock error predictor: {}",
+                e
+            )))
         })?;
 
         Ok(predictor.predict_file_errors(file_path, operation))

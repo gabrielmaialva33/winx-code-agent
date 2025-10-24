@@ -91,7 +91,7 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
 
     let file = File::open(path).map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Failed to open file for streaming: {}", e),
+        message: Arc::new(format!("Failed to open file for streaming: {}", e)),
     })?;
 
     let mut reader = BufReader::new(file);
@@ -103,7 +103,7 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
             .read(&mut buffer)
             .map_err(|e| WinxError::FileAccessError {
                 path: path.to_path_buf(),
-                message: format!("Failed to read chunk from file: {}", e),
+                message: Arc::new(format!("Failed to read chunk from file: {}", e)),
             })?;
 
         if bytes_read == 0 {
@@ -185,7 +185,7 @@ async fn read_file(
     if !path.exists() {
         let error = WinxError::FileAccessError {
             path: path.clone(),
-            message: "File does not exist".to_string(),
+            message: Arc::new("File does not exist".to_string()),
         };
 
         // Provide helpful suggestions for common errors
@@ -202,7 +202,7 @@ async fn read_file(
     if !path.is_file() {
         let error = WinxError::FileAccessError {
             path: path.clone(),
-            message: "Path exists but is not a file".to_string(),
+            message: Arc::new("Path exists but is not a file".to_string()),
         };
 
         // If it's a directory, suggest using a specific file
@@ -222,7 +222,7 @@ async fn read_file(
         Err(e) => {
             let error = WinxError::FileAccessError {
                 path: path.clone(),
-                message: format!("Failed to get file metadata: {}", e),
+                message: Arc::new(format!("Failed to get file metadata: {}", e)),
             };
 
             return Err(ErrorRecovery::suggest(
@@ -522,7 +522,7 @@ pub async fn handle_tool_call(
     // Lock bash state to extract data
     {
         let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
+            WinxError::BashStateLockError(Arc::new(format!("Failed to lock bash state: {}", e)))
         })?;
 
         // Ensure bash state is initialized
@@ -711,10 +711,10 @@ pub async fn handle_tool_call(
         for task in chunk_tasks {
             file_read_tasks.push(task.await.unwrap_or_else(|e| FileReadInfo {
                 original_path: "unknown".to_string(),
-                result: Err(WinxError::CommandExecutionError(format!(
+                result: Err(WinxError::CommandExecutionError(Arc::new(format!(
                     "Task panicked: {}",
                     e
-                ))),
+                )))),
             }));
         }
     }

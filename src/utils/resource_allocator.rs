@@ -6,7 +6,8 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tracing::{debug, info};
@@ -100,23 +101,23 @@ pub struct Allocation {
 }
 
 /// Resource usage statistics
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ResourceStats {
-    pub total_allocated: usize,
-    pub active_reads: usize,
-    pub pending_requests: usize,
-    pub successful_reads: u64,
-    pub failed_reads: u64,
-    pub cache_hits: u64,
-    pub cache_misses: u64,
+    pub total_allocated: AtomicUsize,
+    pub active_reads: AtomicUsize,
+    pub pending_requests: AtomicUsize,
+    pub successful_reads: AtomicU64,
+    pub failed_reads: AtomicU64,
+    pub cache_hits: AtomicU64,
+    pub cache_misses: AtomicU64,
 }
 
 /// Cache entry for allocation decisions
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct CacheEntry {
     allocation: Allocation,
     created_at: Instant,
-    access_count: u32,
+    access_count: AtomicU32,
 }
 
 /// Smart resource allocator for file reading operations
@@ -125,13 +126,13 @@ pub struct ResourceAllocator {
     /// Semaphore for limiting concurrent operations
     read_semaphore: Arc<Semaphore>,
     /// Current memory allocations by file path
-    allocations: Arc<Mutex<HashMap<PathBuf, usize>>>,
+    allocations: Arc<RwLock<HashMap<PathBuf, usize>>>,
     /// Allocation cache for repeated requests
-    cache: Arc<Mutex<HashMap<PathBuf, CacheEntry>>>,
+    cache: Arc<RwLock<HashMap<PathBuf, CacheEntry>>>,
     /// Priority queue for pending requests
     pending_queue: Arc<Mutex<VecDeque<AllocationRequest>>>,
     /// Resource usage statistics
-    stats: Arc<Mutex<ResourceStats>>,
+    stats: Arc<ResourceStats>,
     /// Configuration
     max_total_memory: usize,
     max_concurrent_reads: usize,
@@ -148,18 +149,18 @@ impl ResourceAllocator {
     pub fn new() -> Self {
         Self {
             read_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_READS)),
-            allocations: Arc::new(Mutex::new(HashMap::new())),
-            cache: Arc::new(Mutex::new(HashMap::new())),
+            allocations: Arc::new(RwLock::new(HashMap::new())),
+            cache: Arc::new(RwLock::new(HashMap::new())),
             pending_queue: Arc::new(Mutex::new(VecDeque::new())),
-            stats: Arc::new(Mutex::new(ResourceStats {
-                total_allocated: 0,
-                active_reads: 0,
-                pending_requests: 0,
-                successful_reads: 0,
-                failed_reads: 0,
-                cache_hits: 0,
-                cache_misses: 0,
-            })),
+            stats: Arc::new(ResourceStats {
+                total_allocated: AtomicUsize::new(0),
+                active_reads: AtomicUsize::new(0),
+                pending_requests: AtomicUsize::new(0),
+                successful_reads: AtomicU64::new(0),
+                failed_reads: AtomicU64::new(0),
+                cache_hits: AtomicU64::new(0),
+                cache_misses: AtomicU64::new(0),
+            }),
             max_total_memory: MAX_TOTAL_MEMORY,
             max_concurrent_reads: MAX_CONCURRENT_READS,
         }
@@ -173,7 +174,7 @@ impl ResourceAllocator {
         if let Some(cached) = self.check_cache(&request.file_path).await {
             self.update_cache_hit().await;
             debug!("Cache hit for: {:?}", request.file_path);
-            return Ok(cached.allocation);
+            return Ok(cached);
         }
 
         self.update_cache_miss().await;
@@ -205,7 +206,7 @@ impl ResourceAllocator {
             // Add to pending queue if resources not available
             self.queue_request(request).await;
             Err(WinxError::ResourceAllocationError {
-                message: "Insufficient resources available, request queued".to_string(),
+                message: Arc::new("Insufficient resources available, request queued".to_string()),
             })
         }
     }
@@ -251,7 +252,7 @@ impl ResourceAllocator {
 
     /// Check if we can allocate the requested memory
     async fn can_allocate(&self, requested_memory: usize) -> bool {
-        if let Ok(allocations) = self.allocations.lock() {
+        if let Ok(allocations) = self.allocations.read() {
             let current_total: usize = allocations.values().sum();
             current_total + requested_memory <= self.max_total_memory
         } else {
@@ -261,32 +262,32 @@ impl ResourceAllocator {
 
     /// Allocate resources for a file read
     async fn allocate_resources(&self, file_path: &Path, memory: usize) {
-        if let Ok(mut allocations) = self.allocations.lock() {
+        if let Ok(mut allocations) = self.allocations.write() {
             allocations.insert(file_path.to_path_buf(), memory);
 
-            if let Ok(mut stats) = self.stats.lock() {
-                stats.total_allocated += memory;
-                stats.active_reads += 1;
+            self.stats
+                .total_allocated
+                .fetch_add(memory, Ordering::Relaxed);
+            self.stats.active_reads.fetch_add(1, Ordering::Relaxed);
 
-                debug!("Allocated {} bytes for: {:?}", memory, file_path);
-            }
+            debug!("Allocated {} bytes for: {:?}", memory, file_path);
         }
     }
 
     /// Release resources after file read completion
     pub async fn release_allocation(&self, file_path: &Path) -> Result<()> {
         // Release allocation and update stats in separate blocks
-        let memory_released = if let Ok(mut allocations) = self.allocations.lock() {
+        let memory_released = if let Ok(mut allocations) = self.allocations.write() {
             allocations.remove(file_path)
         } else {
             None
         };
 
-        if let Some(memory) = memory_released
-            && let Ok(mut stats) = self.stats.lock()
-        {
-            stats.total_allocated = stats.total_allocated.saturating_sub(memory);
-            stats.active_reads = stats.active_reads.saturating_sub(1);
+        if let Some(memory) = memory_released {
+            self.stats
+                .total_allocated
+                .fetch_sub(memory, Ordering::Relaxed);
+            self.stats.active_reads.fetch_sub(1, Ordering::Relaxed);
 
             debug!("Released {} bytes for: {:?}", memory, file_path);
         }
@@ -298,17 +299,14 @@ impl ResourceAllocator {
     }
 
     /// Check cache for allocation
-    async fn check_cache(&self, file_path: &Path) -> Option<CacheEntry> {
-        if let Ok(mut cache) = self.cache.lock()
-            && let Some(entry) = cache.get_mut(file_path)
-        {
-            // Check if entry is still valid
-            if entry.created_at.elapsed() < CACHE_TTL {
-                entry.access_count += 1;
-                return Some(entry.clone());
-            } else {
-                // Remove expired entry
-                cache.remove(file_path);
+    async fn check_cache(&self, file_path: &Path) -> Option<Allocation> {
+        if let Ok(cache) = self.cache.read() {
+            if let Some(entry) = cache.get(file_path) {
+                // Check if entry is still valid
+                if entry.created_at.elapsed() < CACHE_TTL {
+                    entry.access_count.fetch_add(1, Ordering::Relaxed);
+                    return Some(entry.allocation.clone());
+                }
             }
         }
 
@@ -317,13 +315,13 @@ impl ResourceAllocator {
 
     /// Cache an allocation decision
     async fn cache_allocation(&self, file_path: &Path, allocation: Allocation) {
-        if let Ok(mut cache) = self.cache.lock() {
+        if let Ok(mut cache) = self.cache.write() {
             cache.insert(
                 file_path.to_path_buf(),
                 CacheEntry {
                     allocation,
                     created_at: Instant::now(),
-                    access_count: 1,
+                    access_count: AtomicU32::new(1),
                 },
             );
 
@@ -351,9 +349,7 @@ impl ResourceAllocator {
 
             queue.insert(insert_pos, request);
 
-            if let Ok(mut stats) = self.stats.lock() {
-                stats.pending_requests += 1;
-            }
+            self.stats.pending_requests.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -401,58 +397,46 @@ impl ResourceAllocator {
             .acquire()
             .await
             .map_err(|e| WinxError::ResourceAllocationError {
-                message: format!("Failed to acquire read permit: {}", e),
+                message: Arc::new(format!("Failed to acquire read permit: {}", e)),
             })
     }
 
     /// Mark read operation as successful
     pub async fn mark_read_success(&self) {
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.successful_reads += 1;
-        }
+        self.stats.successful_reads.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Mark read operation as failed
     pub async fn mark_read_failure(&self) {
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.failed_reads += 1;
-        }
+        self.stats.failed_reads.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Update cache hit statistics
     async fn update_cache_hit(&self) {
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.cache_hits += 1;
-        }
+        self.stats.cache_hits.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Update cache miss statistics
     async fn update_cache_miss(&self) {
-        if let Ok(mut stats) = self.stats.lock() {
-            stats.cache_misses += 1;
-        }
+        self.stats.cache_misses.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Get current resource usage statistics
     pub async fn get_stats(&self) -> ResourceStats {
-        if let Ok(stats) = self.stats.lock() {
-            stats.clone()
-        } else {
-            ResourceStats {
-                total_allocated: 0,
-                active_reads: 0,
-                pending_requests: 0,
-                successful_reads: 0,
-                failed_reads: 0,
-                cache_hits: 0,
-                cache_misses: 0,
-            }
+        ResourceStats {
+            total_allocated: AtomicUsize::new(self.stats.total_allocated.load(Ordering::Relaxed)),
+            active_reads: AtomicUsize::new(self.stats.active_reads.load(Ordering::Relaxed)),
+            pending_requests: AtomicUsize::new(self.stats.pending_requests.load(Ordering::Relaxed)),
+            successful_reads: AtomicU64::new(self.stats.successful_reads.load(Ordering::Relaxed)),
+            failed_reads: AtomicU64::new(self.stats.failed_reads.load(Ordering::Relaxed)),
+            cache_hits: AtomicU64::new(self.stats.cache_hits.load(Ordering::Relaxed)),
+            cache_misses: AtomicU64::new(self.stats.cache_misses.load(Ordering::Relaxed)),
         }
     }
 
     /// Get memory usage percentage
     pub async fn get_memory_usage_percent(&self) -> f64 {
-        if let Ok(allocations) = self.allocations.lock() {
+        if let Ok(allocations) = self.allocations.read() {
             let current_total: usize = allocations.values().sum();
             (current_total as f64 / self.max_total_memory as f64) * 100.0
         } else {
@@ -467,11 +451,11 @@ impl ResourceAllocator {
 
     /// Force cleanup of unused allocations
     pub async fn cleanup_unused_allocations(&self) {
-        if let Ok(mut cache) = self.cache.lock() {
+        if let Ok(mut cache) = self.cache.write() {
             self.cleanup_cache(&mut cache);
 
             // Also cleanup any stale allocations
-            if let Ok(mut allocations) = self.allocations.lock() {
+            if let Ok(mut allocations) = self.allocations.write() {
                 allocations.retain(|path, _| cache.contains_key(path));
             }
 
