@@ -133,9 +133,8 @@ impl CommandSafety {
 
         // Check if command starts with any interactive command
         for interactive_cmd in INTERACTIVE_COMMANDS.iter() {
-            if normalized.starts_with(interactive_cmd) {
+            if let Some(rest) = normalized.strip_prefix(interactive_cmd) {
                 // Check that it's a word boundary
-                let rest = &normalized[interactive_cmd.len()..];
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
                     // For git commit, check if it has -m flag (non-interactive)
                     if *interactive_cmd == "git commit"
@@ -165,8 +164,7 @@ impl CommandSafety {
         let normalized = self.normalize_command(command);
 
         for long_cmd in LONG_RUNNING_COMMANDS.iter() {
-            if normalized.starts_with(long_cmd) {
-                let rest = &normalized[long_cmd.len()..];
+            if let Some(rest) = normalized.strip_prefix(long_cmd) {
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
                     return true;
                 }
@@ -186,8 +184,7 @@ impl CommandSafety {
         }
 
         for bg_cmd in BACKGROUND_COMMANDS.iter() {
-            if normalized.starts_with(bg_cmd) {
-                let rest = &normalized[bg_cmd.len()..];
+            if let Some(rest) = normalized.strip_prefix(bg_cmd) {
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
                     return true;
                 }

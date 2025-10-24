@@ -34,7 +34,7 @@ pub async fn handle_tool_call(
 
     // We need to extract information without holding the lock across an await point
     let (current_dir, pattern_analyzer);
-    let last_command_str;
+    let last_command_str: Option<String>;
 
     // Scope for the lock
     {
@@ -48,14 +48,14 @@ pub async fn handle_tool_call(
         // Determine current directory
         current_dir = match &args.current_dir {
             Some(dir) if !dir.is_empty() => dir.clone(),
-            _ => bash_state.cwd.clone(),
+            _ => bash_state.cwd.to_string_lossy().to_string(),
         };
 
         // Get the last command from arguments or from bash state
         let last_command_opt: Option<String> = match &args.last_command {
             Some(cmd) if !cmd.is_empty() => Some(cmd.clone()),
             _ => {
-                if let Some(interactive_bash) = bash_state.interactive_bash.as_ref() {
+                if let Some(interactive_bash) = bash_state.interactive_bash.lock().await.as_ref() {
                     if !interactive_bash.last_command.is_empty() {
                         Some(interactive_bash.last_command.clone())
                     } else {
@@ -68,7 +68,7 @@ pub async fn handle_tool_call(
         };
 
         // Clone the last command to owned string to avoid reference issues
-        last_command_str = last_command_opt.map(|s| s.to_string());
+        last_command_str = last_command_opt;
 
         // Clone the pattern analyzer
         pattern_analyzer = bash_state.pattern_analyzer.clone();

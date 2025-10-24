@@ -118,7 +118,7 @@ impl NvidiaConfig {
     }
 
     /// Get the chat completions endpoint URL
-    pub fn chat_completions_url(&self) -> Cow<str> {
+    pub fn chat_completions_url(&self) -> Cow<'_, str> {
         if self.base_url == "https://integrate.api.nvidia.com" {
             Cow::Borrowed(&DEFAULT_NVIDIA_CHAT_COMPLETIONS_URL)
         } else {

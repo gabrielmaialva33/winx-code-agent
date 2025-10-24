@@ -1223,7 +1223,7 @@ impl WinxService {
         }
 
         let mut state = crate::state::BashState::new();
-        match state.init_interactive_bash() {
+        match state.init_interactive_bash().await {
             Ok(_) => {
                 *bash_state_guard = Some(state);
                 info!("Shell environment initialized with {}", shell);
@@ -1529,7 +1529,7 @@ impl WinxService {
 
         // Try DashScope first (primary)
         {
-            let mut clients_guard = self.ai_clients.lock().await;
+            let clients_guard = self.ai_clients.lock().await;
             if let Some(dashscope_client) = clients_guard.dashscope.as_ref() {
                 match dashscope_client
                     .analyze_code(&code, language.as_deref())

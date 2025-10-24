@@ -14,11 +14,7 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::state::terminal::MAX_OUTPUT_SIZE as TERMINAL_MAX_OUTPUT_SIZE;
-use crate::state::terminal::{
-    DEFAULT_MAX_SCREEN_LINES, TerminalEmulator, TerminalOutputDiff, incremental_text,
-    render_terminal_output,
-};
+use crate::state::terminal::{DEFAULT_MAX_SCREEN_LINES, TerminalEmulator};
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
 };
@@ -329,8 +325,6 @@ pub struct TerminalState {
     pub command_running: bool,
     /// Terminal emulator for processing output
     pub terminal_emulator: Arc<Mutex<TerminalEmulator>>,
-    /// Output difference detector for efficient incremental updates
-    pub diff_detector: Option<TerminalOutputDiff>,
     /// Indicates if buffer should be limited to handle large outputs
     pub limit_buffer: bool,
     /// Maximum buffer size for large outputs (in lines)
@@ -351,7 +345,6 @@ impl TerminalState {
             last_pending_output: String::new(),
             command_running: false,
             terminal_emulator: Arc::new(Mutex::new(TerminalEmulator::new(160))),
-            diff_detector: Some(TerminalOutputDiff::new()),
             limit_buffer: false,
             max_buffer_lines: DEFAULT_MAX_SCREEN_LINES,
         }
@@ -367,7 +360,6 @@ impl TerminalState {
                 columns,
                 max_buffer_lines,
             ))),
-            diff_detector: Some(TerminalOutputDiff::new_with_max_lines(max_buffer_lines)),
             limit_buffer,
             max_buffer_lines,
         }
@@ -379,10 +371,8 @@ impl TerminalState {
         self.last_pending_output = output.to_string();
 
         // For large outputs, use limited buffer mode if configured
-        if self.limit_buffer
-            && output.len() > TERMINAL_MAX_OUTPUT_SIZE
-            && let mut emulator = self.terminal_emulator.lock().await
-        {
+        if self.limit_buffer && output.len() > MAX_OUTPUT_SIZE {
+            let mut emulator = self.terminal_emulator.lock().await;
             // Process with limited buffer
             emulator.process_with_limited_buffer(output, self.max_buffer_lines);
             let display = emulator.display();
@@ -390,14 +380,10 @@ impl TerminalState {
         }
 
         // Process the output with the terminal emulator
-        if let mut emulator = self.terminal_emulator.lock().await {
-            emulator.process(output);
-            let display = emulator.display();
-            display.join("\n")
-        } else {
-            // Fallback if we can't lock the emulator
-            output.to_string()
-        }
+        let mut emulator = self.terminal_emulator.lock().await;
+        emulator.process(output);
+        let display = emulator.display();
+        display.join("\n")
     }
 
     /// Get incremental output updates efficiently
@@ -406,8 +392,12 @@ impl TerminalState {
             return String::new();
         }
 
-        // Use the optimized incremental_text function
-        let result = incremental_text(output, &self.last_pending_output);
+        // Simple incremental text: return the new part if output starts with last_pending_output
+        let result = if output.starts_with(&self.last_pending_output) {
+            output[self.last_pending_output.len()..].to_string()
+        } else {
+            output.to_string()
+        };
 
         // Update the last pending output
         self.last_pending_output = output.to_string();
@@ -421,25 +411,19 @@ impl TerminalState {
         self.last_pending_output = String::new();
         self.command_running = false;
 
-        // Reset the diff detector
-        if let Some(diff_detector) = &mut self.diff_detector {
-            diff_detector.reset();
-        }
-
         // Clear the terminal emulator
-        if let Ok(mut emulator) = self.terminal_emulator.lock() {
+        if let Ok(mut emulator) = self.terminal_emulator.try_lock() {
             emulator.clear();
         }
     }
 
     /// Smart truncate the terminal output if it gets too large
-    pub fn smart_truncate(&mut self, max_size: usize) {
+    pub async fn smart_truncate(&mut self, max_size: usize) {
         // Refactored to ensure await is used in async contexts and fix type mismatches
-        if let Some(screen) = self.terminal_emulator.lock().await {
-            if let Some(mut screen_guard) = screen.get_screen().lock().await {
-                screen_guard.smart_truncate(max_size);
-            }
-        }
+        let emulator_guard = self.terminal_emulator.lock().await;
+        let screen = emulator_guard.get_screen();
+        let mut screen_guard = screen.lock().expect("Failed to lock screen");
+        screen_guard.smart_truncate(max_size);
     }
 }
 
@@ -1033,7 +1017,7 @@ impl BashState {
     }
 
     /// Initialize the interactive bash process
-    pub fn init_interactive_bash(&mut self) -> Result<()> {
+    pub async fn init_interactive_bash(&mut self) -> Result<()> {
         let restricted_mode = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
 
         debug!(
@@ -1045,10 +1029,7 @@ impl BashState {
         let bash = InteractiveBash::new(&self.cwd, restricted_mode)?;
 
         // Update the state
-        let mut guard = self
-            .interactive_bash
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
+        let mut guard = self.interactive_bash.lock().await;
 
         *guard = Some(bash);
 
@@ -1061,17 +1042,6 @@ impl BashState {
     pub fn update_cwd(&mut self, path: &Path) -> Result<()> {
         if path.exists() && path.is_dir() {
             self.cwd = path.to_path_buf();
-
-            // Update cwd in interactive bash if it exists
-            if let Ok(mut bash_guard) = self.interactive_bash.lock()
-                && let Some(bash) = bash_guard.as_mut()
-            {
-                // Send cd command to bash
-                bash.send_command(&format!("cd \"{}\"", path.display()))?;
-                // Wait briefly and read output to process the cd command
-                let _ = bash.read_output(0.5)?;
-            }
-
             Ok(())
         } else {
             Err(anyhow!(
@@ -1095,11 +1065,8 @@ impl BashState {
     }
 
     /// Update the current working directory from bash
-    fn update_cwd_from_bash(&self) -> Result<String> {
-        let mut bash_guard = self
-            .interactive_bash
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
+    async fn update_cwd_from_bash(&self) -> Result<String> {
+        let mut bash_guard = self.interactive_bash.lock().await;
 
         if let Some(bash) = bash_guard.as_mut() {
             // Send pwd command and read result
@@ -1124,11 +1091,8 @@ impl BashState {
     }
 
     /// Check for background jobs
-    pub fn check_background_jobs(&self) -> Result<usize> {
-        let mut bash_guard = self
-            .interactive_bash
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
+    pub async fn check_background_jobs(&self) -> Result<usize> {
+        let mut bash_guard = self.interactive_bash.lock().await;
 
         if let Some(bash) = bash_guard.as_mut() {
             // Use 'jobs -l' and manually count - avoids creating a pipeline which can leave jobs running
@@ -1136,7 +1100,7 @@ impl BashState {
             let (output, _) = bash.read_output(0.5)?;
 
             // Parse output to count jobs manually
-            let lines = render_terminal_output(&output);
+            let lines: Vec<String> = output.lines().map(|s| s.to_string()).collect();
             let mut job_count = 0;
 
             for line in lines {
@@ -1182,11 +1146,7 @@ impl BashState {
 
         // First, lock to check state
         {
-            let bash_guard = self
-                .interactive_bash
-                .lock()
-                .await
-                .map_err(|e| anyhow!("Failed to lock bash state: {}", e))?;
+            let bash_guard = self.interactive_bash.lock().await;
 
             need_init = bash_guard.is_none();
             command_running_info = match bash_guard.as_ref() {
@@ -1217,9 +1177,7 @@ impl BashState {
 
                 // Get current output (needs lock, but doesn't await)
                 let (output, complete) = {
-                    let mut bash_guard = self.interactive_bash.lock().map_err(|e| {
-                        anyhow!("Failed to lock bash state for status check: {}", e)
-                    })?;
+                    let mut bash_guard = self.interactive_bash.lock().await;
 
                     if let Some(bash) = bash_guard.as_mut() {
                         bash.read_output(0.2)?
@@ -1231,7 +1189,7 @@ impl BashState {
                 };
 
                 // Process the output through terminal emulation
-                let rendered_output = crate::state::terminal::incremental_text(&output, "");
+                let rendered_output = output.clone();
 
                 // Add status information
                 let status = if complete {
@@ -1266,7 +1224,7 @@ impl BashState {
             let mut self_mut = self.clone();
 
             // No await here, so no lock held across await points
-            if let Err(e) = self_mut.init_interactive_bash() {
+            if let Err(e) = self_mut.init_interactive_bash().await {
                 return Err(anyhow!("Failed to initialize interactive bash: {}", e));
             }
 
@@ -1277,10 +1235,7 @@ impl BashState {
 
         // Phase 1: Send command and get initial output (no await)
         let (initial_output, mut complete) = {
-            let mut bash_guard =
-                self.interactive_bash.lock().await.map_err(|e| {
-                    anyhow!("Failed to lock bash state for command execution: {}", e)
-                })?;
+            let mut bash_guard = self.interactive_bash.lock().await;
 
             let bash = match bash_guard.as_mut() {
                 Some(b) => b,
@@ -1335,13 +1290,7 @@ impl BashState {
 
                 // Check output (lock, but no await)
                 let (new_output, cmd_complete) = {
-                    let mut bash_guard = match self.interactive_bash.lock() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            warn!("Failed to lock bash mutex during polling: {}", e);
-                            continue;
-                        }
-                    };
+                    let mut bash_guard = self.interactive_bash.lock().await;
 
                     match bash_guard.as_mut() {
                         Some(bash) => match bash.read_output(0.1) {
@@ -1386,14 +1335,14 @@ impl BashState {
         }
 
         // Process output through optimized terminal emulation
-        let rendered_output =
-            if self.terminal_state.limit_buffer && result.len() > TERMINAL_MAX_OUTPUT_SIZE {
-                // For very large outputs, use the limited buffer processing
-                self.terminal_state.process_output(&result)
-            } else {
-                // For normal outputs, use the optimized incremental text function
-                self.terminal_state.get_incremental_output(&result)
-            };
+        let rendered_output = if self.terminal_state.limit_buffer && result.len() > MAX_OUTPUT_SIZE
+        {
+            // For very large outputs, use the limited buffer processing
+            self.terminal_state.process_output(&result).await
+        } else {
+            // For normal outputs, use the optimized incremental text function
+            self.terminal_state.get_incremental_output(&result)
+        };
 
         // Add status information
         let status = if complete {
@@ -1405,10 +1354,11 @@ impl BashState {
         // Get current working directory (it might have changed if cd was used)
         let current_cwd = self
             .update_cwd_from_bash()
+            .await
             .unwrap_or_else(|_| self.cwd.display().to_string());
 
         // Check for background jobs
-        let bg_jobs = self.check_background_jobs().unwrap_or_default();
+        let bg_jobs = self.check_background_jobs().await.unwrap_or_default();
 
         // Include background job info in status if available
         let status_line = if bg_jobs > 0 {
@@ -1423,10 +1373,11 @@ impl BashState {
         };
 
         // Check if output is very large and might need truncation
-        if result.len() > TERMINAL_MAX_OUTPUT_SIZE {
+        if result.len() > MAX_OUTPUT_SIZE {
             // Apply smart truncation to avoid excessive memory usage
             self.terminal_state
-                .smart_truncate(self.terminal_state.max_buffer_lines);
+                .smart_truncate(self.terminal_state.max_buffer_lines)
+                .await;
             debug!(
                 "Applied smart truncation for large output ({} bytes)",
                 result.len()
@@ -1454,20 +1405,16 @@ impl BashState {
         Ok(final_result)
     }
     pub async fn check_command_status(&mut self, timeout_secs: f32) -> Result<String> {
-        let mut bash_guard = self
-            .interactive_bash
-            .lock()
-            .await
-            .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
+        let mut bash_guard = self.interactive_bash.lock().await;
 
         if let Some(bash) = bash_guard.as_mut() {
             let (output, complete) = bash.read_output(timeout_secs)?;
 
             // Process output through optimized terminal emulation
             let rendered_output =
-                if self.terminal_state.limit_buffer && output.len() > TERMINAL_MAX_OUTPUT_SIZE {
+                if self.terminal_state.limit_buffer && output.len() > MAX_OUTPUT_SIZE {
                     // For very large outputs, use the limited buffer processing
-                    self.terminal_state.process_output(&output)
+                    self.terminal_state.process_output(&output).await
                 } else {
                     // For normal outputs, use the optimized incremental text function
                     self.terminal_state.get_incremental_output(&output)
@@ -1481,10 +1428,11 @@ impl BashState {
             };
 
             // Check if output is very large and might need truncation
-            if output.len() > TERMINAL_MAX_OUTPUT_SIZE {
+            if output.len() > MAX_OUTPUT_SIZE {
                 // Apply smart truncation to avoid excessive memory usage
                 self.terminal_state
-                    .smart_truncate(self.terminal_state.max_buffer_lines);
+                    .smart_truncate(self.terminal_state.max_buffer_lines)
+                    .await;
                 debug!(
                     "Applied smart truncation for large output ({} bytes)",
                     output.len()
@@ -1792,6 +1740,6 @@ fn sha256_hash(data: &[u8]) -> String {
 
 /// Generates a random 4-digit chat ID with 'i' prefix
 pub fn generate_chat_id() -> String {
-    let mut rng = rand::thread_rng();
-    format!("i{}", rng.gen_range(1000..10000))
+    let mut rng = rand::rng();
+    format!("i{}", rng.random_range(1000..10000))
 }

@@ -16,7 +16,6 @@ use tracing::{debug, error, info, instrument, warn}; // Replace std::sync::Mutex
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, CommandState};
-use crate::state::terminal::incremental_text; // Removed render_terminal_output as it doesn't exist
 use crate::types::{BashCommand, BashCommandAction, SpecialKey};
 use crate::utils::command_safety::{CommandContext, CommandSafety};
 
@@ -618,7 +617,7 @@ pub async fn handle_tool_call(
     }
 
     let bash_state_guard = bash_state_arc.lock().await;
-    let state = match &*bash_state_guard {
+    let mut state = match &*bash_state_guard {
         Some(state) => state.clone(),
         None => {
             error!("BashState not initialized");
@@ -646,10 +645,10 @@ pub async fn handle_tool_call(
             debug!("Processing Command action: {}", command);
 
             // Enhanced command validation using WCGW-style mode checking
-            if !bash_state.is_command_allowed(command) {
+            if !state.is_command_allowed(command) {
                 error!("Command '{}' not allowed in current mode", command);
                 let violation_message =
-                    bash_state.get_mode_violation_message("command execution", command);
+                    state.get_mode_violation_message("command execution", command);
                 return Err(WinxError::CommandNotAllowed {
                     message: Arc::new(violation_message),
                 });
@@ -687,7 +686,7 @@ pub async fn handle_tool_call(
             // Check for screen command specifically to handle it specially
             if command.trim().starts_with("screen ") {
                 info!("Detected screen command, using special handling");
-                execute_screen_command(&mut bash_state, command).await
+                execute_screen_command(&mut state, command).await
             }
             // Check if command should run in background (contains &)
             else if command.contains(" & ")
@@ -697,7 +696,7 @@ pub async fn handle_tool_call(
                 || (command.contains(" > ") && command.contains(" < "))
             {
                 info!("Command contains background operator, using background execution");
-                execute_background_command(&mut bash_state, command).await
+                execute_background_command(&mut state, command).await
             } else {
                 // Normal command execution with WCGW-style timeout handling
                 let timeout_seconds = bash_command
@@ -709,12 +708,12 @@ pub async fn handle_tool_call(
                     "Executing command '{}' with timeout: {:.1}s",
                     command, timeout_seconds
                 );
-                execute_interactive_command(&mut bash_state, command, Some(timeout_seconds)).await
+                execute_interactive_command(&mut state, command, Some(timeout_seconds)).await
             }
         }
         BashCommandAction::StatusCheck { status_check: _ } => {
             debug!("Processing StatusCheck action");
-            check_command_status(&mut bash_state).await
+            check_command_status(&mut state).await
         }
         BashCommandAction::SendText { send_text } => {
             debug!("Processing SendText action: {}", send_text);
@@ -724,7 +723,7 @@ pub async fn handle_tool_call(
                 });
             }
 
-            send_text_to_interactive(&mut bash_state, send_text).await
+            send_text_to_interactive(&mut state, send_text).await
         }
         BashCommandAction::SendSpecials { send_specials } => {
             debug!("Processing SendSpecials action: {:?}", send_specials);
@@ -734,7 +733,7 @@ pub async fn handle_tool_call(
                 });
             }
 
-            send_special_keys_to_interactive(&mut bash_state, send_specials).await
+            send_special_keys_to_interactive(&mut state, send_specials).await
         }
         BashCommandAction::SendAscii { send_ascii } => {
             debug!("Processing SendAscii action: {:?}", send_ascii);
@@ -744,7 +743,7 @@ pub async fn handle_tool_call(
                 });
             }
 
-            send_ascii_to_interactive(&mut bash_state, send_ascii).await
+            send_ascii_to_interactive(&mut state, send_ascii).await
         }
     }
 }
@@ -773,27 +772,19 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
     }
 
     // Acquire lock with timeout and better error handling
-    let bash_guard =
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
-            async {
-                bash_state.interactive_bash.lock().await.map_err(|e| {
-                    WinxError::BashStateLockError {
-                        message: Arc::new(e.to_string()),
-                    }
-                })
-            },
-        )
-        .await
-        {
-            Ok(Ok(guard)) => guard,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                return Err(WinxError::BashStateLockError {
-                    message: Arc::new("Lock acquisition timed out".to_string()),
-                });
-            }
-        };
+    let bash_guard = match tokio::time::timeout(
+        std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
+        async { bash_state.interactive_bash.lock().await },
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(WinxError::BashStateLockError {
+                message: Arc::new("Lock acquisition timed out".to_string()),
+            });
+        }
+    };
 
     // Cannot clone a reference to InteractiveBash, we need to check command state here
     let command_state = match bash_guard.as_ref() {
@@ -809,7 +800,7 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
     }
 
     // Get command info for better error messages
-    let command_info = match &command_state {
+    let _command_info = match &command_state {
         CommandState::Running {
             command,
             start_time,
@@ -824,14 +815,7 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
 
     // Drop guard and acquire mutable reference to bash state
     drop(bash_guard);
-    let mut bash_guard =
-        bash_state
-            .interactive_bash
-            .lock()
-            .await
-            .map_err(|e| WinxError::BashStateLockError {
-                message: Arc::new(e.to_string()),
-            })?;
+    let mut bash_guard = bash_state.interactive_bash.lock().await;
 
     let bash = bash_guard
         .as_mut()
@@ -878,7 +862,7 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
         };
 
         // Process the output through terminal emulation
-        let rendered_output = crate::state::terminal::incremental_text(&output, "");
+        let rendered_output = output.clone();
 
         // Check if the process is still alive
         let is_alive = bash.is_alive();
@@ -946,27 +930,19 @@ async fn send_special_keys_to_interactive(
     }
 
     // Acquire lock with timeout and better error handling
-    let bash_guard =
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
-            async {
-                bash_state.interactive_bash.lock().await.map_err(|e| {
-                    WinxError::BashStateLockError {
-                        message: Arc::new(e.to_string()),
-                    }
-                })
-            },
-        )
-        .await
-        {
-            Ok(Ok(guard)) => guard,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                return Err(WinxError::BashStateLockError {
-                    message: Arc::new("Lock acquisition timed out".to_string()),
-                });
-            }
-        };
+    let bash_guard = match tokio::time::timeout(
+        std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
+        async { bash_state.interactive_bash.lock().await },
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(WinxError::BashStateLockError {
+                message: Arc::new("Lock acquisition timed out".to_string()),
+            });
+        }
+    };
 
     // Cannot clone a reference to InteractiveBash, we need to check command state here
     let command_state = match bash_guard.as_ref() {
@@ -982,7 +958,7 @@ async fn send_special_keys_to_interactive(
     }
 
     // Get command info for better error messages
-    let command_info = match &command_state {
+    let _command_info = match &command_state {
         CommandState::Running {
             command,
             start_time,
@@ -997,14 +973,7 @@ async fn send_special_keys_to_interactive(
 
     // Drop guard and acquire mutable reference to bash state
     drop(bash_guard);
-    let mut bash_guard =
-        bash_state
-            .interactive_bash
-            .lock()
-            .await
-            .map_err(|e| WinxError::BashStateLockError {
-                message: Arc::new(e.to_string()),
-            })?;
+    let mut bash_guard = bash_state.interactive_bash.lock().await;
 
     let bash = bash_guard
         .as_mut()
@@ -1087,7 +1056,7 @@ async fn send_special_keys_to_interactive(
     };
 
     // Process the output through terminal emulation
-    let rendered_output = crate::state::terminal::incremental_text(&output, "");
+    let rendered_output = output.clone();
 
     // Check if the process is still alive
     let is_alive = bash.is_alive();
@@ -1161,27 +1130,19 @@ async fn send_ascii_to_interactive(
     }
 
     // Acquire lock with timeout and better error handling
-    let bash_guard =
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
-            async {
-                bash_state.interactive_bash.lock().await.map_err(|e| {
-                    WinxError::BashStateLockError {
-                        message: Arc::new(e.to_string()),
-                    }
-                })
-            },
-        )
-        .await
-        {
-            Ok(Ok(guard)) => guard,
-            Ok(Err(e)) => return Err(e),
-            Err(_) => {
-                return Err(WinxError::BashStateLockError {
-                    message: Arc::new("Lock acquisition timed out".to_string()),
-                });
-            }
-        };
+    let bash_guard = match tokio::time::timeout(
+        std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
+        async { bash_state.interactive_bash.lock().await },
+    )
+    .await
+    {
+        Ok(guard) => guard,
+        Err(_) => {
+            return Err(WinxError::BashStateLockError {
+                message: Arc::new("Lock acquisition timed out".to_string()),
+            });
+        }
+    };
 
     // Cannot clone a reference to InteractiveBash, we need to check command state here
     let command_state = match bash_guard.as_ref() {
@@ -1197,7 +1158,7 @@ async fn send_ascii_to_interactive(
     }
 
     // Get command info for better error messages
-    let command_info = match &command_state {
+    let _command_info = match &command_state {
         CommandState::Running {
             command,
             start_time,
@@ -1212,14 +1173,7 @@ async fn send_ascii_to_interactive(
 
     // Drop guard and acquire mutable reference to bash state
     drop(bash_guard);
-    let mut bash_guard =
-        bash_state
-            .interactive_bash
-            .lock()
-            .await
-            .map_err(|e| WinxError::BashStateLockError {
-                message: Arc::new(e.to_string()),
-            })?;
+    let mut bash_guard = bash_state.interactive_bash.lock().await;
 
     let bash = bash_guard
         .as_mut()
@@ -1284,7 +1238,7 @@ async fn send_ascii_to_interactive(
     };
 
     // Process the output through terminal emulation
-    let rendered_output = crate::state::terminal::incremental_text(&output, "");
+    let rendered_output = output.clone();
 
     // Check if the process is still alive
     let is_alive = bash.is_alive();
@@ -1374,11 +1328,7 @@ async fn execute_interactive_command(
 
         // Check for command already running before validation
         {
-            let bash_guard = bash_state.interactive_bash.lock().await.map_err(|e| {
-                WinxError::BashStateLockError {
-                    message: Arc::new(e.to_string()),
-                }
-            })?;
+            let bash_guard = bash_state.interactive_bash.lock().await;
 
             if let Some(ref bash) = *bash_guard
                 && let CommandState::Running {
@@ -1426,7 +1376,11 @@ async fn execute_interactive_command(
 
     // Check for potential errors using the error predictor
     let mut potential_errors = Vec::new();
-    match bash_state.error_predictor.predict_command_errors(command) {
+    match bash_state
+        .error_predictor
+        .predict_command_errors(command)
+        .await
+    {
         Ok(predictions) => {
             // Filter predictions with high confidence
             for prediction in predictions {
@@ -1554,13 +1508,17 @@ async fn execute_interactive_command(
             debug!("Command completed in {:.2?}", execution_duration);
 
             // Record successful command execution for pattern analysis
-            if let Err(e) = bash_state.error_predictor.record_error(
-                "command_success",
-                "Command executed successfully",
-                Some(command),
-                None,
-                Some(&bash_state.cwd.to_string_lossy()),
-            ) {
+            if let Err(e) = bash_state
+                .error_predictor
+                .record_error(
+                    "command_success",
+                    "Command executed successfully",
+                    Some(command),
+                    None,
+                    Some(&bash_state.cwd.to_string_lossy()),
+                )
+                .await
+            {
                 debug!("Failed to record successful command: {}", e);
             }
 
@@ -1584,13 +1542,17 @@ async fn execute_interactive_command(
             let execution_duration = start_execution_time.elapsed();
 
             // Record command error for pattern analysis
-            if let Err(record_err) = bash_state.error_predictor.record_error(
-                "command_execution_error",
-                &format!("{}", e),
-                Some(command),
-                None,
-                Some(&bash_state.cwd.to_string_lossy()),
-            ) {
+            if let Err(record_err) = bash_state
+                .error_predictor
+                .record_error(
+                    "command_execution_error",
+                    &format!("{}", e),
+                    Some(command),
+                    None,
+                    Some(&bash_state.cwd.to_string_lossy()),
+                )
+                .await
+            {
                 debug!("Failed to record command error: {}", record_err);
             }
 
@@ -1653,14 +1615,7 @@ async fn check_command_status(bash_state: &mut BashState) -> Result<String> {
     // Use a scope to limit the lock lifetime
     {
         // Get command info from BashState
-        let bash_guard = match bash_state.interactive_bash.lock() {
-            Ok(guard) => guard,
-            Err(e) => {
-                return Err(WinxError::BashStateLockError {
-                    message: Arc::new("Failed to acquire bash state lock".to_string()),
-                });
-            }
-        };
+        let bash_guard = bash_state.interactive_bash.lock().await;
 
         // Extract command info
         command_info = match bash_guard.as_ref() {
@@ -1695,7 +1650,7 @@ async fn check_command_status(bash_state: &mut BashState) -> Result<String> {
     }
 
     // Get background job count separately
-    let bg_jobs = bash_state.check_background_jobs().unwrap_or_default();
+    let bg_jobs = bash_state.check_background_jobs().await.unwrap_or(0);
 
     // Now we can safely use await
     let mut result = bash_state.execute_interactive("", 0.0).await?;

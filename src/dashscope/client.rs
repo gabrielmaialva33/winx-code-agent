@@ -114,13 +114,12 @@ impl DashScopeClient {
                 rate_limit.can_make_request()
             };
 
-            if let Some(wait) = wait_time {
-                if !wait.is_zero() {
+            if let Some(wait) = wait_time
+                && !wait.is_zero() {
                     warn!("Rate limit exceeded, waiting for {:?}", wait);
                     tokio::time::sleep(wait).await;
                     continue;
                 }
-            }
 
             // Record the request
             {

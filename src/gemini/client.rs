@@ -136,7 +136,7 @@ impl GeminiClient {
         request: &GenerateContentRequest,
     ) -> Result<GenerateContentResponse> {
         let endpoint = self.config.model.endpoint();
-        let url = self.config.endpoint_url(&endpoint);
+        let url = self.config.endpoint_url(endpoint);
 
         debug!("Making Gemini API request to: {}", url);
 

@@ -346,7 +346,10 @@ impl WinxChatProcessor {
         let suggestions = self.generate_suggestions(&mode, chat.context.as_deref());
 
         // Get a random fun fact
-        let fun_fact = self.get_fun_fact(personality_level)?.map(|s| s.to_string());
+        let fun_fact = self
+            .get_fun_fact(personality_level)
+            .await?
+            .map(|s| s.to_string());
 
         // Update conversation history
         {

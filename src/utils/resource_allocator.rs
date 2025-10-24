@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Semaphore;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info}; // Replace std::sync::Mutex
+use tracing::{debug, info}; // Replace std::sync::Mutex
 
 use crate::errors::{Result, WinxError};
 
@@ -253,12 +253,9 @@ impl ResourceAllocator {
 
     /// Check if we can allocate the requested memory
     async fn can_allocate(&self, requested_memory: usize) -> bool {
-        if let Ok(allocations_guard) = self.allocations.read().await {
-            let current_total: usize = allocations_guard.values().sum();
-            current_total + requested_memory <= self.max_total_memory
-        } else {
-            false
-        }
+        let allocations_guard = self.allocations.read().await;
+        let current_total: usize = allocations_guard.values().sum();
+        current_total + requested_memory <= self.max_total_memory
     }
 
     /// Allocate resources for a file read
@@ -296,12 +293,11 @@ impl ResourceAllocator {
     /// Check cache for allocation
     async fn check_cache(&self, file_path: &Path) -> Option<Allocation> {
         let cache = self.cache.read().await;
-        if let Some(entry) = cache.get(file_path) {
-            if entry.created_at.elapsed() < CACHE_TTL {
+        if let Some(entry) = cache.get(file_path)
+            && entry.created_at.elapsed() < CACHE_TTL {
                 entry.access_count.fetch_add(1, Ordering::Relaxed);
                 return Some(entry.allocation.clone());
             }
-        }
         None
     }
 
@@ -430,16 +426,14 @@ impl ResourceAllocator {
 
     /// Force cleanup of unused allocations
     pub async fn cleanup_unused_allocations(&self) {
-        if let Ok(mut cache) = self.cache.write() {
-            self.cleanup_cache(&mut cache);
+        let mut cache = self.cache.write().await;
+        self.cleanup_cache(&mut cache);
 
-            // Also cleanup any stale allocations
-            if let Ok(mut allocations) = self.allocations.write() {
-                allocations.retain(|path, _| cache.contains_key(path));
-            }
+        // Also cleanup any stale allocations
+        let mut allocations = self.allocations.write().await;
+        allocations.retain(|path, _| cache.contains_key(path));
 
-            info!("Performed cleanup of unused allocations");
-        }
+        info!("Performed cleanup of unused allocations");
     }
 
     /// Cleanup all allocations (for testing and debugging)

@@ -558,26 +558,30 @@ impl FileCache {
         let mut stats = WorkspaceStats::new();
         stats.refresh(workspace_path)?;
 
-        if let Ok(mut ws_guard) = self.workspace_stats.write() {
-            *ws_guard = Some(stats);
-            info!(
-                "Initialized workspace statistics for {}",
-                workspace_path.display()
-            );
-        } else {
-            warn!("Failed to acquire write lock for workspace stats");
-        }
+        tokio::task::block_in_place(|| {
+            if let Ok(mut ws_guard) = self.workspace_stats.try_write() {
+                *ws_guard = Some(stats);
+                info!(
+                    "Initialized workspace statistics for {}",
+                    workspace_path.display()
+                );
+            } else {
+                warn!("Failed to acquire write lock for workspace stats");
+            }
+        });
 
         Ok(())
     }
 
     /// Get workspace statistics
     pub fn get_workspace_stats(&self) -> Option<WorkspaceStats> {
-        if let Ok(ws_guard) = self.workspace_stats.read() {
-            ws_guard.clone()
-        } else {
-            None
-        }
+        tokio::task::block_in_place(|| {
+            if let Ok(ws_guard) = self.workspace_stats.try_read() {
+                ws_guard.clone()
+            } else {
+                None
+            }
+        })
     }
 
     /// Get the global cache instance
@@ -587,25 +591,27 @@ impl FileCache {
 
     /// Clear all entries from the cache
     pub fn clear(&self) {
-        // Clear entries
-        if let Ok(mut entries) = self.entries.write() {
-            entries.clear();
-        }
+        tokio::task::block_in_place(|| {
+            // Clear entries
+            if let Ok(mut entries) = self.entries.try_write() {
+                entries.clear();
+            }
 
-        // Clear access order
-        if let Ok(mut access_order) = self.access_order.write() {
-            access_order.clear();
-        }
+            // Clear access order
+            if let Ok(mut access_order) = self.access_order.try_write() {
+                access_order.clear();
+            }
 
-        // Reset memory usage
-        if let Ok(mut memory_usage) = self.memory_usage.write() {
-            *memory_usage = 0;
-        }
+            // Reset memory usage
+            if let Ok(mut memory_usage) = self.memory_usage.try_write() {
+                *memory_usage = 0;
+            }
 
-        // Clear pinned files
-        if let Ok(mut pinned) = self.pinned_files.write() {
-            pinned.clear();
-        }
+            // Clear pinned files
+            if let Ok(mut pinned) = self.pinned_files.try_write() {
+                pinned.clear();
+            }
+        });
 
         debug!("File cache cleared");
     }
@@ -617,76 +623,90 @@ impl FileCache {
         let mut removed_paths = Vec::new();
 
         // Remove expired entries
-        if let Ok(mut entries) = self.entries.write() {
-            let expired_keys: Vec<PathBuf> = entries
-                .iter()
-                .filter(|(_, entry)| entry.is_expired())
-                .map(|(path, entry)| {
-                    // Track memory usage for each expired entry
-                    if let Some(content) = &entry.content {
-                        memory_freed += content.len() as u64;
-                    }
-                    path.clone()
-                })
-                .collect();
+        tokio::task::block_in_place(|| {
+            if let Ok(mut entries) = self.entries.try_write() {
+                let expired_keys: Vec<PathBuf> = entries
+                    .iter()
+                    .filter(|(_, entry): &(&PathBuf, &FileCacheEntry)| entry.is_expired())
+                    .map(|(path, entry)| {
+                        // Track memory usage for each expired entry
+                        if let Some(content) = &entry.content {
+                            memory_freed += content.len() as u64;
+                        }
+                        path.clone()
+                    })
+                    .collect();
 
-            // Remove expired entries
-            for key in &expired_keys {
-                entries.remove(key);
-                removed_paths.push(key.clone());
+                // Remove expired entries
+                for key in &expired_keys {
+                    entries.remove(key);
+                    removed_paths.push(key.clone());
+                }
+
+                debug!("Removed {} expired entries from cache", expired_keys.len());
             }
-
-            debug!("Removed {} expired entries from cache", expired_keys.len());
-        }
+        });
 
         // Update memory usage
-        if memory_freed > 0
-            && let Ok(mut usage) = self.memory_usage.write()
-        {
-            *usage = usage.saturating_sub(memory_freed);
-            debug!("Freed {} bytes from expired cache entries", memory_freed);
-        }
+        tokio::task::block_in_place(|| {
+            if let Ok(mut usage) = self.memory_usage.try_write() {
+                *usage = usage.saturating_sub(memory_freed);
+                debug!("Freed {} bytes from expired cache entries", memory_freed);
+            }
+        });
 
         // Update access order list
-        if !removed_paths.is_empty()
-            && let Ok(mut access_order) = self.access_order.write()
-        {
-            access_order.retain(|path| !removed_paths.contains(path));
-        }
+        tokio::task::block_in_place(|| {
+            if let Ok(mut access_order) = self.access_order.try_write() {
+                access_order.retain(|path| !removed_paths.contains(path));
+            }
+        });
     }
 
     /// Check memory pressure and perform eviction if needed
     fn check_memory_pressure(&self) -> bool {
         // Only check periodically to avoid lock contention
-        let should_check = {
-            if let Ok(last_check) = self.last_eviction_check.read() {
+        let should_check = tokio::task::block_in_place(|| {
+            if let Ok(last_check) = self.last_eviction_check.try_read() {
                 last_check.elapsed() > EVICTION_CHECK_INTERVAL
             } else {
                 false
             }
-        };
+        });
 
         if !should_check {
             // Return current memory pressure status without checking
-            if let (Ok(usage), Ok(budget)) = (self.memory_usage.read(), self.memory_budget.read()) {
+            let (usage, budget) = tokio::task::block_in_place(|| {
+                let usage = self.memory_usage.try_read().ok();
+                let budget = self.memory_budget.try_read().ok();
+                (usage, budget)
+            });
+            if let (Some(usage), Some(budget)) = (usage, budget) {
                 return *usage > (*budget * 9) / 10; // 90% of budget
             }
             return false;
         }
 
         // Update last check time
-        if let Ok(mut last_check) = self.last_eviction_check.write() {
-            *last_check = Instant::now();
-        }
+        tokio::task::block_in_place(|| {
+            if let Ok(mut last_check) = self.last_eviction_check.try_write() {
+                *last_check = Instant::now();
+            }
+        });
 
         // Calculate current memory usage and pressure level
-        let (current_usage, budget) = {
-            if let (Ok(usage), Ok(budget)) = (self.memory_usage.read(), self.memory_budget.read()) {
+        let (current_usage, budget) = tokio::task::block_in_place(|| {
+            let usage = self.memory_usage.try_read().ok();
+            let budget = self.memory_budget.try_read().ok();
+            if let (Some(usage), Some(budget)) = (usage, budget) {
                 (*usage, *budget)
             } else {
-                return false;
+                return (0, 0);
             }
-        };
+        });
+        if current_usage == 0 && budget == 0 {
+            return false;
+        }
 
         // Define pressure levels
         let low_pressure = budget * 7 / 10; // 70% of budget
@@ -742,17 +762,17 @@ impl FileCache {
         // 2. Level 2 (Medium): Unload SegmentedCache content and some AlwaysCache content
         // 3. Level 3 (High): Aggressive unloading, only keep essential files
 
-        {
+        tokio::task::block_in_place(|| {
             // Read lock for analyzing entries
-            if let Ok(entries) = self.entries.read() {
+            if let Ok(entries) = self.entries.try_read() {
                 // If we're at high pressure, first figure out how many entries should be unloaded
                 if pressure_level >= 3 {
                     unload_content = true;
 
                     // Set target to get below 70% of budget
-                    if let Ok(budget) = self.memory_budget.read() {
+                    if let Ok(budget) = self.memory_budget.try_read() {
                         let target_usage = (*budget * 7) / 10;
-                        if let Ok(usage) = self.memory_usage.read()
+                        if let Ok(usage) = self.memory_usage.try_read()
                             && *usage > target_usage
                         {
                             memory_to_free = *usage - target_usage;
@@ -764,7 +784,7 @@ impl FileCache {
 
                 // Get access order to prioritize eviction of least recently used files
                 let mut access_order_copy = Vec::new();
-                if let Ok(access_order) = self.access_order.read() {
+                if let Ok(access_order) = self.access_order.try_read() {
                     // Copy from end (oldest) to beginning (newest)
                     for path in access_order.iter().rev() {
                         access_order_copy.push(path.clone());
@@ -840,90 +860,102 @@ impl FileCache {
                     }
                 }
             }
-        }
+        });
 
         // Now perform the actual unloading with a write lock
         if unload_content && !unload_candidates.is_empty() {
-            debug!(
-                "Evicting {} entries due to memory pressure level {}",
-                unload_candidates.len(),
-                pressure_level
-            );
+            tokio::task::block_in_place(|| {
+                debug!(
+                    "Evicting {} entries due to memory pressure level {}",
+                    unload_candidates.len(),
+                    pressure_level
+                );
 
-            if let Ok(mut entries) = self.entries.write() {
-                let mut total_freed = 0;
+                if let Ok(mut entries) = self.entries.try_write() {
+                    let mut total_freed = 0;
 
-                for path in &unload_candidates {
-                    if let Some(entry) = entries.get_mut(path) {
-                        // Calculate memory to free
-                        if let Some(content) = &entry.content {
-                            total_freed += content.len() as u64;
+                    for path in &unload_candidates {
+                        if let Some(entry) = entries.get_mut(path) {
+                            // Calculate memory to free
+                            if let Some(content) = &entry.content {
+                                total_freed += content.len() as u64;
+                            }
+
+                            // Remove content but keep metadata
+                            entry.content = None;
+
+                            // Reset access counter
+                            entry.access_count_since_load = 0;
+                        }
+                    }
+
+                    // Update memory usage
+                    if total_freed > 0 {
+                        if let Ok(mut usage) = self.memory_usage.try_write() {
+                            *usage = usage.saturating_sub(total_freed);
                         }
 
-                        // Remove content but keep metadata
-                        entry.content = None;
-
-                        // Reset access counter
-                        entry.access_count_since_load = 0;
+                        debug!(
+                            "Freed {} bytes by unloading content from {} entries",
+                            total_freed,
+                            unload_candidates.len()
+                        );
                     }
                 }
-
-                // Update memory usage
-                if total_freed > 0 {
-                    if let Ok(mut usage) = self.memory_usage.write() {
-                        *usage = usage.saturating_sub(total_freed);
-                    }
-
-                    debug!(
-                        "Freed {} bytes by unloading content from {} entries",
-                        total_freed,
-                        unload_candidates.len()
-                    );
-                }
-            }
+            });
         }
     }
 
     /// Update memory usage tracking
     fn update_memory_usage(&self, delta: i64) {
-        if let Ok(mut usage) = self.memory_usage.write() {
-            if delta > 0 {
-                *usage += delta as u64;
-            } else {
-                *usage = usage.saturating_sub((-delta) as u64);
+        tokio::task::block_in_place(|| {
+            if let Ok(mut usage) = self.memory_usage.try_write() {
+                if delta > 0 {
+                    *usage += delta as u64;
+                } else {
+                    *usage = usage.saturating_sub((-delta) as u64);
+                }
             }
-        }
+        });
     }
 
     /// Update LRU order when a file is accessed
     fn update_lru_order(&self, path: &Path) {
-        if let Ok(mut access_order) = self.access_order.write() {
-            // Remove the path if it already exists
-            access_order.retain(|p| p != path);
+        tokio::task::block_in_place(|| {
+            if let Ok(mut access_order) = self.access_order.try_write() {
+                // Remove the path if it already exists
+                access_order.retain(|p| p != path);
 
-            // Add to front (most recently used)
-            access_order.push_front(path.to_path_buf());
+                // Add to front (most recently used)
+                access_order.push_front(path.to_path_buf());
 
-            // Keep size bounded
-            if access_order.len() > MAX_CACHE_ENTRIES * 2 {
-                access_order.truncate(MAX_CACHE_ENTRIES * 2);
+                // Keep size bounded
+                if access_order.len() > MAX_CACHE_ENTRIES * 2 {
+                    access_order.truncate(MAX_CACHE_ENTRIES * 2);
+                }
             }
-        }
+        });
     }
 
     /// Get metadata for a file, checking the cache first
     #[allow(dead_code)]
     pub fn get_metadata(&self, path: &Path) -> Result<fs::Metadata> {
         // Check if we have a cached entry
-        if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path)
-        {
-            // Check if the file has been modified
-            if let Ok(metadata) = fs::metadata(path)
-                && metadata.modified()? == entry.last_modified
-            {
-                return Ok(metadata);
-            }
+        let cached_metadata = tokio::task::block_in_place(|| {
+            if let Ok(entries) = self.entries.try_read()
+                && let Some(entry) = entries.get(path) {
+                    // Check if the file has been modified
+                    if let Ok(metadata) = fs::metadata(path)
+                        && metadata.modified().ok()? == entry.last_modified
+                    {
+                        return Some(metadata);
+                    }
+                }
+            None
+        });
+
+        if let Some(metadata) = cached_metadata {
+            return Ok(metadata);
         }
 
         // Not in cache or modified, get fresh metadata
@@ -934,15 +966,21 @@ impl FileCache {
     #[allow(dead_code)]
     pub fn calculate_hash(&self, path: &Path) -> Result<String> {
         // Check if we have a cached entry with content
-        if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path)
-        {
-            // Check if the file has been modified
-            if let Ok(metadata) = fs::metadata(path)
-                && metadata.modified()? == entry.last_modified
-            {
-                return Ok(entry.hash.clone());
-            }
+        let cached_hash = tokio::task::block_in_place(|| {
+            if let Ok(entries) = self.entries.try_read()
+                && let Some(entry) = entries.get(path) {
+                    // Check if the file has been modified
+                    if let Ok(metadata) = fs::metadata(path)
+                        && metadata.modified().ok()? == entry.last_modified
+                    {
+                        return Some(entry.hash.clone());
+                    }
+                }
+            None
+        });
+
+        if let Some(hash) = cached_hash {
+            return Ok(hash);
         }
 
         // Not in cache or modified, calculate hash
@@ -966,9 +1004,9 @@ impl FileCache {
         // 2. If cache miss or file modified, acquire write lock to update cache
 
         // Phase 1: Try to get from cache with read lock
-        let cached_result: Result<Option<Vec<u8>>> = {
+        let cached_result: Result<Option<Vec<u8>>> = tokio::task::block_in_place(|| {
             // Scope for read lock
-            match self.entries.read() {
+            match self.entries.try_read() {
                 Ok(entries) => {
                     if let Some(entry) = entries.get(path) {
                         // Check if the file has been modified
@@ -987,14 +1025,15 @@ impl FileCache {
                                     cache_ref.update_lru_order(&path_copy);
 
                                     // Then update entry (write lock)
-                                    if let Ok(mut entries) = cache_ref.entries.write()
-                                        && let Some(entry) = entries.get_mut(&path_copy)
-                                    {
-                                        entry.touch();
-                                    }
+                                    tokio::task::block_in_place(|| {
+                                        if let Ok(mut entries) = cache_ref.entries.try_write()
+                                            && let Some(entry) = entries.get_mut(&path_copy) {
+                                                entry.touch();
+                                            }
+                                    });
                                 });
 
-                                return Ok(content.clone());
+                                return Ok(Some(content.clone()));
                             } else if !under_pressure {
                                 // Content not cached but entry exists - try loading
                                 debug!(
@@ -1009,7 +1048,7 @@ impl FileCache {
                 }
                 Err(e) => Err(anyhow::anyhow!("Failed to acquire read lock: {}", e)),
             }
-        };
+        });
 
         // Handle successful cache hit
         if let Ok(Some(content)) = cached_result {
@@ -1081,6 +1120,11 @@ impl FileCache {
         // Track memory delta for updating usage counter
         let mut memory_delta: i64 = 0;
 
+        // Get pinned status (async call)
+        let is_pinned = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async { self.is_file_pinned(path).await })
+        });
+
         // Attempt to update the cache with timeout to prevent long waits
         let update_result = tokio::task::block_in_place(|| {
             // Use a short timeout since this is a frequent operation
@@ -1145,7 +1189,7 @@ impl FileCache {
                                 loading_strategy,
                                 last_content_access: Instant::now(),
                                 access_count_since_load: 1,
-                                is_pinned: self.is_file_pinned(path).await,
+                                is_pinned,
                                 fully_read: false,
                                 read_ranges: Vec::new(),
                                 total_lines,
@@ -1306,12 +1350,14 @@ impl FileCache {
         // Get access order to identify least recently used entries
         let mut lru_paths = Vec::new();
 
-        if let Ok(access_order) = self.access_order.read() {
-            // Get paths from back (least recently used) to front
-            for path in access_order.iter().rev() {
-                lru_paths.push(path.clone());
+        tokio::task::block_in_place(|| {
+            if let Ok(access_order) = self.access_order.try_read() {
+                // Get paths from back (least recently used) to front
+                for path in access_order.iter().rev() {
+                    lru_paths.push(path.clone());
+                }
             }
-        }
+        });
 
         // If we have access order data, use it for eviction
         if !lru_paths.is_empty() {
@@ -1333,7 +1379,9 @@ impl FileCache {
                     }
 
                     // Skip pinned files
-                    if self.is_file_pinned(&path) {
+                    let is_pinned = tokio::runtime::Handle::current()
+                        .block_on(async { self.is_file_pinned(&path).await });
+                    if is_pinned {
                         continue;
                     }
 
@@ -1424,10 +1472,12 @@ impl FileCache {
         }
 
         // Update access order list to remove evicted entries
-        if !removed_paths.is_empty()
-            && let Ok(mut access_order) = self.access_order.write()
-        {
-            access_order.retain(|path| !removed_paths.contains(path));
+        if !removed_paths.is_empty() {
+            tokio::task::block_in_place(|| {
+                if let Ok(mut access_order) = self.access_order.try_write() {
+                    access_order.retain(|path| !removed_paths.contains(path));
+                }
+            });
         }
     }
 
@@ -1489,11 +1539,12 @@ impl FileCache {
     /// Record a file edit operation
     pub fn record_file_edit(&self, path: &Path) -> Result<()> {
         // Update the cache entry
-        if let Ok(mut entries) = self.entries.write()
-            && let Some(entry) = entries.get_mut(path)
-        {
-            entry.record_edit();
-        }
+        tokio::task::block_in_place(|| {
+            if let Ok(mut entries) = self.entries.try_write()
+                && let Some(entry) = entries.get_mut(path) {
+                    entry.record_edit();
+                }
+        });
 
         // Update workspace stats
         self.update_workspace_stats_file_edit(path);
@@ -1504,11 +1555,12 @@ impl FileCache {
     /// Record a file write operation
     pub fn record_file_write(&self, path: &Path) -> Result<()> {
         // Update the cache entry
-        if let Ok(mut entries) = self.entries.write()
-            && let Some(entry) = entries.get_mut(path)
-        {
-            entry.record_write();
-        }
+        tokio::task::block_in_place(|| {
+            if let Ok(mut entries) = self.entries.try_write()
+                && let Some(entry) = entries.get_mut(path) {
+                    entry.record_write();
+                }
+        });
 
         // Update workspace stats
         self.update_workspace_stats_file_edit(path);
@@ -1520,56 +1572,62 @@ impl FileCache {
     fn update_workspace_stats_file_access(&self, path: &Path) {
         let path_str = path.to_string_lossy().to_string();
 
-        if let Ok(mut ws_guard) = self.workspace_stats.write()
-            && let Some(stats) = ws_guard.as_mut()
-        {
-            stats.record_file_access(&path_str);
-        }
+        tokio::task::block_in_place(|| {
+            if let Ok(mut ws_guard) = self.workspace_stats.try_write()
+                && let Some(stats) = ws_guard.as_mut() {
+                    stats.record_file_access(&path_str);
+                }
+        });
     }
 
     /// Update workspace stats with file edit
     fn update_workspace_stats_file_edit(&self, path: &Path) {
         let path_str = path.to_string_lossy().to_string();
 
-        if let Ok(mut ws_guard) = self.workspace_stats.write()
-            && let Some(stats) = ws_guard.as_mut()
-        {
-            stats.record_file_edit(&path_str);
-        }
+        tokio::task::block_in_place(|| {
+            if let Ok(mut ws_guard) = self.workspace_stats.try_write()
+                && let Some(stats) = ws_guard.as_mut() {
+                    stats.record_file_edit(&path_str);
+                }
+        });
     }
 
     /// Get file statistics for a particular file
     pub fn get_file_stats(&self, path: &Path) -> Option<FileStats> {
-        if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path)
-        {
-            return Some(entry.stats.clone());
-        }
-
-        None
+        tokio::task::block_in_place(|| {
+            if let Ok(entries) = self.entries.try_read()
+                && let Some(entry) = entries.get(path) {
+                    return Some(entry.stats.clone());
+                }
+            None
+        })
     }
 
     /// Get the most active files based on their statistics
     pub fn get_most_active_files(&self, limit: usize) -> Vec<(PathBuf, FileStats)> {
         let mut results = Vec::new();
 
-        if let Ok(entries) = self.entries.read() {
-            // Collect all entries with their stats
-            let mut file_stats: Vec<_> = entries
-                .iter()
-                .map(|(path, entry)| (path.clone(), entry.stats.clone()))
-                .collect();
+        tokio::task::block_in_place(|| {
+            if let Ok(entries) = self.entries.try_read() {
+                // Collect all entries with their stats
+                let mut file_stats: Vec<(PathBuf, FileStats)> = entries
+                    .iter()
+                    .map(|(path, entry): (&PathBuf, &FileCacheEntry)| {
+                        (path.clone(), entry.stats.clone())
+                    })
+                    .collect();
 
-            // Sort by importance score (highest first)
-            file_stats.sort_by(|a, b| {
-                b.1.importance_score
-                    .partial_cmp(&a.1.importance_score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+                // Sort by importance score (highest first)
+                file_stats.sort_by(|a: &(PathBuf, FileStats), b: &(PathBuf, FileStats)| {
+                    b.1.importance_score
+                        .partial_cmp(&a.1.importance_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
 
-            // Return top entries
-            results = file_stats.into_iter().take(limit).collect();
-        }
+                // Return top entries
+                results = file_stats.into_iter().take(limit).collect();
+            }
+        });
 
         results
     }
@@ -1577,74 +1635,75 @@ impl FileCache {
     /// Check if a file has been fully read
     #[allow(dead_code)]
     pub fn is_file_fully_read(&self, path: &Path) -> bool {
-        if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path)
-        {
-            return entry.fully_read;
-        }
-
-        false
+        tokio::task::block_in_place(|| {
+            if let Ok(entries) = self.entries.try_read()
+                && let Some(entry) = entries.get(path) {
+                    return entry.fully_read;
+                }
+            false
+        })
     }
 
     /// Check if a file has been read enough (>=99%)
     #[allow(dead_code)]
     pub fn is_file_read_enough(&self, path: &Path) -> bool {
-        if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path)
-        {
-            return entry.is_read_enough();
-        }
-
-        false
+        tokio::task::block_in_place(|| {
+            if let Ok(entries) = self.entries.try_read()
+                && let Some(entry) = entries.get(path) {
+                    return entry.is_read_enough();
+                }
+            false
+        })
     }
 
     /// Get the unread ranges for a file
     pub fn get_unread_ranges(&self, path: &Path) -> Vec<(usize, usize)> {
-        if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path)
-        {
-            return entry.get_unread_ranges();
-        }
-
-        if let Ok(metadata) = fs::metadata(path)
-            && metadata.is_file()
-        {
-            // File exists but not in cache, consider the whole file unread
-            if let Ok(content) = fs::read(path) {
-                let total_lines = count_lines(&content);
-                if total_lines > 0 {
-                    return vec![(1, total_lines)];
+        tokio::task::block_in_place(|| {
+            if let Ok(entries) = self.entries.try_read()
+                && let Some(entry) = entries.get(path) {
+                    return entry.get_unread_ranges();
                 }
-            }
-        }
 
-        Vec::new()
+            if let Ok(metadata) = fs::metadata(path)
+                && metadata.is_file() {
+                    // File exists but not in cache, consider the whole file unread
+                    if let Ok(content) = fs::read(path) {
+                        let total_lines = count_lines(&content);
+                        if total_lines > 0 {
+                            return vec![(1, total_lines)];
+                        }
+                    }
+                }
+
+            Vec::new()
+        })
     }
 
     /// Check if a file has changed since it was last cached
     #[allow(dead_code)]
     pub fn has_file_changed(&self, path: &Path) -> Result<bool> {
-        if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path)
-            && let Ok(metadata) = fs::metadata(path)
-        {
-            let current_modified = metadata.modified()?;
-            return Ok(current_modified != entry.last_modified);
-        }
+        tokio::task::block_in_place(|| {
+            if let Ok(entries) = self.entries.try_read()
+                && let Some(entry) = entries.get(path)
+                    && let Ok(metadata) = fs::metadata(path) {
+                        let current_modified = metadata.modified()?;
+                        return Ok(current_modified != entry.last_modified);
+                    }
 
-        // Not in cache or can't get metadata, consider changed
-        Ok(true)
+            // Not in cache or can't get metadata, consider changed
+            Ok(true)
+        })
     }
 
     /// Get the hash for a file from the cache
     pub fn get_cached_hash(&self, path: &Path) -> Option<String> {
-        if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path)
-        {
-            return Some(entry.hash.clone());
-        }
-
-        None
+        tokio::task::block_in_place(|| {
+            if let Ok(entries) = self.entries.try_read()
+                && let Some(entry) = entries.get(path) {
+                    return Some(entry.hash.clone());
+                }
+            None
+        })
     }
 
     /// Check if a file can be safely written to (it's been read enough)
@@ -1724,8 +1783,8 @@ mod tests {
         file
     }
 
-    #[test]
-    fn test_file_cache_basic() {
+    #[tokio::test]
+    async fn test_file_cache_basic() {
         let cache = FileCache::new();
         let content = "Line 1\nLine 2\nLine 3\n";
         let file = create_temp_file(content);
@@ -1740,8 +1799,8 @@ mod tests {
         assert!(entries.contains_key(path));
     }
 
-    #[test]
-    fn test_read_ranges() {
+    #[tokio::test]
+    async fn test_read_ranges() {
         let cache = FileCache::new();
         let content = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n";
         let file = create_temp_file(content);
@@ -1783,8 +1842,8 @@ mod tests {
         assert!(unread.is_empty());
     }
 
-    #[test]
-    fn test_read_percentage() {
+    #[tokio::test]
+    async fn test_read_percentage() {
         let cache = FileCache::new();
         let content = "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n";
         let file = create_temp_file(content);

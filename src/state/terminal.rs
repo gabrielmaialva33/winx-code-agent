@@ -1,7 +1,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, warn};
 use vte::{Parser, Perform}; // Replace std::sync::Mutex
 
@@ -960,49 +961,43 @@ impl Perform for TerminalPerformer {
         let attributes = self.attributes.clone();
 
         tokio::spawn(async move {
-            if let Ok(mut screen_guard) = screen.lock().await {
-                let screen = &mut *screen_guard;
-                screen.put_char(c, attributes);
-            } else {
-                warn!("Failed to lock screen");
-            }
+            let mut screen_guard = screen.lock().unwrap();
+            let screen = &mut *screen_guard;
+            screen.put_char(c, attributes);
         });
     }
 
     fn execute(&mut self, byte: u8) {
         let screen = self.screen.clone();
         tokio::spawn(async move {
-            if let Ok(mut screen_guard) = screen.lock().await {
-                let screen = &mut *screen_guard;
-                match byte {
-                    b'\r' => screen.carriage_return(),
-                    b'\n' => {
-                        screen.carriage_return();
-                        screen.linefeed();
-                    }
-                    b'\t' => {
-                        let current_col = screen.cursor_col();
-                        let new_col = (current_col + 8) & !7;
+            let mut screen_guard = screen.lock().unwrap();
+            let screen = &mut *screen_guard;
+            match byte {
+                b'\r' => screen.carriage_return(),
+                b'\n' => {
+                    screen.carriage_return();
+                    screen.linefeed();
+                }
+                b'\t' => {
+                    let current_col = screen.cursor_col();
+                    let new_col = (current_col + 8) & !7;
+                    let current_row = screen.cursor_row();
+                    screen.move_cursor(current_row, new_col);
+                }
+                b'\x08' => {
+                    if screen.cursor_col() > 0 {
                         let current_row = screen.cursor_row();
+                        let new_col = screen.cursor_col() - 1;
                         screen.move_cursor(current_row, new_col);
                     }
-                    b'\x08' => {
-                        if screen.cursor_col() > 0 {
-                            let current_row = screen.cursor_row();
-                            let new_col = screen.cursor_col() - 1;
-                            screen.move_cursor(current_row, new_col);
-                        }
-                    }
-                    b'\x0C' => {
-                        screen.clear();
-                    }
-                    b'\x07' => {}
-                    _ => {
-                        debug!("Unhandled execute: {:?}", byte);
-                    }
                 }
-            } else {
-                warn!("Failed to lock screen for execute");
+                b'\x0C' => {
+                    screen.clear();
+                }
+                b'\x07' => {}
+                _ => {
+                    debug!("Unhandled execute: {:?}", byte);
+                }
             }
         });
     }
@@ -1020,230 +1015,207 @@ impl Perform for TerminalPerformer {
         }
 
         let screen = self.screen.clone(); // Clone the Arc<Mutex<Screen>> to move into the async block
-        let attributes = self.attributes.clone(); // Clone attributes to move into the async block
+        // Extract parameter values before spawning to avoid lifetime issues
+        let param_values: Vec<Vec<u16>> = params.iter().map(|p| p.to_vec()).collect();
 
         tokio::spawn(async move {
-            if let Ok(mut screen_guard) = screen.lock().await {
-                let screen = &mut *screen_guard;
-                match c {
-                    'A' => {
-                        // Cursor Up
-                        let n = params
-                            .iter()
-                            .next()
-                            .and_then(|p| p.first().copied())
-                            .unwrap_or(1) as usize;
-                        let current_row = screen.cursor_row();
-                        let new_row = current_row.saturating_sub(n);
-                        let current_col = screen.cursor_col();
-                        screen.move_cursor(new_row, current_col);
-                    }
-                    'B' => {
-                        // Cursor Down
-                        let n = params
-                            .iter()
-                            .next()
-                            .and_then(|p| p.first().copied())
-                            .unwrap_or(1) as usize;
-                        let current_row = screen.cursor_row();
-                        let current_col = screen.cursor_col();
-                        screen.move_cursor(current_row + n, current_col);
-                    }
-                    'C' => {
-                        // Cursor Forward
-                        let n = params
-                            .iter()
-                            .next()
-                            .and_then(|p| p.first().copied())
-                            .unwrap_or(1) as usize;
-                        let current_row = screen.cursor_row();
-                        let current_col = screen.cursor_col();
-                        screen.move_cursor(current_row, current_col + n);
-                    }
-                    'D' => {
-                        // Cursor Back
-                        let n = params
-                            .iter()
-                            .next()
-                            .and_then(|p| p.first().copied())
-                            .unwrap_or(1) as usize;
-                        let current_row = screen.cursor_row();
-                        let current_col = screen.cursor_col();
-                        let new_col = current_col.saturating_sub(n);
-                        screen.move_cursor(current_row, new_col);
-                    }
-                    'H' | 'f' => {
-                        // Cursor Position
-                        let row = params
-                            .iter()
-                            .next()
-                            .and_then(|p| p.first().copied())
-                            .unwrap_or(1) as usize;
-                        let col = params
-                            .iter()
-                            .nth(1)
-                            .and_then(|p| p.first().copied())
-                            .unwrap_or(1) as usize;
-                        // Convert 1-based to 0-based
-                        let row = row.saturating_sub(1);
-                        let col = col.saturating_sub(1);
-                        screen.move_cursor(row, col);
-                    }
-                    'J' => {
-                        // Erase in Display
-                        let n = params
-                            .iter()
-                            .next()
-                            .and_then(|p| p.first().copied())
-                            .unwrap_or(0);
-                        match n {
-                            0 => {
-                                // Clear from cursor to end of screen
-                                screen.clear_line_forward();
-                                // Clear all lines below cursor
-                                let row = screen.cursor_row();
-                                if row + 1 < screen.lines.len() {
-                                    for i in row + 1..screen.lines.len() {
-                                        screen.lines[i] =
-                                            vec![ScreenCell::default(); screen.columns];
-                                    }
+            let mut screen_guard = screen.lock().unwrap();
+            let screen = &mut *screen_guard;
+            match c {
+                'A' => {
+                    // Cursor Up
+                    let n = param_values
+                        .first()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1) as usize;
+                    let current_row = screen.cursor_row();
+                    let new_row = current_row.saturating_sub(n);
+                    let current_col = screen.cursor_col();
+                    screen.move_cursor(new_row, current_col);
+                }
+                'B' => {
+                    // Cursor Down
+                    let n = param_values
+                        .first()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1) as usize;
+                    let current_row = screen.cursor_row();
+                    let current_col = screen.cursor_col();
+                    screen.move_cursor(current_row + n, current_col);
+                }
+                'C' => {
+                    // Cursor Forward
+                    let n = param_values
+                        .first()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1) as usize;
+                    let current_row = screen.cursor_row();
+                    let current_col = screen.cursor_col();
+                    screen.move_cursor(current_row, current_col + n);
+                }
+                'D' => {
+                    // Cursor Back
+                    let n = param_values
+                        .first()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1) as usize;
+                    let current_row = screen.cursor_row();
+                    let current_col = screen.cursor_col();
+                    let new_col = current_col.saturating_sub(n);
+                    screen.move_cursor(current_row, new_col);
+                }
+                'H' | 'f' => {
+                    // Cursor Position
+                    let row = param_values
+                        .first()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1) as usize;
+                    let col = param_values
+                        .get(1)
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1) as usize;
+                    // Convert 1-based to 0-based
+                    let row = row.saturating_sub(1);
+                    let col = col.saturating_sub(1);
+                    screen.move_cursor(row, col);
+                }
+                'J' => {
+                    // Erase in Display
+                    let n = param_values
+                        .first()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(0);
+                    match n {
+                        0 => {
+                            // Clear from cursor to end of screen
+                            screen.clear_line_forward();
+                            // Clear all lines below cursor
+                            let row = screen.cursor_row();
+                            if row + 1 < screen.lines.len() {
+                                for i in row + 1..screen.lines.len() {
+                                    screen.lines[i] = vec![ScreenCell::default(); screen.columns];
                                 }
                             }
-                            1 => {
-                                // Clear from beginning of screen to cursor
-                                let row = screen.cursor_row();
-                                let col = screen.cursor_col();
+                        }
+                        1 => {
+                            // Clear from beginning of screen to cursor
+                            let row = screen.cursor_row();
+                            let col = screen.cursor_col();
 
-                                // Clear current line up to cursor
-                                if row < screen.lines.len() {
-                                    for i in 0..=col.min(screen.lines[row].len().saturating_sub(1))
-                                    {
-                                        screen.lines[row][i] = ScreenCell::default();
-                                    }
-                                }
-
-                                // Clear all lines above cursor
-                                for i in 0..row {
-                                    if i < screen.lines.len() {
-                                        screen.lines[i] =
-                                            vec![ScreenCell::default(); screen.columns];
-                                    }
+                            // Clear current line up to cursor
+                            if row < screen.lines.len() {
+                                for i in 0..=col.min(screen.lines[row].len().saturating_sub(1)) {
+                                    screen.lines[row][i] = ScreenCell::default();
                                 }
                             }
-                            2 => {
-                                // Clear entire screen
-                                screen.clear();
-                            }
-                            3 => {
-                                // Clear entire screen and delete scrollback buffer
-                                screen.clear();
-                                // In a real terminal, this would also clear scrollback
-                            }
-                            _ => debug!("Unhandled erase in display: {}", n),
-                        }
-                    }
-                    'K' => {
-                        // Erase in Line
-                        let n = params
-                            .iter()
-                            .next()
-                            .and_then(|p| p.first().copied())
-                            .unwrap_or(0);
-                        match n {
-                            0 => screen.clear_line_forward(),
-                            1 => {
-                                // Clear from start of line to cursor
-                                let row = screen.cursor_row();
-                                let col = screen.cursor_col();
 
-                                if row < screen.lines.len() {
-                                    for i in 0..=col.min(screen.lines[row].len().saturating_sub(1))
-                                    {
-                                        screen.lines[row][i] = ScreenCell::default();
-                                    }
+                            // Clear all lines above cursor
+                            for i in 0..row {
+                                if i < screen.lines.len() {
+                                    screen.lines[i] = vec![ScreenCell::default(); screen.columns];
                                 }
                             }
-                            2 => screen.clear_line(),
-                            _ => debug!("Unhandled erase in line: {}", n),
                         }
-                    }
-                    'S' => {
-                        // Scroll up
-                        let n = params
-                            .iter()
-                            .next()
-                            .and_then(|p| p.first().copied())
-                            .unwrap_or(1) as usize;
-
-                        for _ in 0..n {
-                            screen.scroll_up();
+                        2 => {
+                            // Clear entire screen
+                            screen.clear();
                         }
-                    }
-                    'T' => {
-                        // Scroll down
-                        let n = params
-                            .iter()
-                            .next()
-                            .and_then(|p| p.first().copied())
-                            .unwrap_or(1) as usize;
-
-                        // Implement scroll down by adding empty lines at the top
-                        let columns = screen.columns; // Copy the columns value
-
-                        for _ in 0..n {
-                            screen
-                                .lines
-                                .push_front(vec![ScreenCell::default(); columns]);
-                            if screen.lines.len() > screen.max_lines {
-                                screen.lines.pop_back();
-                            }
+                        3 => {
+                            // Clear entire screen and delete scrollback buffer
+                            screen.clear();
+                            // In a real terminal, this would also clear scrollback
                         }
-
-                        // Adjust cursor position
-                        let new_row = screen.cursor_row() + n;
-                        let cursor_col = screen.cursor_col(); // Copy the cursor column
-                        screen.move_cursor(new_row, cursor_col);
-                    }
-                    // 'm' case is now handled separately before acquiring the screen lock
-                    _ => {
-                        debug!("Unhandled CSI: {:?} {:?}", params, c);
+                        _ => debug!("Unhandled erase in display: {}", n),
                     }
                 }
-            } else {
-                warn!("Failed to lock screen for csi_dispatch");
+                'K' => {
+                    // Erase in Line
+                    let n = param_values
+                        .first()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(0);
+                    match n {
+                        0 => screen.clear_line_forward(),
+                        1 => {
+                            // Clear from start of line to cursor
+                            let row = screen.cursor_row();
+                            let col = screen.cursor_col();
+
+                            if row < screen.lines.len() {
+                                for i in 0..=col.min(screen.lines[row].len().saturating_sub(1)) {
+                                    screen.lines[row][i] = ScreenCell::default();
+                                }
+                            }
+                        }
+                        2 => screen.clear_line(),
+                        _ => debug!("Unhandled erase in line: {}", n),
+                    }
+                }
+                'S' => {
+                    // Scroll up
+                    let n = param_values
+                        .first()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1) as usize;
+
+                    for _ in 0..n {
+                        screen.scroll_up();
+                    }
+                }
+                'T' => {
+                    // Scroll down
+                    let n = param_values
+                        .first()
+                        .and_then(|p| p.first().copied())
+                        .unwrap_or(1) as usize;
+
+                    // Implement scroll down by adding empty lines at the top
+                    let columns = screen.columns; // Copy the columns value
+
+                    for _ in 0..n {
+                        screen
+                            .lines
+                            .push_front(vec![ScreenCell::default(); columns]);
+                        if screen.lines.len() > screen.max_lines {
+                            screen.lines.pop_back();
+                        }
+                    }
+
+                    // Adjust cursor position
+                    let new_row = screen.cursor_row() + n;
+                    let cursor_col = screen.cursor_col(); // Copy the cursor column
+                    screen.move_cursor(new_row, cursor_col);
+                }
+                // 'm' case is now handled separately before acquiring the screen lock
+                _ => {
+                    debug!("Unhandled CSI: {:?} {:?}", param_values, c);
+                }
             }
         });
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         if intermediates.is_empty() {
-            let screen = self.screen.clone();
-            tokio::spawn(async move {
-                if let Ok(mut screen_guard) = screen.lock().await {
-                    let screen = &mut *screen_guard;
-                    match byte {
-                        b'c' => {
-                            // RIS - Reset to Initial State
-                            screen.clear();
-                            // Reset attributes
-                            // Not using self.reset_attributes() here to avoid double reset
-                            screen.attributes = ScreenCellAttributes::default();
-                            screen.sgr_state.clear();
-                        }
-                        b'7' => {
-                            // DECSC - Save Cursor
-                            // Not implemented yet
-                        }
-                        b'8' => {
-                            // DECRC - Restore Cursor
-                            // Not implemented yet
-                        }
-                        _ => debug!("Unhandled ESC dispatch: {:?}", byte),
-                    }
-                } else {
-                    warn!("Failed to lock screen for esc_dispatch");
+            match byte {
+                b'c' => {
+                    // RIS - Reset to Initial State
+                    self.reset_attributes();
+                    let screen = self.screen.clone();
+                    tokio::spawn(async move {
+                        let mut screen_guard = screen.lock().unwrap();
+                        screen_guard.clear();
+                    });
                 }
-            });
+                b'7' => {
+                    // DECSC - Save Cursor
+                    // Not implemented yet
+                }
+                b'8' => {
+                    // DECRC - Restore Cursor
+                    // Not implemented yet
+                }
+                _ => debug!("Unhandled ESC dispatch: {:?}", byte),
+            }
         }
     }
 }
@@ -1298,18 +1270,18 @@ impl TerminalEmulator {
 
     /// Process input with limited buffer (for large outputs)
     pub fn process_with_limited_buffer(&mut self, data: &str, max_lines: usize) {
-        if let Ok(mut screen) = self.screen.lock() {
+        if let Ok(mut guard) = self.screen.lock() {
             // Update max_lines setting
-            screen.max_lines = max_lines.min(MAX_SCREEN_LINES);
+            guard.max_lines = max_lines.min(MAX_SCREEN_LINES);
         }
 
         self.process(data);
 
         // After processing, check if we need to smart truncate
-        if let Ok(mut screen) = self.screen.lock()
-            && screen.lines.len() > max_lines
+        if let Ok(mut guard) = self.screen.lock()
+            && guard.lines.len() > max_lines
         {
-            screen.smart_truncate(max_lines);
+            guard.smart_truncate(max_lines);
         }
     }
 
@@ -1320,8 +1292,8 @@ impl TerminalEmulator {
 
     /// Get the screen contents as a vector of strings
     pub fn display(&self) -> Vec<String> {
-        if let Ok(screen) = self.screen.lock() {
-            screen.display()
+        if let Ok(guard) = self.screen.lock() {
+            guard.display()
         } else {
             warn!("Failed to lock screen for display");
             vec![]
@@ -1330,8 +1302,8 @@ impl TerminalEmulator {
 
     /// Get the screen contents as plain text
     pub fn to_plain_text(&self) -> String {
-        if let Ok(screen) = self.screen.lock() {
-            screen.to_plain_text()
+        if let Ok(guard) = self.screen.lock() {
+            guard.to_plain_text()
         } else {
             warn!("Failed to lock screen for to_plain_text");
             String::new()
@@ -1340,8 +1312,8 @@ impl TerminalEmulator {
 
     /// Clear the screen
     pub fn clear(&mut self) {
-        if let Ok(mut screen) = self.screen.lock() {
-            screen.clear();
+        if let Ok(mut guard) = self.screen.lock() {
+            guard.clear();
         } else {
             warn!("Failed to lock screen for clear");
         }
@@ -1385,11 +1357,10 @@ impl TerminalCache {
     async fn get(&self, key: &str) -> Option<Vec<String>> {
         let hash = self.calculate_hash(key);
         let entries = self.entries.read().await;
-        if let Some((value, timestamp)) = entries.get(&hash) {
-            if timestamp.elapsed().as_secs() < self.ttl {
+        if let Some((value, timestamp)) = entries.get(&hash)
+            && timestamp.elapsed().as_secs() < self.ttl {
                 return Some(value.clone());
             }
-        }
         None
     }
 

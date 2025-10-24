@@ -346,7 +346,7 @@ async fn read_file(
     if show_line_numbers {
         for (i, line) in filtered_lines.iter().enumerate() {
             let line_num = start_idx + i + 1; // Convert to 1-indexed
-            write!(result_content, "{} {}\n", line_num, line).unwrap();
+            writeln!(result_content, "{} {}", line_num, line).unwrap();
         }
     } else {
         for line in filtered_lines {

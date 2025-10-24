@@ -138,7 +138,7 @@ pub async fn handle_tool_call(
 
     // We need to extract data from the bash state before awaiting
     // to avoid holding the MutexGuard across await points
-    let cwd: PathBuf;
+    
 
     // Lock bash state to extract data
     let bash_state_guard = bash_state_arc.lock().await;
@@ -153,7 +153,7 @@ pub async fn handle_tool_call(
     };
 
     // Extract needed data
-    cwd = bash_state.cwd.clone();
+    let cwd: PathBuf = bash_state.cwd.clone();
 
     // Read the image file
     read_image_from_path(&read_image.file_path, &cwd)

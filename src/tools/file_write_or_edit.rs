@@ -11,7 +11,6 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::task;
 use tracing::{debug, error, info, instrument, trace, warn}; // Replace std::sync::Mutex
 
 use crate::errors::{Result, WinxError};
@@ -774,7 +773,7 @@ impl MultiMatchResolver {
         if conflicting_blocks.len() > 1 {
             return Err(WinxError::SearchBlockConflict {
                 conflicting_blocks: Arc::new(conflicting_blocks),
-                first_differing_block: first_differing_block.map(|s| Arc::new(s)),
+                first_differing_block: first_differing_block.map(Arc::new),
             });
         }
 
@@ -1423,13 +1422,7 @@ pub async fn handle_tool_call(
 
     // Lock bash state to extract data
     {
-        let bash_state_guard =
-            bash_state_arc
-                .lock()
-                .await
-                .map_err(|e| WinxError::BashStateLockError {
-                    message: Arc::new(format!("Failed to lock bash state: {}", e)),
-                })?;
+        let bash_state_guard = bash_state_arc.lock().await;
 
         let bash_state = bash_state_guard
             .as_ref()
@@ -1501,24 +1494,19 @@ pub async fn handle_tool_call(
     let mut potential_errors = Vec::new();
 
     // Get a mutex guard for the BashState
-    let mut bash_state_guard =
-        bash_state_arc
-            .lock()
-            .await
-            .map_err(|e| WinxError::BashStateLockError {
-                message: Arc::new(format!("Failed to lock bash state: {}", e)),
-            })?;
+    let mut bash_state_guard = bash_state_arc.lock().await;
 
-    if let Some(bash_state) = bash_state_guard.as_ref() {
+    if let Some(bash_state) = bash_state_guard.as_mut() {
         // Enhanced file access validation for existing files
         if Path::new(&file_path).exists() {
             bash_state.validate_file_access(Path::new(&file_path))?;
         }
         // Predict potential errors for this file operation
-        match bash_state
+        let predictions = bash_state
             .error_predictor
             .predict_file_errors(&file_path, operation)
-        {
+            .await;
+        match predictions {
             Ok(predictions) => {
                 // Filter predictions with high confidence
                 for prediction in predictions {
@@ -1696,19 +1684,22 @@ pub async fn handle_tool_call(
             // Record the error for future prediction
             let bash_state_guard = bash_state_arc.lock().await;
             if let Some(bash_state) = bash_state_guard.as_ref() {
-                bash_state.error_predictor.record_error(
-                    "file_write",
-                    &format!("Failed to write file: {}", e),
-                    None,
-                    Some(&file_path),
-                    Some(
-                        file_path_obj
-                            .parent()
-                            .unwrap_or_else(|| Path::new("."))
-                            .to_string_lossy()
-                            .as_ref(),
-                    ),
-                )?;
+                bash_state
+                    .error_predictor
+                    .record_error(
+                        "file_write",
+                        &format!("Failed to write file: {}", e),
+                        None,
+                        Some(&file_path),
+                        Some(
+                            file_path_obj
+                                .parent()
+                                .unwrap_or_else(|| Path::new("."))
+                                .to_string_lossy()
+                                .as_ref(),
+                        ),
+                    )
+                    .await?;
             }
 
             return Err(WinxError::FileWriteError {
@@ -1733,11 +1724,11 @@ pub async fn handle_tool_call(
         // Update whitelist data asynchronously
         let file_path_clone = file_path.clone();
         let bash_state_arc_clone = Arc::clone(bash_state_arc);
-        task::spawn_blocking(move || {
-            if let Ok(mut bash_state_guard) = bash_state_arc_clone.lock() {
-                if let Some(bash_state) = bash_state_guard.as_mut() {
-                    // Calculate file hash
-                    let file_content = fs::read(&file_path_clone).ok()?;
+        tokio::spawn(async move {
+            let mut bash_state_guard = bash_state_arc_clone.lock().await;
+            if let Some(bash_state) = bash_state_guard.as_mut() {
+                // Calculate file hash
+                if let Ok(file_content) = fs::read(&file_path_clone) {
                     let file_hash = format!("{:x}", Sha256::digest(&file_content));
 
                     // The line range represents the entire file (1 to total_lines)
@@ -1757,9 +1748,6 @@ pub async fn handle_tool_call(
                         );
                     }
                 }
-                Some(())
-            } else {
-                None
             }
         });
 
@@ -1831,11 +1819,11 @@ pub async fn handle_tool_call(
         // Update whitelist data asynchronously
         let file_path_clone = file_path.clone();
         let bash_state_arc_clone = Arc::clone(bash_state_arc);
-        task::spawn_blocking(move || {
-            if let Ok(mut bash_state_guard) = bash_state_arc_clone.lock() {
-                if let Some(bash_state) = bash_state_guard.as_mut() {
-                    // Calculate file hash
-                    let file_content = fs::read(&file_path_clone).ok()?;
+        tokio::spawn(async move {
+            let mut bash_state_guard = bash_state_arc_clone.lock().await;
+            if let Some(bash_state) = bash_state_guard.as_mut() {
+                // Calculate file hash
+                if let Ok(file_content) = fs::read(&file_path_clone) {
                     let file_hash = format!("{:x}", Sha256::digest(&file_content));
 
                     // The line range represents the entire file (1 to total_lines)
@@ -1855,9 +1843,6 @@ pub async fn handle_tool_call(
                         );
                     }
                 }
-                Some(())
-            } else {
-                None
             }
         });
 
