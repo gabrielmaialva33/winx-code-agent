@@ -257,7 +257,7 @@ impl FuzzyMatcher {
         let mut matches = Vec::new();
         let mut start = 0;
 
-        while let Some(pos) = text[start..].to_lowercase().find(&pattern_lower) {
+        while let Some(pos) = text_lower[start..].find(&pattern_lower) {
             let abs_pos = start + pos;
             let end_pos = abs_pos + pattern.len();
 
@@ -625,8 +625,8 @@ impl FuzzyMatcher {
             return Vec::new();
         }
 
-        // Build the dynamic programming table
-        let mut dp = vec![vec![0; n + 1]; m + 1];
+        // Build the dynamic programming table using a single contiguous vector for better performance
+        let mut dp = vec![0; (m + 1) * (n + 1)];
         let mut max_length = 0;
         let mut end_pos_in_s1 = 0;
         let mut end_pos_in_s2 = 0;
@@ -634,10 +634,12 @@ impl FuzzyMatcher {
         for i in 1..=m {
             for j in 1..=n {
                 if s1_chars[i - 1] == s2_chars[j - 1] {
-                    dp[i][j] = dp[i - 1][j - 1] + 1;
+                    let idx = i * (n + 1) + j;
+                    let prev_idx = (i - 1) * (n + 1) + (j - 1);
+                    dp[idx] = dp[prev_idx] + 1;
 
-                    if dp[i][j] > max_length {
-                        max_length = dp[i][j];
+                    if dp[idx] > max_length {
+                        max_length = dp[idx];
                         end_pos_in_s1 = i;
                         end_pos_in_s2 = j;
                     }
