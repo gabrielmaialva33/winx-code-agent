@@ -69,7 +69,12 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
 
         // Print this directory
         if depth > 0 {
-            writeln!(output, "{}  {}", "  ".repeat(indent), dir_name)?;
+            let marker = if dir_path.is_dir() { "/" } else { "" };
+            // Write indentation spaces directly to avoid allocation
+            for _ in 0..indent {
+                write!(output, "  ")?;
+            }
+            writeln!(output, "{}{}", dir_path.display(), marker)?;
         }
 
         // List entries in this directory
@@ -304,10 +309,11 @@ impl WorkspaceStats {
         // Process file metadata
         for file_path in files {
             if let Ok(metadata) = fs::metadata(&file_path)
-                && let Ok(modified) = metadata.modified() {
-                    let path_str = file_path.to_string_lossy().to_string();
-                    self.update_file_modified_time(&path_str, modified);
-                }
+                && let Ok(modified) = metadata.modified()
+            {
+                let path_str = file_path.to_string_lossy().to_string();
+                self.update_file_modified_time(&path_str, modified);
+            }
         }
 
         Ok(())
@@ -361,9 +367,10 @@ impl WorkspaceStats {
             .iter()
             .filter_map(|(file, time)| {
                 if let Ok(duration) = now.duration_since(*time)
-                    && duration <= max_age {
-                        return Some((file.clone(), *time));
-                    }
+                    && duration <= max_age
+                {
+                    return Some((file.clone(), *time));
+                }
                 None
             })
             .collect();

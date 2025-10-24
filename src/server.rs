@@ -19,6 +19,27 @@ use crate::state::BashState;
 use crate::tools::winx_chat::WinxChat;
 use crate::types::{CommandSuggestions, ContextSave, ReadImage};
 
+/// Static project structure string to avoid runtime allocation
+const PROJECT_STRUCTURE: &str = "# Winx Code Agent - Project Structure\n\n\
+## Root Files\n\
+- Cargo.toml - Project configuration and dependencies\n\
+- README.md - Project documentation\n\
+- CLAUDE.md - Claude integration guide\n\n\
+## Source Code Structure\n\
+- src/main.rs - Application entry point\n\
+- src/server.rs - MCP server implementation\n\
+- src/tools/ - MCP tools implementation\n\
+- src/state/ - Shell and terminal state management\n\
+- src/nvidia/ - NVIDIA AI integration\n\
+- src/dashscope/ - DashScope AI integration\n\
+- src/gemini/ - Google Gemini AI integration\n\
+- src/utils/ - Utility functions\n\n\
+## Key Features\n\
+- Multi-provider AI integration (DashScope, NVIDIA, Gemini)\n\
+- Shell command execution with state management\n\
+- File operations and context saving\n\
+- AI-powered code analysis and generation\n";
+
 /// Helper function to create JSON schema from serde_json::Value
 fn json_to_schema(value: Value) -> Arc<serde_json::Map<String, Value>> {
     match value {
@@ -141,27 +162,7 @@ impl WinxService {
 
     /// Get project structure overview
     async fn get_project_structure(&self) -> Result<String, McpError> {
-        let mut structure = String::new();
-        structure.push_str("# Winx Code Agent - Project Structure\n\n");
-        structure.push_str("## Root Files\n");
-        structure.push_str("- Cargo.toml - Project configuration and dependencies\n");
-        structure.push_str("- README.md - Project documentation\n");
-        structure.push_str("- CLAUDE.md - Claude integration guide\n\n");
-        structure.push_str("## Source Code Structure\n");
-        structure.push_str("- src/main.rs - Application entry point\n");
-        structure.push_str("- src/server.rs - MCP server implementation\n");
-        structure.push_str("- src/tools/ - MCP tools implementation\n");
-        structure.push_str("- src/state/ - Shell and terminal state management\n");
-        structure.push_str("- src/nvidia/ - NVIDIA AI integration\n");
-        structure.push_str("- src/dashscope/ - DashScope AI integration\n");
-        structure.push_str("- src/gemini/ - Google Gemini AI integration\n");
-        structure.push_str("- src/utils/ - Utility functions\n\n");
-        structure.push_str("## Key Features\n");
-        structure.push_str("- Multi-provider AI integration (DashScope, NVIDIA, Gemini)\n");
-        structure.push_str("- Shell command execution with state management\n");
-        structure.push_str("- File operations and context saving\n");
-        structure.push_str("- AI-powered code analysis and generation\n");
-        Ok(structure)
+        Ok(PROJECT_STRUCTURE.to_string())
     }
 
     /// Get source code structure details
@@ -179,7 +180,7 @@ impl WinxService {
             entries.sort_by_key(|a| a.file_name());
 
             for entry in entries {
-                let name = entry.file_name().to_string_lossy().to_string();
+                let name = entry.file_name().to_string_lossy().into_owned();
                 let is_dir = entry
                     .file_type()
                     .await
@@ -1871,8 +1872,7 @@ impl WinxService {
             let request = crate::nvidia::models::ChatCompletionRequest {
                 model: nvidia_client
                     .recommend_model(crate::nvidia::models::TaskType::CodeExplanation)
-                    .as_str()
-                    .to_string(),
+                    .as_str(),
                 messages: vec![
                     crate::nvidia::models::ChatMessage::system(system_prompt),
                     crate::nvidia::models::ChatMessage::user(user_prompt),
