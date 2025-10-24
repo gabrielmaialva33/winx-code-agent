@@ -701,7 +701,7 @@ impl FileCache {
             if let (Some(usage), Some(budget)) = (usage, budget) {
                 (*usage, *budget)
             } else {
-                return (0, 0);
+                (0, 0)
             }
         });
         if current_usage == 0 && budget == 0 {
