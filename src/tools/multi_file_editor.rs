@@ -8,15 +8,33 @@
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::fs;
-use tracing::{debug, info, warn};
+use tokio::sync::Mutex;
+use tracing::{debug, info, warn}; // Replace std::sync::Mutex
 
 use crate::dashscope::{ChatCompletionRequest, ChatMessage, DashScopeClient, DashScopeConfig};
 use crate::errors::{Result, WinxError};
 use crate::gemini::{GeminiClient, GeminiConfig};
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
 use crate::state::BashState;
+
+/// Common operation messages to avoid repeated allocations
+const MSG_FILE_CREATED: &str = "File created successfully";
+const MSG_CONTENT_REPLACED: &str = "File content replaced successfully";
+const MSG_CONTENT_APPENDED: &str = "Content appended successfully";
+const MSG_CONTENT_PREPENDED: &str = "Content prepended successfully";
+const MSG_VALIDATION_FAILED: &str = "Validation failed";
+const MSG_EXECUTION_FAILED: &str = "Execution failed";
+const MSG_DRY_RUN_SUCCESS: &str = "Dry run - operation would succeed";
+const MSG_NO_AI_PROVIDERS: &str = "No AI providers available for smart search/replace";
+const MSG_FILE_EXISTS: &str = "File already exists";
+const MSG_FILE_NOT_FOUND: &str = "File not found";
+const MSG_SEARCH_EMPTY: &str = "Search string cannot be empty";
+const MSG_LINE_NUMBER_INVALID: &str = "Line number must be >= 1";
+const MSG_CONFIDENCE_INVALID: &str = "Confidence threshold must be between 0.0 and 1.0";
+const MSG_SMART_SEARCH_EMPTY: &str = "SmartSearchReplace requires at least one file path";
+const MSG_PATTERN_EMPTY: &str = "Search pattern cannot be empty";
 
 /// Represents different types of file operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,7 +200,7 @@ impl AIProvider for DashScopeClient {
         );
 
         let request = ChatCompletionRequest {
-            model: "qwen3-coder-plus".to_string(),
+            model: "qwen3-coder-plus",
             messages: vec![ChatMessage::user(prompt)],
             temperature: Some(0.3),
             max_tokens: Some(2000),
@@ -196,7 +214,9 @@ impl AIProvider for DashScopeClient {
         if let Some(message) = response.choices.first() {
             self.parse_ai_response(&message.message.content, content)
         } else {
-            Err(WinxError::AIError("No response from DashScope".to_string()))
+            Err(WinxError::AIError {
+                message: Arc::new("No response received from AI provider".to_string()),
+            })
         }
     }
 }
@@ -370,19 +390,19 @@ impl MultiFileEditorTool {
         // Try DashScope first (primary)
         if let Some(client) = self.get_dashscope_client().await {
             debug!("Using DashScope AI client for smart operations");
-            return Some(Box::new(client));
+            return Some(Box::new(client) as Box<dyn AIProvider>);
         }
 
         // Try NVIDIA as fallback 1
         if let Some(client) = self.get_nvidia_client().await {
             debug!("Using NVIDIA AI client for smart operations");
-            return Some(Box::new(client));
+            return Some(Box::new(client) as Box<dyn AIProvider>);
         }
 
         // Try Gemini as fallback 2
         if let Some(client) = self.get_gemini_client().await {
             debug!("Using Gemini AI client for smart operations");
-            return Some(Box::new(client));
+            return Some(Box::new(client) as Box<dyn AIProvider>);
         }
 
         warn!("No AI providers available for smart operations");
@@ -391,30 +411,30 @@ impl MultiFileEditorTool {
 
     /// Get DashScope client if available
     async fn get_dashscope_client(&self) -> Option<DashScopeClient> {
-        if let Ok(config) = DashScopeConfig::from_env() {
-            if let Ok(client) = DashScopeClient::new(config) {
-                return Some(client);
-            }
+        if let Ok(config) = DashScopeConfig::from_env()
+            && let Ok(client) = DashScopeClient::new(config)
+        {
+            return Some(client);
         }
         None
     }
 
     /// Get NVIDIA client if available  
     async fn get_nvidia_client(&self) -> Option<NvidiaClient> {
-        if let Ok(config) = NvidiaConfig::from_env() {
-            if let Ok(client) = NvidiaClient::new(config).await {
-                return Some(client);
-            }
+        if let Ok(config) = NvidiaConfig::from_env()
+            && let Ok(client) = NvidiaClient::new(config).await
+        {
+            return Some(client);
         }
         None
     }
 
     /// Get Gemini client if available
     async fn get_gemini_client(&self) -> Option<GeminiClient> {
-        if let Ok(config) = GeminiConfig::from_env() {
-            if let Ok(client) = GeminiClient::new(config) {
-                return Some(client);
-            }
+        if let Ok(config) = GeminiConfig::from_env()
+            && let Ok(client) = GeminiClient::new(config)
+        {
+            return Some(client);
         }
         None
     }
@@ -523,7 +543,7 @@ impl MultiFileEditorTool {
                 if path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
-                        message: "File already exists".to_string(),
+                        message: Arc::new(MSG_FILE_EXISTS.to_string()),
                     });
                 }
 
@@ -537,11 +557,11 @@ impl MultiFileEditorTool {
                 }
 
                 // Check if parent directory exists or can be created
-                if let Some(parent) = path.parent() {
-                    if !parent.exists() {
-                        // This is okay if create_dirs is true
-                        debug!("Parent directory {:?} does not exist", parent);
-                    }
+                if let Some(parent) = path.parent()
+                    && !parent.exists()
+                {
+                    // This is okay if create_dirs is true
+                    debug!("Parent directory {:?} does not exist", parent);
                 }
             }
             FileOperation::Replace { file_path, content }
@@ -553,7 +573,7 @@ impl MultiFileEditorTool {
                 if !path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
-                        message: "File not found".to_string(),
+                        message: Arc::new(MSG_FILE_NOT_FOUND.to_string()),
                     });
                 }
 
@@ -567,8 +587,8 @@ impl MultiFileEditorTool {
                 }
 
                 // Check file size
-                let metadata = fs::metadata(path).await.map_err(|e| {
-                    WinxError::FileError(format!("Failed to get file metadata: {}", e))
+                let metadata = fs::metadata(path).await.map_err(|e| WinxError::FileError {
+                    message: Arc::new(format!("Failed to get file metadata: {}", e)),
                 })?;
 
                 if metadata.len() as usize > self.max_file_size {
@@ -589,7 +609,7 @@ impl MultiFileEditorTool {
                 if !path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
-                        message: "File not found".to_string(),
+                        message: Arc::new("File not found".to_string()),
                     });
                 }
 
@@ -603,9 +623,9 @@ impl MultiFileEditorTool {
 
                 // Validate line number
                 if *line_number == 0 {
-                    return Err(WinxError::InvalidInput(
-                        "Line number must be >= 1".to_string(),
-                    ));
+                    return Err(WinxError::InvalidInput {
+                        message: Arc::new(MSG_LINE_NUMBER_INVALID.to_string()),
+                    });
                 }
             }
             FileOperation::SearchReplace {
@@ -619,14 +639,14 @@ impl MultiFileEditorTool {
                 if !path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
-                        message: "File not found".to_string(),
+                        message: Arc::new("File not found".to_string()),
                     });
                 }
 
                 if search.is_empty() {
-                    return Err(WinxError::InvalidInput(
-                        "Search string cannot be empty".to_string(),
-                    ));
+                    return Err(WinxError::InvalidInput {
+                        message: Arc::new(MSG_SEARCH_EMPTY.to_string()),
+                    });
                 }
 
                 if replace.len() > self.max_file_size {
@@ -645,9 +665,9 @@ impl MultiFileEditorTool {
             } => {
                 // Validate file paths
                 if file_paths.is_empty() {
-                    return Err(WinxError::InvalidInput(
-                        "SmartSearchReplace requires at least one file path".to_string(),
-                    ));
+                    return Err(WinxError::InvalidInput {
+                        message: Arc::new(MSG_SMART_SEARCH_EMPTY.to_string()),
+                    });
                 }
 
                 for file_path in file_paths {
@@ -655,25 +675,25 @@ impl MultiFileEditorTool {
                     if !path.exists() {
                         return Err(WinxError::FileAccessError {
                             path: path.to_path_buf(),
-                            message: "File not found".to_string(),
+                            message: Arc::new("File not found".to_string()),
                         });
                     }
                 }
 
                 // Validate search pattern
                 if search_pattern.is_empty() {
-                    return Err(WinxError::InvalidInput(
-                        "Search pattern cannot be empty".to_string(),
-                    ));
+                    return Err(WinxError::InvalidInput {
+                        message: Arc::new(MSG_PATTERN_EMPTY.to_string()),
+                    });
                 }
 
                 // Validate confidence threshold
-                if let Some(threshold) = confidence_threshold {
-                    if *threshold < 0.0 || *threshold > 1.0 {
-                        return Err(WinxError::InvalidInput(
-                            "Confidence threshold must be between 0.0 and 1.0".to_string(),
-                        ));
-                    }
+                if let Some(threshold) = confidence_threshold
+                    && (*threshold < 0.0 || *threshold > 1.0)
+                {
+                    return Err(WinxError::InvalidInput {
+                        message: Arc::new(MSG_CONFIDENCE_INVALID.to_string()),
+                    });
                 }
             }
         }
@@ -694,7 +714,7 @@ impl MultiFileEditorTool {
                 operation_index: index,
                 file_path,
                 success: true,
-                message: "Dry run - operation would succeed".to_string(),
+                message: MSG_DRY_RUN_SUCCESS.to_string(),
                 backup_path: None,
                 bytes_written: None,
             });
@@ -805,7 +825,9 @@ impl MultiFileEditorTool {
         let backup_path = format!("{}.backup.{}", file_path, chrono::Utc::now().timestamp());
         fs::copy(file_path, &backup_path)
             .await
-            .map_err(|e| WinxError::FileError(format!("Failed to create backup: {}", e)))?;
+            .map_err(|e| WinxError::FileError {
+                message: Arc::new(format!("Failed to create backup: {}", e)),
+            })?;
 
         self.backups.push(BackupInfo {
             original_path: path.to_path_buf(),
@@ -825,10 +847,12 @@ impl MultiFileEditorTool {
                 // File was created, so delete it
                 if backup.original_path.exists() {
                     fs::remove_file(&backup.original_path).await.map_err(|e| {
-                        WinxError::FileError(format!(
-                            "Failed to remove created file during rollback: {}",
-                            e
-                        ))
+                        WinxError::FileError {
+                            message: Arc::new(format!(
+                                "Failed to remove created file during rollback: {}",
+                                e
+                            )),
+                        }
                     })?;
                     debug!("Removed created file: {:?}", backup.original_path);
                 }
@@ -836,11 +860,11 @@ impl MultiFileEditorTool {
                 // File was modified, restore from backup
                 fs::copy(backup_path, &backup.original_path)
                     .await
-                    .map_err(|e| {
-                        WinxError::FileError(format!(
+                    .map_err(|e| WinxError::FileError {
+                        message: Arc::new(format!(
                             "Failed to restore file from backup during rollback: {}",
                             e
-                        ))
+                        )),
                     })?;
                 debug!(
                     "Restored file: {:?} from {:?}",
@@ -868,12 +892,12 @@ impl MultiFileEditorTool {
         let path = Path::new(file_path);
 
         // Create parent directories if needed
-        if create_dirs {
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).await.map_err(|e| {
-                    WinxError::FileError(format!("Failed to create directories: {}", e))
+        if create_dirs && let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .await
+                .map_err(|e| WinxError::FileError {
+                    message: Arc::new(format!("Failed to create directories: {}", e)),
                 })?;
-            }
         }
 
         // Create backup (will record that file was created)
@@ -882,13 +906,15 @@ impl MultiFileEditorTool {
         // Write file
         fs::write(file_path, content)
             .await
-            .map_err(|e| WinxError::FileError(format!("Failed to create file: {}", e)))?;
+            .map_err(|e| WinxError::FileError {
+                message: Arc::new(format!("Failed to create file: {}", e)),
+            })?;
 
         Ok(OperationResult {
             operation_index: index,
             file_path: file_path.to_string(),
             success: true,
-            message: "File created successfully".to_string(),
+            message: MSG_FILE_CREATED.to_string(),
             backup_path,
             bytes_written: Some(content.len()),
         })
@@ -905,13 +931,15 @@ impl MultiFileEditorTool {
 
         fs::write(file_path, content)
             .await
-            .map_err(|e| WinxError::FileError(format!("Failed to replace file content: {}", e)))?;
+            .map_err(|e| WinxError::FileError {
+                message: Arc::new(format!("Failed to replace file content: {}", e)),
+            })?;
 
         Ok(OperationResult {
             operation_index: index,
             file_path: file_path.to_string(),
             success: true,
-            message: "File content replaced successfully".to_string(),
+            message: MSG_CONTENT_REPLACED.to_string(),
             backup_path,
             bytes_written: Some(content.len()),
         })
@@ -926,21 +954,26 @@ impl MultiFileEditorTool {
     ) -> Result<OperationResult> {
         let backup_path = self.create_backup(file_path).await?;
 
-        let mut existing_content = fs::read_to_string(file_path)
-            .await
-            .map_err(|e| WinxError::FileError(format!("Failed to read existing file: {}", e)))?;
+        let mut existing_content =
+            fs::read_to_string(file_path)
+                .await
+                .map_err(|e| WinxError::FileError {
+                    message: Arc::new(format!("Failed to read existing file: {}", e)),
+                })?;
 
         existing_content.push_str(content);
 
         fs::write(file_path, &existing_content)
             .await
-            .map_err(|e| WinxError::FileError(format!("Failed to append to file: {}", e)))?;
+            .map_err(|e| WinxError::FileError {
+                message: Arc::new(format!("Failed to append to file: {}", e)),
+            })?;
 
         Ok(OperationResult {
             operation_index: index,
             file_path: file_path.to_string(),
             success: true,
-            message: "Content appended successfully".to_string(),
+            message: MSG_CONTENT_APPENDED.to_string(),
             backup_path,
             bytes_written: Some(content.len()),
         })
@@ -955,21 +988,26 @@ impl MultiFileEditorTool {
     ) -> Result<OperationResult> {
         let backup_path = self.create_backup(file_path).await?;
 
-        let existing_content = fs::read_to_string(file_path)
-            .await
-            .map_err(|e| WinxError::FileError(format!("Failed to read existing file: {}", e)))?;
+        let existing_content =
+            fs::read_to_string(file_path)
+                .await
+                .map_err(|e| WinxError::FileError {
+                    message: Arc::new(format!("Failed to read existing file: {}", e)),
+                })?;
 
         let new_content = format!("{}{}", content, existing_content);
 
         fs::write(file_path, &new_content)
             .await
-            .map_err(|e| WinxError::FileError(format!("Failed to prepend to file: {}", e)))?;
+            .map_err(|e| WinxError::FileError {
+                message: Arc::new(format!("Failed to prepend to file: {}", e)),
+            })?;
 
         Ok(OperationResult {
             operation_index: index,
             file_path: file_path.to_string(),
             success: true,
-            message: "Content prepended successfully".to_string(),
+            message: MSG_CONTENT_PREPENDED.to_string(),
             backup_path,
             bytes_written: Some(content.len()),
         })
@@ -985,9 +1023,12 @@ impl MultiFileEditorTool {
     ) -> Result<OperationResult> {
         let backup_path = self.create_backup(file_path).await?;
 
-        let existing_content = fs::read_to_string(file_path)
-            .await
-            .map_err(|e| WinxError::FileError(format!("Failed to read existing file: {}", e)))?;
+        let existing_content =
+            fs::read_to_string(file_path)
+                .await
+                .map_err(|e| WinxError::FileError {
+                    message: Arc::new(format!("Failed to read existing file: {}", e)),
+                })?;
 
         let mut lines: Vec<&str> = existing_content.lines().collect();
 
@@ -1001,9 +1042,11 @@ impl MultiFileEditorTool {
         lines.insert(insert_index, content);
         let new_content = lines.join("\n");
 
-        fs::write(file_path, &new_content).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to insert content at line: {}", e))
-        })?;
+        fs::write(file_path, &new_content)
+            .await
+            .map_err(|e| WinxError::FileError {
+                message: Arc::new(format!("Failed to insert content at line: {}", e)),
+            })?;
 
         Ok(OperationResult {
             operation_index: index,
@@ -1026,9 +1069,12 @@ impl MultiFileEditorTool {
     ) -> Result<OperationResult> {
         let backup_path = self.create_backup(file_path).await?;
 
-        let existing_content = fs::read_to_string(file_path)
-            .await
-            .map_err(|e| WinxError::FileError(format!("Failed to read existing file: {}", e)))?;
+        let existing_content =
+            fs::read_to_string(file_path)
+                .await
+                .map_err(|e| WinxError::FileError {
+                    message: Arc::new(format!("Failed to read existing file: {}", e)),
+                })?;
 
         let new_content = if all_occurrences {
             existing_content.replace(search, replace)
@@ -1044,9 +1090,11 @@ impl MultiFileEditorTool {
             0
         };
 
-        fs::write(file_path, &new_content).await.map_err(|e| {
-            WinxError::FileError(format!("Failed to write search/replace result: {}", e))
-        })?;
+        fs::write(file_path, &new_content)
+            .await
+            .map_err(|e| WinxError::FileError {
+                message: Arc::new(format!("Failed to write updated content to file: {}", e)),
+            })?;
 
         Ok(OperationResult {
             operation_index: index,
@@ -1086,9 +1134,12 @@ impl MultiFileEditorTool {
             None => {
                 return Ok(OperationResult {
                     operation_index: index,
-                    file_path: file_paths.first().unwrap_or(&"unknown".to_string()).clone(),
+                    file_path: file_paths
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string()),
                     success: false,
-                    message: "No AI providers available for smart search/replace".to_string(),
+                    message: MSG_NO_AI_PROVIDERS.to_string(),
                     backup_path: None,
                     bytes_written: None,
                 });
@@ -1155,9 +1206,11 @@ impl MultiFileEditorTool {
             let new_content = self.apply_smart_replacements(&content, &valid_matches)?;
 
             // Write the modified content
-            fs::write(file_path, &new_content).await.map_err(|e| {
-                WinxError::FileError(format!("Failed to write smart replacements: {}", e))
-            })?;
+            fs::write(file_path, &new_content)
+                .await
+                .map_err(|e| WinxError::FileError {
+                    message: Arc::new(format!("Failed to write updated content to file: {}", e)),
+                })?;
 
             total_replacements += valid_matches.len();
             processed_files += 1;
@@ -1187,8 +1240,8 @@ impl MultiFileEditorTool {
             operation_index: index,
             file_path: file_paths
                 .first()
-                .unwrap_or(&"multiple_files".to_string())
-                .clone(),
+                .cloned()
+                .unwrap_or_else(|| "multiple_files".to_string()),
             success: true,
             message,
             backup_path: None,
@@ -1236,8 +1289,10 @@ pub async fn handle_tool_call(
     let result = tool.execute(&multi_file_editor.operations).await?;
 
     // Format result as JSON for better readability
-    let result_json = serde_json::to_string_pretty(&result)
-        .map_err(|e| WinxError::SerializationError(format!("Failed to serialize result: {}", e)))?;
+    let result_json =
+        serde_json::to_string_pretty(&result).map_err(|e| WinxError::SerializationError {
+            message: Arc::new(format!("Failed to serialize result to JSON: {}", e)),
+        })?;
 
     Ok(result_json)
 }
@@ -1617,9 +1672,11 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.failed_operations, 1);
-        assert!(result.results[0]
-            .message
-            .contains("requires at least one file path"));
+        assert!(
+            result.results[0]
+                .message
+                .contains("requires at least one file path")
+        );
     }
 
     #[tokio::test]
@@ -1655,9 +1712,11 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.failed_operations, 1);
-        assert!(result.results[0]
-            .message
-            .contains("Confidence threshold must be between 0.0 and 1.0"));
+        assert!(
+            result.results[0]
+                .message
+                .contains("Confidence threshold must be between 0.0 and 1.0")
+        );
     }
 
     #[test]

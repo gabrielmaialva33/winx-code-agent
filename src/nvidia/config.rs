@@ -2,7 +2,23 @@
 
 use crate::errors::{Result, WinxError};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::env;
+use std::sync::Arc;
+
+const DEFAULT_BASE_URL: &str = "https://integrate.api.nvidia.com";
+const DEFAULT_MODEL: &str = "qwen/qwen3-235b-a22b";
+const ERR_API_KEY_MISSING: &str =
+    "NVIDIA API key not found. Set NVIDIA_API_KEY or NVAPI_KEY environment variable";
+const ERR_API_KEY_EMPTY: &str = "API key cannot be empty";
+const ERR_BASE_URL_EMPTY: &str = "Base URL cannot be empty";
+const ERR_TIMEOUT_ZERO: &str = "Timeout must be greater than 0";
+const ERR_RATE_LIMIT_ZERO: &str = "Rate limit must be greater than 0";
+
+lazy_static::lazy_static! {
+    /// Cached default chat completions URL for NVIDIA
+    static ref DEFAULT_NVIDIA_CHAT_COMPLETIONS_URL: &'static str = "https://integrate.api.nvidia.com/v1/chat/completions";
+}
 
 /// Configuration for NVIDIA API client
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,8 +41,8 @@ impl Default for NvidiaConfig {
     fn default() -> Self {
         Self {
             api_key: String::new(),
-            base_url: "https://integrate.api.nvidia.com".to_string(),
-            default_model: "qwen/qwen3-235b-a22b".to_string(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            default_model: DEFAULT_MODEL.to_string(),
             timeout_seconds: 30,
             max_retries: 3,
             rate_limit_rpm: 60,
@@ -39,10 +55,8 @@ impl NvidiaConfig {
     pub fn from_env() -> Result<Self> {
         let api_key = env::var("NVIDIA_API_KEY")
             .or_else(|_| env::var("NVAPI_KEY"))
-            .map_err(|_| {
-                WinxError::ConfigurationError(
-                    "NVIDIA API key not found. Set NVIDIA_API_KEY or NVAPI_KEY environment variable".to_string()
-                )
+            .map_err(|_| WinxError::ConfigurationError {
+                message: Arc::new(ERR_API_KEY_MISSING.to_string()),
             })?;
 
         let mut config = Self {
@@ -77,37 +91,41 @@ impl NvidiaConfig {
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
         if self.api_key.is_empty() {
-            return Err(WinxError::ConfigurationError(
-                "API key cannot be empty".to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_API_KEY_EMPTY.to_string()),
+            });
         }
 
         if self.base_url.is_empty() {
-            return Err(WinxError::ConfigurationError(
-                "Base URL cannot be empty".to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_BASE_URL_EMPTY.to_string()),
+            });
         }
 
         if self.timeout_seconds == 0 {
-            return Err(WinxError::ConfigurationError(
-                "Timeout must be greater than 0".to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_TIMEOUT_ZERO.to_string()),
+            });
         }
 
         if self.rate_limit_rpm == 0 {
-            return Err(WinxError::ConfigurationError(
-                "Rate limit must be greater than 0".to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_RATE_LIMIT_ZERO.to_string()),
+            });
         }
 
         Ok(())
     }
 
     /// Get the chat completions endpoint URL
-    pub fn chat_completions_url(&self) -> String {
-        format!(
-            "{}/v1/chat/completions",
-            self.base_url.trim_end_matches('/')
-        )
+    pub fn chat_completions_url(&self) -> Cow<'_, str> {
+        if self.base_url == "https://integrate.api.nvidia.com" {
+            Cow::Borrowed(&DEFAULT_NVIDIA_CHAT_COMPLETIONS_URL)
+        } else {
+            Cow::Owned(format!(
+                "{}/v1/chat/completions",
+                self.base_url.trim_end_matches('/')
+            ))
+        }
     }
 }

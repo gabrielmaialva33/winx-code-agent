@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context as AnyhowContext, Result};
+use anyhow::{Context as AnyhowContext, Result, anyhow};
 use glob;
 use rand::Rng;
 use regex;
@@ -8,16 +8,13 @@ use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
-use crate::state::terminal::MAX_OUTPUT_SIZE as TERMINAL_MAX_OUTPUT_SIZE;
-use crate::state::terminal::{
-    incremental_text, render_terminal_output, TerminalEmulator, TerminalOutputDiff,
-    DEFAULT_MAX_SCREEN_LINES,
-};
+use crate::state::terminal::{DEFAULT_MAX_SCREEN_LINES, TerminalEmulator};
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
 };
@@ -36,11 +33,82 @@ pub struct FileWhitelistData {
     pub content_hash: Option<String>,
     /// Timestamp when the file was last read
     pub last_read_time: Option<std::time::SystemTime>,
-    /// Whether this file has been modified since last read
+    /// Whether this file has been modified since the last read
     pub modified_since_read: bool,
     /// Minimum percentage of file that must be read before editing
     pub min_read_percentage: f64,
 }
+
+const ERR_FILE_EDIT_NOT_ALLOWED: &str =
+    "File editing not allowed in {} mode for path: {}. Check your mode configuration.";
+const ERR_NEEDS_MORE_READING: &str = "{}. Use ReadFiles tool to read more of the file first.";
+const ERR_FILE_CHANGED: &str = "File {} has changed since last read. Please read the file again with ReadFiles before modifying.";
+const ERR_FILE_NOT_READ: &str = "File {} has not been read yet. You must read the file at least once using ReadFiles before editing it.";
+const ERR_UNEXPECTED_WCGW: &str = "Unexpected error: {} should be allowed in wcgw mode";
+const ERR_ARCHITECT_READONLY: &str = "Operation '{}' not allowed in architect mode. Architect mode is read-only. \
+Use Initialize with mode_name=\"wcgw\" or \"code_writer\" to enable modifications.";
+const ERR_CODEWRITER_RESTRICTED: &str = "Operation '{}' on '{}' not allowed in code_writer mode. \
+Check your allowed_globs and allowed_commands configuration, or use Initialize \
+with mode_name=\"wcgw\" for full permissions.";
+const ERR_UNKNOWN_SPECIAL_KEY: &str = "Unknown special key: {}";
+const ERR_PATH_NOT_DIR: &str = "Path does not exist or is not a directory: {:?}";
+const ERR_BASH_INIT_FAILED: &str = "Failed to initialize interactive bash: {}";
+const ERR_BASH_SEND_FAILED: &str = "Failed to send command to bash: {}";
+const ERR_OUTPUT_READ_FAILED: &str = "Failed to read initial output: {}";
+const ERR_BASH_NONE: &str = "Interactive bash is None after initialization";
+const ERR_ALIVE_CHECK_FAILED: &str = "Failed to ensure bash process is alive: {}";
+const ERR_COMMAND_RUNNING: &str = "{}\n\nA command is already running: '{}' (for {:.2?}).\nUse status_check to see current output, or send_text/send_specials to interact with it.";
+const ERR_STATUS_CHECK_NONE: &str = "Interactive bash is None when trying to check status";
+const ERR_LOCK_FAILED: &str = "Failed to lock bash state: {}";
+const ERR_LOCK_STATUS_FAILED: &str = "Failed to lock bash state for status check: {}";
+const ERR_LOCK_EXEC_FAILED: &str = "Failed to lock bash state for command execution: {}";
+const ERR_STDIN_FAILED: &str = "Failed to get stdin for bash process";
+const ERR_STDOUT_FAILED: &str = "Failed to get stdout for bash process";
+const ERR_STDERR_FAILED: &str = "Failed to get stderr for bash process";
+const ERR_WRITE_PROMPT_FAILED: &str = "Failed to write prompt statement to bash process";
+const ERR_SPAWN_FAILED: &str = "Failed to spawn bash process";
+const ERR_MUTEX_LOCK_FAILED: &str = "Failed to lock interactive bash mutex: {}";
+const ERR_WRITE_COMMAND_FAILED: &str = "Failed to write command to bash process";
+const ERR_FLUSH_STDIN_FAILED: &str = "Failed to flush bash stdin";
+const ERR_READ_STDOUT_FAILED: &str = "Error reading from bash stdout: {}";
+const ERR_READ_STDERR_FAILED: &str = "Error reading from bash stderr: {}";
+const ERR_OUTPUT_TRUNCATED: &str = "\n(...output truncated, showing last {} bytes...)\n";
+const ERR_PROCESS_EXITED: &str = "\nProcess exited with status: {:?}\n";
+const ERR_TIMEOUT: &str = "\n(Command output reading timed out after {:.2?}, still running...)\n";
+const ERR_MULTIPLE_SIGNALS: &str = "\n(Sent multiple interrupt signals, but process is still running. It may need to be killed manually)";
+const ERR_STILL_RUNNING: &str = "\n(Sent interrupt signals, but process is still running)";
+const ERR_STDIN_NONE: &str = "Failed to get stdin for bash process";
+const ERR_CWD_UPDATE_FAILED: &str = "Path does not exist or is not a directory: {:?}";
+const ERR_WORKSPACE_UPDATE_FAILED: &str = "Path does not exist or is not a directory: {:?}";
+const ERR_JOBS_COMMAND_FAILED: &str = "Failed to lock interactive bash mutex: {}";
+const ERR_EXEC_LOCK_FAILED: &str = "Failed to lock bash state: {}";
+const ERR_EXEC_LOCK_STATUS_FAILED: &str = "Failed to lock bash state for status check: {}";
+const ERR_EXEC_LOCK_COMMAND_FAILED: &str = "Failed to lock bash state for command execution: {}";
+const ERR_EXEC_NONE: &str = "Interactive bash is None after initialization";
+const ERR_EXEC_ALIVE_FAILED: &str = "Failed to ensure bash process is alive: {}";
+const ERR_EXEC_SEND_FAILED: &str = "Failed to send command to bash: {}";
+const ERR_EXEC_READ_FAILED: &str = "Failed to read initial output: {}";
+const ERR_PATTERN_RECORD_FAILED: &str = "Failed to record command in pattern analyzer: {}";
+const ERR_STATUS_LOCK_FAILED: &str = "Failed to lock interactive bash mutex: {}";
+const ERR_STATUS_NONE: &str = "Interactive bash is None when trying to check status";
+const ERR_STATUS_READ_FAILED: &str = "Error reading output during polling: {}";
+const ERR_STATUS_MUTEX_FAILED: &str = "Failed to lock bash mutex during polling: {}";
+const ERR_STATUS_DISAPPEARED: &str = "Bash disappeared during polling";
+const ERR_FILE_ACCESS_MODE: &str =
+    "File editing not allowed in {} mode for path: {}. Check your mode configuration.";
+const ERR_FILE_ACCESS_WCGW: &str = "wcgw";
+const ERR_FILE_ACCESS_ARCHITECT: &str = "architect";
+const ERR_FILE_ACCESS_CODEWRITER: &str = "code_writer";
+const ERR_FILE_ACCESS_NEEDS_READING: &str =
+    "{}. Use ReadFiles tool to read more of the file first.";
+const ERR_FILE_ACCESS_CHANGED: &str = "File {} has changed since last read. Please read the file again with ReadFiles before modifying.";
+const ERR_FILE_ACCESS_NOT_READ: &str = "File {} has not been read yet. You must read the file at least once using ReadFiles before editing it.";
+const ERR_MODE_VIOLATION_WCGW: &str = "Unexpected error: {} should be allowed in wcgw mode";
+const ERR_MODE_VIOLATION_ARCHITECT: &str = "Operation '{}' not allowed in architect mode. Architect mode is read-only. \
+Use Initialize with mode_name=\"wcgw\" or \"code_writer\" to enable modifications.";
+const ERR_MODE_VIOLATION_CODEWRITER: &str = "Operation '{}' on '{}' not allowed in code_writer mode. \
+Check your allowed_globs and allowed_commands configuration, or use Initialize \
+with mode_name=\"wcgw\" for full permissions.";
 
 #[allow(dead_code)]
 impl FileWhitelistData {
@@ -257,8 +325,6 @@ pub struct TerminalState {
     pub command_running: bool,
     /// Terminal emulator for processing output
     pub terminal_emulator: Arc<Mutex<TerminalEmulator>>,
-    /// Output difference detector for efficient incremental updates
-    pub diff_detector: Option<TerminalOutputDiff>,
     /// Indicates if buffer should be limited to handle large outputs
     pub limit_buffer: bool,
     /// Maximum buffer size for large outputs (in lines)
@@ -279,7 +345,6 @@ impl TerminalState {
             last_pending_output: String::new(),
             command_running: false,
             terminal_emulator: Arc::new(Mutex::new(TerminalEmulator::new(160))),
-            diff_detector: Some(TerminalOutputDiff::new()),
             limit_buffer: false,
             max_buffer_lines: DEFAULT_MAX_SCREEN_LINES,
         }
@@ -295,36 +360,30 @@ impl TerminalState {
                 columns,
                 max_buffer_lines,
             ))),
-            diff_detector: Some(TerminalOutputDiff::new_with_max_lines(max_buffer_lines)),
             limit_buffer,
             max_buffer_lines,
         }
     }
 
     /// Process new output with the terminal emulator
-    pub fn process_output(&mut self, output: &str) -> String {
+    pub async fn process_output(&mut self, output: &str) -> String {
         // Update the last pending output
         self.last_pending_output = output.to_string();
 
         // For large outputs, use limited buffer mode if configured
-        if self.limit_buffer && output.len() > TERMINAL_MAX_OUTPUT_SIZE {
-            if let Ok(mut emulator) = self.terminal_emulator.lock() {
-                // Process with limited buffer
-                emulator.process_with_limited_buffer(output, self.max_buffer_lines);
-                let display = emulator.display();
-                return display.join("\n");
-            }
+        if self.limit_buffer && output.len() > MAX_OUTPUT_SIZE {
+            let mut emulator = self.terminal_emulator.lock().await;
+            // Process with limited buffer
+            emulator.process_with_limited_buffer(output, self.max_buffer_lines);
+            let display = emulator.display();
+            return display.join("\n");
         }
 
         // Process the output with the terminal emulator
-        if let Ok(mut emulator) = self.terminal_emulator.lock() {
-            emulator.process(output);
-            let display = emulator.display();
-            display.join("\n")
-        } else {
-            // Fallback if we can't lock the emulator
-            output.to_string()
-        }
+        let mut emulator = self.terminal_emulator.lock().await;
+        emulator.process(output);
+        let display = emulator.display();
+        display.join("\n")
     }
 
     /// Get incremental output updates efficiently
@@ -333,8 +392,12 @@ impl TerminalState {
             return String::new();
         }
 
-        // Use the optimized incremental_text function
-        let result = incremental_text(output, &self.last_pending_output);
+        // Simple incremental text: return the new part if output starts with last_pending_output
+        let result = if output.starts_with(&self.last_pending_output) {
+            output[self.last_pending_output.len()..].to_string()
+        } else {
+            output.to_string()
+        };
 
         // Update the last pending output
         self.last_pending_output = output.to_string();
@@ -348,24 +411,19 @@ impl TerminalState {
         self.last_pending_output = String::new();
         self.command_running = false;
 
-        // Reset the diff detector
-        if let Some(diff_detector) = &mut self.diff_detector {
-            diff_detector.reset();
-        }
-
         // Clear the terminal emulator
-        if let Ok(mut emulator) = self.terminal_emulator.lock() {
+        if let Ok(mut emulator) = self.terminal_emulator.try_lock() {
             emulator.clear();
         }
     }
 
     /// Smart truncate the terminal output if it gets too large
-    pub fn smart_truncate(&mut self, max_size: usize) {
-        if let Ok(screen) = self.terminal_emulator.lock() {
-            if let Ok(mut screen_guard) = screen.get_screen().lock() {
-                screen_guard.smart_truncate(max_size);
-            }
-        }
+    pub async fn smart_truncate(&mut self, max_size: usize) {
+        // Refactored to ensure await is used in async contexts and fix type mismatches
+        let emulator_guard = self.terminal_emulator.lock().await;
+        let screen = emulator_guard.get_screen();
+        let mut screen_guard = screen.lock().expect("Failed to lock screen");
+        screen_guard.smart_truncate(max_size);
     }
 }
 
@@ -792,7 +850,9 @@ impl InteractiveBash {
                                 #[cfg(unix)]
                                 {
                                     // CommandExt not needed
-                                    debug!("Process still running, attempting to terminate with SIGTERM");
+                                    debug!(
+                                        "Process still running, attempting to terminate with SIGTERM"
+                                    );
                                     unsafe {
                                         // Get process ID
                                         let pid = self.process.id();
@@ -819,7 +879,9 @@ impl InteractiveBash {
                                 #[cfg(not(unix))]
                                 {
                                     // Process might be waiting for more input or ignoring the interrupt
-                                    debug!("Process still running after interrupt, may be ignoring Ctrl+C");
+                                    debug!(
+                                        "Process still running after interrupt, may be ignoring Ctrl+C"
+                                    );
                                     self.last_output.push_str(
                                         "\n(Sent interrupt signals, but process is still running)",
                                     );
@@ -955,7 +1017,7 @@ impl BashState {
     }
 
     /// Initialize the interactive bash process
-    pub fn init_interactive_bash(&mut self) -> Result<()> {
+    pub async fn init_interactive_bash(&mut self) -> Result<()> {
         let restricted_mode = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
 
         debug!(
@@ -967,10 +1029,7 @@ impl BashState {
         let bash = InteractiveBash::new(&self.cwd, restricted_mode)?;
 
         // Update the state
-        let mut guard = self
-            .interactive_bash
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
+        let mut guard = self.interactive_bash.lock().await;
 
         *guard = Some(bash);
 
@@ -983,17 +1042,6 @@ impl BashState {
     pub fn update_cwd(&mut self, path: &Path) -> Result<()> {
         if path.exists() && path.is_dir() {
             self.cwd = path.to_path_buf();
-
-            // Update cwd in interactive bash if it exists
-            if let Ok(mut bash_guard) = self.interactive_bash.lock() {
-                if let Some(bash) = bash_guard.as_mut() {
-                    // Send cd command to bash
-                    bash.send_command(&format!("cd \"{}\"", path.display()))?;
-                    // Wait briefly and read output to process the cd command
-                    let _ = bash.read_output(0.5)?;
-                }
-            }
-
             Ok(())
         } else {
             Err(anyhow!(
@@ -1017,11 +1065,8 @@ impl BashState {
     }
 
     /// Update the current working directory from bash
-    fn update_cwd_from_bash(&self) -> Result<String> {
-        let mut bash_guard = self
-            .interactive_bash
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
+    async fn update_cwd_from_bash(&self) -> Result<String> {
+        let mut bash_guard = self.interactive_bash.lock().await;
 
         if let Some(bash) = bash_guard.as_mut() {
             // Send pwd command and read result
@@ -1046,11 +1091,8 @@ impl BashState {
     }
 
     /// Check for background jobs
-    pub fn check_background_jobs(&self) -> Result<usize> {
-        let mut bash_guard = self
-            .interactive_bash
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
+    pub async fn check_background_jobs(&self) -> Result<usize> {
+        let mut bash_guard = self.interactive_bash.lock().await;
 
         if let Some(bash) = bash_guard.as_mut() {
             // Use 'jobs -l' and manually count - avoids creating a pipeline which can leave jobs running
@@ -1058,7 +1100,7 @@ impl BashState {
             let (output, _) = bash.read_output(0.5)?;
 
             // Parse output to count jobs manually
-            let lines = render_terminal_output(&output);
+            let lines: Vec<String> = output.lines().map(|s| s.to_string()).collect();
             let mut job_count = 0;
 
             for line in lines {
@@ -1104,17 +1146,14 @@ impl BashState {
 
         // First, lock to check state
         {
-            let bash_guard = self
-                .interactive_bash
-                .lock()
-                .map_err(|e| anyhow!("Failed to lock bash state: {}", e))?;
+            let bash_guard = self.interactive_bash.lock().await;
 
             need_init = bash_guard.is_none();
             command_running_info = match bash_guard.as_ref() {
                 Some(bash) => match &bash.command_state {
                     CommandState::Running {
                         start_time,
-                        command: ref running_command,
+                        command: running_command,
                     } => {
                         let elapsed = start_time
                             .elapsed()
@@ -1138,9 +1177,7 @@ impl BashState {
 
                 // Get current output (needs lock, but doesn't await)
                 let (output, complete) = {
-                    let mut bash_guard = self.interactive_bash.lock().map_err(|e| {
-                        anyhow!("Failed to lock bash state for status check: {}", e)
-                    })?;
+                    let mut bash_guard = self.interactive_bash.lock().await;
 
                     if let Some(bash) = bash_guard.as_mut() {
                         bash.read_output(0.2)?
@@ -1152,7 +1189,7 @@ impl BashState {
                 };
 
                 // Process the output through terminal emulation
-                let rendered_output = crate::state::terminal::incremental_text(&output, "");
+                let rendered_output = output.clone();
 
                 // Add status information
                 let status = if complete {
@@ -1187,7 +1224,7 @@ impl BashState {
             let mut self_mut = self.clone();
 
             // No await here, so no lock held across await points
-            if let Err(e) = self_mut.init_interactive_bash() {
+            if let Err(e) = self_mut.init_interactive_bash().await {
                 return Err(anyhow!("Failed to initialize interactive bash: {}", e));
             }
 
@@ -1198,10 +1235,7 @@ impl BashState {
 
         // Phase 1: Send command and get initial output (no await)
         let (initial_output, mut complete) = {
-            let mut bash_guard = self
-                .interactive_bash
-                .lock()
-                .map_err(|e| anyhow!("Failed to lock bash state for command execution: {}", e))?;
+            let mut bash_guard = self.interactive_bash.lock().await;
 
             let bash = match bash_guard.as_mut() {
                 Some(b) => b,
@@ -1256,13 +1290,7 @@ impl BashState {
 
                 // Check output (lock, but no await)
                 let (new_output, cmd_complete) = {
-                    let mut bash_guard = match self.interactive_bash.lock() {
-                        Ok(guard) => guard,
-                        Err(e) => {
-                            warn!("Failed to lock bash mutex during polling: {}", e);
-                            continue;
-                        }
-                    };
+                    let mut bash_guard = self.interactive_bash.lock().await;
 
                     match bash_guard.as_mut() {
                         Some(bash) => match bash.read_output(0.1) {
@@ -1297,7 +1325,7 @@ impl BashState {
                 }
 
                 // Log progress
-                if elapsed > 5.0 && (elapsed as usize) % 5 == 0 {
+                if elapsed > 5.0 && (elapsed as usize).is_multiple_of(5) {
                     debug!(
                         "Still waiting for command completion - elapsed: {:.2?}s",
                         elapsed
@@ -1307,14 +1335,14 @@ impl BashState {
         }
 
         // Process output through optimized terminal emulation
-        let rendered_output =
-            if self.terminal_state.limit_buffer && result.len() > TERMINAL_MAX_OUTPUT_SIZE {
-                // For very large outputs, use the limited buffer processing
-                self.terminal_state.process_output(&result)
-            } else {
-                // For normal outputs, use the optimized incremental text function
-                self.terminal_state.get_incremental_output(&result)
-            };
+        let rendered_output = if self.terminal_state.limit_buffer && result.len() > MAX_OUTPUT_SIZE
+        {
+            // For very large outputs, use the limited buffer processing
+            self.terminal_state.process_output(&result).await
+        } else {
+            // For normal outputs, use the optimized incremental text function
+            self.terminal_state.get_incremental_output(&result)
+        };
 
         // Add status information
         let status = if complete {
@@ -1326,10 +1354,11 @@ impl BashState {
         // Get current working directory (it might have changed if cd was used)
         let current_cwd = self
             .update_cwd_from_bash()
+            .await
             .unwrap_or_else(|_| self.cwd.display().to_string());
 
         // Check for background jobs
-        let bg_jobs = self.check_background_jobs().unwrap_or_default();
+        let bg_jobs = self.check_background_jobs().await.unwrap_or_default();
 
         // Include background job info in status if available
         let status_line = if bg_jobs > 0 {
@@ -1344,10 +1373,11 @@ impl BashState {
         };
 
         // Check if output is very large and might need truncation
-        if result.len() > TERMINAL_MAX_OUTPUT_SIZE {
+        if result.len() > MAX_OUTPUT_SIZE {
             // Apply smart truncation to avoid excessive memory usage
             self.terminal_state
-                .smart_truncate(self.terminal_state.max_buffer_lines);
+                .smart_truncate(self.terminal_state.max_buffer_lines)
+                .await;
             debug!(
                 "Applied smart truncation for large output ({} bytes)",
                 result.len()
@@ -1375,19 +1405,16 @@ impl BashState {
         Ok(final_result)
     }
     pub async fn check_command_status(&mut self, timeout_secs: f32) -> Result<String> {
-        let mut bash_guard = self
-            .interactive_bash
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
+        let mut bash_guard = self.interactive_bash.lock().await;
 
         if let Some(bash) = bash_guard.as_mut() {
             let (output, complete) = bash.read_output(timeout_secs)?;
 
             // Process output through optimized terminal emulation
             let rendered_output =
-                if self.terminal_state.limit_buffer && output.len() > TERMINAL_MAX_OUTPUT_SIZE {
+                if self.terminal_state.limit_buffer && output.len() > MAX_OUTPUT_SIZE {
                     // For very large outputs, use the limited buffer processing
-                    self.terminal_state.process_output(&output)
+                    self.terminal_state.process_output(&output).await
                 } else {
                     // For normal outputs, use the optimized incremental text function
                     self.terminal_state.get_incremental_output(&output)
@@ -1401,10 +1428,11 @@ impl BashState {
             };
 
             // Check if output is very large and might need truncation
-            if output.len() > TERMINAL_MAX_OUTPUT_SIZE {
+            if output.len() > MAX_OUTPUT_SIZE {
                 // Apply smart truncation to avoid excessive memory usage
                 self.terminal_state
-                    .smart_truncate(self.terminal_state.max_buffer_lines);
+                    .smart_truncate(self.terminal_state.max_buffer_lines)
+                    .await;
                 debug!(
                     "Applied smart truncation for large output ({} bytes)",
                     output.len()
@@ -1486,7 +1514,7 @@ impl BashState {
 
     /// Check if a command is read-only (safe for architect mode)
     fn is_readonly_command(&self, command: &str) -> bool {
-        let cmd = command.trim().to_lowercase();
+        let cmd = command.trim();
 
         // List of read-only commands allowed in architect mode
         let readonly_commands = [
@@ -1540,15 +1568,15 @@ impl BashState {
             "rustc --version",
         ];
 
-        // Check for exact matches first
+        // Check for exact matches first (case-insensitive)
         if readonly_commands
             .iter()
-            .any(|&readonly_cmd| cmd.starts_with(readonly_cmd))
+            .any(|&readonly_cmd| cmd.eq_ignore_ascii_case(readonly_cmd))
         {
             return true;
         }
 
-        // Check for dangerous patterns that should be blocked
+        // Check for dangerous patterns that should be blocked (case-insensitive)
         let dangerous_patterns = [
             "rm",
             "mv",
@@ -1585,7 +1613,7 @@ impl BashState {
 
         !dangerous_patterns
             .iter()
-            .any(|&dangerous| cmd.contains(dangerous))
+            .any(|&dangerous| cmd.to_lowercase().contains(dangerous))
     }
 
     /// Check if a command matches an allowed command pattern

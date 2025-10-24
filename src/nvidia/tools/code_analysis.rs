@@ -5,7 +5,14 @@ use crate::nvidia::NvidiaClient;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
 use tracing::{debug, info};
+
+const DEFAULT_MIN_SEVERITY: &str = "Warning";
+const ERR_NO_FILE_OR_CODE: &str = "Either file_path or code must be provided";
+const ERR_READ_FILE: &str = "Failed to read file {}: {}";
+
+const SEVERITY_ORDER: [&str; 4] = ["Info", "Warning", "Error", "Critical"];
 
 /// Parameters for AI-powered code analysis
 #[derive(Debug, Serialize, Deserialize, JsonSchema)]
@@ -35,7 +42,7 @@ fn default_true() -> bool {
 }
 
 fn default_warning() -> String {
-    "Warning".to_string()
+    DEFAULT_MIN_SEVERITY.to_string()
 }
 
 /// Result of AI-powered code analysis
@@ -147,14 +154,17 @@ async fn get_code_and_metadata(
     match (&params.file_path, &params.code) {
         (Some(file_path), _) => {
             // Read from file
-            let code = tokio::fs::read_to_string(file_path).await.map_err(|e| {
-                WinxError::FileError(format!("Failed to read file {}: {}", file_path, e))
-            })?;
+            let code =
+                tokio::fs::read_to_string(file_path)
+                    .await
+                    .map_err(|e| WinxError::FileError {
+                        message: Arc::new(format!("Failed to read file {}: {}", file_path, e)),
+                    })?;
 
             let language = params
                 .language
                 .clone()
-                .or_else(|| detect_language_from_path(file_path));
+                .or_else(|| detect_language_from_path(file_path).map(|s| s.to_string()));
 
             Ok((code, Some(file_path.clone()), language))
         }
@@ -162,64 +172,62 @@ async fn get_code_and_metadata(
             // Use provided code
             Ok((code.clone(), None, params.language.clone()))
         }
-        (None, None) => Err(WinxError::InvalidInput(
-            "Either file_path or code must be provided".to_string(),
-        )),
+        (None, None) => Err(WinxError::InvalidInput {
+            message: Arc::new(ERR_NO_FILE_OR_CODE.to_string()),
+        }),
     }
 }
 
 /// Detect programming language from file extension
-fn detect_language_from_path(file_path: &str) -> Option<String> {
+fn detect_language_from_path(file_path: &str) -> Option<&'static str> {
     let path = Path::new(file_path);
     let extension = path.extension()?.to_str()?.to_lowercase();
 
     match extension.as_str() {
-        "rs" => Some("Rust".to_string()),
-        "py" => Some("Python".to_string()),
-        "js" | "mjs" => Some("JavaScript".to_string()),
-        "ts" => Some("TypeScript".to_string()),
-        "go" => Some("Go".to_string()),
-        "java" => Some("Java".to_string()),
-        "cpp" | "cc" | "cxx" => Some("C++".to_string()),
-        "c" => Some("C".to_string()),
-        "cs" => Some("C#".to_string()),
-        "php" => Some("PHP".to_string()),
-        "rb" => Some("Ruby".to_string()),
-        "swift" => Some("Swift".to_string()),
-        "kt" => Some("Kotlin".to_string()),
-        "scala" => Some("Scala".to_string()),
-        "clj" => Some("Clojure".to_string()),
-        "hs" => Some("Haskell".to_string()),
-        "ml" => Some("OCaml".to_string()),
-        "ex" | "exs" => Some("Elixir".to_string()),
-        "erl" => Some("Erlang".to_string()),
-        "dart" => Some("Dart".to_string()),
-        "lua" => Some("Lua".to_string()),
-        "r" => Some("R".to_string()),
-        "m" => Some("MATLAB".to_string()),
-        "sql" => Some("SQL".to_string()),
-        "sh" | "bash" => Some("Shell".to_string()),
-        "ps1" => Some("PowerShell".to_string()),
-        "dockerfile" => Some("Dockerfile".to_string()),
-        "yaml" | "yml" => Some("YAML".to_string()),
-        "json" => Some("JSON".to_string()),
-        "xml" => Some("XML".to_string()),
-        "html" => Some("HTML".to_string()),
-        "css" => Some("CSS".to_string()),
-        "scss" | "sass" => Some("SCSS".to_string()),
+        "rs" => Some("Rust"),
+        "py" => Some("Python"),
+        "js" | "mjs" => Some("JavaScript"),
+        "ts" => Some("TypeScript"),
+        "go" => Some("Go"),
+        "java" => Some("Java"),
+        "cpp" | "cc" | "cxx" => Some("C++"),
+        "c" => Some("C"),
+        "cs" => Some("C#"),
+        "php" => Some("PHP"),
+        "rb" => Some("Ruby"),
+        "swift" => Some("Swift"),
+        "kt" => Some("Kotlin"),
+        "scala" => Some("Scala"),
+        "clj" => Some("Clojure"),
+        "hs" => Some("Haskell"),
+        "ml" => Some("OCaml"),
+        "ex" | "exs" => Some("Elixir"),
+        "erl" => Some("Erlang"),
+        "dart" => Some("Dart"),
+        "lua" => Some("Lua"),
+        "r" => Some("R"),
+        "m" => Some("MATLAB"),
+        "sql" => Some("SQL"),
+        "sh" | "bash" => Some("Shell"),
+        "ps1" => Some("PowerShell"),
+        "dockerfile" => Some("Dockerfile"),
+        "yaml" | "yml" => Some("YAML"),
+        "json" => Some("JSON"),
+        "xml" => Some("XML"),
+        "html" => Some("HTML"),
+        "css" => Some("CSS"),
+        "scss" | "sass" => Some("SCSS"),
         _ => None,
     }
 }
 
 /// Check if an issue should be included based on severity level
 fn should_include_issue(issue_severity: &str, min_severity: &str) -> bool {
-    let severity_order = ["Info", "Warning", "Error", "Critical"];
-
-    let issue_level = severity_order
+    let issue_level = SEVERITY_ORDER
         .iter()
         .position(|&s| s == issue_severity)
         .unwrap_or(0);
-    let min_level = severity_order
+    let min_level = SEVERITY_ORDER
         .iter()
         .position(|&s| s == min_severity)
         .unwrap_or(1);
@@ -233,29 +241,20 @@ mod tests {
 
     #[test]
     fn test_detect_language_from_path() {
-        assert_eq!(
-            detect_language_from_path("main.rs"),
-            Some("Rust".to_string())
-        );
-        assert_eq!(
-            detect_language_from_path("script.py"),
-            Some("Python".to_string())
-        );
-        assert_eq!(
-            detect_language_from_path("app.js"),
-            Some("JavaScript".to_string())
-        );
+        assert_eq!(detect_language_from_path("main.rs"), Some("Rust"));
+        assert_eq!(detect_language_from_path("script.py"), Some("Python"));
+        assert_eq!(detect_language_from_path("app.js"), Some("JavaScript"));
         assert_eq!(detect_language_from_path("component.tsx"), None); // TypeScript JSX not in our list
         assert_eq!(detect_language_from_path("noext"), None);
     }
 
     #[test]
     fn test_should_include_issue() {
-        assert_eq!(should_include_issue("Critical", "Warning"), true);
-        assert_eq!(should_include_issue("Error", "Warning"), true);
-        assert_eq!(should_include_issue("Warning", "Warning"), true);
-        assert_eq!(should_include_issue("Info", "Warning"), false);
-        assert_eq!(should_include_issue("Critical", "Critical"), true);
-        assert_eq!(should_include_issue("Error", "Critical"), false);
+        assert!(should_include_issue("Critical", "Warning"));
+        assert!(should_include_issue("Error", "Warning"));
+        assert!(should_include_issue("Warning", "Warning"));
+        assert!(!should_include_issue("Info", "Warning"));
+        assert!(should_include_issue("Critical", "Critical"));
+        assert!(!should_include_issue("Error", "Critical"));
     }
 }

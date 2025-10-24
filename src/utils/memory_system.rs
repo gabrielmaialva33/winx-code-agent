@@ -251,13 +251,13 @@ impl MemorySystem {
             let entry = entry?;
             let path = entry.path();
 
-            if path.is_file() {
-                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                    // Look for .txt files (main memory files)
-                    if file_name.ends_with(".txt") && !file_name.ends_with("_bash_state.json") {
-                        let task_id = file_name.strip_suffix(".txt").unwrap_or(file_name);
-                        task_ids.push(task_id.to_string());
-                    }
+            if path.is_file()
+                && let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+            {
+                // Look for .txt files (main memory files)
+                if file_name.ends_with(".txt") && !file_name.ends_with("_bash_state.json") {
+                    let task_id = file_name.strip_suffix(".txt").unwrap_or(file_name);
+                    task_ids.push(task_id.to_string());
                 }
             }
         }
@@ -303,17 +303,17 @@ impl MemorySystem {
             let entry = entry?;
             let path = entry.path();
 
-            if path.is_file() {
-                if let Ok(metadata) = entry.metadata() {
-                    stats.total_files += 1;
-                    stats.total_size += metadata.len();
+            if path.is_file()
+                && let Ok(metadata) = entry.metadata()
+            {
+                stats.total_files += 1;
+                stats.total_size += metadata.len();
 
-                    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-                        if file_name.ends_with(".txt") {
-                            stats.memory_files += 1;
-                        } else if file_name.ends_with("_bash_state.json") {
-                            stats.state_files += 1;
-                        }
+                if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                    if file_name.ends_with(".txt") {
+                        stats.memory_files += 1;
+                    } else if file_name.ends_with("_bash_state.json") {
+                        stats.state_files += 1;
                     }
                 }
             }

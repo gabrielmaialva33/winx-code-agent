@@ -6,12 +6,13 @@
 use anyhow::Context as AnyhowContext;
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use similar::TextDiff;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use tokio::task;
-use tracing::{debug, error, info, instrument, trace, warn};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::{debug, error, info, instrument, trace, warn}; // Replace std::sync::Mutex
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, FileWhitelistData};
@@ -24,23 +25,28 @@ use crate::utils::path::expand_user;
 // Create these with caching to improve performance
 fn search_marker() -> &'static Regex {
     lazy_static::lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"^<<<<<<+\s*SEARCH\s*$").unwrap();
+        static ref REGEX: Regex = Regex::new(r"^<<<<<<+\s*SEARCH\s*$").expect("Invalid regex pattern for search marker");
     }
     &REGEX
 }
 
 fn divider_marker() -> &'static Regex {
     lazy_static::lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"^======*\s*$").unwrap();
+        static ref REGEX: Regex = Regex::new(r"^======*\s*$").expect("Invalid regex pattern for divider marker");
     }
     &REGEX
 }
 
 fn replace_marker() -> &'static Regex {
     lazy_static::lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"^>>>>>>+\s*REPLACE\s*$").unwrap();
+        static ref REGEX: Regex = Regex::new(r"^>>>>>>+\s*REPLACE\s*$").expect("Invalid regex pattern for replace marker");
     }
     &REGEX
+}
+
+/// Remove all whitespace from a string
+fn remove_whitespace(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
 }
 
 /// Maximum file size to read
@@ -146,9 +152,9 @@ impl SearchReplaceHelper {
                     }
 
                     return Err(WinxError::SearchBlockAmbiguous {
-                        block_content: search.clone(),
+                        block_content: Arc::new(search.clone()),
                         match_count: count_before,
-                        suggestions: vec![
+                        suggestions: Arc::new(vec![
                             format!("Block {} matches {} times in the file at lines: {}", 
                                 i + 1, count_before,
                                 match_locations.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")),
@@ -158,7 +164,7 @@ impl SearchReplaceHelper {
                             "• Include surrounding function names, comments, or unique identifiers".to_string(),
                             "• Make the search block more specific to match only the intended location".to_string(),
                             "• Break the change into smaller, more targeted search/replace blocks".to_string(),
-                        ],
+                        ]),
                     });
                 }
 
@@ -187,8 +193,11 @@ impl SearchReplaceHelper {
             ));
 
             // Try fuzzy matching if enabled
-            if self.use_fuzzy_matching && self.fuzzy_matcher.is_some() {
-                let mut fuzzy_matcher = self.fuzzy_matcher.as_ref().unwrap().clone();
+            if self.use_fuzzy_matching
+                && self.fuzzy_matcher.is_some()
+                && let Some(ref matcher) = self.fuzzy_matcher
+            {
+                let mut fuzzy_matcher = matcher.clone();
                 let matches = fuzzy_matcher.find_matches(search, &content);
 
                 if !matches.is_empty() {
@@ -241,12 +250,15 @@ impl SearchReplaceHelper {
                 });
 
             // Create a more detailed error message
-            let error_message = format!(
-                "Search block {} of {} not found in content:\n```\n{}\n```\n\n{}\n\nThis might be due to:\n- Mismatched whitespace or line endings\n- Different indentation or formatting\n- The code has been significantly changed\n- Case sensitivity differences\n\nConsider using percentage_to_change > 50 to replace the entire file instead.",
-                i + 1, total_blocks, search.trim(), suggestion
-            );
-
-            return Err(WinxError::SearchBlockNotFound(error_message));
+            return Err(WinxError::SearchBlockNotFound {
+                message: Arc::new(format!(
+                    "Search block {} of {} not found in content:\n```\n{}\n```\n\n{}\n\nThis might be due to:\n- Mismatched whitespace or line endings\n- Different indentation or formatting\n- The code has been significantly changed\n- Case sensitivity differences\n\nConsider using percentage_to_change > 50 to replace the entire file instead.",
+                    i + 1,
+                    total_blocks,
+                    search.trim(),
+                    suggestion
+                )),
+            });
         }
 
         Ok(content)
@@ -263,9 +275,9 @@ impl SearchReplaceHelper {
         let matcher = match &mut self.fuzzy_matcher {
             Some(matcher) => matcher,
             None => {
-                return Err(WinxError::SearchBlockNotFound(
-                    "Fuzzy matching not available".to_string(),
-                ))
+                return Err(WinxError::SearchBlockNotFound {
+                    message: Arc::new("Fuzzy matcher not available".to_string()),
+                });
             }
         };
 
@@ -273,9 +285,9 @@ impl SearchReplaceHelper {
         let matches = matcher.find_matches(search, content);
 
         if matches.is_empty() {
-            return Err(WinxError::SearchBlockNotFound(
-                "No fuzzy matches found for search block".to_string(),
-            ));
+            return Err(WinxError::SearchBlockNotFound {
+                message: Arc::new("No fuzzy matches found for search block".to_string()),
+            });
         }
 
         // Find highest confidence match
@@ -319,14 +331,18 @@ impl SearchReplaceHelper {
                 "Found potential match with high confidence ({confidence_percent}%) but automatic replacement is disabled.\n\n{}\n\nTo enable automatic fixing with high-confidence matches, set auto_apply_fuzzy_fixes=true.",
                 match_suggestions
             );
-            Err(WinxError::SearchBlockNotFound(error_message))
+            Err(WinxError::SearchBlockNotFound {
+                message: Arc::new(error_message),
+            })
         } else {
             // Low confidence match
             let error_message = format!(
                 "Found potential match but confidence is too low ({confidence_percent}%).\n\n{}",
                 match_suggestions
             );
-            Err(WinxError::SearchBlockNotFound(error_message))
+            Err(WinxError::SearchBlockNotFound {
+                message: Arc::new(error_message),
+            })
         }
     }
 
@@ -368,8 +384,8 @@ impl SearchReplaceHelper {
         let mut suggestions = Vec::new();
 
         // Strategy 1: Check for whitespace/line ending differences
-        let search_no_whitespace = search.replace(" ", "").replace("\n", "").replace("\t", "");
-        let content_no_whitespace = content.replace(" ", "").replace("\n", "").replace("\t", "");
+        let search_no_whitespace = remove_whitespace(search);
+        let content_no_whitespace = remove_whitespace(content);
 
         if content_no_whitespace.contains(&search_no_whitespace) {
             suggestions.push("Your search block might have different whitespace or line endings than the content. Try normalizing whitespace.".to_string());
@@ -421,21 +437,21 @@ impl SearchReplaceHelper {
         }
 
         // Strategy 3: Longest common substring detection
-        if let Some(common) = self.find_longest_common_substring(search, content) {
-            if common.len() >= 20 {
-                // Only show substantial matches
-                let preview = if common.len() > 40 {
-                    format!("{}...", &common[..40])
-                } else {
-                    common.clone()
-                };
+        if let Some(common) = self.find_longest_common_substring(search, content)
+            && common.len() >= 20
+        {
+            // Only show substantial matches
+            let preview = if common.len() > 40 {
+                format!("{}...", &common[..40])
+            } else {
+                common.clone()
+            };
 
-                suggestions.push(format!(
-                    "Found a matching section of {} characters: '{}'",
-                    common.len(),
-                    preview
-                ));
-            }
+            suggestions.push(format!(
+                "Found a matching section of {} characters: '{}'",
+                common.len(),
+                preview
+            ));
         }
 
         // Strategy 4: Check for case sensitivity issues
@@ -698,12 +714,13 @@ impl MatchAnalysis {
                 "Consider adding more context before and after this block to make the match unique.".to_string(),
                 "Include additional surrounding lines in your search block.".to_string(),
                 "Use more specific content that uniquely identifies the location to change.".to_string(),
+                "Break large changes into smaller, more specific blocks".to_string(),
             ]);
 
             return Err(WinxError::SearchBlockAmbiguous {
-                block_content: self.search_block.clone(),
+                block_content: Arc::new(self.search_block.clone()),
                 match_count: self.exact_matches.len(),
-                suggestions,
+                suggestions: Arc::new(suggestions),
             });
         }
 
@@ -756,8 +773,8 @@ impl MultiMatchResolver {
         // If multiple blocks have conflicts, generate a summary error
         if conflicting_blocks.len() > 1 {
             return Err(WinxError::SearchBlockConflict {
-                conflicting_blocks,
-                first_differing_block,
+                conflicting_blocks: Arc::new(conflicting_blocks),
+                first_differing_block: first_differing_block.map(Arc::new),
             });
         }
 
@@ -792,10 +809,10 @@ impl MultiMatchResolver {
 /// Enhanced search/replace syntax error with WCGW-style detailed reporting
 #[derive(Debug)]
 struct SearchReplaceSyntaxError {
-    message: String,
+    message: Arc<String>,
     line_number: Option<usize>,
-    block_type: Option<String>,
-    suggestions: Vec<String>,
+    block_type: Option<Arc<String>>,
+    suggestions: Arc<Vec<String>>,
 }
 
 impl std::fmt::Display for SearchReplaceSyntaxError {
@@ -809,10 +826,10 @@ impl SearchReplaceSyntaxError {
     fn with_help_text(message: impl Into<String>) -> Self {
         let msg = message.into();
         Self {
-            message: msg,
+            message: Arc::new(msg),
             line_number: None,
             block_type: None,
-            suggestions: vec![
+            suggestions: Arc::new(vec![
                 "Make sure blocks are in correct sequence, and the markers are in separate lines:"
                     .to_string(),
                 "".to_string(),
@@ -821,7 +838,7 @@ impl SearchReplaceSyntaxError {
                 "=======".to_string(),
                 " example new".to_string(),
                 ">>>>>>> REPLACE".to_string(),
-            ],
+            ]),
         }
     }
 
@@ -833,10 +850,10 @@ impl SearchReplaceSyntaxError {
         suggestions: Vec<String>,
     ) -> Self {
         Self {
-            message: message.into(),
+            message: Arc::new(message.into()),
             line_number,
-            block_type,
-            suggestions,
+            block_type: block_type.map(Arc::new),
+            suggestions: Arc::new(suggestions),
         }
     }
 
@@ -859,7 +876,7 @@ impl SearchReplaceSyntaxError {
 
         if !self.suggestions.is_empty() {
             msg.push_str("\nSuggestions:\n");
-            for suggestion in &self.suggestions {
+            for suggestion in self.suggestions.as_ref() {
                 if suggestion.is_empty() {
                     msg.push('\n');
                 } else {
@@ -1250,8 +1267,7 @@ fn check_can_overwrite(file_path: &str, bash_state: &BashState) -> Result<()> {
     if !bash_state.whitelist_for_overwrite.contains_key(file_path) {
         return Err(WinxError::FileAccessError {
             path: PathBuf::from(file_path),
-            message: "You need to read the file at least once before it can be overwritten. Use the ReadFiles tool with this file path first."
-                .to_string(),
+            message: Arc::new("You need to read the file at least once before it can be overwritten. Use the ReadFiles tool with this file path first.".to_string()),
         });
     }
 
@@ -1264,7 +1280,7 @@ fn check_can_overwrite(file_path: &str, bash_state: &BashState) -> Result<()> {
     if curr_hash != whitelist_data.file_hash {
         return Err(WinxError::FileAccessError {
             path: PathBuf::from(file_path),
-            message: "The file has changed since it was last read. Use the ReadFiles tool to read the current version before modifying.".to_string(),
+            message: Arc::new("The file has changed since it was last read. Use the ReadFiles tool to read the current version before modifying.".to_string()),
         });
     }
 
@@ -1279,10 +1295,10 @@ fn check_can_overwrite(file_path: &str, bash_state: &BashState) -> Result<()> {
 
         return Err(WinxError::FileAccessError {
             path: PathBuf::from(file_path),
-            message: format!(
+            message: Arc::new(format!(
                 "You need to read more of the file before it can be overwritten. Unread line ranges: {}. Use the ReadFiles tool with line range specifications to read these sections.",
                 ranges_str
-            ),
+            )),
         });
     }
 
@@ -1321,14 +1337,16 @@ fn check_path_allowed(file_path: &str, bash_state: &BashState) -> Result<()> {
                 }
             }
 
-            Err(WinxError::CommandNotAllowed(format!(
-                "Updating file {} not allowed in current mode. Doesn't match allowed globs: {:?}",
-                file_path, globs
-            )))
+            Err(WinxError::CommandNotAllowed {
+                message: Arc::new(format!(
+                    "Updating file {} not allowed in current mode. Doesn't match allowed globs: {:?}",
+                    file_path, globs
+                )),
+            })
         }
-        _ => Err(WinxError::CommandNotAllowed(
-            "No file paths are allowed in current mode".to_string(),
-        )),
+        _ => Err(WinxError::CommandNotAllowed {
+            message: Arc::new("No file paths are allowed in current mode".to_string()),
+        }),
     }
 }
 
@@ -1350,34 +1368,13 @@ fn detect_file_changes(original: &str, new: &str) -> Option<String> {
         return None;
     }
 
-    // Create temporary files for diff
-    let mut original_file = tempfile::NamedTempFile::new().ok()?;
-    let mut new_file = tempfile::NamedTempFile::new().ok()?;
+    let diff = TextDiff::from_lines(original, new);
+    let unified_diff = diff.unified_diff().to_string();
 
-    // Write content to temp files
-    if original_file.write_all(original.as_bytes()).is_err()
-        || new_file.write_all(new.as_bytes()).is_err()
-    {
-        return None;
-    }
-
-    // Get file paths
-    let original_path = original_file.path();
-    let new_path = new_file.path();
-
-    // Run diff command
-    let output = std::process::Command::new("diff")
-        .args(["-u", original_path.to_str()?, new_path.to_str()?])
-        .output()
-        .ok()?;
-
-    // Parse output
-    let diff = String::from_utf8_lossy(&output.stdout).to_string();
-
-    if diff.is_empty() {
+    if unified_diff.trim().is_empty() {
         None
     } else {
-        Some(diff)
+        Some(unified_diff)
     }
 }
 
@@ -1409,18 +1406,11 @@ pub async fn handle_tool_call(
 
     // Lock bash state to extract data
     {
-        let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
-        })?;
+        let bash_state_guard = bash_state_arc.lock().await;
 
-        // Ensure bash state is initialized
-        let bash_state = match &*bash_state_guard {
-            Some(state) => state,
-            None => {
-                error!("BashState not initialized");
-                return Err(WinxError::BashStateNotInitialized);
-            }
-        };
+        let bash_state = bash_state_guard
+            .as_ref()
+            .ok_or(WinxError::BashStateNotInitialized)?;
 
         // Extract needed data
         chat_id = bash_state.current_chat_id.clone();
@@ -1432,10 +1422,12 @@ pub async fn handle_tool_call(
                 "Chat ID mismatch: expected {}, got {}",
                 chat_id, file_write_or_edit.chat_id
             );
-            return Err(WinxError::ChatIdMismatch(format!(
-                "Error: No saved bash state found for chat ID \"{}\". Please initialize first with this ID.",
-                file_write_or_edit.chat_id
-            )));
+            return Err(WinxError::ChatIdMismatch {
+                message: Arc::new(format!(
+                    "Error: No saved bash state found for chat ID \"{}\". Please initialize first with this ID.",
+                    file_write_or_edit.chat_id
+                )),
+            });
         }
 
         // Expand the path
@@ -1458,14 +1450,18 @@ pub async fn handle_tool_call(
             if !bash_state.is_file_edit_allowed(&file_path) {
                 let violation_message =
                     bash_state.get_mode_violation_message("file editing", &file_path);
-                return Err(WinxError::CommandNotAllowed(violation_message));
+                return Err(WinxError::CommandNotAllowed {
+                    message: Arc::new(violation_message),
+                });
             }
         } else {
             // New file, check write permissions
             if !bash_state.is_file_write_allowed(&file_path) {
                 let violation_message =
                     bash_state.get_mode_violation_message("file writing", &file_path);
-                return Err(WinxError::CommandNotAllowed(violation_message));
+                return Err(WinxError::CommandNotAllowed {
+                    message: Arc::new(violation_message),
+                });
             }
         }
     }
@@ -1482,9 +1478,7 @@ pub async fn handle_tool_call(
     let mut potential_errors = Vec::new();
 
     // Get a mutex guard for the BashState
-    let mut bash_state_guard = bash_state_arc
-        .lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+    let mut bash_state_guard = bash_state_arc.lock().await;
 
     if let Some(bash_state) = bash_state_guard.as_mut() {
         // Enhanced file access validation for existing files
@@ -1492,10 +1486,11 @@ pub async fn handle_tool_call(
             bash_state.validate_file_access(Path::new(&file_path))?;
         }
         // Predict potential errors for this file operation
-        match bash_state
+        let predictions = bash_state
             .error_predictor
             .predict_file_errors(&file_path, operation)
-        {
+            .await;
+        match predictions {
             Ok(predictions) => {
                 // Filter predictions with high confidence
                 for prediction in predictions {
@@ -1515,7 +1510,7 @@ pub async fn handle_tool_call(
     // Release the lock before continuing with file operations
     drop(bash_state_guard);
 
-    // Get the original content if file exists (for diff and incremental updates)
+    // Get the original content if file exists (for similar diff and incremental updates)
     let original_content = if Path::new(&file_path).exists() {
         fs::read_to_string(&file_path).ok()
     } else {
@@ -1554,7 +1549,7 @@ pub async fn handle_tool_call(
         if !file_path_obj.exists() {
             return Err(WinxError::FileAccessError {
                 path: file_path_obj.to_path_buf(),
-                message: "File does not exist, cannot perform search/replace edit. Use percentage_to_change > 50 to create a new file.".to_string(),
+                message: Arc::new("File does not exist, cannot perform search/replace edit. Use percentage_to_change > 50 to create a new file.".to_string()),
             });
         }
 
@@ -1565,10 +1560,10 @@ pub async fn handle_tool_call(
                 tracing::error!("Failed to get file metadata: {}", e);
                 return Err(WinxError::FileAccessError {
                     path: file_path_obj.to_path_buf(),
-                    message: format!(
+                    message: Arc::new(format!(
                         "Failed to get file metadata: {}. Check file permissions.",
                         e
-                    ),
+                    )),
                 });
             }
         };
@@ -1582,15 +1577,21 @@ pub async fn handle_tool_call(
             });
         }
 
-        // Read the file content
-        let original_content = match fs::read_to_string(file_path_obj) {
-            Ok(content) => content,
-            Err(e) => {
-                tracing::error!("Failed to read file for search/replace edit: {}", e);
-                return Err(WinxError::FileAccessError {
-                    path: file_path_obj.to_path_buf(),
-                    message: format!("Failed to read file: {}. The file might be binary or have encoding issues.", e),
-                });
+        let original_content = if let Some(content) = original_content {
+            content
+        } else {
+            match fs::read_to_string(file_path_obj) {
+                Ok(content) => content,
+                Err(e) => {
+                    tracing::error!("Failed to read file for search/replace edit: {}", e);
+                    return Err(WinxError::FileAccessError {
+                        path: file_path_obj.to_path_buf(),
+                        message: Arc::new(format!(
+                            "Failed to read file: {}. The file might be binary or have encoding issues.",
+                            e
+                        )),
+                    });
+                }
             }
         };
 
@@ -1646,8 +1647,8 @@ pub async fn handle_tool_call(
             ));
         }
 
-        // Generate diff if requested
-        let diff_info = if file_write_or_edit.show_diff.unwrap_or(false) {
+        // Generate similar diff if requested
+        let similar_info = if file_write_or_edit.show_diff.unwrap_or(false) {
             match detect_file_changes(&original_content, &new_content) {
                 Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
                 None => "".to_string(),
@@ -1665,10 +1666,11 @@ pub async fn handle_tool_call(
             );
 
             // Record the error for future prediction
-            let bash_state_guard = bash_state_arc.lock().ok();
-            if let Some(guard) = bash_state_guard {
-                if let Some(bash_state) = guard.as_ref() {
-                    if let Err(record_err) = bash_state.error_predictor.record_error(
+            let bash_state_guard = bash_state_arc.lock().await;
+            if let Some(bash_state) = bash_state_guard.as_ref() {
+                bash_state
+                    .error_predictor
+                    .record_error(
                         "file_write",
                         &format!("Failed to write file: {}", e),
                         None,
@@ -1680,15 +1682,13 @@ pub async fn handle_tool_call(
                                 .to_string_lossy()
                                 .as_ref(),
                         ),
-                    ) {
-                        warn!("Failed to record error for prediction: {}", record_err);
-                    }
-                }
+                    )
+                    .await?;
             }
 
             return Err(WinxError::FileWriteError {
                 path: file_path_obj.to_path_buf(),
-                message: format!("Failed to write file: {}", e),
+                message: Arc::new(format!("Failed to write file: {}", e)),
             });
         }
 
@@ -1708,11 +1708,11 @@ pub async fn handle_tool_call(
         // Update whitelist data asynchronously
         let file_path_clone = file_path.clone();
         let bash_state_arc_clone = Arc::clone(bash_state_arc);
-        task::spawn_blocking(move || {
-            if let Ok(mut bash_state_guard) = bash_state_arc_clone.lock() {
-                if let Some(bash_state) = bash_state_guard.as_mut() {
-                    // Calculate file hash
-                    let file_content = fs::read(&file_path_clone).ok()?;
+        tokio::spawn(async move {
+            let mut bash_state_guard = bash_state_arc_clone.lock().await;
+            if let Some(bash_state) = bash_state_guard.as_mut() {
+                // Calculate file hash
+                if let Ok(file_content) = fs::read(&file_path_clone) {
                     let file_hash = format!("{:x}", Sha256::digest(&file_content));
 
                     // The line range represents the entire file (1 to total_lines)
@@ -1732,15 +1732,12 @@ pub async fn handle_tool_call(
                         );
                     }
                 }
-                Some(())
-            } else {
-                None
             }
         });
 
         Ok(format!(
             "Successfully edited file {}{}",
-            file_path, diff_info
+            file_path, similar_info
         ))
     } else {
         // This is a full file write operation
@@ -1763,16 +1760,19 @@ pub async fn handle_tool_call(
             ));
         }
 
-        // Generate diff if requested and file exists
-        let diff_info =
-            if file_write_or_edit.show_diff.unwrap_or(false) && original_content.is_some() {
-                match detect_file_changes(original_content.as_ref().unwrap(), content) {
+        // Generate similar diff if requested and file exists
+        let similar_info = if file_write_or_edit.show_diff.unwrap_or(false) {
+            if let Some(orig) = &original_content {
+                match detect_file_changes(orig, content) {
                     Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
                     None => "".to_string(),
                 }
             } else {
                 "".to_string()
-            };
+            }
+        } else {
+            "".to_string()
+        };
 
         // Write the content to the file
         if let Err(e) = write_to_file(file_path_obj, content) {
@@ -1783,7 +1783,7 @@ pub async fn handle_tool_call(
             );
             return Err(WinxError::FileWriteError {
                 path: file_path_obj.to_path_buf(),
-                message: format!("Failed to write file: {}", e),
+                message: Arc::new(format!("Failed to write file: {}", e)),
             });
         }
 
@@ -1803,11 +1803,11 @@ pub async fn handle_tool_call(
         // Update whitelist data asynchronously
         let file_path_clone = file_path.clone();
         let bash_state_arc_clone = Arc::clone(bash_state_arc);
-        task::spawn_blocking(move || {
-            if let Ok(mut bash_state_guard) = bash_state_arc_clone.lock() {
-                if let Some(bash_state) = bash_state_guard.as_mut() {
-                    // Calculate file hash
-                    let file_content = fs::read(&file_path_clone).ok()?;
+        tokio::spawn(async move {
+            let mut bash_state_guard = bash_state_arc_clone.lock().await;
+            if let Some(bash_state) = bash_state_guard.as_mut() {
+                // Calculate file hash
+                if let Ok(file_content) = fs::read(&file_path_clone) {
                     let file_hash = format!("{:x}", Sha256::digest(&file_content));
 
                     // The line range represents the entire file (1 to total_lines)
@@ -1827,15 +1827,12 @@ pub async fn handle_tool_call(
                         );
                     }
                 }
-                Some(())
-            } else {
-                None
             }
         });
 
         Ok(format!(
             "Successfully wrote file {}{}",
-            file_path, diff_info
+            file_path, similar_info
         ))
     }
 }

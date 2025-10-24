@@ -6,11 +6,19 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::debug;
+use tokio::sync::Mutex;
+use tracing::debug; // Replace std::sync::Mutex
 
 use crate::errors::WinxError;
+
+lazy_static::lazy_static! {
+    static ref PATH_REGEX: regex::Regex = regex::Regex::new(r"[/\\][^\s:;,]+").unwrap();
+    static ref NUM_REGEX: regex::Regex = regex::Regex::new(r"\b\d+\b").unwrap();
+    static ref NAME_REGEX: regex::Regex = regex::Regex::new(r"'[^']+'").unwrap();
+    static ref STRING_REGEX: regex::Regex = regex::Regex::new(r#""[^"]+""#).unwrap();
+}
 
 /// Maximum number of errors to keep in history
 const MAX_ERROR_HISTORY: usize = 100;
@@ -305,18 +313,18 @@ impl ErrorPredictor {
     fn extract_file_pattern(&self, file_path: &str) -> String {
         let path = Path::new(file_path);
 
-        if let Some(extension) = path.extension() {
-            if let Some(ext_str) = extension.to_str() {
-                // For files, we often care about the extension
-                return format!("*.{}", ext_str);
-            }
+        if let Some(extension) = path.extension()
+            && let Some(ext_str) = extension.to_str()
+        {
+            // For files, we often care about the extension
+            return format!("*.{}", ext_str);
         }
 
         // If no extension or error, use a more generic pattern
-        if let Some(file_name) = path.file_name() {
-            if let Some(name) = file_name.to_str() {
-                return name.to_string();
-            }
+        if let Some(file_name) = path.file_name()
+            && let Some(name) = file_name.to_str()
+        {
+            return name.to_string();
         }
 
         // Fallback
@@ -328,10 +336,10 @@ impl ErrorPredictor {
         let path = Path::new(directory);
 
         // We often care about the last component of the directory
-        if let Some(last_component) = path.file_name() {
-            if let Some(name) = last_component.to_str() {
-                return format!("*/{}", name);
-            }
+        if let Some(last_component) = path.file_name()
+            && let Some(name) = last_component.to_str()
+        {
+            return format!("*/{}", name);
         }
 
         // Fallback
@@ -344,26 +352,16 @@ impl ErrorPredictor {
         let mut pattern = message.to_string();
 
         // Replace specific file paths with placeholders
-        pattern = regex::Regex::new(r"[/\\][^\s:;,]+")
-            .unwrap_or_else(|_| regex::Regex::new(r"xxx").unwrap())
-            .replace_all(&pattern, "[PATH]")
-            .to_string();
+        pattern = PATH_REGEX.replace_all(&pattern, "[PATH]").to_string();
 
         // Replace numbers with placeholders
-        pattern = regex::Regex::new(r"\b\d+\b")
-            .unwrap_or_else(|_| regex::Regex::new(r"xxx").unwrap())
-            .replace_all(&pattern, "[NUM]")
-            .to_string();
+        pattern = NUM_REGEX.replace_all(&pattern, "[NUM]").to_string();
 
         // Replace specific function or error names
-        pattern = regex::Regex::new(r"'[^']+'")
-            .unwrap_or_else(|_| regex::Regex::new(r"xxx").unwrap())
-            .replace_all(&pattern, "'[NAME]'")
-            .to_string();
+        pattern = NAME_REGEX.replace_all(&pattern, "'[NAME]'").to_string();
 
         // Replace quoted strings with placeholders
-        pattern = regex::Regex::new(r#""[^"]+""#)
-            .unwrap_or_else(|_| regex::Regex::new(r"xxx").unwrap())
+        pattern = STRING_REGEX
             .replace_all(&pattern, "\"[STRING]\"")
             .to_string();
 
@@ -413,11 +411,11 @@ impl ErrorPredictor {
                 }
 
                 // Find the most common error
-                if let Some((pattern, count)) = error_counts.iter().max_by_key(|(_, &count)| count)
+                if let Some((pattern, count)) = error_counts.iter().max_by_key(|(_, count)| *count)
                 {
                     let frequency = *count as f64 / errors.len() as f64;
                     if frequency >= ERROR_FREQUENCY_THRESHOLD {
-                        let suggestion = self.get_suggestion_for_error(base_command, pattern);
+                        let suggestion = Self::get_suggestion_for_error(base_command, pattern);
                         predictions.push(ErrorPrediction {
                             error_type: "command_error".to_string(),
                             message_pattern: pattern.clone(),
@@ -429,13 +427,17 @@ impl ErrorPredictor {
             }
         }
 
-        // Check patterns
-        for pattern in &self.error_patterns {
-            if let Some(cmd_pattern) = &pattern.command_pattern {
-                if self.pattern_matches(cmd_pattern, command) {
+        // Check patterns in parallel for better performance
+        let pattern_predictions: Vec<ErrorPrediction> = self
+            .error_patterns
+            .iter()
+            .filter_map(|pattern| {
+                if let Some(cmd_pattern) = &pattern.command_pattern
+                    && Self::pattern_matches(cmd_pattern, command)
+                {
                     // This pattern might apply to this command
                     let suggestion =
-                        self.get_suggestion_for_error(command, &pattern.message_pattern);
+                        Self::get_suggestion_for_error(command, &pattern.message_pattern);
 
                     let base_confidence = pattern.frequency as f64 / 10.0;
                     let decay_factor = 1.0
@@ -446,16 +448,22 @@ impl ErrorPredictor {
                     let confidence = (base_confidence * decay_factor).min(1.0);
 
                     if confidence >= PREDICTION_CONFIDENCE_THRESHOLD {
-                        predictions.push(ErrorPrediction {
+                        Some(ErrorPrediction {
                             error_type: pattern.error_type.clone(),
                             message_pattern: pattern.message_pattern.clone(),
                             confidence,
                             prevention: suggestion,
-                        });
+                        })
+                    } else {
+                        None
                     }
+                } else {
+                    None
                 }
-            }
-        }
+            })
+            .collect();
+
+        predictions.extend(pattern_predictions);
 
         predictions
     }
@@ -476,12 +484,12 @@ impl ErrorPredictor {
                 }
 
                 // Find the most common error
-                if let Some((pattern, count)) = error_counts.iter().max_by_key(|(_, &count)| count)
+                if let Some((pattern, count)) = error_counts.iter().max_by_key(|(_, count)| *count)
                 {
                     let frequency = *count as f64 / errors.len() as f64;
                     if frequency >= ERROR_FREQUENCY_THRESHOLD {
                         let suggestion =
-                            self.get_suggestion_for_file_error(file_path, pattern, operation);
+                            Self::get_suggestion_for_file_error(file_path, pattern, operation);
                         predictions.push(ErrorPrediction {
                             error_type: "file_error".to_string(),
                             message_pattern: pattern.clone(),
@@ -495,11 +503,15 @@ impl ErrorPredictor {
 
         // Check patterns
         let file_pattern = self.extract_file_pattern(file_path);
-        for pattern in &self.error_patterns {
-            if let Some(pat) = &pattern.file_pattern {
-                if self.pattern_matches(pat, &file_pattern) {
+        let pattern_predictions: Vec<ErrorPrediction> = self
+            .error_patterns
+            .iter()
+            .filter_map(|pattern| {
+                if let Some(pat) = &pattern.file_pattern
+                    && Self::pattern_matches(pat, &file_pattern)
+                {
                     // This pattern might apply to this file
-                    let suggestion = self.get_suggestion_for_file_error(
+                    let suggestion = Self::get_suggestion_for_file_error(
                         file_path,
                         &pattern.message_pattern,
                         operation,
@@ -514,16 +526,22 @@ impl ErrorPredictor {
                     let confidence = (base_confidence * decay_factor).min(1.0);
 
                     if confidence >= PREDICTION_CONFIDENCE_THRESHOLD {
-                        predictions.push(ErrorPrediction {
+                        Some(ErrorPrediction {
                             error_type: pattern.error_type.clone(),
                             message_pattern: pattern.message_pattern.clone(),
                             confidence,
                             prevention: suggestion,
-                        });
+                        })
+                    } else {
+                        None
                     }
+                } else {
+                    None
                 }
-            }
-        }
+            })
+            .collect();
+
+        predictions.extend(pattern_predictions);
 
         // Check for common file operation errors
         self.add_common_file_operation_predictions(file_path, operation, &mut predictions);
@@ -532,7 +550,7 @@ impl ErrorPredictor {
     }
 
     /// Check if a pattern matches a string
-    fn pattern_matches(&self, pattern: &str, s: &str) -> bool {
+    fn pattern_matches(pattern: &str, s: &str) -> bool {
         if pattern == "*" || pattern.is_empty() {
             return true;
         }
@@ -615,17 +633,16 @@ impl ErrorPredictor {
                 }
 
                 // Check if parent directory exists for new files
-                if !file_exists {
-                    if let Some(parent) = path.parent() {
-                        if !parent.exists() {
-                            predictions.push(ErrorPrediction {
+                if !file_exists
+                    && let Some(parent) = path.parent()
+                    && !parent.exists()
+                {
+                    predictions.push(ErrorPrediction {
                                 error_type: "directory_not_found".to_string(),
                                 message_pattern: "Directory not found".to_string(),
                                 confidence: 0.9,
                                 prevention: format!("The parent directory for '{}' does not exist. Create it first with mkdir -p.", parent.display()),
                             });
-                        }
-                    }
                 }
             }
             _ => {}
@@ -633,7 +650,7 @@ impl ErrorPredictor {
     }
 
     /// Get a suggestion for fixing a command error
-    fn get_suggestion_for_error(&self, command: &str, error_pattern: &str) -> String {
+    fn get_suggestion_for_error(command: &str, error_pattern: &str) -> String {
         // Extract base command
         let base_command = command.split_whitespace().next().unwrap_or(command);
 
@@ -706,7 +723,6 @@ impl ErrorPredictor {
 
     /// Get a suggestion for fixing a file error
     fn get_suggestion_for_file_error(
-        &self,
         file_path: &str,
         error_pattern: &str,
         operation: &str,
@@ -736,10 +752,10 @@ impl ErrorPredictor {
                 if error_pattern.contains("directory") {
                     return format!("'{}' is a directory, not a file", file_path);
                 }
-                if error_pattern.contains("No such file or directory") {
-                    if let Some(parent) = path.parent() {
-                        return format!("Create the parent directory '{}' first", parent.display());
-                    }
+                if error_pattern.contains("No such file or directory")
+                    && let Some(parent) = path.parent()
+                {
+                    return format!("Create the parent directory '{}' first", parent.display());
                 }
             }
             _ => {}
@@ -808,7 +824,7 @@ impl SharedErrorPredictor {
     }
 
     /// Record an error for future pattern recognition
-    pub fn record_error(
+    pub async fn record_error(
         &self,
         error_type: &str,
         message: &str,
@@ -816,47 +832,45 @@ impl SharedErrorPredictor {
         file_path: Option<&str>,
         directory: Option<&str>,
     ) -> Result<(), WinxError> {
-        let mut predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock error predictor: {}", e))
-        })?;
+        let mut predictor = self.inner.lock().await;
 
         predictor.record_error(error_type, message, command, file_path, directory);
         Ok(())
     }
 
     /// Record a WinxError for future pattern recognition
-    pub fn record_winx_error(
+    pub async fn record_winx_error(
         &self,
         error: &WinxError,
         command: Option<&str>,
         directory: Option<&str>,
     ) -> Result<(), WinxError> {
         let error_type = match error {
-            WinxError::ShellInitializationError(_) => "shell_init",
-            WinxError::WorkspacePathError(_) => "workspace_path",
-            WinxError::BashStateLockError(_) => "bash_state_lock",
+            WinxError::ShellInitializationError { message: _ } => "shell_init",
+            WinxError::WorkspacePathError { message: _ } => "workspace_path",
+            WinxError::BashStateLockError { message: _ } => "bash_state_lock",
             WinxError::BashStateNotInitialized => "bash_state_not_init",
-            WinxError::CommandExecutionError(_) => "command_execution",
-            WinxError::ArgumentParseError(_) => "argument_parse",
+            WinxError::CommandExecutionError { message: _ } => "command_execution",
+            WinxError::ArgumentParseError { message: _ } => "argument_parse",
             WinxError::FileAccessError { .. } => "file_access",
-            WinxError::CommandNotAllowed(_) => "command_not_allowed",
-            WinxError::ChatIdMismatch(_) => "chat_id_mismatch",
-            WinxError::DeserializationError(_) => "deserialization",
-            WinxError::SerializationError(_) => "serialization",
-            WinxError::SearchReplaceSyntaxError(_) => "search_replace_syntax",
-            WinxError::SearchBlockNotFound(_) => "search_block_not_found",
+            WinxError::CommandNotAllowed { message: _ } => "command_not_allowed",
+            WinxError::ChatIdMismatch { message: _ } => "chat_id_mismatch",
+            WinxError::DeserializationError { message: _ } => "deserialization",
+            WinxError::SerializationError { message: _ } => "serialization",
+            WinxError::SearchReplaceSyntaxError { message: _ } => "search_replace_syntax",
+            WinxError::SearchBlockNotFound { message: _ } => "search_block_not_found",
             WinxError::SearchBlockAmbiguous { .. } => "search_block_ambiguous",
             WinxError::SearchBlockConflict { .. } => "search_block_conflict",
             WinxError::SearchReplaceSyntaxErrorDetailed { .. } => "search_replace_syntax_detailed",
-            WinxError::JsonParseError(_) => "json_parse",
+            WinxError::JsonParseError { message: _ } => "json_parse",
             WinxError::FileTooLarge { .. } => "file_too_large",
             WinxError::FileWriteError { .. } => "file_write",
-            WinxError::DataLoadingError(_) => "data_loading",
+            WinxError::DataLoadingError { message: _ } => "data_loading",
             WinxError::ParameterValidationError { .. } => "parameter_validation",
             WinxError::MissingParameterError { .. } => "missing_parameter",
             WinxError::NullValueError { .. } => "null_value",
             WinxError::RecoverableSuggestionError { .. } => "recoverable_suggestion",
-            WinxError::ContextSaveError(_) => "context_save_error",
+            WinxError::ContextSaveError { message: _ } => "context_save_error",
             WinxError::CommandTimeout { .. } => "command_timeout",
             WinxError::InteractiveCommandDetected { .. } => "interactive_command",
             WinxError::CommandAlreadyRunning { .. } => "command_already_running",
@@ -865,13 +879,13 @@ impl SharedErrorPredictor {
             WinxError::SessionRecoveryError { .. } => "session_recovery",
             WinxError::ResourceAllocationError { .. } => "resource_allocation",
             WinxError::IoError(_) => "io_error",
-            WinxError::ApiError(_) => "api_error",
-            WinxError::NetworkError(_) => "network_error",
-            WinxError::ConfigurationError(_) => "configuration_error",
-            WinxError::ParseError(_) => "parse_error",
-            WinxError::InvalidInput(_) => "invalid_input",
-            WinxError::FileError(_) => "file_error",
-            WinxError::AIError(_) => "ai_error",
+            WinxError::ApiError { message: _ } => "api_error",
+            WinxError::NetworkError { message: _ } => "network_error",
+            WinxError::ConfigurationError { message: _ } => "configuration_error",
+            WinxError::ParseError { message: _ } => "parse_error",
+            WinxError::InvalidInput { message: _ } => "invalid_input",
+            WinxError::FileError { message: _ } => "file_error",
+            WinxError::AIError { message: _ } => "ai_error",
         };
 
         let message = format!("{}", error);
@@ -889,27 +903,29 @@ impl SharedErrorPredictor {
             file_path.as_deref(),
             directory,
         )
+        .await
     }
 
     /// Predict potential errors for a command
-    pub fn predict_command_errors(&self, command: &str) -> Result<Vec<ErrorPrediction>, WinxError> {
-        let predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock error predictor: {}", e))
-        })?;
-
+    pub async fn predict_command_errors(
+        &self,
+        command: &str,
+    ) -> Result<Vec<ErrorPrediction>, WinxError> {
+        let predictor = self.inner.lock().await;
         Ok(predictor.predict_command_errors(command))
     }
 
     /// Predict potential errors for a file operation
-    pub fn predict_file_errors(
+    pub async fn predict_file_errors(
         &self,
         file_path: &str,
         operation: &str,
     ) -> Result<Vec<ErrorPrediction>, WinxError> {
-        let predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock error predictor: {}", e))
-        })?;
+        let predictor = self.inner.lock().await;
 
-        Ok(predictor.predict_file_errors(file_path, operation))
+        // Directly use the predictor to call predict_file_errors
+        let predictions = predictor.predict_file_errors(file_path, operation);
+
+        Ok(predictions)
     }
 }

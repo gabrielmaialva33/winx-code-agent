@@ -15,13 +15,14 @@ pub use client::NvidiaClient;
 pub use config::NvidiaConfig;
 
 use crate::errors::{Result, WinxError};
+use std::sync::Arc;
 
 /// Initialize NVIDIA integration with configuration
 pub async fn initialize(config: NvidiaConfig) -> Result<NvidiaClient> {
     if config.api_key.is_empty() {
-        return Err(WinxError::ConfigurationError(
-            "NVIDIA API key is required".to_string(),
-        ));
+        return Err(WinxError::ConfigurationError {
+            message: Arc::new("API key cannot be empty".to_string()),
+        });
     }
 
     let client = NvidiaClient::new(config).await?;

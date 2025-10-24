@@ -8,10 +8,12 @@
 use anyhow::Context as AnyhowContext;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use tracing::{debug, error, info, instrument, warn};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::{debug, error, info, instrument, warn}; // Replace std::sync::Mutex
 
 use crate::errors::{ErrorRecovery, Result, WinxError};
 use crate::state::bash_state::BashState;
@@ -21,7 +23,7 @@ use crate::utils::file_extensions::FileExtensionAnalyzer;
 use crate::utils::mmap::{read_file_optimized, read_file_to_string};
 use crate::utils::path::expand_user;
 use crate::utils::resource_allocator::{
-    get_global_allocator, request_file_allocation, AllocationGuard,
+    AllocationGuard, get_global_allocator, request_file_allocation,
 };
 
 /// Type alias for file reading result
@@ -90,7 +92,7 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
 
     let file = File::open(path).map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Failed to open file for streaming: {}", e),
+        message: Arc::new(format!("Failed to open file for streaming: {}", e)),
     })?;
 
     let mut reader = BufReader::new(file);
@@ -102,7 +104,7 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
             .read(&mut buffer)
             .map_err(|e| WinxError::FileAccessError {
                 path: path.to_path_buf(),
-                message: format!("Failed to read chunk from file: {}", e),
+                message: Arc::new(format!("Failed to read chunk from file: {}", e)),
             })?;
 
         if bytes_read == 0 {
@@ -184,7 +186,7 @@ async fn read_file(
     if !path.exists() {
         let error = WinxError::FileAccessError {
             path: path.clone(),
-            message: "File does not exist".to_string(),
+            message: Arc::new("File does not exist".to_string()),
         };
 
         // Provide helpful suggestions for common errors
@@ -201,7 +203,7 @@ async fn read_file(
     if !path.is_file() {
         let error = WinxError::FileAccessError {
             path: path.clone(),
-            message: "Path exists but is not a file".to_string(),
+            message: Arc::new("Path exists but is not a file".to_string()),
         };
 
         // If it's a directory, suggest using a specific file
@@ -221,7 +223,7 @@ async fn read_file(
         Err(e) => {
             let error = WinxError::FileAccessError {
                 path: path.clone(),
-                message: format!("Failed to get file metadata: {}", e),
+                message: Arc::new(format!("Failed to get file metadata: {}", e)),
             };
 
             return Err(ErrorRecovery::suggest(
@@ -248,7 +250,7 @@ async fn read_file(
     };
 
     // Create allocation guard for automatic cleanup
-    let _guard = AllocationGuard::new(path.clone(), allocation.clone()).await;
+    let _guard = AllocationGuard::new(&path, allocation.clone()).await;
 
     // Check file size against allocation
     if file_size > allocation.allocated_memory as u64 && !allocation.should_use_streaming {
@@ -344,7 +346,7 @@ async fn read_file(
     if show_line_numbers {
         for (i, line) in filtered_lines.iter().enumerate() {
             let line_num = start_idx + i + 1; // Convert to 1-indexed
-            result_content.push_str(&format!("{} {}\n", line_num, line));
+            writeln!(result_content, "{} {}", line_num, line).unwrap();
         }
     } else {
         for line in filtered_lines {
@@ -386,10 +388,8 @@ async fn read_file(
             let last_line_shown = start_idx + line_count;
 
             // Add informative message about truncation
-            result_content.push_str(&format!(
-                "\n(...truncated) Only showing till line number {} of {} total lines due to the token limit, please continue reading from {} if required",
-                last_line_shown, total_lines, last_line_shown + 1
-            ));
+            write!(result_content, "\n(...truncated) Only showing till line number {} of {} total lines due to the token limit, please continue reading from {} if required",
+                last_line_shown, total_lines, last_line_shown + 1).unwrap();
 
             truncated = true;
             effective_end = last_line_shown;
@@ -522,24 +522,18 @@ pub async fn handle_tool_call(
 
     // Lock bash state to extract data
     {
-        let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
-        })?;
+        let mut bash_state_guard = bash_state_arc.lock().await; // Declare as mutable
 
-        // Ensure bash state is initialized
-        let bash_state = match &*bash_state_guard {
-            Some(state) => state,
-            None => {
-                error!("BashState not initialized");
-                return Err(ErrorRecovery::suggest(
-                    WinxError::BashStateNotInitialized,
-                    "Please call Initialize first with type=\"first_call\" and a valid workspace path",
-                ));
-            }
-        };
-
-        // Extract needed data
-        cwd = bash_state.cwd.clone();
+        if let Some(bash_state) = bash_state_guard.as_mut() {
+            // Extract needed data
+            cwd = bash_state.cwd.clone();
+        } else {
+            error!("BashState not initialized");
+            return Err(ErrorRecovery::suggest(
+                WinxError::BashStateNotInitialized,
+                "Please call Initialize first with type=\"first_call\" and a valid workspace path",
+            ));
+        }
     }
 
     // Process file paths and line ranges
@@ -553,7 +547,7 @@ pub async fn handle_tool_call(
 
     // If we have a token limit, allocate intelligently across files
     let token_allocations = if let Some(total_tokens) = max_tokens_per_file {
-        let file_names: Vec<String> = validated_read_files
+        let file_names: Vec<&str> = validated_read_files
             .file_paths
             .iter()
             .map(|path| {
@@ -561,14 +555,14 @@ pub async fn handle_tool_call(
                 Path::new(path)
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .unwrap_or(path)
-                    .to_string()
+                    .unwrap_or(path.as_str())
             })
             .collect();
 
         file_extension_analyzer
             .allocate_token_budget(&file_names, total_tokens)
             .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
             .collect::<HashMap<String, usize>>()
     } else {
         HashMap::new()
@@ -655,6 +649,7 @@ pub async fn handle_tool_call(
     // Build a structure to hold results
     struct FileReadInfo {
         original_path: String,
+        clean_path: String,
         result: Result<FileReadResult>,
     }
 
@@ -671,18 +666,18 @@ pub async fn handle_tool_call(
 
     // Process files in chunks
     for chunk in cloned_params.chunks(chunk_size.max(1)) {
+        let chunk = chunk.to_vec(); // Clone the chunk to ensure ownership
         let chunk_tasks = chunk
-            .iter()
+            .into_iter()
             .map(
                 |(clean_path, original_path, start_line_num, end_line_num, allocated_tokens)| {
                     let clean_path = clean_path.clone();
                     let original_path = original_path.clone();
                     let cwd = cwd.clone();
-                    let start = *start_line_num;
-                    let end = *end_line_num;
-                    let file_tokens = *allocated_tokens;
-
                     tokio::spawn(async move {
+                        let start = start_line_num;
+                        let end = end_line_num;
+                        let file_tokens = allocated_tokens;
                         let result = read_file(
                             &clean_path,
                             file_tokens,
@@ -701,6 +696,7 @@ pub async fn handle_tool_call(
 
                         FileReadInfo {
                             original_path,
+                            clean_path,
                             result,
                         }
                     })
@@ -712,10 +708,10 @@ pub async fn handle_tool_call(
         for task in chunk_tasks {
             file_read_tasks.push(task.await.unwrap_or_else(|e| FileReadInfo {
                 original_path: "unknown".to_string(),
-                result: Err(WinxError::CommandExecutionError(format!(
-                    "Task panicked: {}",
-                    e
-                ))),
+                clean_path: "unknown".to_string(),
+                result: Err(WinxError::CommandExecutionError {
+                    message: Arc::new(format!("Task panicked: {}", e)),
+                }),
             }));
         }
     }
@@ -733,6 +729,7 @@ pub async fn handle_tool_call(
         }
 
         let file_path = &file_info.original_path;
+        let clean_path = &file_info.clean_path;
 
         match file_info.result {
             Ok((content, file_truncated, tokens_used, canon_path, line_range)) => {
@@ -764,10 +761,12 @@ pub async fn handle_tool_call(
                     None
                 };
                 let range_formatted = range_format(start_line_num, end_line_num);
-                message.push_str(&format!(
+                write!(
+                    message,
                     "\n{}{}\n```\n{}\n",
-                    file_path, range_formatted, content
-                ));
+                    clean_path, range_formatted, content
+                )
+                .unwrap();
 
                 // Check if we need to stop due to truncation or token limit
                 if file_truncated || remaining_tokens == Some(0) {
@@ -781,10 +780,8 @@ pub async fn handle_tool_call(
                         .cloned()
                         .collect();
                     if !remaining_files.is_empty() {
-                        message.push_str(&format!(
-                            "\nNot reading the rest of the files: {} due to token limit, please call again",
-                            remaining_files.join(", ")
-                        ));
+                        write!(message, "\nNot reading the rest of the files: {} due to token limit, please call again",
+                            remaining_files.join(", ")).unwrap();
                     }
                 } else {
                     message.push_str("```");
@@ -808,7 +805,7 @@ pub async fn handle_tool_call(
                     _ => format!("{}", e),
                 };
 
-                message.push_str(&format!("\n{}: {}\n", file_path, error_msg));
+                write!(message, "\n{}: {}\n", clean_path, error_msg).unwrap();
                 had_errors = true;
             }
         }
@@ -852,17 +849,14 @@ pub async fn handle_tool_call(
         let whitelist_data: HashMap<String, Vec<(usize, usize)>> = file_ranges_dict.clone();
 
         move || {
-            if let Ok(mut bash_state_guard) = bash_state_arc.lock() {
+            // Correctly structured async block for tokio::spawn
+            tokio::spawn(async move {
+                let mut bash_state_guard = bash_state_arc.lock().await;
                 if let Some(bash_state) = bash_state_guard.as_mut() {
                     for (file_path, ranges) in whitelist_data {
-                        // The cache already has the file hash and metadata,
-                        // so we just need to ensure it's in the whitelist
-
-                        // Get the hash from the cache
                         let file_hash = cache
                             .get_cached_hash(Path::new(&file_path))
                             .unwrap_or_else(|| {
-                                // If not in cache (shouldn't happen), calculate it
                                 match read_file_optimized(Path::new(&file_path), MAX_FILE_SIZE) {
                                     Ok(content) => {
                                         let mut hasher = Sha256::new();
@@ -873,13 +867,10 @@ pub async fn handle_tool_call(
                                 }
                             });
 
-                        // Add or update the whitelist entry
                         if let Some(existing) =
                             bash_state.whitelist_for_overwrite.get_mut(&file_path)
                         {
                             existing.file_hash = file_hash.clone();
-
-                            // Get total lines from the cache
                             let total_lines = cache
                                 .get_unread_ranges(Path::new(&file_path))
                                 .iter()
@@ -895,7 +886,6 @@ pub async fn handle_tool_call(
                                 existing.add_range(range.0, range.1);
                             }
                         } else {
-                            // Create new entry
                             let total_lines = cache
                                 .get_unread_ranges(Path::new(&file_path))
                                 .iter()
@@ -914,7 +904,7 @@ pub async fn handle_tool_call(
                         }
                     }
                 }
-            }
+            });
         }
     });
 

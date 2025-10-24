@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+const DETAIL_BASIC: &str = "Provide a brief, high-level explanation of what this code does.";
+const DETAIL_EXPERT: &str = "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities.";
+const DETAIL_DEFAULT: &str = "Provide a detailed explanation of this code including its purpose, how it works, and key concepts.";
+
 /// Chat message role
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -46,8 +50,8 @@ impl ChatMessage {
 
 /// Chat completion request
 #[derive(Debug, Serialize)]
-pub struct ChatCompletionRequest {
-    pub model: String,
+pub struct ChatCompletionRequest<'a> {
+    pub model: &'a str,
     pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
@@ -137,9 +141,9 @@ pub struct DashScopeCodeAnalysisRequest {
     pub include_complexity: Option<bool>,
 }
 
-impl ChatCompletionRequest {
+impl<'a> ChatCompletionRequest<'a> {
     /// Create a new chat completion request
-    pub fn new(model: String, messages: Vec<ChatMessage>) -> Self {
+    pub fn new(model: &'a str, messages: Vec<ChatMessage>) -> Self {
         Self {
             model,
             messages,
@@ -152,11 +156,10 @@ impl ChatCompletionRequest {
     }
 
     /// Create a request for code analysis
-    pub fn new_code_analysis(model: String, code: &str, language: Option<&str>) -> Self {
+    pub fn new_code_analysis(model: &'a str, code: &str, language: Option<&str>) -> Self {
         let analysis_prompt = if let Some(lang) = language {
             format!(
-                "Analyze this {} code for bugs, security issues, performance problems, and style violations. \
-Return a JSON response with the following structure:
+                "Return a JSON response with the following structure:
 {{
   \"summary\": \"Brief description of what the code does and main issues\",
   \"issues\": [
@@ -173,15 +176,14 @@ Return a JSON response with the following structure:
 }}
 
 Code to analyze:
-```{}
-{}
-```",
+```{} {}
+```
+{}",
                 lang, lang, code
             )
         } else {
             format!(
-                "Analyze this code for bugs, security issues, performance problems, and style violations. \
-Return a JSON response with the following structure:
+                "Return a JSON response with the following structure:
 {{
   \"summary\": \"Brief description of what the code does and main issues\",
   \"issues\": [
@@ -215,7 +217,7 @@ Code to analyze:
 
     /// Create a request for code generation
     pub fn new_code_generation(
-        model: String,
+        model: &'a str,
         prompt: &str,
         language: Option<&str>,
         context: Option<&str>,
@@ -259,15 +261,15 @@ Code to analyze:
 
     /// Create a request for code explanation
     pub fn new_code_explanation(
-        model: String,
+        model: &'a str,
         code: &str,
         language: Option<&str>,
         detail_level: &str,
     ) -> Self {
         let detail_instruction = match detail_level {
-            "basic" => "Provide a brief, high-level explanation of what this code does.",
-            "expert" => "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities.",
-            _ => "Provide a detailed explanation of this code including its purpose, how it works, and key concepts."
+            "basic" => DETAIL_BASIC,
+            "expert" => DETAIL_EXPERT,
+            _ => DETAIL_DEFAULT,
         };
 
         let explanation_prompt = if let Some(lang) = language {

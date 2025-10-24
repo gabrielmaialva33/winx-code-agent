@@ -4,7 +4,9 @@
 //! that might hang, require interaction, or cause other issues. Based on WCGW's
 //! command safety patterns.
 
+use lazy_static::lazy_static;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Default command timeout in seconds
@@ -99,37 +101,25 @@ static BACKGROUND_COMMANDS: &[&str] = &[
     "service start",
 ];
 
-/// Command safety analyzer
-#[derive(Debug, Clone)]
-pub struct CommandSafety {
-    interactive_commands: HashSet<String>,
-    long_running_commands: HashSet<String>,
-    background_commands: HashSet<String>,
+lazy_static! {
+    /// Pre-computed HashSet for interactive commands
+    static ref INTERACTIVE_COMMANDS_SET: HashSet<&'static str> = INTERACTIVE_COMMANDS.iter().cloned().collect();
+
+    /// Pre-computed HashSet for long-running commands
+    static ref LONG_RUNNING_COMMANDS_SET: HashSet<&'static str> = LONG_RUNNING_COMMANDS.iter().cloned().collect();
+
+    /// Pre-computed HashSet for background commands
+    static ref BACKGROUND_COMMANDS_SET: HashSet<&'static str> = BACKGROUND_COMMANDS.iter().cloned().collect();
 }
 
-impl Default for CommandSafety {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Command safety analyzer with efficient lookups
+#[derive(Debug, Clone, Default)]
+pub struct CommandSafety;
 
 impl CommandSafety {
     /// Create a new command safety analyzer
     pub fn new() -> Self {
-        let interactive_commands = INTERACTIVE_COMMANDS.iter().map(|s| s.to_string()).collect();
-
-        let long_running_commands = LONG_RUNNING_COMMANDS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-
-        let background_commands = BACKGROUND_COMMANDS.iter().map(|s| s.to_string()).collect();
-
-        Self {
-            interactive_commands,
-            long_running_commands,
-            background_commands,
-        }
+        Self
     }
 
     /// Check if a command is potentially interactive
@@ -137,24 +127,23 @@ impl CommandSafety {
         let normalized = self.normalize_command(command);
 
         // Check exact matches
-        if self.interactive_commands.contains(&normalized) {
+        if INTERACTIVE_COMMANDS_SET.contains(&normalized.as_str()) {
             return true;
         }
 
         // Check if command starts with any interactive command
-        for interactive_cmd in &self.interactive_commands {
-            if normalized.starts_with(interactive_cmd) {
+        for interactive_cmd in INTERACTIVE_COMMANDS.iter() {
+            if let Some(rest) = normalized.strip_prefix(interactive_cmd) {
                 // Check that it's a word boundary
-                let rest = &normalized[interactive_cmd.len()..];
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
                     // For git commit, check if it has -m flag (non-interactive)
-                    if interactive_cmd == "git commit"
+                    if *interactive_cmd == "git commit"
                         && (normalized.contains("-m") || normalized.contains("--message"))
                     {
                         return false;
                     }
                     // For python, check if it has a script argument (non-interactive)
-                    if interactive_cmd == "python" || interactive_cmd == "python3" {
+                    if *interactive_cmd == "python" || *interactive_cmd == "python3" {
                         // If there's more than just "python" or "python3", it's likely a script
                         let parts: Vec<&str> = normalized.split_whitespace().collect();
                         if parts.len() > 1 && !parts[1].starts_with('-') {
@@ -173,17 +162,11 @@ impl CommandSafety {
     /// Check if a command might run for a long time
     pub fn is_long_running(&self, command: &str) -> bool {
         let normalized = self.normalize_command(command);
-
-        for long_cmd in &self.long_running_commands {
-            if normalized.starts_with(long_cmd) {
-                let rest = &normalized[long_cmd.len()..];
-                if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
-                    return true;
-                }
-            }
-        }
-
-        false
+        LONG_RUNNING_COMMANDS.iter().any(|&long_cmd| {
+            normalized.strip_prefix(long_cmd).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t')
+            })
+        })
     }
 
     /// Check if a command spawns background processes
@@ -195,12 +178,11 @@ impl CommandSafety {
             return true;
         }
 
-        for bg_cmd in &self.background_commands {
-            if normalized.starts_with(bg_cmd) {
-                let rest = &normalized[bg_cmd.len()..];
-                if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
-                    return true;
-                }
+        for bg_cmd in BACKGROUND_COMMANDS.iter() {
+            if let Some(rest) = normalized.strip_prefix(bg_cmd)
+                && (rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t'))
+            {
+                return true;
             }
         }
 
@@ -323,7 +305,7 @@ impl CommandContext {
     pub fn should_allow_execution(&self) -> Result<(), crate::errors::WinxError> {
         if self.is_interactive {
             return Err(crate::errors::WinxError::InteractiveCommandDetected {
-                command: self.command.clone(),
+                command: Arc::new(self.command.clone()),
             });
         }
 

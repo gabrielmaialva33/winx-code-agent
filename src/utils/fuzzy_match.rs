@@ -243,7 +243,7 @@ impl FuzzyMatcher {
         let pattern_lower = pattern.to_lowercase();
         let text_lower = text.to_lowercase();
 
-        if pattern_lower == text_lower {
+        if pattern.eq_ignore_ascii_case(text) {
             // Perfect case-insensitive match
             return vec![FuzzyMatch::new(
                 pattern.to_string(),
@@ -625,8 +625,8 @@ impl FuzzyMatcher {
             return Vec::new();
         }
 
-        // Build the dynamic programming table
-        let mut dp = vec![vec![0; n + 1]; m + 1];
+        // Build the dynamic programming table using a single contiguous vector for better performance
+        let mut dp = vec![0; (m + 1) * (n + 1)];
         let mut max_length = 0;
         let mut end_pos_in_s1 = 0;
         let mut end_pos_in_s2 = 0;
@@ -634,10 +634,12 @@ impl FuzzyMatcher {
         for i in 1..=m {
             for j in 1..=n {
                 if s1_chars[i - 1] == s2_chars[j - 1] {
-                    dp[i][j] = dp[i - 1][j - 1] + 1;
+                    let idx = i * (n + 1) + j;
+                    let prev_idx = (i - 1) * (n + 1) + (j - 1);
+                    dp[idx] = dp[prev_idx] + 1;
 
-                    if dp[i][j] > max_length {
-                        max_length = dp[i][j];
+                    if dp[idx] > max_length {
+                        max_length = dp[idx];
                         end_pos_in_s1 = i;
                         end_pos_in_s2 = j;
                     }
@@ -795,9 +797,10 @@ impl FuzzyMatcher {
                 // End of token
                 if !current_token.is_empty() {
                     if current_token.len() >= MIN_TOKEN_LENGTH {
-                        tokens.push(current_token.clone());
+                        tokens.push(std::mem::take(&mut current_token));
+                    } else {
+                        current_token.clear();
                     }
-                    current_token.clear();
                 }
 
                 // Include delimiters that might be significant in code
@@ -991,9 +994,11 @@ mod tests {
 
         // Should find at least one match with NormalizedWhitespace type
         assert!(!matches.is_empty());
-        assert!(matches
-            .iter()
-            .any(|m| m.match_type == MatchType::NormalizedWhitespace));
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.match_type == MatchType::NormalizedWhitespace)
+        );
     }
 
     #[test]
@@ -1003,9 +1008,11 @@ mod tests {
         let text = "some text\nline 1\nline 2\nmodified line 3\nmore text";
 
         let matches = matcher.find_matches(pattern, text);
-        assert!(matches
-            .iter()
-            .any(|m| m.match_type == MatchType::LineByLine));
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.match_type == MatchType::LineByLine)
+        );
     }
 
     #[test]
@@ -1015,9 +1022,11 @@ mod tests {
         let text = "function calculateSubtotal(items) {\n    return items.reduce((sum, item) => sum + item.price * item.quantity, 0);\n}";
 
         let matches = matcher.find_matches(pattern, text);
-        assert!(matches
-            .iter()
-            .any(|m| m.match_type == MatchType::LongestCommonSubstring));
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.match_type == MatchType::LongestCommonSubstring)
+        );
     }
 
     #[test]
@@ -1027,8 +1036,10 @@ mod tests {
         let text = "// Process function\nfunction processData(data) {\n    const result = transform(data);\n    return result;\n}";
 
         let matches = matcher.find_matches(pattern, text);
-        assert!(matches
-            .iter()
-            .any(|m| m.match_type == MatchType::TokenBased));
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.match_type == MatchType::TokenBased)
+        );
     }
 }

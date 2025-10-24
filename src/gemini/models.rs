@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+const DETAIL_BASIC: &str = "Provide a brief, high-level explanation of what this code does.";
+const DETAIL_EXPERT: &str = "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities.";
+const DETAIL_DEFAULT: &str = "Provide a detailed explanation of this code including its purpose, how it works, and key concepts.";
+
 /// Gemini content part
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ContentPart {
@@ -119,8 +123,7 @@ impl GenerateContentRequest {
     pub fn new_code_analysis(code: &str, language: Option<&str>) -> Self {
         let analysis_prompt = if let Some(lang) = language {
             format!(
-                "Analyze this {} code for bugs, security issues, performance problems, and style violations. 
-Return a JSON response with the following structure:
+                "Return a JSON response with the following structure:
 {{
   \"summary\": \"Brief description of what the code does and main issues\",
   \"issues\": [
@@ -137,15 +140,14 @@ Return a JSON response with the following structure:
 }}
 
 Code to analyze:
-```{}
-{}
-```",
+```{} {}
+```
+{}",
                 lang, lang, code
             )
         } else {
             format!(
-                "Analyze this code for bugs, security issues, performance problems, and style violations. 
-Return a JSON response with the following structure:
+                "Return a JSON response with the following structure:
 {{
   \"summary\": \"Brief description of what the code does and main issues\",
   \"issues\": [
@@ -229,9 +231,9 @@ Code to analyze:
     /// Create a request for code explanation
     pub fn new_code_explanation(code: &str, language: Option<&str>, detail_level: &str) -> Self {
         let detail_instruction = match detail_level {
-            "basic" => "Provide a brief, high-level explanation of what this code does.",
-            "expert" => "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities.",
-            _ => "Provide a detailed explanation of this code including its purpose, how it works, and key concepts."
+            "basic" => DETAIL_BASIC,
+            "expert" => DETAIL_EXPERT,
+            _ => DETAIL_DEFAULT,
         };
 
         let explanation_prompt = if let Some(lang) = language {

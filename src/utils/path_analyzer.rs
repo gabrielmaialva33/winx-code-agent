@@ -178,7 +178,13 @@ impl PathScorer {
     pub fn new(model_path: &Path, vocab_path: &Path) -> Result<Self> {
         let tokenizer =
             Tokenizer::from_file(model_path.to_string_lossy().as_ref()).map_err(|e| {
-                WinxError::DataLoadingError(format!("Failed to load tokenizer model: {}", e))
+                WinxError::DataLoadingError {
+                    message: Arc::new(format!(
+                        "Failed to load tokenizer from {}: {}",
+                        model_path.display(),
+                        e
+                    )),
+                }
             })?;
 
         let vocab_probs = Self::load_vocab_probs(vocab_path)?;
@@ -240,9 +246,12 @@ impl PathScorer {
         }
 
         if vocab_probs.is_empty() {
-            return Err(WinxError::DataLoadingError(
-                "Vocabulary file is empty or has invalid format".to_string(),
-            )
+            return Err(WinxError::DataLoadingError {
+                message: Arc::new(format!(
+                    "No vocabulary entries found in file: {}",
+                    vocab_path.display()
+                )),
+            }
             .into());
         }
 
@@ -359,7 +368,11 @@ impl PathScorer {
         }
 
         // Extract the extension from the path
-        let extension = path.split('.').next_back().unwrap_or("");
+        let extension = if let Some(i) = path.rfind('.') {
+            &path[i + 1..]
+        } else {
+            ""
+        };
 
         // Get the extension weight or default to 1.0
         let weight = self
@@ -753,9 +766,9 @@ mod tests {
     use tempfile::TempDir;
 
     // Helper to create a test vocabulary file
-    fn create_test_vocab_file(dir: &TempDir) -> PathBuf {
+    fn create_test_vocab_file(dir: &TempDir) -> Result<PathBuf> {
         let vocab_path = dir.path().join("test.vocab");
-        let mut file = File::create(&vocab_path).unwrap();
+        let mut file = File::create(&vocab_path)?;
 
         // Write some test vocab entries
         let test_data = "src 0.5\n\
@@ -769,8 +782,8 @@ mod tests {
              lib 0.3\n\
              app 0.1\n";
 
-        file.write_all(test_data.as_bytes()).unwrap();
-        vocab_path
+        file.write_all(test_data.as_bytes())?;
+        Ok(vocab_path)
     }
 
     // Helper function to create a minimal mock PathScorer for testing
@@ -889,7 +902,7 @@ mod tests {
         assert!(scorer.context_tokens.contains("config"));
 
         // Check the size of the context tokens set
-        assert!(scorer.context_tokens.len() > 0);
+        assert!(!scorer.context_tokens.is_empty());
     }
 
     // Test for RelevanceLevel grouping
@@ -923,7 +936,6 @@ mod tests {
         let _medium_relevance_files = &grouped.medium;
         let _low_relevance_files = &grouped.low;
 
-        // Basic structure test passing means the function didn't panic
-        assert!(true);
+        // The test passes if the function completes without panicking
     }
 }

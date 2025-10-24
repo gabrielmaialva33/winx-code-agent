@@ -1,88 +1,91 @@
+use std::fmt::Debug;
 use std::path::PathBuf;
-use thiserror::Error;
+use std::sync::Arc;
 
 /// Errors that can occur in the Winx application
-#[derive(Error, Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum WinxError {
     /// Error when initializing the shell
-    #[error("Failed to initialize shell: {0}")]
-    ShellInitializationError(String),
+    #[error("Failed to initialize shell: {message}")]
+    ShellInitializationError { message: String },
 
     /// Error when operating on a workspace path
-    #[error("Workspace path error: {0}")]
-    WorkspacePathError(String),
+    #[error("Workspace path error: {message}")]
+    WorkspacePathError { message: String },
 
     /// Error when locking the bash state
-    #[error("Failed to lock the bash state: {0}")]
-    BashStateLockError(String),
+    #[error("Failed to lock the bash state: {message}")]
+    BashStateLockError { message: Arc<String> },
 
     /// Error when the bash state is not initialized
-    #[error("Bash state not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path.")]
+    #[error(
+        "Bash state not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path."
+    )]
     BashStateNotInitialized,
 
     /// Error when a command fails to execute
-    #[error("Command execution failed: {0}")]
-    CommandExecutionError(String),
+    #[error("Command execution failed: {message}")]
+    CommandExecutionError { message: Arc<String> },
 
     /// Error when parsing arguments
-    #[error("Failed to parse arguments: {0}")]
-    ArgumentParseError(String),
+    #[error("Failed to parse arguments: {message}")]
+    ArgumentParseError { message: Arc<String> },
 
     /// Error when trying to access a file or directory
     #[error("File access error for {path}: {message}")]
-    FileAccessError { path: PathBuf, message: String },
+    FileAccessError { path: PathBuf, message: Arc<String> },
 
     /// Error when a command is not allowed in the current mode
-    #[error("Command not allowed: {0}")]
-    CommandNotAllowed(String),
+    #[error("Command not allowed: {message}")]
+    CommandNotAllowed { message: Arc<String> },
 
     /// Error when chat IDs don't match
-    #[error("Chat ID mismatch: {0}")]
-    ChatIdMismatch(String),
+    #[error("Chat ID mismatch: {message}")]
+    ChatIdMismatch { message: Arc<String> },
 
     /// Error when deserializing data
-    #[error("Deserialization error: {0}")]
-    DeserializationError(String),
+    #[error("Deserialization error: {message}")]
+    DeserializationError { message: Arc<String> },
 
     /// Error when serializing data
-    #[error("Serialization error: {0}")]
-    SerializationError(String),
+    #[error("Serialization error: {message}")]
+    SerializationError { message: Arc<String> },
 
     /// Error in the search/replace format
-    #[error("Search/replace syntax error: {0}")]
-    SearchReplaceSyntaxError(String),
+    #[error("Search/replace syntax error: {message}")]
+    SearchReplaceSyntaxError { message: Arc<String> },
 
     /// Error when search block is not found in content
-    #[error("Search block not found in content: {0}")]
-    SearchBlockNotFound(String),
+    #[error("Search block not found in content: {message}")]
+    SearchBlockNotFound { message: Arc<String> },
 
     /// Error when search block matches multiple locations (WCGW-style)
     #[error("Search block matched multiple times")]
     SearchBlockAmbiguous {
-        block_content: String,
+        block_content: Arc<String>,
         match_count: usize,
-        suggestions: Vec<String>,
+        suggestions: Arc<Vec<String>>,
     },
 
     /// Error when search blocks have conflicting matches
     #[error("Multiple search blocks have conflicting matches")]
     SearchBlockConflict {
-        conflicting_blocks: Vec<String>,
-        first_differing_block: Option<String>,
+        conflicting_blocks: Arc<Vec<String>>,
+        first_differing_block: Option<Arc<String>>,
     },
 
     /// Enhanced search/replace syntax error with detailed context
     #[error("Search/replace syntax error: {message}")]
     SearchReplaceSyntaxErrorDetailed {
-        message: String,
+        message: Arc<String>,
         line_number: Option<usize>,
-        block_type: Option<String>,
-        suggestions: Vec<String>,
+        block_type: Option<Arc<String>>,
+        suggestions: Arc<Vec<String>>,
     },
 
     /// Error when JSON parsing fails
-    #[error("Invalid JSON: {0}")]
-    JsonParseError(String),
+    #[error("Invalid JSON: {message}")]
+    JsonParseError { message: Arc<String> },
 
     /// Error when a file is too large for operation
     #[error("File {path} is too large: {size} bytes (max {max_size})")]
@@ -94,36 +97,45 @@ pub enum WinxError {
 
     /// Error when writing to a file
     #[error("Failed to write file {path}: {message}")]
-    FileWriteError { path: PathBuf, message: String },
+    FileWriteError { path: PathBuf, message: Arc<String> },
 
     /// Error loading data
-    #[error("Failed to load data: {0}")]
-    DataLoadingError(String),
+    #[error("Failed to load data: {message}")]
+    DataLoadingError { message: Arc<String> },
 
     /// Parameter validation error
     #[error("Invalid parameter: {field} - {message}")]
-    ParameterValidationError { field: String, message: String },
+    ParameterValidationError {
+        field: Arc<String>,
+        message: Arc<String>,
+    },
 
     /// Required parameter missing error
     #[error("Required parameter missing: {field} - {message}")]
-    MissingParameterError { field: String, message: String },
+    MissingParameterError {
+        field: Arc<String>,
+        message: Arc<String>,
+    },
 
     /// Null or undefined value error
     #[error("Null or undefined value where object expected: {field}")]
-    NullValueError { field: String },
+    NullValueError { field: Arc<String> },
 
     /// Recovery suggestion error with potential solutions
     #[error("{message} - {suggestion}")]
-    RecoverableSuggestionError { message: String, suggestion: String },
+    RecoverableSuggestionError {
+        message: Arc<String>,
+        suggestion: Arc<String>,
+    },
 
     /// Context save error
-    #[error("Context save error: {0}")]
-    ContextSaveError(String),
+    #[error("Context save error: {message}")]
+    ContextSaveError { message: Arc<String> },
 
     /// Command timeout error
     #[error("Command timed out after {timeout_seconds}s: {command}")]
     CommandTimeout {
-        command: String,
+        command: Arc<String>,
         timeout_seconds: u64,
     },
 
@@ -131,18 +143,20 @@ pub enum WinxError {
     #[error(
         "Interactive command detected: {command}. Use appropriate flags or consider alternatives."
     )]
-    InteractiveCommandDetected { command: String },
+    InteractiveCommandDetected { command: Arc<String> },
 
     /// Command already running error
-    #[error("A command is already running: '{current_command}' (for {duration_seconds:.1}s). Use status_check, send_text, or interrupt.")]
+    #[error(
+        "A command is already running: '{current_command}' (for {duration_seconds:.1}s). Use status_check, send_text, or interrupt."
+    )]
     CommandAlreadyRunning {
-        current_command: String,
+        current_command: Arc<String>,
         duration_seconds: f64,
     },
 
     /// Process cleanup error
     #[error("Failed to cleanup process: {message}")]
-    ProcessCleanupError { message: String },
+    ProcessCleanupError { message: Arc<String> },
 
     /// Buffer overflow error
     #[error("Command output exceeded maximum size: {size} bytes (max {max_size})")]
@@ -150,43 +164,43 @@ pub enum WinxError {
 
     /// Session recovery error
     #[error("Failed to recover bash session: {message}")]
-    SessionRecoveryError { message: String },
+    SessionRecoveryError { message: Arc<String> },
 
     /// Resource allocation error
     #[error("Resource allocation failed: {message}")]
-    ResourceAllocationError { message: String },
+    ResourceAllocationError { message: Arc<String> },
 
     /// IO error
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
     /// NVIDIA API error
-    #[error("NVIDIA API error: {0}")]
-    ApiError(String),
+    #[error("NVIDIA API error: {message}")]
+    ApiError { message: Arc<String> },
 
     /// Network error for HTTP requests
-    #[error("Network error: {0}")]
-    NetworkError(String),
+    #[error("Network error: {message}")]
+    NetworkError { message: Arc<String> },
 
     /// Configuration error
-    #[error("Configuration error: {0}")]
-    ConfigurationError(String),
+    #[error("Configuration error: {message}")]
+    ConfigurationError { message: Arc<String> },
 
     /// Parse error for responses
-    #[error("Parse error: {0}")]
-    ParseError(String),
+    #[error("Parse error: {message}")]
+    ParseError { message: Arc<String> },
 
     /// Invalid input error
-    #[error("Invalid input: {0}")]
-    InvalidInput(String),
+    #[error("Invalid input: {message}")]
+    InvalidInput { message: Arc<String> },
 
     /// File error for file operations
-    #[error("File error: {0}")]
-    FileError(String),
+    #[error("File error: {message}")]
+    FileError { message: Arc<String> },
 
     /// AI provider error
-    #[error("AI error: {0}")]
-    AIError(String),
+    #[error("AI error: {message}")]
+    AIError { message: Arc<String> },
 }
 
 /// Type alias for Result with WinxError
@@ -195,7 +209,9 @@ pub type Result<T> = std::result::Result<T, WinxError>;
 /// Conversion from anyhow::Error to WinxError
 impl From<anyhow::Error> for WinxError {
     fn from(error: anyhow::Error) -> Self {
-        WinxError::CommandExecutionError(format!("{}", error))
+        WinxError::CommandExecutionError {
+            message: Arc::new(error.to_string()),
+        }
     }
 }
 
@@ -218,26 +234,38 @@ impl AnyhowErrorExt for anyhow::Error {
         let root_cause = self.root_cause().to_string();
 
         // Classify based on error content
-        if root_cause.contains("command not found") {
-            WinxError::CommandExecutionError(format!("Command not found: {}", self))
-        } else if root_cause.contains("permission denied") {
-            WinxError::CommandExecutionError(format!("Permission denied: {}", self))
+        if root_cause.contains("command not found") || root_cause.contains("permission denied") {
+            WinxError::CommandExecutionError {
+                message: Arc::new(err_string),
+            }
         } else if err_string.contains("bash state") {
-            WinxError::BashStateLockError(err_string)
+            WinxError::BashStateLockError {
+                message: Arc::new(err_string),
+            }
         } else if err_string.contains("workspace") || err_string.contains("directory") {
-            WinxError::WorkspacePathError(err_string)
+            WinxError::WorkspacePathError {
+                message: err_string,
+            }
         } else if err_string.contains("command") {
-            WinxError::CommandExecutionError(err_string)
+            WinxError::CommandExecutionError {
+                message: Arc::new(err_string),
+            }
         } else if err_string.contains("null") || err_string.contains("undefined") {
             WinxError::NullValueError {
-                field: "unknown".to_string(),
+                field: Arc::new("unknown".to_string()),
             }
         } else if err_string.contains("parse") || err_string.contains("deserializ") {
-            WinxError::DeserializationError(err_string)
+            WinxError::DeserializationError {
+                message: Arc::new(err_string),
+            }
         } else if err_string.contains("serialize") {
-            WinxError::SerializationError(err_string)
+            WinxError::SerializationError {
+                message: Arc::new(err_string),
+            }
         } else {
-            WinxError::ShellInitializationError(format!("{}: {}", default_message, err_string))
+            WinxError::ShellInitializationError {
+                message: format!("{}: {}", default_message, err_string),
+            }
         }
     }
 }
@@ -246,33 +274,37 @@ impl AnyhowErrorExt for anyhow::Error {
 pub fn with_suggestion(error: WinxError, suggestion: &str) -> WinxError {
     match error {
         WinxError::FileAccessError { path, message } => WinxError::RecoverableSuggestionError {
-            message: format!("File access error for {}: {}", path.display(), message),
-            suggestion: suggestion.to_string(),
+            message: Arc::new(format!(
+                "File access error for {}: {}",
+                path.display(),
+                message
+            )),
+            suggestion: Arc::new(suggestion.to_string()),
         },
-        WinxError::DeserializationError(msg) => WinxError::RecoverableSuggestionError {
-            message: format!("Failed to parse input: {}", msg),
-            suggestion: suggestion.to_string(),
+        WinxError::DeserializationError { message } => WinxError::RecoverableSuggestionError {
+            message: Arc::new(format!("Failed to parse input: {}", message)),
+            suggestion: Arc::new(suggestion.to_string()),
         },
         WinxError::NullValueError { field } => WinxError::RecoverableSuggestionError {
-            message: format!("Null or undefined value found in field: {}", field),
-            suggestion: suggestion.to_string(),
+            message: Arc::new(format!("Null or undefined value found in field: {}", field)),
+            suggestion: Arc::new(suggestion.to_string()),
         },
         WinxError::ParameterValidationError { field, message } => {
             WinxError::RecoverableSuggestionError {
-                message: format!("Invalid parameter {}: {}", field, message),
-                suggestion: suggestion.to_string(),
+                message: Arc::new(format!("Invalid parameter {}: {}", field, message)),
+                suggestion: Arc::new(suggestion.to_string()),
             }
         }
         WinxError::MissingParameterError { field, message } => {
             WinxError::RecoverableSuggestionError {
-                message: format!("Missing required parameter {}: {}", field, message),
-                suggestion: suggestion.to_string(),
+                message: Arc::new(format!("Missing required parameter {}: {}", field, message)),
+                suggestion: Arc::new(suggestion.to_string()),
             }
         }
         // For other error types, just add the suggestion but maintain the original error type
         _ => WinxError::RecoverableSuggestionError {
-            message: format!("{}", error),
-            suggestion: suggestion.to_string(),
+            message: Arc::new(format!("{}", error)),
+            suggestion: Arc::new(suggestion.to_string()),
         },
     }
 }
@@ -304,23 +336,23 @@ impl ErrorRecovery {
     /// Create a parameter validation error
     pub fn param_error(field: &str, message: &str) -> WinxError {
         WinxError::ParameterValidationError {
-            field: field.to_string(),
-            message: message.to_string(),
+            field: Arc::new(field.to_string()),
+            message: Arc::new(message.to_string()),
         }
     }
 
     /// Create a missing parameter error
     pub fn missing_param(field: &str, message: &str) -> WinxError {
         WinxError::MissingParameterError {
-            field: field.to_string(),
-            message: message.to_string(),
+            field: Arc::new(field.to_string()),
+            message: Arc::new(message.to_string()),
         }
     }
 
     /// Create a null value error
     pub fn null_value(field: &str) -> WinxError {
         WinxError::NullValueError {
-            field: field.to_string(),
+            field: Arc::new(field.to_string()),
         }
     }
 
@@ -381,7 +413,10 @@ impl ErrorRecovery {
                         path.display()
                     ))
                 } else if message.contains("Permission denied") {
-                    Some(format!("Permission denied for file '{}'. Check file permissions or use sudo if appropriate.", path.display()))
+                    Some(format!(
+                        "Permission denied for file '{}'. Check file permissions or use sudo if appropriate.",
+                        path.display()
+                    ))
                 } else if message.contains("Is a directory") {
                     Some(format!(
                         "'{}' is a directory, not a file. Specify a file path instead.",
@@ -393,7 +428,10 @@ impl ErrorRecovery {
             }
             WinxError::FileWriteError { path, message } => {
                 if message.contains("No space left on device") {
-                    Some(format!("No space left on device while writing to '{}'. Free up disk space and try again.", path.display()))
+                    Some(format!(
+                        "No space left on device while writing to '{}'. Free up disk space and try again.",
+                        path.display()
+                    ))
                 } else {
                     None
                 }
@@ -405,9 +443,9 @@ impl ErrorRecovery {
     /// Check if an error is potentially recoverable
     pub fn is_recoverable(err: &WinxError) -> bool {
         match err {
-            WinxError::BashStateLockError(_) => true,
+            WinxError::BashStateLockError { .. } => true,
             WinxError::FileAccessError { .. } => true,
-            WinxError::CommandExecutionError(msg) if msg.contains("timed out") => true,
+            WinxError::CommandExecutionError { message } if message.contains("timed out") => true,
             WinxError::RecoverableSuggestionError { .. } => true,
             _ => false,
         }
@@ -418,22 +456,44 @@ impl ErrorRecovery {
 impl Clone for WinxError {
     fn clone(&self) -> Self {
         match self {
-            Self::ShellInitializationError(msg) => Self::ShellInitializationError(msg.clone()),
-            Self::WorkspacePathError(msg) => Self::WorkspacePathError(msg.clone()),
-            Self::BashStateLockError(msg) => Self::BashStateLockError(msg.clone()),
+            Self::ShellInitializationError { message } => Self::ShellInitializationError {
+                message: message.clone(),
+            },
+            Self::WorkspacePathError { message } => Self::WorkspacePathError {
+                message: message.clone(),
+            },
+            Self::BashStateLockError { message } => Self::BashStateLockError {
+                message: message.clone(),
+            },
             Self::BashStateNotInitialized => Self::BashStateNotInitialized,
-            Self::CommandExecutionError(msg) => Self::CommandExecutionError(msg.clone()),
-            Self::CommandNotAllowed(msg) => Self::CommandNotAllowed(msg.clone()),
-            Self::ChatIdMismatch(msg) => Self::ChatIdMismatch(msg.clone()),
-            Self::ArgumentParseError(msg) => Self::ArgumentParseError(msg.clone()),
+            Self::CommandExecutionError { message } => Self::CommandExecutionError {
+                message: message.clone(),
+            },
+            Self::CommandNotAllowed { message } => Self::CommandNotAllowed {
+                message: message.clone(),
+            },
+            Self::ChatIdMismatch { message } => Self::ChatIdMismatch {
+                message: message.clone(),
+            },
+            Self::ArgumentParseError { message } => Self::ArgumentParseError {
+                message: message.clone(),
+            },
             Self::FileAccessError { path, message } => Self::FileAccessError {
                 path: path.clone(),
                 message: message.clone(),
             },
-            Self::DeserializationError(msg) => Self::DeserializationError(msg.clone()),
-            Self::SerializationError(msg) => Self::SerializationError(msg.clone()),
-            Self::SearchReplaceSyntaxError(msg) => Self::SearchReplaceSyntaxError(msg.clone()),
-            Self::SearchBlockNotFound(msg) => Self::SearchBlockNotFound(msg.clone()),
+            Self::DeserializationError { message } => Self::DeserializationError {
+                message: message.clone(),
+            },
+            Self::SerializationError { message } => Self::SerializationError {
+                message: message.clone(),
+            },
+            Self::SearchReplaceSyntaxError { message } => Self::SearchReplaceSyntaxError {
+                message: message.clone(),
+            },
+            Self::SearchBlockNotFound { message } => Self::SearchBlockNotFound {
+                message: message.clone(),
+            },
             Self::SearchBlockAmbiguous {
                 block_content,
                 match_count,
@@ -461,7 +521,9 @@ impl Clone for WinxError {
                 block_type: block_type.clone(),
                 suggestions: suggestions.clone(),
             },
-            Self::JsonParseError(msg) => Self::JsonParseError(msg.clone()),
+            Self::JsonParseError { message } => Self::JsonParseError {
+                message: message.clone(),
+            },
             Self::FileTooLarge {
                 path,
                 size,
@@ -475,7 +537,9 @@ impl Clone for WinxError {
                 path: path.clone(),
                 message: message.clone(),
             },
-            Self::DataLoadingError(msg) => Self::DataLoadingError(msg.clone()),
+            Self::DataLoadingError { message } => Self::DataLoadingError {
+                message: message.clone(),
+            },
             Self::ParameterValidationError { field, message } => Self::ParameterValidationError {
                 field: field.clone(),
                 message: message.clone(),
@@ -494,7 +558,9 @@ impl Clone for WinxError {
                 message: message.clone(),
                 suggestion: suggestion.clone(),
             },
-            Self::ContextSaveError(msg) => Self::ContextSaveError(msg.clone()),
+            Self::ContextSaveError { message } => Self::ContextSaveError {
+                message: message.clone(),
+            },
             Self::CommandTimeout {
                 command,
                 timeout_seconds,
@@ -526,13 +592,27 @@ impl Clone for WinxError {
                 message: message.clone(),
             },
             Self::IoError(err) => Self::IoError(std::io::Error::new(err.kind(), err.to_string())),
-            Self::ApiError(msg) => Self::ApiError(msg.clone()),
-            Self::NetworkError(msg) => Self::NetworkError(msg.clone()),
-            Self::ConfigurationError(msg) => Self::ConfigurationError(msg.clone()),
-            Self::ParseError(msg) => Self::ParseError(msg.clone()),
-            Self::InvalidInput(msg) => Self::InvalidInput(msg.clone()),
-            Self::FileError(msg) => Self::FileError(msg.clone()),
-            Self::AIError(msg) => Self::AIError(msg.clone()),
+            Self::ApiError { message } => Self::ApiError {
+                message: message.clone(),
+            },
+            Self::NetworkError { message } => Self::NetworkError {
+                message: message.clone(),
+            },
+            Self::ConfigurationError { message } => Self::ConfigurationError {
+                message: message.clone(),
+            },
+            Self::ParseError { message } => Self::ParseError {
+                message: message.clone(),
+            },
+            Self::InvalidInput { message } => Self::InvalidInput {
+                message: message.clone(),
+            },
+            Self::FileError { message } => Self::FileError {
+                message: message.clone(),
+            },
+            Self::AIError { message } => Self::AIError {
+                message: message.clone(),
+            },
         }
     }
 }

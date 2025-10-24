@@ -4,10 +4,11 @@
 //! to read image files and return their contents as base64-encoded data with
 //! the appropriate MIME type.
 
-use base64::{engine::general_purpose, Engine};
+use base64::{Engine, engine::general_purpose};
 use mime_guess::MimeGuess;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument};
 
 use crate::errors::{Result, WinxError};
@@ -56,7 +57,7 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
     if !path.exists() {
         return Err(WinxError::FileAccessError {
             path: path.clone(),
-            message: "File does not exist".to_string(),
+            message: Arc::new("File does not exist".to_string()),
         });
     }
 
@@ -64,14 +65,14 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
     if !path.is_file() {
         return Err(WinxError::FileAccessError {
             path: path.clone(),
-            message: "Path exists but is not a file".to_string(),
+            message: Arc::new("Path exists but is not a file".to_string()),
         });
     }
 
     // Read the file as bytes
     let image_bytes = std::fs::read(&path).map_err(|e| WinxError::FileAccessError {
         path: path.clone(),
-        message: format!("Error reading file: {}", e),
+        message: Arc::new(format!("Error reading file: {}", e)),
     })?;
 
     // Encode the bytes to base64
@@ -107,7 +108,7 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
         debug!("Using fallback MIME type: {}", mime_type);
         Ok((mime_type.to_string(), image_b64))
     } else {
-        Ok((mime_type, image_b64))
+        Ok((mime_type.to_string(), image_b64))
     }
 }
 
@@ -137,26 +138,22 @@ pub async fn handle_tool_call(
 
     // We need to extract data from the bash state before awaiting
     // to avoid holding the MutexGuard across await points
-    let cwd: PathBuf;
+    
 
     // Lock bash state to extract data
-    {
-        let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
-        })?;
+    let bash_state_guard = bash_state_arc.lock().await;
 
-        // Ensure bash state is initialized
-        let bash_state = match &*bash_state_guard {
-            Some(state) => state,
-            None => {
-                error!("BashState not initialized");
-                return Err(WinxError::BashStateNotInitialized);
-            }
-        };
+    // Ensure bash state is initialized
+    let bash_state = match &*bash_state_guard {
+        Some(state) => state,
+        None => {
+            error!("BashState not initialized");
+            return Err(WinxError::BashStateNotInitialized);
+        }
+    };
 
-        // Extract needed data
-        cwd = bash_state.cwd.clone();
-    }
+    // Extract needed data
+    let cwd: PathBuf = bash_state.cwd.clone();
 
     // Read the image file
     read_image_from_path(&read_image.file_path, &cwd)

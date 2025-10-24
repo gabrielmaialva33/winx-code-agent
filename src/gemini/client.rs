@@ -7,6 +7,16 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+const UNKNOWN_ERROR: &str = "Unknown error";
+const ALL_ATTEMPTS_FAILED: &str = "All Gemini API attempts failed";
+const REQUEST_FAILED: &str = "Request failed: {}";
+const API_ERROR: &str = "Gemini API error {}: {}";
+const PARSE_FAILED: &str = "Failed to parse response: {}";
+const BLOCKED_RESPONSE: &str = "Response blocked by Gemini safety filters";
+const EMPTY_RESPONSE: &str = "Empty response from Gemini";
+const CONNECTION_TEST_FAILED: &str = "Gemini connection test failed";
+const TEST_MESSAGE: &str = "Hello, can you respond with 'OK'?";
+
 /// Rate limiting information
 #[derive(Debug)]
 struct RateLimit {
@@ -58,7 +68,9 @@ impl GeminiClient {
             .timeout(Duration::from_secs(config.timeout_seconds))
             .user_agent("Winx-Code-Agent/1.0")
             .build()
-            .map_err(|e| WinxError::NetworkError(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| WinxError::NetworkError {
+                message: Arc::new(e.to_string()),
+            })?;
 
         let rate_limit = Arc::new(Mutex::new(RateLimit::new(config.rate_limit_rpm)));
 
@@ -113,8 +125,8 @@ impl GeminiClient {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            WinxError::NetworkError("All Gemini API attempts failed".to_string())
+        Err(last_error.unwrap_or_else(|| WinxError::NetworkError {
+            message: Arc::new(ALL_ATTEMPTS_FAILED.to_string()),
         }))
     }
 
@@ -124,7 +136,7 @@ impl GeminiClient {
         request: &GenerateContentRequest,
     ) -> Result<GenerateContentResponse> {
         let endpoint = self.config.model.endpoint();
-        let url = self.config.endpoint_url(&endpoint);
+        let url = self.config.endpoint_url(endpoint);
 
         debug!("Making Gemini API request to: {}", url);
 
@@ -135,31 +147,33 @@ impl GeminiClient {
             .json(request)
             .send()
             .await
-            .map_err(|e| WinxError::NetworkError(format!("Request failed: {}", e)))?;
+            .map_err(|e| WinxError::NetworkError {
+                message: Arc::new(e.to_string()),
+            })?;
 
         let status = response.status();
         if !status.is_success() {
             let error_text = response
                 .text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+                .unwrap_or_else(|_| UNKNOWN_ERROR.to_string());
 
             error!("Gemini API error {}: {}", status, error_text);
-            return Err(WinxError::NetworkError(format!(
-                "Gemini API error {}: {}",
-                status, error_text
-            )));
+            return Err(WinxError::ApiError {
+                message: Arc::new(format!("Gemini API error {}: {}", status, error_text)),
+            });
         }
 
-        let gemini_response: GenerateContentResponse = response.json().await.map_err(|e| {
-            WinxError::SerializationError(format!("Failed to parse response: {}", e))
-        })?;
+        let gemini_response: GenerateContentResponse =
+            response.json().await.map_err(|e| WinxError::ParseError {
+                message: Arc::new(e.to_string()),
+            })?;
 
         if gemini_response.is_blocked() {
             warn!("Gemini response was blocked by safety filters");
-            return Err(WinxError::ApiError(
-                "Response blocked by Gemini safety filters".to_string(),
-            ));
+            return Err(WinxError::ApiError {
+                message: Arc::new(BLOCKED_RESPONSE.to_string()),
+            });
         }
 
         Ok(gemini_response)
@@ -173,9 +187,9 @@ impl GeminiClient {
 
         let response = self.generate_content(&request).await?;
 
-        response
-            .get_text()
-            .ok_or_else(|| WinxError::ApiError("Empty response from Gemini".to_string()))
+        response.get_text().ok_or_else(|| WinxError::ApiError {
+            message: Arc::new(EMPTY_RESPONSE.to_string()),
+        })
     }
 
     /// Generate code using Gemini
@@ -199,9 +213,9 @@ impl GeminiClient {
 
         let response = self.generate_content(&request).await?;
 
-        response
-            .get_text()
-            .ok_or_else(|| WinxError::ApiError("Empty response from Gemini".to_string()))
+        response.get_text().ok_or_else(|| WinxError::ApiError {
+            message: Arc::new(EMPTY_RESPONSE.to_string()),
+        })
     }
 
     /// Explain code using Gemini
@@ -217,14 +231,14 @@ impl GeminiClient {
 
         let response = self.generate_content(&request).await?;
 
-        response
-            .get_text()
-            .ok_or_else(|| WinxError::ApiError("Empty response from Gemini".to_string()))
+        response.get_text().ok_or_else(|| WinxError::ApiError {
+            message: Arc::new(EMPTY_RESPONSE.to_string()),
+        })
     }
 
     /// Test the connection to Gemini API
     pub async fn test_connection(&self) -> Result<()> {
-        let test_request = GenerateContentRequest::new_text("Hello, can you respond with 'OK'?");
+        let test_request = GenerateContentRequest::new_text(TEST_MESSAGE);
 
         debug!("Testing Gemini API connection");
 
@@ -234,9 +248,9 @@ impl GeminiClient {
             info!("Gemini API connection test successful");
             Ok(())
         } else {
-            Err(WinxError::ApiError(
-                "Gemini connection test failed".to_string(),
-            ))
+            Err(WinxError::ApiError {
+                message: Arc::new(CONNECTION_TEST_FAILED.to_string()),
+            })
         }
     }
 
@@ -271,8 +285,10 @@ mod tests {
 
     #[test]
     fn test_gemini_config_validation() {
-        let mut config = GeminiConfig::default();
-        config.api_key = "AIzaValidKey".to_string();
+        let mut config = GeminiConfig {
+            api_key: "AIzaValidKey".to_string(),
+            ..Default::default()
+        };
 
         assert!(config.validate().is_ok());
 
@@ -283,8 +299,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_client_creation() {
-        let mut config = GeminiConfig::default();
-        config.api_key = "AIzaTestKey".to_string();
+        let config = GeminiConfig {
+            api_key: "AIzaTestKey".to_string(),
+            ..Default::default()
+        };
 
         let client = GeminiClient::new(config);
         assert!(client.is_ok());

@@ -13,3 +13,7 @@ Cargo.lock
 **/.claude/settings.local.json
 tmp
 .claude
+target/
+.github/instructions/
+tree.txt
+.github/agents/Bug Squasher.agent.md

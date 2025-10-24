@@ -22,5 +22,5 @@ pub mod types;
 pub mod utils;
 
 pub use errors::{Result, WinxError};
-pub use server::{start_winx_server, WinxService};
+pub use server::{WinxService, start_winx_server};
 pub use tools::WinxService as WinxToolsService;
