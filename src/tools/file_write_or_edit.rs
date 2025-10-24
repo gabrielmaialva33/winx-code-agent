@@ -1336,9 +1336,9 @@ fn check_path_allowed(file_path: &str, bash_state: &BashState) -> Result<()> {
                 file_path, globs
             ))))
         }
-        _ => Err(WinxError::CommandNotAllowed(
-            Arc::new("No file paths are allowed in current mode".to_string()),
-        )),
+        _ => Err(WinxError::CommandNotAllowed(Arc::new(
+            "No file paths are allowed in current mode".to_string(),
+        ))),
     }
 }
 
