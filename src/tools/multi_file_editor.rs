@@ -540,7 +540,7 @@ impl MultiFileEditorTool {
                 if path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
-                        message: MSG_FILE_EXISTS.to_string(),
+                        message: Arc::new(MSG_FILE_EXISTS.to_string()),
                     });
                 }
 
@@ -570,7 +570,7 @@ impl MultiFileEditorTool {
                 if !path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
-                        message: MSG_FILE_NOT_FOUND.to_string(),
+                        message: Arc::new(MSG_FILE_NOT_FOUND.to_string()),
                     });
                 }
 
@@ -606,7 +606,7 @@ impl MultiFileEditorTool {
                 if !path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
-                        message: "File not found".to_string(),
+                        message: Arc::new("File not found".to_string()),
                     });
                 }
 
@@ -620,7 +620,9 @@ impl MultiFileEditorTool {
 
                 // Validate line number
                 if *line_number == 0 {
-                    return Err(WinxError::InvalidInput(MSG_LINE_NUMBER_INVALID.to_string()));
+                    return Err(WinxError::InvalidInput(Arc::new(
+                        MSG_LINE_NUMBER_INVALID.to_string(),
+                    )));
                 }
             }
             FileOperation::SearchReplace {
@@ -634,12 +636,14 @@ impl MultiFileEditorTool {
                 if !path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
-                        message: "File not found".to_string(),
+                        message: Arc::new("File not found".to_string()),
                     });
                 }
 
                 if search.is_empty() {
-                    return Err(WinxError::InvalidInput(MSG_SEARCH_EMPTY.to_string()));
+                    return Err(WinxError::InvalidInput(Arc::new(
+                        MSG_SEARCH_EMPTY.to_string(),
+                    )));
                 }
 
                 if replace.len() > self.max_file_size {
@@ -658,7 +662,9 @@ impl MultiFileEditorTool {
             } => {
                 // Validate file paths
                 if file_paths.is_empty() {
-                    return Err(WinxError::InvalidInput(MSG_SMART_SEARCH_EMPTY.to_string()));
+                    return Err(WinxError::InvalidInput(Arc::new(
+                        MSG_SMART_SEARCH_EMPTY.to_string(),
+                    )));
                 }
 
                 for file_path in file_paths {
@@ -666,21 +672,25 @@ impl MultiFileEditorTool {
                     if !path.exists() {
                         return Err(WinxError::FileAccessError {
                             path: path.to_path_buf(),
-                            message: "File not found".to_string(),
+                            message: Arc::new("File not found".to_string()),
                         });
                     }
                 }
 
                 // Validate search pattern
                 if search_pattern.is_empty() {
-                    return Err(WinxError::InvalidInput(MSG_PATTERN_EMPTY.to_string()));
+                    return Err(WinxError::InvalidInput(Arc::new(
+                        MSG_PATTERN_EMPTY.to_string(),
+                    )));
                 }
 
                 // Validate confidence threshold
                 if let Some(threshold) = confidence_threshold
                     && (*threshold < 0.0 || *threshold > 1.0)
                 {
-                    return Err(WinxError::InvalidInput(MSG_CONFIDENCE_INVALID.to_string()));
+                    return Err(WinxError::InvalidInput(Arc::new(
+                        MSG_CONFIDENCE_INVALID.to_string(),
+                    )));
                 }
             }
         }

@@ -151,9 +151,9 @@ impl SearchReplaceHelper {
                     }
 
                     return Err(WinxError::SearchBlockAmbiguous {
-                        block_content: search.clone(),
+                        block_content: Arc::new(search.clone()),
                         match_count: count_before,
-                        suggestions: vec![
+                        suggestions: Arc::new(vec![
                             format!("Block {} matches {} times in the file at lines: {}", 
                                 i + 1, count_before,
                                 match_locations.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")),
@@ -163,7 +163,7 @@ impl SearchReplaceHelper {
                             "• Include surrounding function names, comments, or unique identifiers".to_string(),
                             "• Make the search block more specific to match only the intended location".to_string(),
                             "• Break the change into smaller, more targeted search/replace blocks".to_string(),
-                        ],
+                        ]),
                     });
                 }
 
@@ -712,9 +712,9 @@ impl MatchAnalysis {
             ]);
 
             return Err(WinxError::SearchBlockAmbiguous {
-                block_content: self.search_block.clone(),
+                block_content: Arc::new(self.search_block.clone()),
                 match_count: self.exact_matches.len(),
-                suggestions,
+                suggestions: Arc::new(suggestions),
             });
         }
 
@@ -767,8 +767,8 @@ impl MultiMatchResolver {
         // If multiple blocks have conflicts, generate a summary error
         if conflicting_blocks.len() > 1 {
             return Err(WinxError::SearchBlockConflict {
-                conflicting_blocks,
-                first_differing_block,
+                conflicting_blocks: Arc::new(conflicting_blocks),
+                first_differing_block: first_differing_block.map(|s| Arc::new(s)),
             });
         }
 
@@ -845,9 +845,9 @@ impl SearchReplaceSyntaxError {
     ) -> Self {
         Self {
             message: message.into(),
-            line_number,
+            line_number: line_number.map(Arc::new),
             block_type,
-            suggestions,
+            suggestions: Arc::new(suggestions),
         }
     }
 
@@ -1416,9 +1416,12 @@ pub async fn handle_tool_call(
 
     // Lock bash state to extract data
     {
-        let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
-        })?;
+        let bash_state_guard =
+            bash_state_arc
+                .lock()
+                .map_err(|e| WinxError::BashStateLockError {
+                    message: Arc::new(format!("Failed to lock bash state: {}", e)),
+                })?;
 
         // Ensure bash state is initialized
         let bash_state = match &*bash_state_guard {
@@ -1561,7 +1564,7 @@ pub async fn handle_tool_call(
         if !file_path_obj.exists() {
             return Err(WinxError::FileAccessError {
                 path: file_path_obj.to_path_buf(),
-                message: "File does not exist, cannot perform search/replace edit. Use percentage_to_change > 50 to create a new file.".to_string(),
+                message: Arc::new("File does not exist, cannot perform search/replace edit. Use percentage_to_change > 50 to create a new file.".to_string()),
             });
         }
 
@@ -1572,10 +1575,10 @@ pub async fn handle_tool_call(
                 tracing::error!("Failed to get file metadata: {}", e);
                 return Err(WinxError::FileAccessError {
                     path: file_path_obj.to_path_buf(),
-                    message: format!(
+                    message: Arc::new(format!(
                         "Failed to get file metadata: {}. Check file permissions.",
                         e
-                    ),
+                    )),
                 });
             }
         };
@@ -1598,10 +1601,10 @@ pub async fn handle_tool_call(
                     tracing::error!("Failed to read file for search/replace edit: {}", e);
                     return Err(WinxError::FileAccessError {
                         path: file_path_obj.to_path_buf(),
-                        message: format!(
+                        message: Arc::new(format!(
                             "Failed to read file: {}. The file might be binary or have encoding issues.",
                             e
-                        ),
+                        )),
                     });
                 }
             }
@@ -1700,7 +1703,7 @@ pub async fn handle_tool_call(
 
             return Err(WinxError::FileWriteError {
                 path: file_path_obj.to_path_buf(),
-                message: format!("Failed to write file: {}", e),
+                message: Arc::new(format!("Failed to write file: {}", e)),
             });
         }
 
@@ -1798,7 +1801,7 @@ pub async fn handle_tool_call(
             );
             return Err(WinxError::FileWriteError {
                 path: file_path_obj.to_path_buf(),
-                message: format!("Failed to write file: {}", e),
+                message: Arc::new(format!("Failed to write file: {}", e)),
             });
         }
 
