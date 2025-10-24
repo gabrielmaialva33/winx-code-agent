@@ -20,6 +20,14 @@ use crate::state::BashState;
 use crate::tools::winx_chat::WinxChat;
 use crate::types::{CommandSuggestions, ContextSave, ReadImage};
 
+/// AI clients container for efficient storage
+#[derive(Default)]
+struct AiClients {
+    dashscope: Option<DashScopeClient>,
+    nvidia: Option<NvidiaClient>,
+    gemini: Option<GeminiClient>,
+}
+
 /// Static project structure string to avoid runtime allocation
 const PROJECT_STRUCTURE: &str = "# Winx Code Agent - Project Structure\n\n\
 ## Root Files\n\
@@ -529,12 +537,8 @@ fn json_to_schema(value: Value) -> Arc<serde_json::Map<String, Value>> {
 pub struct WinxService {
     /// Shared state for the bash shell environment
     pub bash_state: Arc<Mutex<Option<BashState>>>,
-    /// DashScope client for AI-powered features (primary)
-    pub dashscope_client: Arc<Mutex<Option<DashScopeClient>>>,
-    /// NVIDIA client for AI-powered features (fallback 1)
-    pub nvidia_client: Arc<Mutex<Option<NvidiaClient>>>,
-    /// Gemini client for AI-powered features (fallback 2)
-    pub gemini_client: Arc<Mutex<Option<GeminiClient>>>,
+    /// Consolidated AI clients container
+    pub ai_clients: Arc<Mutex<AiClients>>,
     /// Version information for the service
     pub version: &'static str,
 }
@@ -551,9 +555,7 @@ impl WinxService {
         info!("Creating new WinxService instance");
         Self {
             bash_state: Arc::new(Mutex::new(None)),
-            dashscope_client: Arc::new(Mutex::new(None)),
-            nvidia_client: Arc::new(Mutex::new(None)),
-            gemini_client: Arc::new(Mutex::new(None)),
+            ai_clients: Arc::new(Mutex::new(AiClients::default())),
             version: env!("CARGO_PKG_VERSION"),
         }
     }
@@ -563,7 +565,7 @@ impl WinxService {
         match DashScopeConfig::from_env() {
             Ok(config) => match DashScopeClient::new(config) {
                 Ok(client) => {
-                    *self.dashscope_client.lock().unwrap() = Some(client);
+                    self.ai_clients.lock().unwrap().dashscope = Some(client);
                     info!("DashScope AI integration initialized successfully");
                     Ok(true)
                 }
@@ -584,7 +586,7 @@ impl WinxService {
         match NvidiaConfig::from_env() {
             Ok(config) => match crate::nvidia::initialize(config).await {
                 Ok(client) => {
-                    *self.nvidia_client.lock().unwrap() = Some(client);
+                    self.ai_clients.lock().unwrap().nvidia = Some(client);
                     info!("NVIDIA AI integration initialized successfully");
                     Ok(true)
                 }
@@ -602,12 +604,12 @@ impl WinxService {
 
     /// Get DashScope client if available
     pub async fn get_dashscope_client(&self) -> Option<DashScopeClient> {
-        self.dashscope_client.lock().unwrap().clone()
+        self.ai_clients.lock().unwrap().dashscope.clone()
     }
 
     /// Get NVIDIA client if available
     pub async fn get_nvidia_client(&self) -> Option<NvidiaClient> {
-        self.nvidia_client.lock().unwrap().clone()
+        self.ai_clients.lock().unwrap().nvidia.clone()
     }
 
     /// Initialize Gemini integration if API key is available
@@ -615,7 +617,7 @@ impl WinxService {
         match GeminiConfig::from_env() {
             Ok(config) => match GeminiClient::new(config) {
                 Ok(client) => {
-                    *self.gemini_client.lock().unwrap() = Some(client);
+                    self.ai_clients.lock().unwrap().gemini = Some(client);
                     info!("Gemini AI integration initialized successfully");
                     Ok(true)
                 }
@@ -633,7 +635,7 @@ impl WinxService {
 
     /// Get Gemini client if available
     pub async fn get_gemini_client(&self) -> Option<GeminiClient> {
-        self.gemini_client.lock().unwrap().clone()
+        self.ai_clients.lock().unwrap().gemini.clone()
     }
 
     /// Get project structure overview
@@ -1522,8 +1524,8 @@ impl WinxService {
 
         // Try DashScope first (primary)
         {
-            let client_guard = self.dashscope_client.lock().unwrap();
-            if let Some(dashscope_client) = client_guard.as_ref() {
+            let mut clients_guard = self.ai_clients.lock().unwrap();
+            if let Some(dashscope_client) = clients_guard.dashscope.as_ref() {
                 match dashscope_client
                     .analyze_code(&code, language.as_deref())
                     .await
@@ -1550,8 +1552,8 @@ impl WinxService {
 
         // Try NVIDIA as fallback 1
         {
-            let client_guard = self.nvidia_client.lock().unwrap();
-            if let Some(nvidia_client) = client_guard.as_ref() {
+            let clients_guard = self.ai_clients.lock().unwrap();
+            if let Some(nvidia_client) = clients_guard.nvidia.as_ref() {
                 match nvidia_client.analyze_code(&code, language.as_deref()).await {
                     Ok(result) => {
                         let issues_text = if result.issues.is_empty() {
@@ -1611,12 +1613,10 @@ impl WinxService {
                     }
                 }
             }
-        }
-
-        // Try Gemini as fallback 2
+        } // Try Gemini as fallback 2
         {
-            let client_guard = self.gemini_client.lock().unwrap();
-            if let Some(gemini_client) = client_guard.as_ref() {
+            let clients_guard = self.ai_clients.lock().unwrap();
+            if let Some(gemini_client) = clients_guard.gemini.as_ref() {
                 match gemini_client.analyze_code(&code, language.as_deref()).await {
                     Ok(gemini_result) => {
                         let analysis_result = format!(
@@ -1682,8 +1682,8 @@ impl WinxService {
 
         // Try DashScope first (primary)
         {
-            let client_guard = self.dashscope_client.lock().unwrap();
-            if let Some(dashscope_client) = client_guard.as_ref() {
+            let clients_guard = self.ai_clients.lock().unwrap();
+            if let Some(dashscope_client) = clients_guard.dashscope.as_ref() {
                 match dashscope_client
                     .generate_code(
                         prompt,
@@ -1719,8 +1719,8 @@ impl WinxService {
 
         // Try NVIDIA as fallback 1
         {
-            let client_guard = self.nvidia_client.lock().unwrap();
-            if let Some(nvidia_client) = client_guard.as_ref() {
+            let clients_guard = self.ai_clients.lock().unwrap();
+            if let Some(nvidia_client) = clients_guard.nvidia.as_ref() {
                 let request = crate::nvidia::models::CodeGenerationRequest {
                     prompt: prompt.to_string(),
                     language: language.clone(),
@@ -1758,8 +1758,8 @@ impl WinxService {
 
         // Try Gemini as fallback 2
         {
-            let client_guard = self.gemini_client.lock().unwrap();
-            if let Some(gemini_client) = client_guard.as_ref() {
+            let clients_guard = self.ai_clients.lock().unwrap();
+            if let Some(gemini_client) = clients_guard.gemini.as_ref() {
                 match gemini_client
                     .generate_code(
                         prompt,
@@ -1845,8 +1845,8 @@ impl WinxService {
 
         // Try DashScope first (primary)
         {
-            let client_guard = self.dashscope_client.lock().unwrap();
-            if let Some(dashscope_client) = client_guard.as_ref() {
+            let clients_guard = self.ai_clients.lock().unwrap();
+            if let Some(dashscope_client) = clients_guard.dashscope.as_ref() {
                 match dashscope_client
                     .explain_code(&code, language.as_deref(), detail_level)
                     .await
@@ -1873,8 +1873,8 @@ impl WinxService {
 
         // Try NVIDIA as fallback 1
         {
-            let client_guard = self.nvidia_client.lock().unwrap();
-            if let Some(nvidia_client) = client_guard.as_ref() {
+            let clients_guard = self.ai_clients.lock().unwrap();
+            if let Some(nvidia_client) = clients_guard.nvidia.as_ref() {
                 let detail_prompt = match detail_level {
                     "basic" => "Provide a brief, high-level explanation of what this code does.",
                     "expert" => {
@@ -1936,8 +1936,8 @@ impl WinxService {
 
         // Try Gemini as fallback 2
         {
-            let client_guard = self.gemini_client.lock().unwrap();
-            if let Some(gemini_client) = client_guard.as_ref() {
+            let clients_guard = self.ai_clients.lock().unwrap();
+            if let Some(gemini_client) = clients_guard.gemini.as_ref() {
                 match gemini_client
                     .explain_code(&code, language.as_deref(), detail_level)
                     .await
@@ -2231,9 +2231,10 @@ impl WinxService {
                 }
 
                 let ai_provider_info = {
-                    let d = self.dashscope_client.lock().unwrap().is_some();
-                    let n = self.nvidia_client.lock().unwrap().is_some();
-                    let g = self.gemini_client.lock().unwrap().is_some();
+                    let clients_guard = self.ai_clients.lock().unwrap();
+                    let d = clients_guard.dashscope.is_some();
+                    let n = clients_guard.nvidia.is_some();
+                    let g = clients_guard.gemini.is_some();
                     match (d, n, g) {
                         (true, _, _) => "DashScope/Qwen3",
                         (false, true, _) => "NVIDIA AI",
