@@ -60,7 +60,7 @@ pub struct WinxService {
     /// Gemini client for AI-powered features (fallback 2)
     pub gemini_client: Arc<Mutex<Option<GeminiClient>>>,
     /// Version information for the service
-    pub version: String,
+    pub version: &'static str,
 }
 
 impl Default for WinxService {
@@ -78,7 +78,7 @@ impl WinxService {
             dashscope_client: Arc::new(Mutex::new(None)),
             nvidia_client: Arc::new(Mutex::new(None)),
             gemini_client: Arc::new(Mutex::new(None)),
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            version: env!("CARGO_PKG_VERSION"),
         }
     }
 
@@ -161,8 +161,8 @@ impl WinxService {
     }
 
     /// Get project structure overview
-    async fn get_project_structure(&self) -> Result<String, McpError> {
-        Ok(PROJECT_STRUCTURE.to_string())
+    async fn get_project_structure(&self) -> Result<&'static str, McpError> {
+        Ok(PROJECT_STRUCTURE)
     }
 
     /// Get source code structure details
@@ -214,7 +214,7 @@ impl ServerHandler for WinxService {
         ServerInfo {
             server_info: Implementation {
                 name: "winx-code-agent".into(),
-                version: self.version.clone(),
+                version: self.version.to_string(),
                 title: Some("Winx Code Agent".to_string()),
                 icons: None,
                 website_url: None,
@@ -782,7 +782,10 @@ impl ServerHandler for WinxService {
         let content = match param.uri.as_ref() {
             "file://project-structure" => {
                 let structure = self.get_project_structure().await?;
-                vec![ResourceContents::text(structure, param.uri.clone())]
+                vec![ResourceContents::text(
+                    structure.to_string(),
+                    param.uri.clone(),
+                )]
             }
             "file://readme" => match tokio::fs::read_to_string("README.md").await {
                 Ok(content) => vec![ResourceContents::text(content, param.uri.clone())],
