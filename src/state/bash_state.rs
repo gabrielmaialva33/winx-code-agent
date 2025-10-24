@@ -36,6 +36,95 @@ pub struct FileWhitelistData {
     pub content_hash: Option<String>,
     /// Timestamp when the file was last read
     pub last_read_time: Option<std::time::SystemTime>,
+    /// Whether this file has been modified since the last read
+    pub modified_since_read: bool,
+    /// Minimum percentage of file that must be read before editing
+    pub min_read_percentage: f64,
+}
+
+const ERR_FILE_EDIT_NOT_ALLOWED: &str =
+    "File editing not allowed in {} mode for path: {}. Check your mode configuration.";
+const ERR_NEEDS_MORE_READING: &str = "{}. Use ReadFiles tool to read more of the file first.";
+const ERR_FILE_CHANGED: &str = "File {} has changed since last read. Please read the file again with ReadFiles before modifying.";
+const ERR_FILE_NOT_READ: &str = "File {} has not been read yet. You must read the file at least once using ReadFiles before editing it.";
+const ERR_UNEXPECTED_WCGW: &str = "Unexpected error: {} should be allowed in wcgw mode";
+const ERR_ARCHITECT_READONLY: &str = "Operation '{}' not allowed in architect mode. Architect mode is read-only. \
+Use Initialize with mode_name=\"wcgw\" or \"code_writer\" to enable modifications.";
+const ERR_CODEWRITER_RESTRICTED: &str = "Operation '{}' on '{}' not allowed in code_writer mode. \
+Check your allowed_globs and allowed_commands configuration, or use Initialize \
+with mode_name=\"wcgw\" for full permissions.";
+const ERR_UNKNOWN_SPECIAL_KEY: &str = "Unknown special key: {}";
+const ERR_PATH_NOT_DIR: &str = "Path does not exist or is not a directory: {:?}";
+const ERR_BASH_INIT_FAILED: &str = "Failed to initialize interactive bash: {}";
+const ERR_BASH_SEND_FAILED: &str = "Failed to send command to bash: {}";
+const ERR_OUTPUT_READ_FAILED: &str = "Failed to read initial output: {}";
+const ERR_BASH_NONE: &str = "Interactive bash is None after initialization";
+const ERR_ALIVE_CHECK_FAILED: &str = "Failed to ensure bash process is alive: {}";
+const ERR_COMMAND_RUNNING: &str = "{}\n\nA command is already running: '{}' (for {:.2?}).\nUse status_check to see current output, or send_text/send_specials to interact with it.";
+const ERR_STATUS_CHECK_NONE: &str = "Interactive bash is None when trying to check status";
+const ERR_LOCK_FAILED: &str = "Failed to lock bash state: {}";
+const ERR_LOCK_STATUS_FAILED: &str = "Failed to lock bash state for status check: {}";
+const ERR_LOCK_EXEC_FAILED: &str = "Failed to lock bash state for command execution: {}";
+const ERR_STDIN_FAILED: &str = "Failed to get stdin for bash process";
+const ERR_STDOUT_FAILED: &str = "Failed to get stdout for bash process";
+const ERR_STDERR_FAILED: &str = "Failed to get stderr for bash process";
+const ERR_WRITE_PROMPT_FAILED: &str = "Failed to write prompt statement to bash process";
+const ERR_SPAWN_FAILED: &str = "Failed to spawn bash process";
+const ERR_MUTEX_LOCK_FAILED: &str = "Failed to lock interactive bash mutex: {}";
+const ERR_WRITE_COMMAND_FAILED: &str = "Failed to write command to bash process";
+const ERR_FLUSH_STDIN_FAILED: &str = "Failed to flush bash stdin";
+const ERR_READ_STDOUT_FAILED: &str = "Error reading from bash stdout: {}";
+const ERR_READ_STDERR_FAILED: &str = "Error reading from bash stderr: {}";
+const ERR_OUTPUT_TRUNCATED: &str = "\n(...output truncated, showing last {} bytes...)\n";
+const ERR_PROCESS_EXITED: &str = "\nProcess exited with status: {:?}\n";
+const ERR_TIMEOUT: &str = "\n(Command output reading timed out after {:.2?}, still running...)\n";
+const ERR_MULTIPLE_SIGNALS: &str = "\n(Sent multiple interrupt signals, but process is still running. It may need to be killed manually)";
+const ERR_STILL_RUNNING: &str = "\n(Sent interrupt signals, but process is still running)";
+const ERR_STDIN_NONE: &str = "Failed to get stdin for bash process";
+const ERR_CWD_UPDATE_FAILED: &str = "Path does not exist or is not a directory: {:?}";
+const ERR_WORKSPACE_UPDATE_FAILED: &str = "Path does not exist or is not a directory: {:?}";
+const ERR_JOBS_COMMAND_FAILED: &str = "Failed to lock interactive bash mutex: {}";
+const ERR_EXEC_LOCK_FAILED: &str = "Failed to lock bash state: {}";
+const ERR_EXEC_LOCK_STATUS_FAILED: &str = "Failed to lock bash state for status check: {}";
+const ERR_EXEC_LOCK_COMMAND_FAILED: &str = "Failed to lock bash state for command execution: {}";
+const ERR_EXEC_NONE: &str = "Interactive bash is None after initialization";
+const ERR_EXEC_ALIVE_FAILED: &str = "Failed to ensure bash process is alive: {}";
+const ERR_EXEC_SEND_FAILED: &str = "Failed to send command to bash: {}";
+const ERR_EXEC_READ_FAILED: &str = "Failed to read initial output: {}";
+const ERR_PATTERN_RECORD_FAILED: &str = "Failed to record command in pattern analyzer: {}";
+const ERR_STATUS_LOCK_FAILED: &str = "Failed to lock interactive bash mutex: {}";
+const ERR_STATUS_NONE: &str = "Interactive bash is None when trying to check status";
+const ERR_STATUS_READ_FAILED: &str = "Error reading output during polling: {}";
+const ERR_STATUS_MUTEX_FAILED: &str = "Failed to lock bash mutex during polling: {}";
+const ERR_STATUS_DISAPPEARED: &str = "Bash disappeared during polling";
+const ERR_FILE_ACCESS_MODE: &str =
+    "File editing not allowed in {} mode for path: {}. Check your mode configuration.";
+const ERR_FILE_ACCESS_WCGW: &str = "wcgw";
+const ERR_FILE_ACCESS_ARCHITECT: &str = "architect";
+const ERR_FILE_ACCESS_CODEWRITER: &str = "code_writer";
+const ERR_FILE_ACCESS_NEEDS_READING: &str =
+    "{}. Use ReadFiles tool to read more of the file first.";
+const ERR_FILE_ACCESS_CHANGED: &str = "File {} has changed since last read. Please read the file again with ReadFiles before modifying.";
+const ERR_FILE_ACCESS_NOT_READ: &str = "File {} has not been read yet. You must read the file at least once using ReadFiles before editing it.";
+const ERR_MODE_VIOLATION_WCGW: &str = "Unexpected error: {} should be allowed in wcgw mode";
+const ERR_MODE_VIOLATION_ARCHITECT: &str = "Operation '{}' not allowed in architect mode. Architect mode is read-only. \
+Use Initialize with mode_name=\"wcgw\" or \"code_writer\" to enable modifications.";
+const ERR_MODE_VIOLATION_CODEWRITER: &str = "Operation '{}' on '{}' not allowed in code_writer mode. \
+Check your allowed_globs and allowed_commands configuration, or use Initialize \
+with mode_name=\"wcgw\" for full permissions.";
+
+/// FileWhitelistData tracks information about files that have been read
+/// and can be edited or overwritten
+/// Enhanced with WCGW-style comprehensive tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileWhitelistData {
+    pub file_hash: String,
+    pub line_ranges_read: Vec<(usize, usize)>,
+    pub total_lines: usize,
+    /// Hash of the file content when it was last read
+    pub content_hash: Option<String>,
+    /// Timestamp when the file was last read
+    pub last_read_time: Option<std::time::SystemTime>,
     /// Whether this file has been modified since last read
     pub modified_since_read: bool,
     /// Minimum percentage of file that must be read before editing
@@ -307,13 +396,15 @@ impl TerminalState {
         self.last_pending_output = output.to_string();
 
         // For large outputs, use limited buffer mode if configured
-        if self.limit_buffer && output.len() > TERMINAL_MAX_OUTPUT_SIZE
-            && let Ok(mut emulator) = self.terminal_emulator.lock() {
-                // Process with limited buffer
-                emulator.process_with_limited_buffer(output, self.max_buffer_lines);
-                let display = emulator.display();
-                return display.join("\n");
-            }
+        if self.limit_buffer
+            && output.len() > TERMINAL_MAX_OUTPUT_SIZE
+            && let Ok(mut emulator) = self.terminal_emulator.lock()
+        {
+            // Process with limited buffer
+            emulator.process_with_limited_buffer(output, self.max_buffer_lines);
+            let display = emulator.display();
+            return display.join("\n");
+        }
 
         // Process the output with the terminal emulator
         if let Ok(mut emulator) = self.terminal_emulator.lock() {
@@ -361,9 +452,10 @@ impl TerminalState {
     /// Smart truncate the terminal output if it gets too large
     pub fn smart_truncate(&mut self, max_size: usize) {
         if let Ok(screen) = self.terminal_emulator.lock()
-            && let Ok(mut screen_guard) = screen.get_screen().lock() {
-                screen_guard.smart_truncate(max_size);
-            }
+            && let Ok(mut screen_guard) = screen.get_screen().lock()
+        {
+            screen_guard.smart_truncate(max_size);
+        }
     }
 }
 
@@ -988,12 +1080,13 @@ impl BashState {
 
             // Update cwd in interactive bash if it exists
             if let Ok(mut bash_guard) = self.interactive_bash.lock()
-                && let Some(bash) = bash_guard.as_mut() {
-                    // Send cd command to bash
-                    bash.send_command(&format!("cd \"{}\"", path.display()))?;
-                    // Wait briefly and read output to process the cd command
-                    let _ = bash.read_output(0.5)?;
-                }
+                && let Some(bash) = bash_guard.as_mut()
+            {
+                // Send cd command to bash
+                bash.send_command(&format!("cd \"{}\"", path.display()))?;
+                // Wait briefly and read output to process the cd command
+                let _ = bash.read_output(0.5)?;
+            }
 
             Ok(())
         } else {
@@ -1487,7 +1580,7 @@ impl BashState {
 
     /// Check if a command is read-only (safe for architect mode)
     fn is_readonly_command(&self, command: &str) -> bool {
-        let cmd = command.trim().to_lowercase();
+        let cmd = command.trim();
 
         // List of read-only commands allowed in architect mode
         let readonly_commands = [
@@ -1541,15 +1634,15 @@ impl BashState {
             "rustc --version",
         ];
 
-        // Check for exact matches first
+        // Check for exact matches first (case-insensitive)
         if readonly_commands
             .iter()
-            .any(|&readonly_cmd| cmd.starts_with(readonly_cmd))
+            .any(|&readonly_cmd| cmd.eq_ignore_ascii_case(readonly_cmd))
         {
             return true;
         }
 
-        // Check for dangerous patterns that should be blocked
+        // Check for dangerous patterns that should be blocked (case-insensitive)
         let dangerous_patterns = [
             "rm",
             "mv",
@@ -1586,7 +1679,7 @@ impl BashState {
 
         !dangerous_patterns
             .iter()
-            .any(|&dangerous| cmd.contains(dangerous))
+            .any(|&dangerous| cmd.to_lowercase().contains(dangerous))
     }
 
     /// Check if a command matches an allowed command pattern

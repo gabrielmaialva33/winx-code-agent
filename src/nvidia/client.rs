@@ -2,11 +2,41 @@
 
 use crate::errors::{Result, WinxError};
 use crate::nvidia::{config::NvidiaConfig, models::*};
-use reqwest::{header, Client, Response};
+use reqwest::{Client, Response, header};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
+
+const TEST_MESSAGE: &str = "Test connection - respond with 'OK'";
+const ALL_RETRIES_FAILED: &str = "All retry attempts failed";
+const REQUEST_FAILED: &str = "Request failed: {}";
+const READ_RESPONSE_FAILED: &str = "Failed to read response: {}";
+const NVIDIA_API_ERROR: &str = "NVIDIA API error ({}): {}";
+const HTTP_ERROR: &str = "HTTP error {}: {}";
+const PARSE_ERROR: &str = "Failed to parse response: {}. Response body: {}";
+const EMPTY_RESPONSE: &str = "Empty response from NVIDIA API";
+const LANGUAGE_CONTEXT: &str = " (written in {})";
+const ANALYZE_CODE_PROMPT: &str = "Analyze this code{}:\n\n```\n{}\n```";
+const GENERATE_LANGUAGE_CONTEXT: &str = " in {}";
+const GENERATE_CONTEXT_INFO: &str = "\n\nContext: {}";
+const GENERATE_SYSTEM_PROMPT: &str = "You are an expert software developer. Generate high-quality code{} based on the user's request. \
+Provide clean, well-documented, and efficient code. Always include explanatory comments for complex logic.{}";
+const ANALYZE_SYSTEM_PROMPT: &str = "You are an expert code analyzer. Analyze the provided code and return your analysis in JSON format with the following structure:
+{
+  \"summary\": \"Brief summary of what the code does\",
+  \"issues\": [
+    {
+      \"severity\": \"Error|Warning|Info|Critical\",
+      \"category\": \"Bug|Performance|Security|Style|Maintainability|Documentation\",
+      \"message\": \"Description of the issue\",
+      \"line\": 10,
+      \"suggestion\": \"How to fix it\"
+    }
+  ],
+  \"suggestions\": [\"General improvement suggestions\"],
+  \"complexity_score\": 75
+}";
 
 /// Rate limiting state
 #[derive(Debug)]
@@ -106,8 +136,8 @@ impl NvidiaClient {
         debug!("Validating NVIDIA API connection");
 
         let request = ChatCompletionRequest {
-            model: self.config.default_model.clone(),
-            messages: vec![ChatMessage::user("Test connection - respond with 'OK'")],
+            model: self.config.default_model.as_str(),
+            messages: vec![ChatMessage::user(TEST_MESSAGE)],
             max_tokens: Some(10),
             temperature: Some(0.1),
             top_p: None,
@@ -127,9 +157,9 @@ impl NvidiaClient {
     }
 
     /// Make a chat completion request
-    pub async fn chat_completion(
+    pub async fn chat_completion<'a>(
         &self,
-        request: &ChatCompletionRequest,
+        request: &ChatCompletionRequest<'a>,
     ) -> Result<ChatCompletionResponse> {
         self.rate_limiter
             .lock()
@@ -158,21 +188,19 @@ impl NvidiaClient {
             }
         }
 
-        Err(WinxError::NetworkError(
-            "All retry attempts failed".to_string(),
-        ))
+        Err(WinxError::NetworkError(ALL_RETRIES_FAILED.to_string()))
     }
 
     /// Make the actual HTTP request
-    async fn make_request(
+    async fn make_request<'a>(
         &self,
-        request: &ChatCompletionRequest,
+        request: &ChatCompletionRequest<'a>,
     ) -> Result<ChatCompletionResponse> {
         let url = self.config.chat_completions_url();
 
         let response = self
             .client
-            .post(&url)
+            .post(url.as_ref())
             .json(request)
             .send()
             .await
@@ -222,31 +250,12 @@ impl NvidiaClient {
             .map(|l| format!(" (written in {})", l))
             .unwrap_or_default();
 
-        let system_prompt = "You are an expert code analyzer. Analyze the provided code and return your analysis in JSON format with the following structure:
-{
-  \"summary\": \"Brief summary of what the code does\",
-  \"issues\": [
-    {
-      \"severity\": \"Error|Warning|Info|Critical\",
-      \"category\": \"Bug|Performance|Security|Style|Maintainability|Documentation\",
-      \"message\": \"Description of the issue\",
-      \"line\": 10,
-      \"suggestion\": \"How to fix it\"
-    }
-  ],
-  \"suggestions\": [\"General improvement suggestions\"],
-  \"complexity_score\": 75
-}";
+        let system_prompt = ANALYZE_SYSTEM_PROMPT;
 
-        let user_prompt = format!(
-            "Analyze this code{}:\n\n```\n{}\n```",
-            language_context, code
-        );
+        let user_prompt = format!(ANALYZE_CODE_PROMPT, language_context, code);
 
         let request = ChatCompletionRequest {
-            model: NvidiaModel::for_task(TaskType::CodeAnalysis)
-                .as_str()
-                .to_string(),
+            model: NvidiaModel::for_task(TaskType::CodeAnalysis).as_str(),
             messages: vec![
                 ChatMessage::system(system_prompt),
                 ChatMessage::user(user_prompt),
@@ -275,9 +284,7 @@ impl NvidiaClient {
                 })
             }
         } else {
-            Err(WinxError::ApiError(
-                "Empty response from NVIDIA API".to_string(),
-            ))
+            Err(WinxError::ApiError(EMPTY_RESPONSE.to_string()))
         }
     }
 
@@ -289,25 +296,19 @@ impl NvidiaClient {
         let language_context = request
             .language
             .as_ref()
-            .map(|l| format!(" in {}", l))
+            .map(|l| format!(GENERATE_LANGUAGE_CONTEXT, l))
             .unwrap_or_default();
 
         let context_info = request
             .context
             .as_ref()
-            .map(|c| format!("\n\nContext: {}", c))
+            .map(|c| format!(GENERATE_CONTEXT_INFO, c))
             .unwrap_or_default();
 
-        let system_prompt = format!(
-            "You are an expert software developer. Generate high-quality code{} based on the user's request. \
-            Provide clean, well-documented, and efficient code. Always include explanatory comments for complex logic.{}",
-            language_context, context_info
-        );
+        let system_prompt = format!(GENERATE_SYSTEM_PROMPT, language_context, context_info);
 
         let chat_request = ChatCompletionRequest {
-            model: NvidiaModel::for_task(TaskType::CodeGeneration)
-                .as_str()
-                .to_string(),
+            model: NvidiaModel::for_task(TaskType::CodeGeneration).as_str(),
             messages: vec![
                 ChatMessage::system(system_prompt),
                 ChatMessage::user(&request.prompt),
@@ -328,9 +329,7 @@ impl NvidiaClient {
                 tests: None,
             })
         } else {
-            Err(WinxError::ApiError(
-                "Empty response from NVIDIA API".to_string(),
-            ))
+            Err(WinxError::ApiError(EMPTY_RESPONSE.to_string()))
         }
     }
 

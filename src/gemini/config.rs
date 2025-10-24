@@ -3,6 +3,32 @@
 use crate::errors::{Result, WinxError};
 use std::env;
 
+const DEFAULT_MODEL: &str = "gemini-2.5-pro";
+const DEFAULT_FALLBACK_MODEL: &str = "gemini-2.5-flash";
+const DEFAULT_TIMEOUT: &str = "30";
+const DEFAULT_MAX_RETRIES: &str = "3";
+const DEFAULT_RATE_LIMIT: &str = "60";
+const BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+
+const ERR_API_KEY_NOT_SET: &str = "GEMINI_API_KEY not set";
+const ERR_INVALID_TIMEOUT: &str = "Invalid GEMINI_TIMEOUT_SECONDS";
+const ERR_INVALID_MAX_RETRIES: &str = "Invalid GEMINI_MAX_RETRIES";
+const ERR_INVALID_RATE_LIMIT: &str = "Invalid GEMINI_RATE_LIMIT_RPM";
+const ERR_UNKNOWN_MODEL: &str =
+    "Unknown Gemini model: {}. Supported models: gemini-2.5-pro, gemini-2.5-flash";
+const ERR_API_KEY_EMPTY: &str = "Gemini API key cannot be empty";
+const ERR_INVALID_API_KEY_FORMAT: &str = "Invalid Gemini API key format (should start with 'AIza')";
+const ERR_TIMEOUT_RANGE: &str = "Timeout must be between 1 and 300 seconds";
+const ERR_MAX_RETRIES_EXCEED: &str = "Max retries cannot exceed 10";
+const ERR_RATE_LIMIT_RANGE: &str = "Rate limit must be between 1 and 1000 RPM";
+
+lazy_static::lazy_static! {
+    /// Cached endpoint for Gemini 2.5 Pro
+    static ref GEMINI_25_PRO_ENDPOINT: &str = "models/gemini-2.5-pro:generateContent";
+    /// Cached endpoint for Gemini 2.5 Flash
+    static ref GEMINI_25_FLASH_ENDPOINT: &str = "models/gemini-2.5-flash:generateContent";
+}
+
 /// Available Gemini models
 #[derive(Debug, Clone)]
 pub enum GeminiModel {
@@ -22,8 +48,11 @@ impl GeminiModel {
     }
 
     /// Get the full endpoint path for the model
-    pub fn endpoint(&self) -> String {
-        format!("models/{}:generateContent", self.model_name())
+    pub fn endpoint(&self) -> &str {
+        match self {
+            GeminiModel::Gemini25Pro => *GEMINI_25_PRO_ENDPOINT,
+            GeminiModel::Gemini25Flash => *GEMINI_25_FLASH_ENDPOINT,
+        }
     }
 }
 
@@ -67,33 +96,29 @@ impl GeminiConfig {
     /// Create configuration from environment variables
     pub fn from_env() -> Result<Self> {
         let api_key = env::var("GEMINI_API_KEY")
-            .map_err(|_| WinxError::ConfigurationError("GEMINI_API_KEY not set".to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError(ERR_API_KEY_NOT_SET.to_string()))?;
 
-        let model = env::var("GEMINI_MODEL").unwrap_or_else(|_| "gemini-2.5-pro".to_string());
+        let model = env::var("GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let model = Self::parse_model(&model)?;
 
-        let fallback_model =
-            env::var("GEMINI_FALLBACK_MODEL").unwrap_or_else(|_| "gemini-2.5-flash".to_string());
+        let fallback_model = env::var("GEMINI_FALLBACK_MODEL")
+            .unwrap_or_else(|_| DEFAULT_FALLBACK_MODEL.to_string());
         let fallback_model = Self::parse_model(&fallback_model)?;
 
         let timeout_seconds = env::var("GEMINI_TIMEOUT_SECONDS")
-            .unwrap_or_else(|_| "30".to_string())
+            .unwrap_or_else(|_| DEFAULT_TIMEOUT.to_string())
             .parse()
-            .map_err(|_| {
-                WinxError::ConfigurationError("Invalid GEMINI_TIMEOUT_SECONDS".to_string())
-            })?;
+            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_TIMEOUT.to_string()))?;
 
         let max_retries = env::var("GEMINI_MAX_RETRIES")
-            .unwrap_or_else(|_| "3".to_string())
+            .unwrap_or_else(|_| DEFAULT_MAX_RETRIES.to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError("Invalid GEMINI_MAX_RETRIES".to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_MAX_RETRIES.to_string()))?;
 
         let rate_limit_rpm = env::var("GEMINI_RATE_LIMIT_RPM")
-            .unwrap_or_else(|_| "60".to_string())
+            .unwrap_or_else(|_| DEFAULT_RATE_LIMIT.to_string())
             .parse()
-            .map_err(|_| {
-                WinxError::ConfigurationError("Invalid GEMINI_RATE_LIMIT_RPM".to_string())
-            })?;
+            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_RATE_LIMIT.to_string()))?;
 
         Ok(Self {
             api_key,
@@ -111,7 +136,7 @@ impl GeminiConfig {
             "gemini-2.5-pro" => Ok(GeminiModel::Gemini25Pro),
             "gemini-2.5-flash" => Ok(GeminiModel::Gemini25Flash),
             _ => Err(WinxError::ConfigurationError(format!(
-                "Unknown Gemini model: {}. Supported models: gemini-2.5-pro, gemini-2.5-flash",
+                ERR_UNKNOWN_MODEL,
                 model_str
             ))),
         }
@@ -120,32 +145,28 @@ impl GeminiConfig {
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
         if self.api_key.is_empty() {
-            return Err(WinxError::ConfigurationError(
-                "Gemini API key cannot be empty".to_string(),
-            ));
+            return Err(WinxError::ConfigurationError(ERR_API_KEY_EMPTY.to_string()));
         }
 
         if !self.api_key.starts_with("AIza") {
             return Err(WinxError::ConfigurationError(
-                "Invalid Gemini API key format (should start with 'AIza')".to_string(),
+                ERR_INVALID_API_KEY_FORMAT.to_string(),
             ));
         }
 
         if self.timeout_seconds == 0 || self.timeout_seconds > 300 {
-            return Err(WinxError::ConfigurationError(
-                "Timeout must be between 1 and 300 seconds".to_string(),
-            ));
+            return Err(WinxError::ConfigurationError(ERR_TIMEOUT_RANGE.to_string()));
         }
 
         if self.max_retries > 10 {
             return Err(WinxError::ConfigurationError(
-                "Max retries cannot exceed 10".to_string(),
+                ERR_MAX_RETRIES_EXCEED.to_string(),
             ));
         }
 
         if self.rate_limit_rpm == 0 || self.rate_limit_rpm > 1000 {
             return Err(WinxError::ConfigurationError(
-                "Rate limit must be between 1 and 1000 RPM".to_string(),
+                ERR_RATE_LIMIT_RANGE.to_string(),
             ));
         }
 
@@ -154,7 +175,7 @@ impl GeminiConfig {
 
     /// Get the base URL for Gemini API
     pub fn base_url(&self) -> &'static str {
-        "https://generativelanguage.googleapis.com/v1beta"
+        BASE_URL
     }
 
     /// Get the full URL for an endpoint

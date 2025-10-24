@@ -4,8 +4,7 @@
 //! based on file extensions, directly ported from WCGW's extensions.py.
 //! It supports intelligent token allocation for source code vs non-source files.
 
-use std::collections::HashSet;
-use std::path::Path;
+use std::borrow::Cow;
 
 /// Set of file extensions considered to be source code
 /// Each extension is listed without the dot (e.g., 'rs' not '.rs')
@@ -239,52 +238,50 @@ impl FileExtensionAnalyzer {
     ///
     /// # Returns
     /// A string describing the file type category
-    pub fn get_file_type_category(&self, filename: &str) -> String {
+    pub fn get_file_type_category(&self, filename: &str) -> Cow<'static, str> {
         if let Some(ext) = Path::new(filename).extension().and_then(|ext| ext.to_str()) {
             let ext_lower = ext.to_lowercase();
 
             // Categorize by major language families
             match ext_lower.as_str() {
-                "rs" | "rlib" => "Rust".to_string(),
-                "py" | "pyx" | "pyi" | "pyw" => "Python".to_string(),
-                "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => "JavaScript/TypeScript".to_string(),
-                "html" | "htm" | "xhtml" | "css" | "scss" | "sass" | "less" => "Web".to_string(),
-                "c" | "h" | "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" | "inl" => {
-                    "C/C++".to_string()
-                }
-                "cs" | "csx" => "C#".to_string(),
-                "java" | "scala" | "kt" | "kts" | "groovy" => "JVM Languages".to_string(),
-                "go" | "mod" => "Go".to_string(),
-                "swift" => "Swift".to_string(),
-                "rb" | "rake" | "gemspec" => "Ruby".to_string(),
-                "php" | "phtml" | "phar" | "phps" => "PHP".to_string(),
-                "sh" | "bash" | "zsh" | "fish" => "Shell".to_string(),
-                "ps1" | "psm1" | "psd1" => "PowerShell".to_string(),
-                "sql" | "ddl" | "dml" => "SQL".to_string(),
+                "rs" | "rlib" => "Rust".into(),
+                "py" | "pyx" | "pyi" | "pyw" => "Python".into(),
+                "js" | "jsx" | "ts" | "tsx" | "mjs" | "cjs" => "JavaScript/TypeScript".into(),
+                "html" | "htm" | "xhtml" | "css" | "scss" | "sass" | "less" => "Web".into(),
+                "c" | "h" | "cpp" | "cxx" | "cc" | "hpp" | "hxx" | "hh" | "inl" => "C/C++".into(),
+                "cs" | "csx" => "C#".into(),
+                "java" | "scala" | "kt" | "kts" | "groovy" => "JVM Languages".into(),
+                "go" | "mod" => "Go".into(),
+                "swift" => "Swift".into(),
+                "rb" | "rake" | "gemspec" => "Ruby".into(),
+                "php" | "phtml" | "phar" | "phps" => "PHP".into(),
+                "sh" | "bash" | "zsh" | "fish" => "Shell".into(),
+                "ps1" | "psm1" | "psd1" => "PowerShell".into(),
+                "sql" | "ddl" | "dml" => "SQL".into(),
                 "xml" | "json" | "yaml" | "yml" | "toml" | "ini" | "cfg" | "conf" => {
-                    "Configuration".to_string()
+                    "Configuration".into()
                 }
-                "md" | "markdown" | "rst" | "adoc" | "tex" => "Documentation".to_string(),
-                "hs" | "lhs" => "Haskell".to_string(),
-                "lisp" | "cl" | "el" | "clj" | "cljs" | "edn" | "scm" => "Lisp Family".to_string(),
-                "erl" | "hrl" | "ex" | "exs" => "Erlang/Elixir".to_string(),
-                "dart" => "Dart".to_string(),
-                "m" | "mm" => "Objective-C".to_string(),
+                "md" | "markdown" | "rst" | "adoc" | "tex" => "Documentation".into(),
+                "hs" | "lhs" => "Haskell".into(),
+                "lisp" | "cl" | "el" | "clj" | "cljs" | "edn" | "scm" => "Lisp Family".into(),
+                "erl" | "hrl" | "ex" | "exs" => "Erlang/Elixir".into(),
+                "dart" => "Dart".into(),
+                "m" | "mm" => "Objective-C".into(),
                 _ => {
                     if self.is_source_code_file(filename) {
-                        "Source Code".to_string()
+                        "Source Code".into()
                     } else {
-                        ext.to_uppercase()
+                        ext.to_uppercase().into()
                     }
                 }
             }
         } else {
             // Handle special files without extensions
             match filename.to_lowercase().as_str() {
-                "makefile" => "Build".to_string(),
-                "dockerfile" => "Docker".to_string(),
-                "jenkinsfile" => "CI/CD".to_string(),
-                _ => "Unknown".to_string(),
+                "makefile" => "Build".into(),
+                "dockerfile" => "Docker".into(),
+                "jenkinsfile" => "CI/CD".into(),
+                _ => "Unknown".into(),
             }
         }
     }
@@ -348,11 +345,7 @@ impl FileExtensionAnalyzer {
     ///
     /// # Returns
     /// Vector of (filename, allocated_tokens) pairs
-    pub fn allocate_token_budget(
-        &self,
-        files: &[String],
-        total_budget: usize,
-    ) -> Vec<(String, usize)> {
+    pub fn allocate_token_budget(&self, files: &[&str], total_budget: usize) -> Vec<(&str, usize)> {
         if files.is_empty() {
             return Vec::new();
         }
@@ -366,9 +359,9 @@ impl FileExtensionAnalyzer {
 
         for file in files {
             if self.is_high_priority_file(file) {
-                high_priority_files.push(file.clone());
+                high_priority_files.push(*file);
             } else {
-                normal_files.push(file.clone());
+                normal_files.push(*file);
             }
         }
 
@@ -471,17 +464,23 @@ mod tests {
     fn test_file_type_categorization() {
         let analyzer = FileExtensionAnalyzer::new();
 
-        assert_eq!(analyzer.get_file_type_category("main.rs"), "Rust");
-        assert_eq!(analyzer.get_file_type_category("script.py"), "Python");
+        assert_eq!(analyzer.get_file_type_category("main.rs").as_ref(), "Rust");
         assert_eq!(
-            analyzer.get_file_type_category("component.tsx"),
+            analyzer.get_file_type_category("script.py").as_ref(),
+            "Python"
+        );
+        assert_eq!(
+            analyzer.get_file_type_category("component.tsx").as_ref(),
             "JavaScript/TypeScript"
         );
         assert_eq!(
-            analyzer.get_file_type_category("config.json"),
+            analyzer.get_file_type_category("config.json").as_ref(),
             "Configuration"
         );
-        assert_eq!(analyzer.get_file_type_category("Dockerfile"), "Docker");
+        assert_eq!(
+            analyzer.get_file_type_category("Dockerfile").as_ref(),
+            "Docker"
+        );
     }
 
     #[test]
@@ -505,10 +504,10 @@ mod tests {
         let analyzer = FileExtensionAnalyzer::new();
 
         let files = vec![
-            "Cargo.toml".to_string(), // High priority
-            "main.rs".to_string(),    // High priority
-            "utils.rs".to_string(),   // Normal
-            "test.rs".to_string(),    // Normal
+            "Cargo.toml", // High priority
+            "main.rs",    // High priority
+            "utils.rs",   // Normal
+            "test.rs",    // Normal
         ];
 
         let allocations = analyzer.allocate_token_budget(&files, 1000);

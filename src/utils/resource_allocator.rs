@@ -283,12 +283,13 @@ impl ResourceAllocator {
         };
 
         if let Some(memory) = memory_released
-            && let Ok(mut stats) = self.stats.lock() {
-                stats.total_allocated = stats.total_allocated.saturating_sub(memory);
-                stats.active_reads = stats.active_reads.saturating_sub(1);
+            && let Ok(mut stats) = self.stats.lock()
+        {
+            stats.total_allocated = stats.total_allocated.saturating_sub(memory);
+            stats.active_reads = stats.active_reads.saturating_sub(1);
 
-                debug!("Released {} bytes for: {:?}", memory, file_path);
-            }
+            debug!("Released {} bytes for: {:?}", memory, file_path);
+        }
 
         // Process pending queue
         self.process_pending_queue().await;
@@ -299,16 +300,17 @@ impl ResourceAllocator {
     /// Check cache for allocation
     async fn check_cache(&self, file_path: &Path) -> Option<CacheEntry> {
         if let Ok(mut cache) = self.cache.lock()
-            && let Some(entry) = cache.get_mut(file_path) {
-                // Check if entry is still valid
-                if entry.created_at.elapsed() < CACHE_TTL {
-                    entry.access_count += 1;
-                    return Some(entry.clone());
-                } else {
-                    // Remove expired entry
-                    cache.remove(file_path);
-                }
+            && let Some(entry) = cache.get_mut(file_path)
+        {
+            // Check if entry is still valid
+            if entry.created_at.elapsed() < CACHE_TTL {
+                entry.access_count += 1;
+                return Some(entry.clone());
+            } else {
+                // Remove expired entry
+                cache.remove(file_path);
             }
+        }
 
         None
     }
@@ -507,14 +509,14 @@ pub async fn release_file_allocation(file_path: &Path) -> Result<()> {
 }
 
 /// Smart resource allocation guard that automatically releases resources
-pub struct AllocationGuard {
-    file_path: PathBuf,
+pub struct AllocationGuard<'a> {
+    file_path: &'a Path,
     _permit: tokio::sync::SemaphorePermit<'static>,
 }
 
-impl AllocationGuard {
+impl<'a> AllocationGuard<'a> {
     /// Create a new allocation guard
-    pub async fn new(file_path: PathBuf, _allocation: Allocation) -> Result<Self> {
+    pub async fn new(file_path: &'a Path, _allocation: Allocation) -> Result<Self> {
         let allocator = get_global_allocator();
         let permit = allocator.acquire_read_permit().await?;
         Ok(Self {
@@ -524,11 +526,11 @@ impl AllocationGuard {
     }
 }
 
-impl Drop for AllocationGuard {
+impl<'a> Drop for AllocationGuard<'a> {
     fn drop(&mut self) {
-        let file_path = self.file_path.clone();
+        let file_path = self.file_path;
         tokio::spawn(async move {
-            let _ = release_file_allocation(&file_path).await;
+            let _ = release_file_allocation(file_path).await;
         });
     }
 }

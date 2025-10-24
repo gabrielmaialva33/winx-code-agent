@@ -23,6 +23,15 @@ use crate::utils::command_safety::{CommandContext, CommandSafety};
 #[allow(dead_code)]
 const MAX_OUTPUT_LENGTH: usize = 100_000;
 
+/// Common status messages to avoid repeated allocations
+const STATUS_SUCCESS: &str = "Command completed successfully";
+const STATUS_RUNNING: &str = "running in background";
+const STATUS_STILL_RUNNING: &str = "still running";
+const STATUS_PROCESS_EXITED: &str = "process exited";
+const STATUS_IDLE: &str = "no active command";
+const STATUS_UNKNOWN: &str = "unknown";
+const CWD_UNKNOWN: &str = "Unknown";
+
 /// Process simple command execution for a bash command
 ///
 /// This handles command execution, truncating output if necessary, and
@@ -81,7 +90,7 @@ async fn execute_simple_command(command: &str, cwd: &Path, timeout: Option<f32>)
 
     // Add status information
     let exit_status = if output.status.success() {
-        "Command completed successfully".to_string()
+        STATUS_SUCCESS.to_string()
     } else {
         format!("Command failed with status: {}", output.status)
     };
@@ -89,7 +98,7 @@ async fn execute_simple_command(command: &str, cwd: &Path, timeout: Option<f32>)
     // Get current working directory
     let current_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "Unknown".to_string());
+        .unwrap_or_else(|_| CWD_UNKNOWN.to_string());
 
     debug!("Command executed in {:.2?}", elapsed);
     Ok(format!(
@@ -180,7 +189,7 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
     // Get current working directory
     let current_dir = std::env::current_dir()
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "Unknown".to_string());
+        .unwrap_or_else(|_| CWD_UNKNOWN.to_string());
 
     Ok(format!(
         "Started command in background screen session '{}'.\n\
@@ -324,7 +333,7 @@ async fn execute_background_command(bash_state: &mut BashState, command: &str) -
         let wrapped_command = format!(
             "screen -dm -S {} bash -c '{} ; ec=$? ; echo \"Command completed with status code: $ec\" > /tmp/{}_result ; exit $ec'",
             screen_name,
-            command.replace("'", "'\\''"),  // Escape single quotes
+            command.replace("'", "'\\''"), // Escape single quotes
             screen_name
         );
 
@@ -673,7 +682,7 @@ pub async fn handle_tool_call(
                             command: format!(
                                 "{} - Consider using non-interactive flags (e.g., git commit -m 'message') or automation tools",
                                 cmd
-                            )
+                            ),
                         }
                     }
                     _ => e,
@@ -792,7 +801,7 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
         Err(_) => {
             return Err(WinxError::BashStateLockError(
                 "Timed out waiting to acquire bash state lock".to_string(),
-            ))
+            ));
         }
     };
 
@@ -873,7 +882,7 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
                 return Err(WinxError::CommandExecutionError(format!(
                     "Failed to read output after sending text: {}",
                     e
-                )))
+                )));
             }
         };
 
@@ -962,7 +971,7 @@ async fn send_special_keys_to_interactive(
         Err(_) => {
             return Err(WinxError::BashStateLockError(
                 "Timed out waiting to acquire bash state lock".to_string(),
-            ))
+            ));
         }
     };
 
@@ -1078,7 +1087,7 @@ async fn send_special_keys_to_interactive(
             return Err(WinxError::CommandExecutionError(format!(
                 "Failed to read output after sending keys: {}",
                 e
-            )))
+            )));
         }
     };
 
@@ -1172,7 +1181,7 @@ async fn send_ascii_to_interactive(
         Err(_) => {
             return Err(WinxError::BashStateLockError(
                 "Timed out waiting to acquire bash state lock".to_string(),
-            ))
+            ));
         }
     };
 
@@ -1271,7 +1280,7 @@ async fn send_ascii_to_interactive(
             return Err(WinxError::CommandExecutionError(format!(
                 "Failed to read output after sending ASCII codes: {}",
                 e
-            )))
+            )));
         }
     };
 
@@ -1375,13 +1384,13 @@ async fn execute_interactive_command(
                     command: current_cmd,
                     start_time,
                 } = &bash.command_state
-                {
-                    let duration = start_time.elapsed().unwrap_or_default().as_secs_f64();
-                    return Err(WinxError::CommandAlreadyRunning {
-                        current_command: current_cmd.clone(),
-                        duration_seconds: duration,
-                    });
-                }
+            {
+                let duration = start_time.elapsed().unwrap_or_default().as_secs_f64();
+                return Err(WinxError::CommandAlreadyRunning {
+                    current_command: current_cmd.clone(),
+                    duration_seconds: duration,
+                });
+            }
         }
 
         // Validate command safety
@@ -1649,7 +1658,7 @@ async fn check_command_status(bash_state: &mut BashState) -> Result<String> {
                 return Err(WinxError::BashStateLockError(format!(
                     "Failed to lock bash state: {}",
                     e
-                )))
+                )));
             }
         };
 

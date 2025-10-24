@@ -12,6 +12,15 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+const UNKNOWN_ERROR: &str = "Unknown error";
+const TEST_MESSAGE: &str = "Hello, can you respond with 'OK'?";
+const ALL_ATTEMPTS_FAILED: &str = "All DashScope API attempts failed";
+const REQUEST_FAILED: &str = "Request failed: {}";
+const API_ERROR: &str = "DashScope API error {}: {}";
+const PARSE_FAILED: &str = "Failed to parse response: {}";
+const EMPTY_RESPONSE: &str = "Empty response from DashScope";
+const CONNECTION_TEST_FAILED: &str = "DashScope connection test failed";
+
 /// Rate limiting information
 #[derive(Debug)]
 struct RateLimit {
@@ -89,9 +98,9 @@ impl DashScopeClient {
     }
 
     /// Make a chat completion request
-    pub async fn chat_completion(
+    pub async fn chat_completion<'a>(
         &self,
-        request: &ChatCompletionRequest,
+        request: &ChatCompletionRequest<'a>,
     ) -> Result<ChatCompletionResponse> {
         let mut backoff = ExponentialBackoff::default();
         let mut last_error = None;
@@ -139,15 +148,13 @@ impl DashScopeClient {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            WinxError::NetworkError("All DashScope API attempts failed".to_string())
-        }))
+        Err(last_error.unwrap_or_else(|| WinxError::NetworkError(ALL_ATTEMPTS_FAILED.to_string())))
     }
 
     /// Make a single request to the DashScope API
-    async fn make_request(
+    async fn make_request<'a>(
         &self,
-        request: &ChatCompletionRequest,
+        request: &ChatCompletionRequest<'a>,
     ) -> Result<ChatCompletionResponse> {
         let url = self.config.chat_completions_url();
 
@@ -155,37 +162,36 @@ impl DashScopeClient {
 
         let response = self
             .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.config.api_key))
+            .post(url.as_ref())
+            .header("Authorization", &*self.config.authorization_header)
             .header("Content-Type", "application/json")
             .json(request)
             .send()
             .await
-            .map_err(|e| WinxError::NetworkError(format!("Request failed: {}", e)))?;
+            .map_err(|e| WinxError::NetworkError(format!(REQUEST_FAILED, e)))?;
 
         let status = response.status();
         if !status.is_success() {
             let error_text = response
                 .text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+                .unwrap_or_else(|_| UNKNOWN_ERROR.to_string());
 
             error!("DashScope API error {}: {}", status, error_text);
             return Err(WinxError::NetworkError(format!(
-                "DashScope API error {}: {}",
+                API_ERROR,
                 status, error_text
             )));
         }
 
-        let completion_response: ChatCompletionResponse = response.json().await.map_err(|e| {
-            WinxError::SerializationError(format!("Failed to parse response: {}", e))
-        })?;
+        let completion_response: ChatCompletionResponse = response
+            .json()
+            .await
+            .map_err(|e| WinxError::SerializationError(format!(PARSE_FAILED, e)))?;
 
         if !completion_response.is_success() {
             warn!("DashScope response has no choices");
-            return Err(WinxError::ApiError(
-                "Empty response from DashScope".to_string(),
-            ));
+            return Err(WinxError::ApiError(EMPTY_RESPONSE.to_string()));
         }
 
         Ok(completion_response)
@@ -194,7 +200,7 @@ impl DashScopeClient {
     /// Analyze code using DashScope
     pub async fn analyze_code(&self, code: &str, language: Option<&str>) -> Result<String> {
         let request = ChatCompletionRequest::new_code_analysis(
-            self.config.model.model_name().to_string(),
+            self.config.model.model_name(),
             code,
             language,
         );
@@ -206,7 +212,7 @@ impl DashScopeClient {
         response
             .get_content()
             .map(|s| s.to_string())
-            .ok_or_else(|| WinxError::ApiError("Empty response from DashScope".to_string()))
+            .ok_or_else(|| WinxError::ApiError(EMPTY_RESPONSE.to_string()))
     }
 
     /// Generate code using DashScope
@@ -219,7 +225,7 @@ impl DashScopeClient {
         temperature: Option<f32>,
     ) -> Result<String> {
         let request = ChatCompletionRequest::new_code_generation(
-            self.config.model.model_name().to_string(),
+            self.config.model.model_name(),
             prompt,
             language,
             context,
@@ -237,7 +243,7 @@ impl DashScopeClient {
         response
             .get_content()
             .map(|s| s.to_string())
-            .ok_or_else(|| WinxError::ApiError("Empty response from DashScope".to_string()))
+            .ok_or_else(|| WinxError::ApiError(EMPTY_RESPONSE.to_string()))
     }
 
     /// Explain code using DashScope
@@ -248,7 +254,7 @@ impl DashScopeClient {
         detail_level: &str,
     ) -> Result<String> {
         let request = ChatCompletionRequest::new_code_explanation(
-            self.config.model.model_name().to_string(),
+            self.config.model.model_name(),
             code,
             language,
             detail_level,
@@ -264,16 +270,13 @@ impl DashScopeClient {
         response
             .get_content()
             .map(|s| s.to_string())
-            .ok_or_else(|| WinxError::ApiError("Empty response from DashScope".to_string()))
+            .ok_or_else(|| WinxError::ApiError(EMPTY_RESPONSE.to_string()))
     }
 
     /// Test the connection to DashScope API
     pub async fn test_connection(&self) -> Result<()> {
-        let messages = vec![ChatMessage::user(
-            "Hello, can you respond with 'OK'?".to_string(),
-        )];
-        let test_request =
-            ChatCompletionRequest::new(self.config.model.model_name().to_string(), messages);
+        let messages = vec![ChatMessage::user(TEST_MESSAGE.to_string())];
+        let test_request = ChatCompletionRequest::new(self.config.model.model_name(), messages);
 
         debug!("Testing DashScope API connection");
 
@@ -283,9 +286,7 @@ impl DashScopeClient {
             info!("DashScope API connection test successful");
             Ok(())
         } else {
-            Err(WinxError::ApiError(
-                "DashScope connection test failed".to_string(),
-            ))
+            Err(WinxError::ApiError(CONNECTION_TEST_FAILED.to_string()))
         }
     }
 

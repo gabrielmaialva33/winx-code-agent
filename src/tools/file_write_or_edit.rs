@@ -43,6 +43,11 @@ fn replace_marker() -> &'static Regex {
     &REGEX
 }
 
+/// Remove all whitespace from a string
+fn remove_whitespace(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 /// Maximum file size to read
 const MAX_FILE_SIZE: u64 = 50_000_000; // 50MB
 
@@ -187,53 +192,54 @@ impl SearchReplaceHelper {
             ));
 
             // Try fuzzy matching if enabled
-            if self.use_fuzzy_matching && self.fuzzy_matcher.is_some()
-                && let Some(ref matcher) = self.fuzzy_matcher {
-                    let mut fuzzy_matcher = matcher.clone();
-                    let matches = fuzzy_matcher.find_matches(search, &content);
+            if self.use_fuzzy_matching
+                && self.fuzzy_matcher.is_some()
+                && let Some(ref matcher) = self.fuzzy_matcher
+            {
+                let mut fuzzy_matcher = matcher.clone();
+                let matches = fuzzy_matcher.find_matches(search, &content);
 
-                    if !matches.is_empty() {
-                        let best_match = &matches[0];
+                if !matches.is_empty() {
+                    let best_match = &matches[0];
+                    self.debug_info.push(format!(
+                        "Best fuzzy match for block {} (similarity: {:.2})",
+                        i + 1,
+                        best_match.similarity
+                    ));
+
+                    // If confidence is high enough and auto-apply is enabled, perform the replacement
+                    if best_match.similarity >= self.fuzzy_threshold && self.auto_apply_fuzzy_fixes
+                    {
                         self.debug_info.push(format!(
-                            "Best fuzzy match for block {} (similarity: {:.2})",
+                            "Auto-applying fuzzy fix for block {} (similarity: {:.2})",
                             i + 1,
                             best_match.similarity
                         ));
 
-                        // If confidence is high enough and auto-apply is enabled, perform the replacement
-                        if best_match.similarity >= self.fuzzy_threshold
-                            && self.auto_apply_fuzzy_fixes
-                        {
-                            self.debug_info.push(format!(
-                                "Auto-applying fuzzy fix for block {} (similarity: {:.2})",
-                                i + 1,
-                                best_match.similarity
-                            ));
+                        // Replace the matched text with the replacement text
+                        let before = &content[..best_match.start_pos];
+                        let after = &content[best_match.end_pos..];
+                        content = format!("{}{}{}", before, replace, after);
+                        _success_count += 1;
+                        continue;
+                    }
 
-                            // Replace the matched text with the replacement text
-                            let before = &content[..best_match.start_pos];
-                            let after = &content[best_match.end_pos..];
-                            content = format!("{}{}{}", before, replace, after);
-                            _success_count += 1;
-                            continue;
-                        }
-
-                        // Add suggestions if the match wasn't automatically applied
-                        for (j, m) in matches.iter().enumerate().take(self.max_suggestions) {
-                            self.debug_info.push(format!(
-                                "Suggestion {}: similarity={:.2}, match_type={:?}, text={}",
-                                j + 1,
-                                m.similarity,
-                                m.match_type,
-                                if m.text.len() > 100 {
-                                    format!("{}...", &m.text[..100])
-                                } else {
-                                    m.text.clone()
-                                }
-                            ));
-                        }
+                    // Add suggestions if the match wasn't automatically applied
+                    for (j, m) in matches.iter().enumerate().take(self.max_suggestions) {
+                        self.debug_info.push(format!(
+                            "Suggestion {}: similarity={:.2}, match_type={:?}, text={}",
+                            j + 1,
+                            m.similarity,
+                            m.match_type,
+                            if m.text.len() > 100 {
+                                format!("{}...", &m.text[..100])
+                            } else {
+                                m.text.clone()
+                            }
+                        ));
                     }
                 }
+            }
 
             // Try to find approximate matches using the legacy approach
             let suggestion = self
@@ -373,8 +379,8 @@ impl SearchReplaceHelper {
         let mut suggestions = Vec::new();
 
         // Strategy 1: Check for whitespace/line ending differences
-        let search_no_whitespace = search.replace(" ", "").replace("\n", "").replace("\t", "");
-        let content_no_whitespace = content.replace(" ", "").replace("\n", "").replace("\t", "");
+        let search_no_whitespace = remove_whitespace(search);
+        let content_no_whitespace = remove_whitespace(content);
 
         if content_no_whitespace.contains(&search_no_whitespace) {
             suggestions.push("Your search block might have different whitespace or line endings than the content. Try normalizing whitespace.".to_string());
@@ -1583,18 +1589,21 @@ pub async fn handle_tool_call(
             });
         }
 
-        // Read the file content
-        let original_content = match fs::read_to_string(file_path_obj) {
-            Ok(content) => content,
-            Err(e) => {
-                tracing::error!("Failed to read file for search/replace edit: {}", e);
-                return Err(WinxError::FileAccessError {
-                    path: file_path_obj.to_path_buf(),
-                    message: format!(
-                        "Failed to read file: {}. The file might be binary or have encoding issues.",
-                        e
-                    ),
-                });
+        let original_content = if let Some(content) = original_content {
+            content
+        } else {
+            match fs::read_to_string(file_path_obj) {
+                Ok(content) => content,
+                Err(e) => {
+                    tracing::error!("Failed to read file for search/replace edit: {}", e);
+                    return Err(WinxError::FileAccessError {
+                        path: file_path_obj.to_path_buf(),
+                        message: format!(
+                            "Failed to read file: {}. The file might be binary or have encoding issues.",
+                            e
+                        ),
+                    });
+                }
             }
         };
 

@@ -556,7 +556,7 @@ pub struct TerminalPerformer {
     /// Active hyperlink URL, if any
     current_hyperlink_url: Option<String>,
     /// Current OSC parameters being parsed
-    osc_params: Vec<String>,
+    osc_params: Vec<std::borrow::Cow<'static, str>>,
 }
 
 // Custom debug implementation to avoid using the one from VTE
@@ -899,10 +899,8 @@ impl TerminalPerformer {
         }
 
         // Convert the params to strings for easier handling
-        let param_strings: Vec<String> = params
-            .iter()
-            .map(|p| String::from_utf8_lossy(p).to_string())
-            .collect();
+        let param_strings: Vec<std::borrow::Cow<'_, str>> =
+            params.iter().map(|p| String::from_utf8_lossy(p)).collect();
 
         if param_strings.is_empty() {
             return;
@@ -915,13 +913,13 @@ impl TerminalPerformer {
 
             // Get hyperlink parameters and URL
             let params = if param_strings.len() > 1 {
-                param_strings[1].clone()
+                param_strings[1].to_string()
             } else {
                 String::new()
             };
 
             let url = if param_strings.len() > 2 {
-                param_strings[2].clone()
+                param_strings[2].to_string()
             } else {
                 String::new()
             };
@@ -1302,9 +1300,10 @@ impl TerminalEmulator {
 
         // After processing, check if we need to smart truncate
         if let Ok(mut screen) = self.screen.lock()
-            && screen.lines.len() > max_lines {
-                screen.smart_truncate(max_lines);
-            }
+            && screen.lines.len() > max_lines
+        {
+            screen.smart_truncate(max_lines);
+        }
     }
 
     /// Get the current screen state
@@ -1343,7 +1342,7 @@ impl TerminalEmulator {
 }
 
 /// Type definition for cache entries to simplify complex types
-type CacheEntryMap = HashMap<String, (Vec<String>, Instant)>;
+type CacheEntryMap = HashMap<u64, (Vec<String>, Instant)>;
 
 /// Caching system for terminal output rendering
 #[derive(Debug, Clone)]
@@ -1368,19 +1367,22 @@ impl TerminalCache {
 
     /// Get a cached value if available and not expired
     fn get(&self, key: &str) -> Option<Vec<String>> {
+        let hash = self.calculate_hash(key);
         if let Ok(entries) = self.entries.read()
-            && let Some((value, timestamp)) = entries.get(key)
-                && timestamp.elapsed().as_secs() < self.ttl {
-                    return Some(value.clone());
-                }
+            && let Some((value, timestamp)) = entries.get(&hash)
+            && timestamp.elapsed().as_secs() < self.ttl
+        {
+            return Some(value.clone());
+        }
         None
     }
 
     /// Insert a value into the cache
-    fn insert(&self, key: String, value: Vec<String>) {
+    fn insert(&self, key: &str, value: Vec<String>) {
+        let hash = self.calculate_hash(key);
         if let Ok(mut entries) = self.entries.write() {
             // Insert the new entry
-            entries.insert(key, (value, Instant::now()));
+            entries.insert(hash, (value, Instant::now()));
 
             // Clean up old entries if cache is too large
             if entries.len() > self.max_entries {
@@ -1393,10 +1395,10 @@ impl TerminalCache {
                     entries_vec.sort_by_key(|(_, (_, timestamp))| *timestamp);
 
                     let to_remove = entries_vec.len() - self.max_entries;
-                    let keys_to_remove: Vec<String> = entries_vec
+                    let keys_to_remove: Vec<u64> = entries_vec
                         .iter()
                         .take(to_remove)
-                        .map(|(k, _)| (*k).clone())
+                        .map(|(k, _)| **k)
                         .collect();
 
                     for key in keys_to_remove {
@@ -1405,6 +1407,15 @@ impl TerminalCache {
                 }
             }
         }
+    }
+
+    /// Calculate hash of the key
+    fn calculate_hash(&self, key: &str) -> u64 {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Clear expired entries from the cache
@@ -1426,7 +1437,7 @@ pub struct TerminalOutputDiff {
     /// Previous output lines
     previous_output: Vec<String>,
     /// Hash of previous output
-    output_hash: String,
+    output_hash: u64,
     /// Maximum number of lines to compare
     max_lines: usize,
 }
@@ -1442,7 +1453,7 @@ impl TerminalOutputDiff {
     pub fn new() -> Self {
         Self {
             previous_output: Vec::new(),
-            output_hash: String::new(),
+            output_hash: 0,
             max_lines: 1000,
         }
     }
@@ -1451,7 +1462,7 @@ impl TerminalOutputDiff {
     pub fn new_with_max_lines(max_lines: usize) -> Self {
         Self {
             previous_output: Vec::new(),
-            output_hash: String::new(),
+            output_hash: 0,
             max_lines,
         }
     }
@@ -1553,20 +1564,20 @@ impl TerminalOutputDiff {
     }
 
     /// Calculate a hash of the output lines for quick comparison
-    fn calculate_hash(&self, lines: &[String]) -> String {
+    fn calculate_hash(&self, lines: &[String]) -> u64 {
         // Simple hash function based on content
         // In a production setting, use a proper hash function
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         for line in lines.iter().take(self.max_lines) {
             std::hash::Hash::hash(line, &mut hasher);
         }
-        format!("{:x}", std::hash::Hasher::finish(&hasher))
+        std::hash::Hasher::finish(&hasher)
     }
 
     /// Reset the diff detector
     pub fn reset(&mut self) {
         self.previous_output.clear();
-        self.output_hash.clear();
+        self.output_hash = 0;
     }
 }
 
@@ -1591,7 +1602,7 @@ pub fn render_terminal_output(text: &str) -> Vec<String> {
 
     // Cache the result for future use (only if reasonably sized)
     if text.len() < MAX_OUTPUT_SIZE {
-        TERMINAL_CACHE.insert(text.to_string(), result.clone());
+        TERMINAL_CACHE.insert(text, result.clone());
     }
 
     // Periodically clean up expired cache entries
@@ -1817,10 +1828,7 @@ mod tests {
         let cache = TerminalCache::new(10, 60);
 
         // Insert a value
-        cache.insert(
-            "test".to_string(),
-            vec!["line1".to_string(), "line2".to_string()],
-        );
+        cache.insert("test", vec!["line1".to_string(), "line2".to_string()]);
 
         // Should be able to retrieve it
         let retrieved = cache.get("test");

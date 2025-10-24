@@ -118,14 +118,14 @@ fn test_nvidia_config_validation() {
 fn test_chat_completions_url() {
     let config = NvidiaConfig::default();
     assert_eq!(
-        config.chat_completions_url(),
+        config.chat_completions_url().as_ref(),
         "https://integrate.api.nvidia.com/v1/chat/completions"
     );
 
     let mut config_with_trailing_slash = config;
     config_with_trailing_slash.base_url = "https://integrate.api.nvidia.com/".to_string();
     assert_eq!(
-        config_with_trailing_slash.chat_completions_url(),
+        config_with_trailing_slash.chat_completions_url().as_ref(),
         "https://integrate.api.nvidia.com/v1/chat/completions"
     );
 }

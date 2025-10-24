@@ -5,6 +5,7 @@
 //! the system, making interactions more natural and engaging.
 
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info};
@@ -67,7 +68,7 @@ pub struct SystemInfo {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WinxResponse {
     /// Winx's response message
-    pub message: String,
+    pub message: Cow<'static, str>,
     /// Conversation mode used for this response
     pub mode: ConversationMode,
     /// Personality level used (0-10)
@@ -75,9 +76,9 @@ pub struct WinxResponse {
     /// Whether system info was included
     pub included_system_info: bool,
     /// Optional suggestions or tips
-    pub suggestions: Option<Vec<String>>,
+    pub suggestions: Option<Vec<Cow<'static, str>>>,
     /// Easter eggs or fun facts
-    pub fun_fact: Option<String>,
+    pub fun_fact: Option<Cow<'static, str>>,
     /// Session ID for conversation continuity
     pub session_id: String,
 }
@@ -91,9 +92,9 @@ pub struct WinxPersonality {
     /// Conversation history for context
     pub conversation_history: Vec<(String, String)>, // (user_message, winx_response)
     /// Fun facts and tips to share
-    pub tips_database: Vec<String>,
+    pub tips_database: Vec<&'static str>,
     /// Easter egg responses for special messages
-    pub easter_eggs: HashMap<String, String>,
+    pub easter_eggs: HashMap<&'static str, &'static str>,
 }
 
 /// Winx's current mood affects response style
@@ -116,13 +117,13 @@ pub enum WinxMood {
 /// Winx's knowledge about the system
 pub struct WinxKnowledge {
     /// Information about available tools
-    pub tools_info: HashMap<String, String>,
+    pub tools_info: HashMap<&'static str, &'static str>,
     /// Rust and programming tips
-    pub programming_tips: Vec<String>,
+    pub programming_tips: Vec<&'static str>,
     /// System architecture knowledge
-    pub architecture_info: HashMap<String, String>,
+    pub architecture_info: HashMap<&'static str, &'static str>,
     /// Common debugging solutions
-    pub debug_solutions: HashMap<String, String>,
+    pub debug_solutions: HashMap<&'static str, &'static str>,
 }
 
 impl Default for WinxPersonality {
@@ -139,57 +140,52 @@ impl Default for WinxPersonality {
 
 impl WinxPersonality {
     /// Default programming tips
-    fn default_tips() -> Vec<String> {
+    fn default_tips() -> Vec<&'static str> {
         vec![
-            "🦀 Em Rust, use `cargo clippy` para dicas de código!".to_string(),
-            "⚡ O sistema de ownership do Rust previne muitos bugs automaticamente!".to_string(),
-            "🔧 Use `cargo fmt` para manter seu código sempre bem formatado!".to_string(),
-            "💡 Tente usar `match` em vez de `if-else` para pattern matching!".to_string(),
-            "🎯 Use `Result<T, E>` para tratamento de erros explícito!".to_string(),
-            "🚀 Winx pode executar comandos, analisar código e muito mais!".to_string(),
-            "✨ O sistema de fallback AI garante que sempre tenhamos resposta!".to_string(),
-            "🔄 Use `cargo watch -x run` para recompilação automática!".to_string(),
+            "🦀 Em Rust, use `cargo clippy` para dicas de código!",
+            "⚡ O sistema de ownership do Rust previne muitos bugs automaticamente!",
+            "🔧 Use `cargo fmt` para manter seu código sempre bem formatado!",
+            "💡 Tente usar `match` em vez de `if-else` para pattern matching!",
+            "🎯 Use `Result<T, E>` para tratamento de erros explícito!",
+            "🚀 Winx pode executar comandos, analisar código e muito mais!",
+            "✨ O sistema de fallback AI garante que sempre tenhamos resposta!",
+            "🔄 Use `cargo watch -x run` para recompilação automática!",
         ]
     }
 
     /// Default easter egg responses
-    fn default_easter_eggs() -> HashMap<String, String> {
+    fn default_easter_eggs() -> HashMap<&'static str, &'static str> {
         let mut eggs = HashMap::new();
         eggs.insert(
-            "oi winx".to_string(),
-            "✨ Oi! Sou a Winx, sua fada digital do código! 🧚‍♀️".to_string(),
+            "oi winx",
+            "✨ Oi! Sou a Winx, sua fada digital do código! 🧚‍♀️",
         );
         eggs.insert(
-            "como você está".to_string(),
-            "Estou ótima! Processando dados a velocidade da luz! ⚡".to_string(),
+            "como você está",
+            "Estou ótima! Processando dados a velocidade da luz! ⚡",
         );
         eggs.insert(
-            "conte uma piada".to_string(),
-            "Por que os programadores preferem modo escuro? Porque a luz atrai bugs! 🐛😄"
-                .to_string(),
+            "conte uma piada",
+            "Por que os programadores preferem modo escuro? Porque a luz atrai bugs! 🐛😄",
         );
         eggs.insert(
-            "rust".to_string(),
-            "🦀 Rust é incrível! Zero-cost abstractions e memory safety! 💚".to_string(),
+            "rust",
+            "🦀 Rust é incrível! Zero-cost abstractions e memory safety! 💚",
         );
         eggs.insert(
-            "help".to_string(),
-            "🆘 Claro! Sou especialista em ajudar com código, debugging e operações do sistema!"
-                .to_string(),
+            "help",
+            "🆘 Claro! Sou especialista em ajudar com código, debugging e operações do sistema!",
         );
+        eggs.insert("obrigado", "✨ De nada! Estou sempre aqui para ajudar! 💫");
         eggs.insert(
-            "obrigado".to_string(),
-            "✨ De nada! Estou sempre aqui para ajudar! 💫".to_string(),
-        );
-        eggs.insert(
-            "winx é legal".to_string(),
-            "🥰 Obrigada! Você também é legal por trabalhar comigo! 💖".to_string(),
+            "winx é legal",
+            "🥰 Obrigada! Você também é legal por trabalhar comigo! 💖",
         );
         eggs
     }
 
     /// Get a random tip
-    pub fn get_random_tip(&self) -> Result<Option<&String>> {
+    pub fn get_random_tip(&self) -> Result<Option<&'static str>> {
         if self.tips_database.is_empty() {
             return Ok(None);
         }
@@ -197,15 +193,15 @@ impl WinxPersonality {
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| WinxError::DataLoadingError(format!("Time error: {}", e)))?;
         let index = (duration.as_nanos() as usize) % self.tips_database.len();
-        Ok(self.tips_database.get(index))
+        Ok(Some(self.tips_database[index]))
     }
 
     /// Check for easter egg response
-    pub fn check_easter_egg(&self, message: &str) -> Option<&String> {
+    pub fn check_easter_egg(&self, message: &str) -> Option<&'static str> {
         let lower_message = message.to_lowercase();
         for (trigger, response) in &self.easter_eggs {
             if lower_message.contains(trigger) {
-                return Some(response);
+                return Some(*response);
             }
         }
         None
@@ -238,66 +234,48 @@ impl Default for WinxKnowledge {
     fn default() -> Self {
         let mut tools_info = HashMap::new();
         tools_info.insert(
-            "bash_command".to_string(),
-            "Executa comandos shell com estado persistente".to_string(),
+            "bash_command",
+            "Executa comandos shell com estado persistente",
+        );
+        tools_info.insert("read_files", "Lê conteúdo de arquivos com suporte a ranges");
+        tools_info.insert("file_write_or_edit", "Escreve ou edita arquivos");
+        tools_info.insert(
+            "code_analyzer",
+            "Análise de código com IA para bugs e performance",
         );
         tools_info.insert(
-            "read_files".to_string(),
-            "Lê conteúdo de arquivos com suporte a ranges".to_string(),
+            "ai_generate_code",
+            "Gera código a partir de descrições naturais",
+        );
+        tools_info.insert("ai_explain_code", "Explica código com detalhes");
+        tools_info.insert(
+            "multi_file_editor",
+            "Editor avançado para múltiplos arquivos",
         );
         tools_info.insert(
-            "file_write_or_edit".to_string(),
-            "Escreve ou edita arquivos".to_string(),
+            "context_save",
+            "Salva contexto de tarefas para resumir depois",
         );
-        tools_info.insert(
-            "code_analyzer".to_string(),
-            "Análise de código com IA para bugs e performance".to_string(),
-        );
-        tools_info.insert(
-            "ai_generate_code".to_string(),
-            "Gera código a partir de descrições naturais".to_string(),
-        );
-        tools_info.insert(
-            "ai_explain_code".to_string(),
-            "Explica código com detalhes".to_string(),
-        );
-        tools_info.insert(
-            "multi_file_editor".to_string(),
-            "Editor avançado para múltiplos arquivos".to_string(),
-        );
-        tools_info.insert(
-            "context_save".to_string(),
-            "Salva contexto de tarefas para resumir depois".to_string(),
-        );
-        tools_info.insert(
-            "read_image".to_string(),
-            "Processa imagens como base64".to_string(),
-        );
-        tools_info.insert(
-            "command_suggestions".to_string(),
-            "Sugere comandos baseado no contexto".to_string(),
-        );
+        tools_info.insert("read_image", "Processa imagens como base64");
+        tools_info.insert("command_suggestions", "Sugere comandos baseado no contexto");
 
         let mut architecture_info = HashMap::new();
         architecture_info.insert(
-            "fallback_system".to_string(),
-            "DashScope → NVIDIA → Gemini com fallback automático".to_string(),
+            "fallback_system",
+            "DashScope → NVIDIA → Gemini com fallback automático",
         );
         architecture_info.insert(
-            "mcp_protocol".to_string(),
-            "Usa Model Context Protocol para comunicação com Claude".to_string(),
+            "mcp_protocol",
+            "Usa Model Context Protocol para comunicação com Claude",
         );
-        architecture_info.insert(
-            "async_runtime".to_string(),
-            "Runtime Tokio para operações assíncronas".to_string(),
-        );
+        architecture_info.insert("async_runtime", "Runtime Tokio para operações assíncronas");
 
         Self {
             tools_info,
             programming_tips: vec![
-                "Use proper error handling with Result<T, E>".to_string(),
-                "Prefira `&str` sobre `String` em parâmetros de função quando possível".to_string(),
-                "Use `cargo test` para executar todos os testes do projeto".to_string(),
+                "Use proper error handling with Result<T, E>.",
+                "Prefira `&str` sobre `String` em parâmetros de função quando possível",
+                "Use `cargo test` para executar todos os testes do projeto",
             ],
             architecture_info,
             debug_solutions: HashMap::new(),
@@ -362,7 +340,7 @@ impl WinxChatProcessor {
         let suggestions = self.generate_suggestions(&mode, chat.context.as_deref());
 
         // Get a random fun fact
-        let fun_fact = self.get_fun_fact(personality_level)?;
+        let fun_fact = self.get_fun_fact(personality_level)?.map(|s| s.to_string());
 
         // Update conversation history
         {
@@ -374,12 +352,12 @@ impl WinxChatProcessor {
         }
 
         Ok(WinxResponse {
-            message: response_message,
+            message: Cow::Owned(response_message),
             mode,
             personality_level,
             included_system_info: include_system_info,
             suggestions,
-            fun_fact,
+            fun_fact: fun_fact.map(Cow::Owned),
             session_id,
         })
     }
@@ -401,7 +379,7 @@ impl WinxChatProcessor {
                 .lock()
                 .map_err(|e| WinxError::DataLoadingError(format!("Mutex lock error: {}", e)))?;
             if let Some(easter_egg) = personality.check_easter_egg(message) {
-                return Ok(easter_egg.clone());
+                return Ok(easter_egg.to_string());
             }
         }
 
@@ -480,7 +458,7 @@ impl WinxChatProcessor {
             "De nada! Foi um prazer ajudar! 💖".to_string()
         } else {
             format!(
-                "Interessante! Sobre '{}' - deixe-me pensar... Como posso te ajudar com isso?",
+                "Que legal conversar com você! Sobre '{}', posso te ajudar de várias formas. O que você precisa?",
                 message
             )
         }
@@ -560,19 +538,19 @@ impl WinxChatProcessor {
         &self,
         mode: &ConversationMode,
         _context: Option<&str>,
-    ) -> Option<Vec<String>> {
+    ) -> Option<Vec<Cow<'static, str>>> {
         let suggestions = match mode {
             ConversationMode::Technical => vec![
-                "Use 'cargo clippy' para análise estática do código".to_string(),
-                "Considere usar 'cargo test' para validar mudanças".to_string(),
+                Cow::Borrowed("Use 'cargo clippy' para análise estática do código"),
+                Cow::Borrowed("Considere usar 'cargo test' para validar mudanças"),
             ],
             ConversationMode::Help => vec![
-                "Experimente a ferramenta 'code_analyzer' para análise automática".to_string(),
-                "Use 'context_save' para salvar progresso de tarefas complexas".to_string(),
+                Cow::Borrowed("Experimente a ferramenta 'code_analyzer' para análise automática"),
+                Cow::Borrowed("Use 'context_save' para salvar progresso de tarefas complexas"),
             ],
             ConversationMode::Debug => vec![
-                "Verifique logs com 'bash_command'".to_string(),
-                "Use 'read_files' para examinar arquivos relevantes".to_string(),
+                Cow::Borrowed("Verifique logs com 'bash_command'"),
+                Cow::Borrowed("Use 'read_files' para examinar arquivos relevantes"),
             ],
             _ => return None,
         };
@@ -585,7 +563,7 @@ impl WinxChatProcessor {
     }
 
     /// Get a fun fact based on personality level
-    fn get_fun_fact(&self, personality_level: u8) -> Result<Option<String>> {
+    fn get_fun_fact(&self, personality_level: u8) -> Result<Option<&'static str>> {
         if personality_level < 6 {
             return Ok(None);
         }
@@ -594,7 +572,7 @@ impl WinxChatProcessor {
             .personality
             .lock()
             .map_err(|e| WinxError::DataLoadingError(format!("Mutex lock error: {}", e)))?;
-        personality.get_random_tip().map(|opt| opt.cloned())
+        personality.get_random_tip()
     }
 
     /// Format system information for display

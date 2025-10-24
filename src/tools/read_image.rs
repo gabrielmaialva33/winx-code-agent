@@ -4,7 +4,7 @@
 //! to read image files and return their contents as base64-encoded data with
 //! the appropriate MIME type.
 
-use base64::{engine::general_purpose, Engine};
+use base64::{Engine, engine::general_purpose};
 use mime_guess::MimeGuess;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -107,7 +107,7 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
         debug!("Using fallback MIME type: {}", mime_type);
         Ok((mime_type.to_string(), image_b64))
     } else {
-        Ok((mime_type, image_b64))
+        Ok((mime_type.to_string(), image_b64))
     }
 }
 

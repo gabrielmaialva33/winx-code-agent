@@ -18,6 +18,23 @@ use crate::gemini::{GeminiClient, GeminiConfig};
 use crate::nvidia::{NvidiaClient, NvidiaConfig};
 use crate::state::BashState;
 
+/// Common operation messages to avoid repeated allocations
+const MSG_FILE_CREATED: &str = "File created successfully";
+const MSG_CONTENT_REPLACED: &str = "File content replaced successfully";
+const MSG_CONTENT_APPENDED: &str = "Content appended successfully";
+const MSG_CONTENT_PREPENDED: &str = "Content prepended successfully";
+const MSG_VALIDATION_FAILED: &str = "Validation failed";
+const MSG_EXECUTION_FAILED: &str = "Execution failed";
+const MSG_DRY_RUN_SUCCESS: &str = "Dry run - operation would succeed";
+const MSG_NO_AI_PROVIDERS: &str = "No AI providers available for smart search/replace";
+const MSG_FILE_EXISTS: &str = "File already exists";
+const MSG_FILE_NOT_FOUND: &str = "File not found";
+const MSG_SEARCH_EMPTY: &str = "Search string cannot be empty";
+const MSG_LINE_NUMBER_INVALID: &str = "Line number must be >= 1";
+const MSG_CONFIDENCE_INVALID: &str = "Confidence threshold must be between 0.0 and 1.0";
+const MSG_SMART_SEARCH_EMPTY: &str = "SmartSearchReplace requires at least one file path";
+const MSG_PATTERN_EMPTY: &str = "Search pattern cannot be empty";
+
 /// Represents different types of file operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -182,7 +199,7 @@ impl AIProvider for DashScopeClient {
         );
 
         let request = ChatCompletionRequest {
-            model: "qwen3-coder-plus".to_string(),
+            model: "qwen3-coder-plus",
             messages: vec![ChatMessage::user(prompt)],
             temperature: Some(0.3),
             max_tokens: Some(2000),
@@ -370,19 +387,19 @@ impl MultiFileEditorTool {
         // Try DashScope first (primary)
         if let Some(client) = self.get_dashscope_client().await {
             debug!("Using DashScope AI client for smart operations");
-            return Some(Box::new(client));
+            return Some(Box::new(client) as Box<dyn AIProvider>);
         }
 
         // Try NVIDIA as fallback 1
         if let Some(client) = self.get_nvidia_client().await {
             debug!("Using NVIDIA AI client for smart operations");
-            return Some(Box::new(client));
+            return Some(Box::new(client) as Box<dyn AIProvider>);
         }
 
         // Try Gemini as fallback 2
         if let Some(client) = self.get_gemini_client().await {
             debug!("Using Gemini AI client for smart operations");
-            return Some(Box::new(client));
+            return Some(Box::new(client) as Box<dyn AIProvider>);
         }
 
         warn!("No AI providers available for smart operations");
@@ -392,27 +409,30 @@ impl MultiFileEditorTool {
     /// Get DashScope client if available
     async fn get_dashscope_client(&self) -> Option<DashScopeClient> {
         if let Ok(config) = DashScopeConfig::from_env()
-            && let Ok(client) = DashScopeClient::new(config) {
-                return Some(client);
-            }
+            && let Ok(client) = DashScopeClient::new(config)
+        {
+            return Some(client);
+        }
         None
     }
 
     /// Get NVIDIA client if available  
     async fn get_nvidia_client(&self) -> Option<NvidiaClient> {
         if let Ok(config) = NvidiaConfig::from_env()
-            && let Ok(client) = NvidiaClient::new(config).await {
-                return Some(client);
-            }
+            && let Ok(client) = NvidiaClient::new(config).await
+        {
+            return Some(client);
+        }
         None
     }
 
     /// Get Gemini client if available
     async fn get_gemini_client(&self) -> Option<GeminiClient> {
         if let Ok(config) = GeminiConfig::from_env()
-            && let Ok(client) = GeminiClient::new(config) {
-                return Some(client);
-            }
+            && let Ok(client) = GeminiClient::new(config)
+        {
+            return Some(client);
+        }
         None
     }
 
@@ -520,7 +540,7 @@ impl MultiFileEditorTool {
                 if path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
-                        message: "File already exists".to_string(),
+                        message: MSG_FILE_EXISTS.to_string(),
                     });
                 }
 
@@ -535,10 +555,11 @@ impl MultiFileEditorTool {
 
                 // Check if parent directory exists or can be created
                 if let Some(parent) = path.parent()
-                    && !parent.exists() {
-                        // This is okay if create_dirs is true
-                        debug!("Parent directory {:?} does not exist", parent);
-                    }
+                    && !parent.exists()
+                {
+                    // This is okay if create_dirs is true
+                    debug!("Parent directory {:?} does not exist", parent);
+                }
             }
             FileOperation::Replace { file_path, content }
             | FileOperation::Append { file_path, content }
@@ -549,7 +570,7 @@ impl MultiFileEditorTool {
                 if !path.exists() {
                     return Err(WinxError::FileAccessError {
                         path: path.to_path_buf(),
-                        message: "File not found".to_string(),
+                        message: MSG_FILE_NOT_FOUND.to_string(),
                     });
                 }
 
@@ -599,9 +620,7 @@ impl MultiFileEditorTool {
 
                 // Validate line number
                 if *line_number == 0 {
-                    return Err(WinxError::InvalidInput(
-                        "Line number must be >= 1".to_string(),
-                    ));
+                    return Err(WinxError::InvalidInput(MSG_LINE_NUMBER_INVALID.to_string()));
                 }
             }
             FileOperation::SearchReplace {
@@ -620,9 +639,7 @@ impl MultiFileEditorTool {
                 }
 
                 if search.is_empty() {
-                    return Err(WinxError::InvalidInput(
-                        "Search string cannot be empty".to_string(),
-                    ));
+                    return Err(WinxError::InvalidInput(MSG_SEARCH_EMPTY.to_string()));
                 }
 
                 if replace.len() > self.max_file_size {
@@ -641,9 +658,7 @@ impl MultiFileEditorTool {
             } => {
                 // Validate file paths
                 if file_paths.is_empty() {
-                    return Err(WinxError::InvalidInput(
-                        "SmartSearchReplace requires at least one file path".to_string(),
-                    ));
+                    return Err(WinxError::InvalidInput(MSG_SMART_SEARCH_EMPTY.to_string()));
                 }
 
                 for file_path in file_paths {
@@ -658,18 +673,15 @@ impl MultiFileEditorTool {
 
                 // Validate search pattern
                 if search_pattern.is_empty() {
-                    return Err(WinxError::InvalidInput(
-                        "Search pattern cannot be empty".to_string(),
-                    ));
+                    return Err(WinxError::InvalidInput(MSG_PATTERN_EMPTY.to_string()));
                 }
 
                 // Validate confidence threshold
                 if let Some(threshold) = confidence_threshold
-                    && (*threshold < 0.0 || *threshold > 1.0) {
-                        return Err(WinxError::InvalidInput(
-                            "Confidence threshold must be between 0.0 and 1.0".to_string(),
-                        ));
-                    }
+                    && (*threshold < 0.0 || *threshold > 1.0)
+                {
+                    return Err(WinxError::InvalidInput(MSG_CONFIDENCE_INVALID.to_string()));
+                }
             }
         }
 
@@ -689,7 +701,7 @@ impl MultiFileEditorTool {
                 operation_index: index,
                 file_path,
                 success: true,
-                message: "Dry run - operation would succeed".to_string(),
+                message: MSG_DRY_RUN_SUCCESS.to_string(),
                 backup_path: None,
                 bytes_written: None,
             });
@@ -863,12 +875,11 @@ impl MultiFileEditorTool {
         let path = Path::new(file_path);
 
         // Create parent directories if needed
-        if create_dirs
-            && let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).await.map_err(|e| {
-                    WinxError::FileError(format!("Failed to create directories: {}", e))
-                })?;
-            }
+        if create_dirs && let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).await.map_err(|e| {
+                WinxError::FileError(format!("Failed to create directories: {}", e))
+            })?;
+        }
 
         // Create backup (will record that file was created)
         let backup_path = self.create_backup(file_path).await?;
@@ -882,7 +893,7 @@ impl MultiFileEditorTool {
             operation_index: index,
             file_path: file_path.to_string(),
             success: true,
-            message: "File created successfully".to_string(),
+            message: MSG_FILE_CREATED.to_string(),
             backup_path,
             bytes_written: Some(content.len()),
         })
@@ -905,7 +916,7 @@ impl MultiFileEditorTool {
             operation_index: index,
             file_path: file_path.to_string(),
             success: true,
-            message: "File content replaced successfully".to_string(),
+            message: MSG_CONTENT_REPLACED.to_string(),
             backup_path,
             bytes_written: Some(content.len()),
         })
@@ -934,7 +945,7 @@ impl MultiFileEditorTool {
             operation_index: index,
             file_path: file_path.to_string(),
             success: true,
-            message: "Content appended successfully".to_string(),
+            message: MSG_CONTENT_APPENDED.to_string(),
             backup_path,
             bytes_written: Some(content.len()),
         })
@@ -963,7 +974,7 @@ impl MultiFileEditorTool {
             operation_index: index,
             file_path: file_path.to_string(),
             success: true,
-            message: "Content prepended successfully".to_string(),
+            message: MSG_CONTENT_PREPENDED.to_string(),
             backup_path,
             bytes_written: Some(content.len()),
         })
@@ -1080,9 +1091,12 @@ impl MultiFileEditorTool {
             None => {
                 return Ok(OperationResult {
                     operation_index: index,
-                    file_path: file_paths.first().unwrap_or(&"unknown".to_string()).clone(),
+                    file_path: file_paths
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "unknown".to_string()),
                     success: false,
-                    message: "No AI providers available for smart search/replace".to_string(),
+                    message: MSG_NO_AI_PROVIDERS.to_string(),
                     backup_path: None,
                     bytes_written: None,
                 });
@@ -1181,8 +1195,8 @@ impl MultiFileEditorTool {
             operation_index: index,
             file_path: file_paths
                 .first()
-                .unwrap_or(&"multiple_files".to_string())
-                .clone(),
+                .cloned()
+                .unwrap_or_else(|| "multiple_files".to_string()),
             success: true,
             message,
             backup_path: None,
@@ -1611,9 +1625,11 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.failed_operations, 1);
-        assert!(result.results[0]
-            .message
-            .contains("requires at least one file path"));
+        assert!(
+            result.results[0]
+                .message
+                .contains("requires at least one file path")
+        );
     }
 
     #[tokio::test]
@@ -1649,9 +1665,11 @@ mod tests {
         let result = tool.execute(&config.operations).await.unwrap();
 
         assert_eq!(result.failed_operations, 1);
-        assert!(result.results[0]
-            .message
-            .contains("Confidence threshold must be between 0.0 and 1.0"));
+        assert!(
+            result.results[0]
+                .message
+                .contains("Confidence threshold must be between 0.0 and 1.0")
+        );
     }
 
     #[test]

@@ -8,6 +8,7 @@
 use anyhow::Context as AnyhowContext;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -21,7 +22,7 @@ use crate::utils::file_extensions::FileExtensionAnalyzer;
 use crate::utils::mmap::{read_file_optimized, read_file_to_string};
 use crate::utils::path::expand_user;
 use crate::utils::resource_allocator::{
-    get_global_allocator, request_file_allocation, AllocationGuard,
+    AllocationGuard, get_global_allocator, request_file_allocation,
 };
 
 /// Type alias for file reading result
@@ -248,7 +249,7 @@ async fn read_file(
     };
 
     // Create allocation guard for automatic cleanup
-    let _guard = AllocationGuard::new(path.clone(), allocation.clone()).await;
+    let _guard = AllocationGuard::new(&path, allocation.clone()).await;
 
     // Check file size against allocation
     if file_size > allocation.allocated_memory as u64 && !allocation.should_use_streaming {
@@ -344,7 +345,7 @@ async fn read_file(
     if show_line_numbers {
         for (i, line) in filtered_lines.iter().enumerate() {
             let line_num = start_idx + i + 1; // Convert to 1-indexed
-            result_content.push_str(&format!("{} {}\n", line_num, line));
+            write!(result_content, "{} {}\n", line_num, line).unwrap();
         }
     } else {
         for line in filtered_lines {
@@ -386,10 +387,8 @@ async fn read_file(
             let last_line_shown = start_idx + line_count;
 
             // Add informative message about truncation
-            result_content.push_str(&format!(
-                "\n(...truncated) Only showing till line number {} of {} total lines due to the token limit, please continue reading from {} if required",
-                last_line_shown, total_lines, last_line_shown + 1
-            ));
+            write!(result_content, "\n(...truncated) Only showing till line number {} of {} total lines due to the token limit, please continue reading from {} if required",
+                last_line_shown, total_lines, last_line_shown + 1).unwrap();
 
             truncated = true;
             effective_end = last_line_shown;
@@ -553,7 +552,7 @@ pub async fn handle_tool_call(
 
     // If we have a token limit, allocate intelligently across files
     let token_allocations = if let Some(total_tokens) = max_tokens_per_file {
-        let file_names: Vec<String> = validated_read_files
+        let file_names: Vec<&str> = validated_read_files
             .file_paths
             .iter()
             .map(|path| {
@@ -561,14 +560,14 @@ pub async fn handle_tool_call(
                 Path::new(path)
                     .file_name()
                     .and_then(|name| name.to_str())
-                    .unwrap_or(path)
-                    .to_string()
+                    .unwrap_or(path.as_str())
             })
             .collect();
 
         file_extension_analyzer
             .allocate_token_budget(&file_names, total_tokens)
             .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
             .collect::<HashMap<String, usize>>()
     } else {
         HashMap::new()
@@ -764,10 +763,12 @@ pub async fn handle_tool_call(
                     None
                 };
                 let range_formatted = range_format(start_line_num, end_line_num);
-                message.push_str(&format!(
+                write!(
+                    message,
                     "\n{}{}\n```\n{}\n",
                     file_path, range_formatted, content
-                ));
+                )
+                .unwrap();
 
                 // Check if we need to stop due to truncation or token limit
                 if file_truncated || remaining_tokens == Some(0) {
@@ -781,10 +782,8 @@ pub async fn handle_tool_call(
                         .cloned()
                         .collect();
                     if !remaining_files.is_empty() {
-                        message.push_str(&format!(
-                            "\nNot reading the rest of the files: {} due to token limit, please call again",
-                            remaining_files.join(", ")
-                        ));
+                        write!(message, "\nNot reading the rest of the files: {} due to token limit, please call again",
+                            remaining_files.join(", ")).unwrap();
                     }
                 } else {
                     message.push_str("```");
@@ -808,7 +807,7 @@ pub async fn handle_tool_call(
                     _ => format!("{}", e),
                 };
 
-                message.push_str(&format!("\n{}: {}\n", file_path, error_msg));
+                write!(message, "\n{}: {}\n", file_path, error_msg).unwrap();
                 had_errors = true;
             }
         }
@@ -853,13 +852,15 @@ pub async fn handle_tool_call(
 
         move || {
             if let Ok(mut bash_state_guard) = bash_state_arc.lock()
-                && let Some(bash_state) = bash_state_guard.as_mut() {
-                    for (file_path, ranges) in whitelist_data {
-                        // The cache already has the file hash and metadata,
-                        // so we just need to ensure it's in the whitelist
+                && let Some(bash_state) = bash_state_guard.as_mut()
+            {
+                for (file_path, ranges) in whitelist_data {
+                    // The cache already has the file hash and metadata,
+                    // so we just need to ensure it's in the whitelist
 
-                        // Get the hash from the cache
-                        let file_hash = cache
+                    // Get the hash from the cache
+                    let file_hash =
+                        cache
                             .get_cached_hash(Path::new(&file_path))
                             .unwrap_or_else(|| {
                                 // If not in cache (shouldn't happen), calculate it
@@ -873,47 +874,45 @@ pub async fn handle_tool_call(
                                 }
                             });
 
-                        // Add or update the whitelist entry
-                        if let Some(existing) =
-                            bash_state.whitelist_for_overwrite.get_mut(&file_path)
-                        {
-                            existing.file_hash = file_hash.clone();
+                    // Add or update the whitelist entry
+                    if let Some(existing) = bash_state.whitelist_for_overwrite.get_mut(&file_path) {
+                        existing.file_hash = file_hash.clone();
 
-                            // Get total lines from the cache
-                            let total_lines = cache
-                                .get_unread_ranges(Path::new(&file_path))
-                                .iter()
-                                .map(|&(_, end)| end)
-                                .max()
-                                .unwrap_or(0);
+                        // Get total lines from the cache
+                        let total_lines = cache
+                            .get_unread_ranges(Path::new(&file_path))
+                            .iter()
+                            .map(|&(_, end)| end)
+                            .max()
+                            .unwrap_or(0);
 
-                            if total_lines > 0 {
-                                existing.total_lines = total_lines;
-                            }
-
-                            for range in ranges {
-                                existing.add_range(range.0, range.1);
-                            }
-                        } else {
-                            // Create new entry
-                            let total_lines = cache
-                                .get_unread_ranges(Path::new(&file_path))
-                                .iter()
-                                .map(|&(_, end)| end)
-                                .max()
-                                .unwrap_or(ranges.iter().map(|&(_, end)| end).max().unwrap_or(0));
-
-                            bash_state.whitelist_for_overwrite.insert(
-                                file_path.clone(),
-                                crate::state::bash_state::FileWhitelistData::new(
-                                    file_hash,
-                                    ranges,
-                                    total_lines,
-                                ),
-                            );
+                        if total_lines > 0 {
+                            existing.total_lines = total_lines;
                         }
+
+                        for range in ranges {
+                            existing.add_range(range.0, range.1);
+                        }
+                    } else {
+                        // Create new entry
+                        let total_lines = cache
+                            .get_unread_ranges(Path::new(&file_path))
+                            .iter()
+                            .map(|&(_, end)| end)
+                            .max()
+                            .unwrap_or(ranges.iter().map(|&(_, end)| end).max().unwrap_or(0));
+
+                        bash_state.whitelist_for_overwrite.insert(
+                            file_path.clone(),
+                            crate::state::bash_state::FileWhitelistData::new(
+                                file_hash,
+                                ranges,
+                                total_lines,
+                            ),
+                        );
                     }
                 }
+            }
         }
     });
 

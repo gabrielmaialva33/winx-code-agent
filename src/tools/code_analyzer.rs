@@ -3,6 +3,7 @@
 //! This module provides functionality for analyzing code, identifying
 //! issues, and providing interactive debugging assistance.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -16,7 +17,7 @@ pub struct CodeAnalysisResult {
     /// File path being analyzed
     pub file_path: PathBuf,
     /// Programming language detected
-    pub language: String,
+    pub language: Cow<'_, str>,
     /// List of issues found
     pub issues: Vec<CodeIssue>,
     /// List of improvement suggestions
@@ -31,32 +32,32 @@ pub struct CodeAnalysisResult {
 #[derive(Debug, Clone)]
 pub struct CodeIssue {
     /// Type of issue (error, warning, etc.)
-    pub issue_type: String,
+    pub issue_type: Cow<'_, str>,
     /// Description of the issue
-    pub description: String,
+    pub description: Cow<'_, str>,
     /// Line number where the issue occurs
     pub line: Option<usize>,
     /// Column where the issue starts
     pub column: Option<usize>,
     /// Severity level (high, medium, low)
-    pub severity: String,
+    pub severity: Cow<'_, str>,
     /// Possible solutions to fix the issue
-    pub solutions: Vec<String>,
+    pub solutions: Vec<Cow<'_, str>>,
 }
 
 /// A suggestion for code improvement
 #[derive(Debug, Clone)]
 pub struct CodeSuggestion {
     /// Type of suggestion (performance, style, etc.)
-    pub suggestion_type: String,
+    pub suggestion_type: Cow<'_, str>,
     /// Description of the suggestion
-    pub description: String,
+    pub description: Cow<'_, str>,
     /// Line number where the suggestion applies
     pub line: Option<usize>,
     /// Confidence level (0.0-1.0)
     pub confidence: f64,
     /// The actual code suggestion
-    pub code_sample: Option<String>,
+    pub code_sample: Option<Cow<'_, str>>,
 }
 
 /// Code complexity metrics
@@ -164,7 +165,7 @@ pub async fn handle_tool_call(
 
     // Detect language if not provided
     let language = match &params.language {
-        Some(lang) => lang.clone(),
+        Some(lang) => Cow::Owned(lang.clone()),
         None => detect_language(&file_path)?,
     };
 
@@ -176,18 +177,18 @@ pub async fn handle_tool_call(
         })?;
 
     // Perform static analysis based on the language
-    let (issues, suggestions) = analyze_code(&file_content, &language, &params)?;
+    let (issues, suggestions) = analyze_code(&file_content, language.as_ref(), &params)?;
 
     // Calculate complexity metrics if requested
     let complexity = if params.include_complexity {
-        Some(calculate_complexity(&file_content, &language)?)
+        Some(calculate_complexity(&file_content, language.as_ref())?)
     } else {
         None
     };
 
     // Analyze dependencies if requested
     let dependency_info = if params.analyze_dependencies {
-        analyze_dependencies(&file_path, &language)?
+        analyze_dependencies(&file_path, language.as_ref())?
     } else {
         String::new()
     };
@@ -226,7 +227,7 @@ pub async fn handle_tool_call(
 }
 
 /// Detect programming language from file extension and content
-fn detect_language(file_path: &Path) -> Result<String, WinxError> {
+fn detect_language(file_path: &Path) -> Result<Cow<'_, str>, WinxError> {
     let extension = file_path
         .extension()
         .and_then(|ext| ext.to_str())
@@ -234,76 +235,76 @@ fn detect_language(file_path: &Path) -> Result<String, WinxError> {
 
     // Map file extensions to languages
     let language = match extension {
-        "rs" => "rust",
-        "go" => "go",
-        "js" => "javascript",
-        "ts" => "typescript",
-        "jsx" => "javascript",
-        "tsx" => "typescript",
-        "py" => "python",
-        "rb" => "ruby",
-        "php" => "php",
-        "java" => "java",
-        "scala" => "scala",
-        "c" => "c",
-        "cpp" | "cc" | "cxx" => "cpp",
-        "h" | "hpp" => "cpp",
-        "cs" => "csharp",
-        "swift" => "swift",
-        "kt" | "kts" => "kotlin",
-        "hs" => "haskell",
-        "ex" | "exs" => "elixir",
-        "erl" => "erlang",
-        "clj" | "cljs" => "clojure",
-        "html" | "htm" => "html",
-        "css" => "css",
-        "scss" | "sass" => "scss",
-        "json" => "json",
-        "yml" | "yaml" => "yaml",
-        "md" => "markdown",
-        "sh" | "bash" => "bash",
-        "pl" => "perl",
-        "r" => "r",
-        "lua" => "lua",
-        "dart" => "dart",
-        "sql" => "sql",
-        "xml" => "xml",
-        "toml" => "toml",
-        "ini" => "ini",
-        "conf" => "config",
+        "rs" => Cow::Borrowed("rust"),
+        "go" => Cow::Borrowed("go"),
+        "js" => Cow::Borrowed("javascript"),
+        "ts" => Cow::Borrowed("typescript"),
+        "jsx" => Cow::Borrowed("javascript"),
+        "tsx" => Cow::Borrowed("typescript"),
+        "py" => Cow::Borrowed("python"),
+        "rb" => Cow::Borrowed("ruby"),
+        "php" => Cow::Borrowed("php"),
+        "java" => Cow::Borrowed("java"),
+        "scala" => Cow::Borrowed("scala"),
+        "c" => Cow::Borrowed("c"),
+        "cpp" | "cc" | "cxx" => Cow::Borrowed("cpp"),
+        "h" | "hpp" => Cow::Borrowed("cpp"),
+        "cs" => Cow::Borrowed("csharp"),
+        "swift" => Cow::Borrowed("swift"),
+        "kt" | "kts" => Cow::Borrowed("kotlin"),
+        "hs" => Cow::Borrowed("haskell"),
+        "ex" | "exs" => Cow::Borrowed("elixir"),
+        "erl" => Cow::Borrowed("erlang"),
+        "clj" | "cljs" => Cow::Borrowed("clojure"),
+        "html" | "htm" => Cow::Borrowed("html"),
+        "css" => Cow::Borrowed("css"),
+        "scss" | "sass" => Cow::Borrowed("scss"),
+        "json" => Cow::Borrowed("json"),
+        "yml" | "yaml" => Cow::Borrowed("yaml"),
+        "md" => Cow::Borrowed("markdown"),
+        "sh" | "bash" => Cow::Borrowed("bash"),
+        "pl" => Cow::Borrowed("perl"),
+        "r" => Cow::Borrowed("r"),
+        "lua" => Cow::Borrowed("lua"),
+        "dart" => Cow::Borrowed("dart"),
+        "sql" => Cow::Borrowed("sql"),
+        "xml" => Cow::Borrowed("xml"),
+        "toml" => Cow::Borrowed("toml"),
+        "ini" => Cow::Borrowed("ini"),
+        "conf" => Cow::Borrowed("config"),
         _ => {
             // Try to detect from file content if extension not recognized
             let content = match std::fs::read_to_string(file_path) {
                 Ok(content) => content,
-                Err(_) => return Ok("unknown".to_string()),
+                Err(_) => return Ok(Cow::Borrowed("unknown")),
             };
 
             // Simple heuristics for language detection from content
             if content.contains("fn ") && content.contains("pub ") && content.contains("->") {
-                "rust"
+                Cow::Borrowed("rust")
             } else if content.contains("package main") || content.contains("import (") {
-                "go"
+                Cow::Borrowed("go")
             } else if content.contains("def ") && content.contains(":") {
-                "python"
+                Cow::Borrowed("python")
             } else if content.contains("function ") && content.contains("const ") {
-                "javascript"
+                Cow::Borrowed("javascript")
             } else if content.contains("public class ") || content.contains("private class ") {
-                "java"
+                Cow::Borrowed("java")
             } else if content.contains("#include") && content.contains("int main") {
-                "cpp"
+                Cow::Borrowed("cpp")
             } else if content.contains("<?php") {
-                "php"
+                Cow::Borrowed("php")
             } else if content.contains("#!/bin/bash") || content.contains("#!/bin/sh") {
-                "bash"
+                Cow::Borrowed("bash")
             } else {
-                "unknown"
+                Cow::Borrowed("unknown")
             }
         }
     }
     .to_string();
 
     debug!("Detected language '{}' for file {:?}", language, file_path);
-    Ok(language)
+    Ok(Cow::Owned(language))
 }
 
 /// Analyze code for issues and suggestions
@@ -398,14 +399,14 @@ fn analyze_rust_code(
             && !line.contains("#[test]")
         {
             issues.push(CodeIssue {
-                issue_type: "error_handling".to_string(),
-                description: "Potential unhandled error with unwrap() or expect()".to_string(),
+                issue_type: Cow::Borrowed("error_handling"),
+                description: Cow::Borrowed("Potential unhandled error with unwrap() or expect()"),
                 line: Some(i + 1),
                 column: None,
-                severity: "medium".to_string(),
+                severity: Cow::Borrowed("medium"),
                 solutions: vec![
-                    "Consider using proper error handling with ? operator".to_string(),
-                    "Use match or if let to handle the Result/Option explicitly".to_string(),
+                    Cow::Borrowed("Consider using proper error handling with ? operator"),
+                    Cow::Borrowed("Use match or if let to handle the Result/Option explicitly"),
                 ],
             });
         }
@@ -415,12 +416,13 @@ fn analyze_rust_code(
     for (i, line) in content.lines().enumerate() {
         if line.contains("&mut ") && !line.contains("=") && !line.contains(".") {
             suggestions.push(CodeSuggestion {
-                suggestion_type: "style".to_string(),
-                description: "Consider using immutable reference if data isn't modified"
-                    .to_string(),
+                suggestion_type: Cow::Borrowed("style"),
+                description: Cow::Borrowed(
+                    "Consider using immutable reference if data isn't modified",
+                ),
                 line: Some(i + 1),
                 confidence: 0.7,
-                code_sample: Some(line.replace("&mut ", "& ").to_string()),
+                code_sample: Some(Cow::Owned(line.replace("&mut ", "& "))),
             });
         }
     }
@@ -436,15 +438,14 @@ fn analyze_rust_code(
                 // Found a new function without closing the previous one
                 if line_count > 50 {
                     issues.push(CodeIssue {
-                        issue_type: "complexity".to_string(),
-                        description: format!("Function is too long ({} lines)", line_count),
+                        issue_type: Cow::Borrowed("complexity"),
+                        description: Cow::Owned(format!("Function is too long ({} lines)", line_count)),
                         line: Some(current_fn_start + 1),
                         column: None,
-                        severity: "low".to_string(),
+                        severity: Cow::Borrowed("low"),
                         solutions: vec![
-                            "Consider breaking the function into smaller, more focused functions"
-                                .to_string(),
-                            "Extract helper methods for complex operations".to_string(),
+                            Cow::Borrowed("Consider breaking the function into smaller, more focused functions"),
+                            Cow::Borrowed("Extract helper methods for complex operations"),
                         ],
                     });
                 }
@@ -463,15 +464,14 @@ fn analyze_rust_code(
 
                 if line_count > 50 {
                     issues.push(CodeIssue {
-                        issue_type: "complexity".to_string(),
-                        description: format!("Function is too long ({} lines)", line_count),
+                        issue_type: Cow::Borrowed("complexity"),
+                        description: Cow::Owned(format!("Function is too long ({} lines)", line_count)),
                         line: Some(current_fn_start + 1),
                         column: None,
-                        severity: "low".to_string(),
+                        severity: Cow::Borrowed("low"),
                         solutions: vec![
-                            "Consider breaking the function into smaller, more focused functions"
-                                .to_string(),
-                            "Extract helper methods for complex operations".to_string(),
+                            Cow::Borrowed("Consider breaking the function into smaller, more focused functions"),
+                            Cow::Borrowed("Extract helper methods for complex operations"),
                         ],
                     });
                 }
@@ -493,15 +493,15 @@ fn analyze_rust_code(
             in_unsafe = false;
 
             issues.push(CodeIssue {
-                issue_type: "safety".to_string(),
-                description: "Code contains unsafe block".to_string(),
+                issue_type: Cow::Borrowed("safety"),
+                description: Cow::Borrowed("Code contains unsafe block"),
                 line: Some(unsafe_start + 1),
                 column: None,
-                severity: "high".to_string(),
+                severity: Cow::Borrowed("high"),
                 solutions: vec![
-                    "Review unsafe code carefully for memory safety".to_string(),
-                    "Consider if there's a safe alternative".to_string(),
-                    "Add detailed comments explaining why unsafe is needed and how safety is maintained".to_string(),
+                    Cow::Borrowed("Review unsafe code carefully for memory safety"),
+                    Cow::Borrowed("Consider if there's a safe alternative"),
+                    Cow::Borrowed("Add detailed comments explaining why unsafe is needed and how safety is maintained"),
                 ],
             });
         }
@@ -510,11 +510,13 @@ fn analyze_rust_code(
     // 5. Suggest usage of more idiomatic Rust
     if content.contains("for i in 0..") && content.contains("[i]") {
         suggestions.push(CodeSuggestion {
-            suggestion_type: "idiomatic".to_string(),
-            description: "Consider using iterator methods instead of indexing in loops".to_string(),
+            suggestion_type: Cow::Borrowed("idiomatic"),
+            description: Cow::Borrowed(
+                "Consider using iterator methods instead of indexing in loops",
+            ),
             line: None,
             confidence: 0.8,
-            code_sample: Some("for item in items.iter() { ... }".to_string()),
+            code_sample: Some(Cow::Borrowed("for item in items.iter() { ... }")),
         });
     }
 
@@ -523,11 +525,13 @@ fn analyze_rust_code(
         // Check for potential memory leaks with Rc/Arc cycles
         if content.contains("Rc<") && content.contains("RefCell<") {
             suggestions.push(CodeSuggestion {
-                suggestion_type: "safety".to_string(),
-                description: "Potential for reference cycles with Rc and RefCell".to_string(),
+                suggestion_type: Cow::Borrowed("safety"),
+                description: Cow::Borrowed("Potential for reference cycles with Rc and RefCell"),
                 line: None,
                 confidence: 0.6,
-                code_sample: Some("Consider using Weak references to break cycles".to_string()),
+                code_sample: Some(Cow::Borrowed(
+                    "Consider using Weak references to break cycles",
+                )),
             });
         }
 
@@ -536,14 +540,14 @@ fn analyze_rust_code(
             for (i, line) in content.lines().enumerate() {
                 if line.contains(".lock()") && !line.contains("?") && !line.contains("unwrap_or") {
                     issues.push(CodeIssue {
-                        issue_type: "concurrency".to_string(),
-                        description: "Unhandled potential deadlock with lock()".to_string(),
+                        issue_type: Cow::Borrowed("concurrency"),
+                        description: Cow::Borrowed("Unhandled potential deadlock with lock()"),
                         line: Some(i + 1),
                         column: None,
-                        severity: "medium".to_string(),
+                        severity: Cow::Borrowed("medium"),
                         solutions: vec![
-                            "Handle potential lock poisoning with ? or match".to_string(),
-                            "Consider using a timeout for the lock acquisition".to_string(),
+                            Cow::Borrowed("Handle potential lock poisoning with ? or match"),
+                            Cow::Borrowed("Consider using a timeout for the lock acquisition"),
                         ],
                     });
                 }
@@ -567,14 +571,14 @@ fn analyze_python_code(
     for (i, line) in content.lines().enumerate() {
         if line.trim() == "except:" {
             issues.push(CodeIssue {
-                issue_type: "error_handling".to_string(),
-                description: "Bare except clause".to_string(),
+                issue_type: Cow::Borrowed("error_handling"),
+                description: Cow::Borrowed("Bare except clause"),
                 line: Some(i + 1),
                 column: None,
-                severity: "medium".to_string(),
+                severity: Cow::Borrowed("medium"),
                 solutions: vec![
-                    "Specify the exception types to catch".to_string(),
-                    "Use 'except Exception:' as a last resort".to_string(),
+                    Cow::Borrowed("Specify the exception types to catch"),
+                    Cow::Borrowed("Use 'except Exception:' as a last resort"),
                 ],
             });
         }
@@ -609,8 +613,8 @@ fn analyze_python_code(
             && !content.contains(&format!("({}", import))
         {
             suggestions.push(CodeSuggestion {
-                suggestion_type: "style".to_string(),
-                description: format!("Potentially unused import: {}", import),
+                suggestion_type: Cow::Borrowed("style"),
+                description: Cow::Owned(format!("Potentially unused import: {}", import)),
                 line: Some(line_num + 1),
                 confidence: 0.5, // Low confidence since this is a simple check
                 code_sample: None,
@@ -622,15 +626,14 @@ fn analyze_python_code(
     for (i, line) in content.lines().enumerate() {
         if line.contains("def ") && line.contains("=[]") || line.contains("={}") {
             issues.push(CodeIssue {
-                issue_type: "bug_risk".to_string(),
-                description: "Mutable default argument".to_string(),
+                issue_type: Cow::Borrowed("bug_risk"),
+                description: Cow::Borrowed("Mutable default argument"),
                 line: Some(i + 1),
                 column: None,
-                severity: "high".to_string(),
-                solutions: vec![
-                    "Use None as default and initialize the mutable value in the function body"
-                        .to_string(),
-                ],
+                severity: Cow::Borrowed("high"),
+                solutions: vec![Cow::Borrowed(
+                    "Use None as default and initialize the mutable value in the function body",
+                )],
             });
         }
     }
@@ -639,14 +642,15 @@ fn analyze_python_code(
     for (i, line) in content.lines().enumerate() {
         if line.trim().starts_with("global ") {
             suggestions.push(CodeSuggestion {
-                suggestion_type: "design".to_string(),
-                description: "Use of global variables can lead to maintainability issues"
-                    .to_string(),
+                suggestion_type: Cow::Borrowed("design"),
+                description: Cow::Borrowed(
+                    "Use of global variables can lead to maintainability issues",
+                ),
                 line: Some(i + 1),
                 confidence: 0.7,
-                code_sample: Some(
-                    "Consider using class attributes or function parameters instead".to_string(),
-                ),
+                code_sample: Some(Cow::Borrowed(
+                    "Consider using class attributes or function parameters instead",
+                )),
             });
         }
     }
@@ -667,13 +671,14 @@ fn analyze_js_code(
     for (i, line) in content.lines().enumerate() {
         if line.contains(" == ") && !line.contains("===") && !line.contains("!==") {
             issues.push(CodeIssue {
-                issue_type: "bug_risk".to_string(),
-                description: "Using == instead of === may lead to unexpected type coercion"
-                    .to_string(),
+                issue_type: Cow::Borrowed("bug_risk"),
+                description: Cow::Borrowed(
+                    "Using == instead of === may lead to unexpected type coercion",
+                ),
                 line: Some(i + 1),
                 column: None,
-                severity: "medium".to_string(),
-                solutions: vec!["Use === for strict equality comparison".to_string()],
+                severity: Cow::Borrowed("medium"),
+                solutions: vec![Cow::Borrowed("Use === for strict equality comparison")],
             });
         }
     }
@@ -682,11 +687,13 @@ fn analyze_js_code(
     for (i, line) in content.lines().enumerate() {
         if line.trim().starts_with("var ") {
             suggestions.push(CodeSuggestion {
-                suggestion_type: "modernize".to_string(),
-                description: "Use let or const instead of var to avoid hoisting issues".to_string(),
+                suggestion_type: Cow::Borrowed("modernize"),
+                description: Cow::Borrowed(
+                    "Use let or const instead of var to avoid hoisting issues",
+                ),
                 line: Some(i + 1),
                 confidence: 0.9,
-                code_sample: Some(line.replace("var ", "const ").to_string()),
+                code_sample: Some(Cow::Owned(line.replace("var ", "const "))),
             });
         }
     }
@@ -695,14 +702,14 @@ fn analyze_js_code(
     for (i, line) in content.lines().enumerate() {
         if line.contains("console.log(") {
             issues.push(CodeIssue {
-                issue_type: "debug_code".to_string(),
-                description: "Debug console.log statement found".to_string(),
+                issue_type: Cow::Borrowed("debug_code"),
+                description: Cow::Borrowed("Debug console.log statement found"),
                 line: Some(i + 1),
                 column: None,
-                severity: "low".to_string(),
+                severity: Cow::Borrowed("low"),
                 solutions: vec![
-                    "Remove console.log before production deployment".to_string(),
-                    "Replace with proper logging system".to_string(),
+                    Cow::Borrowed("Remove console.log before production deployment"),
+                    Cow::Borrowed("Replace with proper logging system"),
                 ],
             });
         }
@@ -713,15 +720,14 @@ fn analyze_js_code(
         for (i, line) in content.lines().enumerate() {
             if line.contains("addEventListener") && !content.contains("removeEventListener") {
                 issues.push(CodeIssue {
-                    issue_type: "memory_leak".to_string(),
-                    description: "Event listener added without cleanup".to_string(),
+                    issue_type: Cow::Borrowed("memory_leak"),
+                    description: Cow::Borrowed("Event listener added without cleanup"),
                     line: Some(i + 1),
                     column: None,
-                    severity: "medium".to_string(),
-                    solutions: vec![
-                        "Remove event listeners in useEffect cleanup or componentWillUnmount"
-                            .to_string(),
-                    ],
+                    severity: Cow::Borrowed("medium"),
+                    solutions: vec![Cow::Borrowed(
+                        "Remove event listeners in useEffect cleanup or componentWillUnmount",
+                    )],
                 });
                 break;
             }
@@ -747,14 +753,14 @@ fn analyze_go_code(
             && !line.contains("log.")
         {
             issues.push(CodeIssue {
-                issue_type: "error_handling".to_string(),
-                description: "Error returned without logging or wrapping".to_string(),
+                issue_type: Cow::Borrowed("error_handling"),
+                description: Cow::Borrowed("Error returned without logging or wrapping"),
                 line: Some(i + 1),
                 column: None,
-                severity: "medium".to_string(),
+                severity: Cow::Borrowed("medium"),
                 solutions: vec![
-                    "Log the error or wrap it with context before returning".to_string(),
-                    "Consider using fmt.Errorf or errors.Wrap".to_string(),
+                    Cow::Borrowed("Log the error or wrap it with context before returning"),
+                    Cow::Borrowed("Consider using fmt.Errorf or errors.Wrap"),
                 ],
             });
         }
@@ -770,14 +776,14 @@ fn analyze_go_code(
             && line.contains("err")
         {
             issues.push(CodeIssue {
-                issue_type: "error_handling".to_string(),
-                description: "Error value ignored with _".to_string(),
+                issue_type: Cow::Borrowed("error_handling"),
+                description: Cow::Borrowed("Error value ignored with _"),
                 line: Some(i + 1),
                 column: None,
-                severity: "high".to_string(),
+                severity: Cow::Borrowed("high"),
                 solutions: vec![
-                    "Handle the error value properly".to_string(),
-                    "If ignoring is intentional, add a comment explaining why".to_string(),
+                    Cow::Borrowed("Handle the error value properly"),
+                    Cow::Borrowed("If ignoring is intentional, add a comment explaining why"),
                 ],
             });
         }
@@ -799,11 +805,11 @@ fn analyze_go_code(
 
     if has_concatenation && !has_string_builder {
         suggestions.push(CodeSuggestion {
-            suggestion_type: "performance".to_string(),
-            description: "Consider using strings.Builder for string concatenation".to_string(),
+            suggestion_type: Cow::Borrowed("performance"),
+            description: Cow::Borrowed("Consider using strings.Builder for string concatenation"),
             line: None,
             confidence: 0.7,
-            code_sample: Some("var sb strings.Builder\nsb.WriteString(...)".to_string()),
+            code_sample: Some(Cow::Borrowed("var sb strings.Builder\nsb.WriteString(...)")),
         });
     }
 
@@ -813,14 +819,14 @@ fn analyze_go_code(
 
     if has_mutex && !has_defer {
         issues.push(CodeIssue {
-            issue_type: "concurrency".to_string(),
-            description: "Mutex used without defer for unlocking".to_string(),
+            issue_type: Cow::Borrowed("concurrency"),
+            description: Cow::Borrowed("Mutex used without defer for unlocking"),
             line: None,
             column: None,
-            severity: "high".to_string(),
-            solutions: vec![
-                "Use defer mu.Unlock() immediately after Lock() to prevent deadlocks".to_string(),
-            ],
+            severity: Cow::Borrowed("high"),
+            solutions: vec![Cow::Borrowed(
+                "Use defer mu.Unlock() immediately after Lock() to prevent deadlocks",
+            )],
         });
     }
 
@@ -838,14 +844,14 @@ fn generic_code_analysis(
     for (i, line) in content.lines().enumerate() {
         if line.contains("TODO") || line.contains("FIXME") {
             issues.push(CodeIssue {
-                issue_type: "maintenance".to_string(),
-                description: "Contains TODO or FIXME comment".to_string(),
+                issue_type: Cow::Borrowed("maintenance"),
+                description: Cow::Borrowed("Contains TODO or FIXME comment"),
                 line: Some(i + 1),
                 column: None,
-                severity: "low".to_string(),
+                severity: Cow::Borrowed("low"),
                 solutions: vec![
-                    "Address the TODO/FIXME item".to_string(),
-                    "Create a ticket for tracking if it can't be fixed immediately".to_string(),
+                    Cow::Borrowed("Address the TODO/FIXME item"),
+                    Cow::Borrowed("Create a ticket for tracking if it can't be fixed immediately"),
                 ],
             });
         }
@@ -855,8 +861,8 @@ fn generic_code_analysis(
     for (i, line) in content.lines().enumerate() {
         if line.len() > 100 {
             suggestions.push(CodeSuggestion {
-                suggestion_type: "style".to_string(),
-                description: format!("Line too long ({} characters)", line.len()),
+                suggestion_type: Cow::Borrowed("style"),
+                description: Cow::Owned(format!("Line too long ({} characters)", line.len())),
                 line: Some(i + 1),
                 confidence: 0.8,
                 code_sample: None,
@@ -917,14 +923,17 @@ fn generic_code_analysis(
 
                 if function_lines > 50 {
                     issues.push(CodeIssue {
-                        issue_type: "complexity".to_string(),
-                        description: format!("Function is too long ({} lines)", function_lines),
+                        issue_type: Cow::Borrowed("complexity"),
+                        description: Cow::Owned(format!(
+                            "Function is too long ({} lines)",
+                            function_lines
+                        )),
                         line: Some(function_start + 1),
                         column: None,
-                        severity: "medium".to_string(),
+                        severity: Cow::Borrowed("medium"),
                         solutions: vec![
-                            "Break down into smaller functions".to_string(),
-                            "Extract helper methods for complex operations".to_string(),
+                            Cow::Borrowed("Break down into smaller functions"),
+                            Cow::Borrowed("Extract helper methods for complex operations"),
                         ],
                     });
                 }
@@ -943,15 +952,15 @@ fn generic_code_analysis(
             && (line.contains("\"") || line.contains("'"))
         {
             issues.push(CodeIssue {
-                issue_type: "security".to_string(),
-                description: "Possible hardcoded credentials".to_string(),
+                issue_type: Cow::Borrowed("security"),
+                description: Cow::Borrowed("Possible hardcoded credentials"),
                 line: Some(i + 1),
                 column: None,
-                severity: "high".to_string(),
+                severity: Cow::Borrowed("high"),
                 solutions: vec![
-                    "Move sensitive data to environment variables".to_string(),
-                    "Use a secure credential store or vault".to_string(),
-                    "Replace with configuration that's loaded at runtime".to_string(),
+                    Cow::Borrowed("Move sensitive data to environment variables"),
+                    Cow::Borrowed("Use a secure credential store or vault"),
+                    Cow::Borrowed("Replace with configuration that's loaded at runtime"),
                 ],
             });
         }
@@ -968,8 +977,8 @@ fn generic_code_analysis(
                 || trimmed.contains(" = "))
         {
             suggestions.push(CodeSuggestion {
-                suggestion_type: "maintenance".to_string(),
-                description: "Commented-out code".to_string(),
+                suggestion_type: Cow::Borrowed("maintenance"),
+                description: Cow::Borrowed("Commented-out code"),
                 line: Some(i + 1),
                 confidence: 0.6,
                 code_sample: None,
@@ -1095,7 +1104,7 @@ fn calculate_complexity(content: &str, language: &str) -> Result<ComplexityMetri
 
 /// Analyze dependencies in the code
 fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, WinxError> {
-    let mut dependencies = Vec::new();
+    let mut dependencies: Vec<Cow<str>> = Vec::new();
 
     // Get parent directory for project files
     let parent_dir = file_path.parent().unwrap_or(Path::new("."));
@@ -1106,7 +1115,7 @@ fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, Winx
             let cargo_path = find_file_in_ancestors(parent_dir, "Cargo.toml")?;
             if let Some(cargo_path) = cargo_path {
                 let content = std::fs::read_to_string(cargo_path)?;
-                dependencies.push("**Rust dependencies (Cargo.toml):**".to_string());
+                dependencies.push(Cow::Borrowed("**Rust dependencies (Cargo.toml):**"));
 
                 // Extract dependencies section
                 if let Some(deps_section) = content.split("[dependencies]").nth(1) {
@@ -1116,7 +1125,7 @@ fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, Winx
                         for line in deps.lines() {
                             let line = line.trim();
                             if !line.is_empty() && line.contains('=') {
-                                dependencies.push(format!("- {}", line));
+                                dependencies.push(Cow::Owned(format!("- {}", line)));
                             }
                         }
                     } else {
@@ -1124,7 +1133,7 @@ fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, Winx
                         for line in deps_section.lines() {
                             let line = line.trim();
                             if !line.is_empty() && line.contains('=') {
-                                dependencies.push(format!("- {}", line));
+                                dependencies.push(Cow::Owned(format!("- {}", line)));
                             }
                         }
                     }
@@ -1136,37 +1145,39 @@ fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, Winx
             let pkg_path = find_file_in_ancestors(parent_dir, "package.json")?;
             if let Some(pkg_path) = pkg_path {
                 let content = std::fs::read_to_string(pkg_path)?;
-                dependencies
-                    .push("**JavaScript/TypeScript dependencies (package.json):**".to_string());
+                dependencies.push(Cow::Borrowed(
+                    "**JavaScript/TypeScript dependencies (package.json):**",
+                ));
 
                 // Very basic JSON parsing
                 if let Some(deps_start) = content.find("\"dependencies\"")
-                    && let Some(deps_content) = content[deps_start..].find('{') {
-                        let start_idx = deps_start + deps_content;
-                        let mut brace_count = 1;
-                        let mut end_idx = start_idx + 1;
+                    && let Some(deps_content) = content[deps_start..].find('{')
+                {
+                    let start_idx = deps_start + deps_content;
+                    let mut brace_count = 1;
+                    let mut end_idx = start_idx + 1;
 
-                        // Find matching closing brace
-                        for (i, c) in content[start_idx + 1..].char_indices() {
-                            if c == '{' {
-                                brace_count += 1;
-                            } else if c == '}' {
-                                brace_count -= 1;
-                                if brace_count == 0 {
-                                    end_idx = start_idx + 1 + i;
-                                    break;
-                                }
-                            }
-                        }
-
-                        let deps_section = &content[start_idx..=end_idx];
-                        for line in deps_section.lines() {
-                            let line = line.trim();
-                            if line.contains('"') && line.contains(':') {
-                                dependencies.push(format!("- {}", line));
+                    // Find matching closing brace
+                    for (i, c) in content[start_idx + 1..].char_indices() {
+                        if c == '{' {
+                            brace_count += 1;
+                        } else if c == '}' {
+                            brace_count -= 1;
+                            if brace_count == 0 {
+                                end_idx = start_idx + 1 + i;
+                                break;
                             }
                         }
                     }
+
+                    let deps_section = &content[start_idx..=end_idx];
+                    for line in deps_section.lines() {
+                        let line = line.trim();
+                        if line.contains('"') && line.contains(':') {
+                            dependencies.push(Cow::Owned(format!("- {}", line)));
+                        }
+                    }
+                }
             }
         }
         "python" => {
@@ -1174,12 +1185,12 @@ fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, Winx
             let req_path = find_file_in_ancestors(parent_dir, "requirements.txt")?;
             if let Some(req_path) = req_path {
                 let content = std::fs::read_to_string(req_path)?;
-                dependencies.push("**Python dependencies (requirements.txt):**".to_string());
+                dependencies.push(Cow::Borrowed("**Python dependencies (requirements.txt):**"));
 
                 for line in content.lines() {
                     let line = line.trim();
                     if !line.is_empty() && !line.starts_with('#') {
-                        dependencies.push(format!("- {}", line));
+                        dependencies.push(Cow::Owned(format!("- {}", line)));
                     }
                 }
             }
@@ -1187,10 +1198,10 @@ fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, Winx
             // Also check for imports in the file itself
             let content = std::fs::read_to_string(file_path)?;
 
-            dependencies.push("\n**Direct imports in this file:**".to_string());
+            dependencies.push(Cow::Borrowed("\n**Direct imports in this file:**"));
             for line in content.lines() {
                 if line.starts_with("import ") || line.starts_with("from ") {
-                    dependencies.push(format!("- {}", line.trim()));
+                    dependencies.push(Cow::Owned(format!("- {}", line.trim())));
                 }
             }
         }
@@ -1198,7 +1209,7 @@ fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, Winx
             // Generic dependency analysis based on file contents
             let content = std::fs::read_to_string(file_path)?;
 
-            dependencies.push("**Referenced libraries/modules:**".to_string());
+            dependencies.push(Cow::Borrowed("**Referenced libraries/modules:**"));
 
             // Look for common import patterns
             let mut imports = Vec::new();
@@ -1218,10 +1229,10 @@ fn analyze_dependencies(file_path: &Path, language: &str) -> Result<String, Winx
             }
 
             if imports.is_empty() {
-                dependencies.push("- No imports detected".to_string());
+                dependencies.push(Cow::Borrowed("- No imports detected"));
             } else {
                 for import in imports {
-                    dependencies.push(format!("- {}", import));
+                    dependencies.push(Cow::Owned(format!("- {}", import)));
                 }
             }
         }
@@ -1337,61 +1348,62 @@ fn format_analysis_results(
 
     // Complexity metrics section
     if params.include_complexity
-        && let Some(complexity) = &result.complexity {
-            output.push_str("## Complexity Metrics\n\n");
-            output.push_str(&format!(
-                "- **Cyclomatic Complexity**: {}\n",
-                complexity.cyclomatic_complexity
-            ));
-            output.push_str(&format!(
-                "- **Cognitive Complexity**: {}\n",
-                complexity.cognitive_complexity
-            ));
-            output.push_str(&format!(
-                "- **Lines of Code**: {}\n",
-                complexity.lines_of_code
-            ));
-            output.push_str(&format!(
-                "- **Function Count**: {}\n",
-                complexity.function_count
-            ));
-            output.push_str(&format!(
-                "- **Average Function Length**: {:.1} lines\n",
-                complexity.avg_function_length
-            ));
-            output.push_str(&format!(
-                "- **Maximum Nesting Depth**: {}\n",
-                complexity.max_nesting_depth
-            ));
+        && let Some(complexity) = &result.complexity
+    {
+        output.push_str("## Complexity Metrics\n\n");
+        output.push_str(&format!(
+            "- **Cyclomatic Complexity**: {}\n",
+            complexity.cyclomatic_complexity
+        ));
+        output.push_str(&format!(
+            "- **Cognitive Complexity**: {}\n",
+            complexity.cognitive_complexity
+        ));
+        output.push_str(&format!(
+            "- **Lines of Code**: {}\n",
+            complexity.lines_of_code
+        ));
+        output.push_str(&format!(
+            "- **Function Count**: {}\n",
+            complexity.function_count
+        ));
+        output.push_str(&format!(
+            "- **Average Function Length**: {:.1} lines\n",
+            complexity.avg_function_length
+        ));
+        output.push_str(&format!(
+            "- **Maximum Nesting Depth**: {}\n",
+            complexity.max_nesting_depth
+        ));
 
-            // Add complexity interpretation
-            output.push_str("\n### Complexity Interpretation\n\n");
+        // Add complexity interpretation
+        output.push_str("\n### Complexity Interpretation\n\n");
 
-            let cyclomatic_interpretation = match complexity.cyclomatic_complexity {
-                0..=10 => "Simple code, easy to maintain",
-                11..=20 => "Moderately complex, consider refactoring longer functions",
-                21..=50 => "Complex code, high risk of bugs, should be refactored",
-                _ => "Extremely complex, high risk, needs immediate refactoring",
-            };
+        let cyclomatic_interpretation = match complexity.cyclomatic_complexity {
+            0..=10 => "Simple code, easy to maintain",
+            11..=20 => "Moderately complex, consider refactoring longer functions",
+            21..=50 => "Complex code, high risk of bugs, should be refactored",
+            _ => "Extremely complex, high risk, needs immediate refactoring",
+        };
 
-            let cognitive_interpretation = match complexity.cognitive_complexity {
-                0..=15 => "Easy to understand",
-                16..=30 => "Moderately difficult to understand",
-                31..=60 => "Difficult to understand, consider refactoring",
-                _ => "Very difficult to understand, refactoring strongly recommended",
-            };
+        let cognitive_interpretation = match complexity.cognitive_complexity {
+            0..=15 => "Easy to understand",
+            16..=30 => "Moderately difficult to understand",
+            31..=60 => "Difficult to understand, consider refactoring",
+            _ => "Very difficult to understand, refactoring strongly recommended",
+        };
 
-            output.push_str(&format!(
-                "- **Cyclomatic Complexity**: {}\n",
-                cyclomatic_interpretation
-            ));
-            output.push_str(&format!(
-                "- **Cognitive Complexity**: {}\n",
-                cognitive_interpretation
-            ));
+        output.push_str(&format!(
+            "- **Cyclomatic Complexity**: {}\n",
+            cyclomatic_interpretation
+        ));
+        output.push_str(&format!(
+            "- **Cognitive Complexity**: {}\n",
+            cognitive_interpretation
+        ));
 
-            output.push('\n');
-        }
+        output.push('\n');
+    }
 
     Ok(output)
 }

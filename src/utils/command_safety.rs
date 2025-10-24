@@ -102,9 +102,9 @@ static BACKGROUND_COMMANDS: &[&str] = &[
 /// Command safety analyzer
 #[derive(Debug, Clone)]
 pub struct CommandSafety {
-    interactive_commands: HashSet<String>,
-    long_running_commands: HashSet<String>,
-    background_commands: HashSet<String>,
+    interactive_commands: HashSet<&'static str>,
+    long_running_commands: HashSet<&'static str>,
+    background_commands: HashSet<&'static str>,
 }
 
 impl Default for CommandSafety {
@@ -116,14 +116,11 @@ impl Default for CommandSafety {
 impl CommandSafety {
     /// Create a new command safety analyzer
     pub fn new() -> Self {
-        let interactive_commands = INTERACTIVE_COMMANDS.iter().map(|s| s.to_string()).collect();
+        let interactive_commands = INTERACTIVE_COMMANDS.iter().cloned().collect();
 
-        let long_running_commands = LONG_RUNNING_COMMANDS
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let long_running_commands = LONG_RUNNING_COMMANDS.iter().cloned().collect();
 
-        let background_commands = BACKGROUND_COMMANDS.iter().map(|s| s.to_string()).collect();
+        let background_commands = BACKGROUND_COMMANDS.iter().cloned().collect();
 
         Self {
             interactive_commands,

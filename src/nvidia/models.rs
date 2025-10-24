@@ -3,8 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Supported NVIDIA models for different tasks
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub enum NvidiaModel {
     /// Qwen3 235B A22B - Latest generation LLM with thinking mode and MoE architecture
     #[serde(rename = "qwen/qwen3-235b-a22b")]
@@ -26,7 +25,6 @@ pub enum NvidiaModel {
     #[serde(rename = "mistralai/codestral-22b-instruct-v0.1")]
     Codestral22B,
 }
-
 
 impl NvidiaModel {
     /// Get the model string for API calls
@@ -69,8 +67,8 @@ pub enum TaskType {
 
 /// Chat completion request to NVIDIA API
 #[derive(Debug, Serialize)]
-pub struct ChatCompletionRequest {
-    pub model: String,
+pub struct ChatCompletionRequest<'a> {
+    pub model: &'a str,
     pub messages: Vec<ChatMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,

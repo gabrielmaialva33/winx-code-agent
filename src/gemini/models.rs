@@ -1,6 +1,74 @@
 //! Google Gemini API models and data structures
 
+use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
+
+const DETAIL_BASIC: &str = "Provide a brief, high-level explanation of what this code does.";
+const DETAIL_EXPERT: &str = "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities.";
+const DETAIL_DEFAULT: &str = "Provide a detailed explanation of this code including its purpose, how it works, and key concepts.";
+
+lazy_static::lazy_static! {
+    /// Cached JSON structure template for code analysis responses
+    static ref ANALYSIS_JSON_STRUCTURE: &'static str = r#"Return a JSON response with the following structure:
+{{
+  \"summary\": \"Brief description of what the code does and main issues\",
+  \"issues\": [
+    {{
+      \"severity\": \"Error|Warning|Info|Critical\",
+      \"category\": \"Bug|Security|Performance|Style\",
+      \"message\": \"Description of the issue\",
+      \"line\": 10,
+      \"suggestion\": \"How to fix this issue\"
+    }}
+  ],
+  \"suggestions\": [\"General improvement suggestions\"],
+  \"complexity_score\": 75
+}}
+
+Code to analyze:
+```{} {}
+```"#;
+
+    /// Cached generic analysis template
+    static ref GENERIC_ANALYSIS_TEMPLATE: &'static str = r#"Return a JSON response with the following structure:
+{{
+  \"summary\": \"Brief description of what the code does and main issues\",
+  \"issues\": [
+    {{
+      \"severity\": \"Error|Warning|Info|Critical\",
+      \"category\": \"Bug|Security|Performance|Style\",
+      \"message\": \"Description of the issue\",
+      \"line\": 10,
+      \"suggestion\": \"How to fix this issue\"
+    }}
+  ],
+  \"suggestions\": [\"General improvement suggestions\"],
+  \"complexity_score\": 75
+}}
+
+Code to analyze:
+```
+{}
+```"#;
+
+    /// Cached code generation template
+    static ref CODE_GENERATION_TEMPLATE: &'static str = "Generate {} code based on this description: {}\n\nContext: {}\n\nProvide clean, well-commented code with best practices.";
+
+    /// Cached simple code generation template
+    static ref SIMPLE_CODE_GENERATION_TEMPLATE: &'static str = "Generate {} code based on this description: {}\n\nProvide clean, well-commented code with best practices.";
+
+    /// Cached context code generation template
+    static ref CONTEXT_CODE_GENERATION_TEMPLATE: &'static str = "Generate code based on this description: {}\n\nContext: {}\n\nProvide clean, well-commented code with best practices.";
+
+    /// Cached basic code generation template
+    static ref BASIC_CODE_GENERATION_TEMPLATE: &'static str = "Generate code based on this description: {}\n\nProvide clean, well-commented code with best practices.";
+
+    /// Cached explanation template with language
+    static ref EXPLANATION_TEMPLATE_WITH_LANG: &'static str = "{}\n\n{} code to explain:\n```{}\n{}\n```";
+
+    /// Cached basic explanation template
+    static ref BASIC_EXPLANATION_TEMPLATE: &'static str = "{}\n\nCode to explain:\n```\n{}\n```";
+}
 
 /// Gemini content part
 #[derive(Debug, Serialize, Deserialize)]
@@ -118,55 +186,9 @@ impl GenerateContentRequest {
     /// Create a request for code analysis
     pub fn new_code_analysis(code: &str, language: Option<&str>) -> Self {
         let analysis_prompt = if let Some(lang) = language {
-            format!(
-                "Analyze this {} code for bugs, security issues, performance problems, and style violations. 
-Return a JSON response with the following structure:
-{{
-  \"summary\": \"Brief description of what the code does and main issues\",
-  \"issues\": [
-    {{
-      \"severity\": \"Error|Warning|Info|Critical\",
-      \"category\": \"Bug|Security|Performance|Style\",
-      \"message\": \"Description of the issue\",
-      \"line\": 10,
-      \"suggestion\": \"How to fix this issue\"
-    }}
-  ],
-  \"suggestions\": [\"General improvement suggestions\"],
-  \"complexity_score\": 75
-}}
-
-Code to analyze:
-```{}
-{}
-```",
-                lang, lang, code
-            )
+            format!(*ANALYSIS_JSON_STRUCTURE, lang, lang, code)
         } else {
-            format!(
-                "Analyze this code for bugs, security issues, performance problems, and style violations. 
-Return a JSON response with the following structure:
-{{
-  \"summary\": \"Brief description of what the code does and main issues\",
-  \"issues\": [
-    {{
-      \"severity\": \"Error|Warning|Info|Critical\",
-      \"category\": \"Bug|Security|Performance|Style\",
-      \"message\": \"Description of the issue\",
-      \"line\": 10,
-      \"suggestion\": \"How to fix this issue\"
-    }}
-  ],
-  \"suggestions\": [\"General improvement suggestions\"],
-  \"complexity_score\": 75
-}}
-
-Code to analyze:
-```
-{}
-```",
-                code
-            )
+            format!(*GENERIC_ANALYSIS_TEMPLATE, code)
         };
 
         let mut request = Self::new_text(&analysis_prompt);
@@ -190,28 +212,16 @@ Code to analyze:
     ) -> Self {
         let generation_prompt = match (language, context) {
             (Some(lang), Some(ctx)) => {
-                format!(
-                    "Generate {} code based on this description: {}\n\nContext: {}\n\nProvide clean, well-commented code with best practices.",
-                    lang, prompt, ctx
-                )
+                format!(*CODE_GENERATION_TEMPLATE, lang, prompt, ctx)
             }
             (Some(lang), None) => {
-                format!(
-                    "Generate {} code based on this description: {}\n\nProvide clean, well-commented code with best practices.",
-                    lang, prompt
-                )
+                format!(*SIMPLE_CODE_GENERATION_TEMPLATE, lang, prompt)
             }
             (None, Some(ctx)) => {
-                format!(
-                    "Generate code based on this description: {}\n\nContext: {}\n\nProvide clean, well-commented code with best practices.",
-                    prompt, ctx
-                )
+                format!(*CONTEXT_CODE_GENERATION_TEMPLATE, prompt, ctx)
             }
             (None, None) => {
-                format!(
-                    "Generate code based on this description: {}\n\nProvide clean, well-commented code with best practices.",
-                    prompt
-                )
+                format!(*BASIC_CODE_GENERATION_TEMPLATE, prompt)
             }
         };
 
@@ -229,21 +239,18 @@ Code to analyze:
     /// Create a request for code explanation
     pub fn new_code_explanation(code: &str, language: Option<&str>, detail_level: &str) -> Self {
         let detail_instruction = match detail_level {
-            "basic" => "Provide a brief, high-level explanation of what this code does.",
-            "expert" => "Provide a comprehensive, expert-level analysis including architecture, patterns, potential issues, and optimization opportunities.",
-            _ => "Provide a detailed explanation of this code including its purpose, how it works, and key concepts."
+            "basic" => DETAIL_BASIC,
+            "expert" => DETAIL_EXPERT,
+            _ => DETAIL_DEFAULT,
         };
 
         let explanation_prompt = if let Some(lang) = language {
             format!(
-                "{}\n\n{} code to explain:\n```{}\n{}\n```",
+                *EXPLANATION_TEMPLATE_WITH_LANG,
                 detail_instruction, lang, lang, code
             )
         } else {
-            format!(
-                "{}\n\nCode to explain:\n```\n{}\n```",
-                detail_instruction, code
-            )
+            format!(*BASIC_EXPLANATION_TEMPLATE, detail_instruction, code)
         };
 
         let mut request = Self::new_text(&explanation_prompt);

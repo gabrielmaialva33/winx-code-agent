@@ -7,6 +7,16 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, warn};
 
+const UNKNOWN_ERROR: &str = "Unknown error";
+const ALL_ATTEMPTS_FAILED: &str = "All Gemini API attempts failed";
+const REQUEST_FAILED: &str = "Request failed: {}";
+const API_ERROR: &str = "Gemini API error {}: {}";
+const PARSE_FAILED: &str = "Failed to parse response: {}";
+const BLOCKED_RESPONSE: &str = "Response blocked by Gemini safety filters";
+const EMPTY_RESPONSE: &str = "Empty response from Gemini";
+const CONNECTION_TEST_FAILED: &str = "Gemini connection test failed";
+const TEST_MESSAGE: &str = "Hello, can you respond with 'OK'?";
+
 /// Rate limiting information
 #[derive(Debug)]
 struct RateLimit {
@@ -113,9 +123,7 @@ impl GeminiClient {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            WinxError::NetworkError("All Gemini API attempts failed".to_string())
-        }))
+        Err(last_error.unwrap_or_else(|| WinxError::NetworkError(ALL_ATTEMPTS_FAILED.to_string())))
     }
 
     /// Make a single request to the Gemini API
@@ -135,31 +143,30 @@ impl GeminiClient {
             .json(request)
             .send()
             .await
-            .map_err(|e| WinxError::NetworkError(format!("Request failed: {}", e)))?;
+            .map_err(|e| WinxError::NetworkError(format!(REQUEST_FAILED, e)))?;
 
         let status = response.status();
         if !status.is_success() {
             let error_text = response
                 .text()
                 .await
-                .unwrap_or_else(|_| "Unknown error".to_string());
+                .unwrap_or_else(|_| UNKNOWN_ERROR.to_string());
 
             error!("Gemini API error {}: {}", status, error_text);
             return Err(WinxError::NetworkError(format!(
-                "Gemini API error {}: {}",
+                API_ERROR,
                 status, error_text
             )));
         }
 
-        let gemini_response: GenerateContentResponse = response.json().await.map_err(|e| {
-            WinxError::SerializationError(format!("Failed to parse response: {}", e))
-        })?;
+        let gemini_response: GenerateContentResponse = response
+            .json()
+            .await
+            .map_err(|e| WinxError::SerializationError(format!(PARSE_FAILED, e)))?;
 
         if gemini_response.is_blocked() {
             warn!("Gemini response was blocked by safety filters");
-            return Err(WinxError::ApiError(
-                "Response blocked by Gemini safety filters".to_string(),
-            ));
+            return Err(WinxError::ApiError(BLOCKED_RESPONSE.to_string()));
         }
 
         Ok(gemini_response)
@@ -175,7 +182,7 @@ impl GeminiClient {
 
         response
             .get_text()
-            .ok_or_else(|| WinxError::ApiError("Empty response from Gemini".to_string()))
+            .ok_or_else(|| WinxError::ApiError(EMPTY_RESPONSE.to_string()))
     }
 
     /// Generate code using Gemini
@@ -224,7 +231,7 @@ impl GeminiClient {
 
     /// Test the connection to Gemini API
     pub async fn test_connection(&self) -> Result<()> {
-        let test_request = GenerateContentRequest::new_text("Hello, can you respond with 'OK'?");
+        let test_request = GenerateContentRequest::new_text(TEST_MESSAGE);
 
         debug!("Testing Gemini API connection");
 
@@ -234,9 +241,7 @@ impl GeminiClient {
             info!("Gemini API connection test successful");
             Ok(())
         } else {
-            Err(WinxError::ApiError(
-                "Gemini connection test failed".to_string(),
-            ))
+            Err(WinxError::ApiError(CONNECTION_TEST_FAILED.to_string()))
         }
     }
 

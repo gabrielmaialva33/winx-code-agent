@@ -66,7 +66,7 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
 
     // Find all files matching the globs
     let mut relevant_files = Vec::new();
-    let mut warnings = Vec::new();
+    let mut warnings = String::new();
 
     for glob_pattern in &context.relevant_file_globs {
         // Expand the glob pattern if it contains a tilde
@@ -111,8 +111,8 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
         }
 
         if !found_files {
-            warnings.push(format!(
-                "Warning: No files found for the glob: {}",
+            warnings.push_str(&format!(
+                "Warning: No files found for the glob: {}\n",
                 glob_pattern
             ));
         }
@@ -223,7 +223,7 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
         } else {
             format!(
                 "{}\n\nContext file successfully saved at {}",
-                warnings.join("\n"),
+                warnings.trim_end(),
                 memory_file_path_str
             )
         }
@@ -402,21 +402,22 @@ fn try_open_file(file_path: &str) -> Result<()> {
                 .status();
 
             if let Ok(status) = status
-                && status.success() {
-                    // Found an available command, use it
-                    let _ = std::process::Command::new(cmd)
-                        .arg(file_path)
-                        .spawn()
-                        .map_err(|e| {
-                            WinxError::CommandExecutionError(format!(
-                                "Failed to spawn open command: {}",
-                                e
-                            ))
-                        })?;
+                && status.success()
+            {
+                // Found an available command, use it
+                let _ = std::process::Command::new(cmd)
+                    .arg(file_path)
+                    .spawn()
+                    .map_err(|e| {
+                        WinxError::CommandExecutionError(format!(
+                            "Failed to spawn open command: {}",
+                            e
+                        ))
+                    })?;
 
-                    // We don't wait for the command to complete
-                    return Ok(());
-                }
+                // We don't wait for the command to complete
+                return Ok(());
+            }
         }
 
         // If no command is available, just return success

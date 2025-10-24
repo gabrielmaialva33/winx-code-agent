@@ -243,7 +243,7 @@ impl FuzzyMatcher {
         let pattern_lower = pattern.to_lowercase();
         let text_lower = text.to_lowercase();
 
-        if pattern_lower == text_lower {
+        if pattern.eq_ignore_ascii_case(text) {
             // Perfect case-insensitive match
             return vec![FuzzyMatch::new(
                 pattern.to_string(),
@@ -257,7 +257,7 @@ impl FuzzyMatcher {
         let mut matches = Vec::new();
         let mut start = 0;
 
-        while let Some(pos) = text_lower[start..].find(&pattern_lower) {
+        while let Some(pos) = text[start..].to_lowercase().find(&pattern_lower) {
             let abs_pos = start + pos;
             let end_pos = abs_pos + pattern.len();
 
@@ -991,9 +991,11 @@ mod tests {
 
         // Should find at least one match with NormalizedWhitespace type
         assert!(!matches.is_empty());
-        assert!(matches
-            .iter()
-            .any(|m| m.match_type == MatchType::NormalizedWhitespace));
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.match_type == MatchType::NormalizedWhitespace)
+        );
     }
 
     #[test]
@@ -1003,9 +1005,11 @@ mod tests {
         let text = "some text\nline 1\nline 2\nmodified line 3\nmore text";
 
         let matches = matcher.find_matches(pattern, text);
-        assert!(matches
-            .iter()
-            .any(|m| m.match_type == MatchType::LineByLine));
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.match_type == MatchType::LineByLine)
+        );
     }
 
     #[test]
@@ -1015,9 +1019,11 @@ mod tests {
         let text = "function calculateSubtotal(items) {\n    return items.reduce((sum, item) => sum + item.price * item.quantity, 0);\n}";
 
         let matches = matcher.find_matches(pattern, text);
-        assert!(matches
-            .iter()
-            .any(|m| m.match_type == MatchType::LongestCommonSubstring));
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.match_type == MatchType::LongestCommonSubstring)
+        );
     }
 
     #[test]
@@ -1027,8 +1033,10 @@ mod tests {
         let text = "// Process function\nfunction processData(data) {\n    const result = transform(data);\n    return result;\n}";
 
         let matches = matcher.find_matches(pattern, text);
-        assert!(matches
-            .iter()
-            .any(|m| m.match_type == MatchType::TokenBased));
+        assert!(
+            matches
+                .iter()
+                .any(|m| m.match_type == MatchType::TokenBased)
+        );
     }
 }

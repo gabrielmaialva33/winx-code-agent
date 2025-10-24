@@ -503,30 +503,30 @@ pub fn parse_ansi_sequences(text: &str) -> Vec<(usize, String)> {
 /// Color name to ANSI code mapping
 pub fn color_name_to_code(name: &str) -> Option<TermColor> {
     lazy_static! {
-        static ref BASIC_COLORS: HashMap<String, u8> = {
+        static ref BASIC_COLORS: HashMap<&'static str, u8> = {
             let mut m = HashMap::new();
-            m.insert("black".to_string(), 0);
-            m.insert("red".to_string(), 1);
-            m.insert("green".to_string(), 2);
-            m.insert("yellow".to_string(), 3);
-            m.insert("blue".to_string(), 4);
-            m.insert("magenta".to_string(), 5);
-            m.insert("cyan".to_string(), 6);
-            m.insert("white".to_string(), 7);
-            m.insert("brightblack".to_string(), 8);
-            m.insert("brightred".to_string(), 9);
-            m.insert("brightgreen".to_string(), 10);
-            m.insert("brightyellow".to_string(), 11);
-            m.insert("brightblue".to_string(), 12);
-            m.insert("brightmagenta".to_string(), 13);
-            m.insert("brightcyan".to_string(), 14);
-            m.insert("brightwhite".to_string(), 15);
+            m.insert("black", 0);
+            m.insert("red", 1);
+            m.insert("green", 2);
+            m.insert("yellow", 3);
+            m.insert("blue", 4);
+            m.insert("magenta", 5);
+            m.insert("cyan", 6);
+            m.insert("white", 7);
+            m.insert("brightblack", 8);
+            m.insert("brightred", 9);
+            m.insert("brightgreen", 10);
+            m.insert("brightyellow", 11);
+            m.insert("brightblue", 12);
+            m.insert("brightmagenta", 13);
+            m.insert("brightcyan", 14);
+            m.insert("brightwhite", 15);
             m
         };
     }
 
     // Try as a basic color name
-    if let Some(code) = BASIC_COLORS.get(&name.to_lowercase()) {
+    if let Some(code) = BASIC_COLORS.get(name.to_lowercase().as_str()) {
         return Some(TermColor::Basic(*code));
     }
 
@@ -537,9 +537,10 @@ pub fn color_name_to_code(name: &str) -> Option<TermColor> {
 
     // Try as a hex color (only if it starts with # or is clearly hex)
     if (name.starts_with('#') || (name.len() == 6 && name.chars().all(|c| c.is_ascii_hexdigit())))
-        && let Some(color) = parse_hex_color(name) {
-            return Some(color);
-        }
+        && let Some(color) = parse_hex_color(name)
+    {
+        return Some(color);
+    }
 
     None
 }
@@ -700,9 +701,10 @@ fn extract_color_from_seq(seq: &str) -> String {
         // 8-bit color
         let parts: Vec<&str> = seq.split(';').collect();
         if parts.len() >= 3
-            && let Some(color_part) = parts[2].strip_suffix('m') {
-                return format!("color-{}", color_part);
-            }
+            && let Some(color_part) = parts[2].strip_suffix('m')
+        {
+            return format!("color-{}", color_part);
+        }
     } else if seq.starts_with("\x1B[38;2;") || seq.starts_with("\x1B[48;2;") {
         // 24-bit color
         let parts: Vec<&str> = seq.split(';').collect();

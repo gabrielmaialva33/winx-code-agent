@@ -12,6 +12,13 @@ use tracing::debug;
 
 use crate::errors::WinxError;
 
+lazy_static::lazy_static! {
+    static ref PATH_REGEX: regex::Regex = regex::Regex::new(r"[/\\][^\s:;,]+").unwrap();
+    static ref NUM_REGEX: regex::Regex = regex::Regex::new(r"\b\d+\b").unwrap();
+    static ref NAME_REGEX: regex::Regex = regex::Regex::new(r"'[^']+'").unwrap();
+    static ref STRING_REGEX: regex::Regex = regex::Regex::new(r#""[^"]+""#).unwrap();
+}
+
 /// Maximum number of errors to keep in history
 const MAX_ERROR_HISTORY: usize = 100;
 
@@ -306,16 +313,18 @@ impl ErrorPredictor {
         let path = Path::new(file_path);
 
         if let Some(extension) = path.extension()
-            && let Some(ext_str) = extension.to_str() {
-                // For files, we often care about the extension
-                return format!("*.{}", ext_str);
-            }
+            && let Some(ext_str) = extension.to_str()
+        {
+            // For files, we often care about the extension
+            return format!("*.{}", ext_str);
+        }
 
         // If no extension or error, use a more generic pattern
         if let Some(file_name) = path.file_name()
-            && let Some(name) = file_name.to_str() {
-                return name.to_string();
-            }
+            && let Some(name) = file_name.to_str()
+        {
+            return name.to_string();
+        }
 
         // Fallback
         "*".to_string()
@@ -327,9 +336,10 @@ impl ErrorPredictor {
 
         // We often care about the last component of the directory
         if let Some(last_component) = path.file_name()
-            && let Some(name) = last_component.to_str() {
-                return format!("*/{}", name);
-            }
+            && let Some(name) = last_component.to_str()
+        {
+            return format!("*/{}", name);
+        }
 
         // Fallback
         "*".to_string()
@@ -341,24 +351,18 @@ impl ErrorPredictor {
         let mut pattern = message.to_string();
 
         // Replace specific file paths with placeholders
-        if let Ok(re) = regex::Regex::new(r"[/\\][^\s:;,]+") {
-            pattern = re.replace_all(&pattern, "[PATH]").to_string();
-        }
+        pattern = PATH_REGEX.replace_all(&pattern, "[PATH]").to_string();
 
         // Replace numbers with placeholders
-        if let Ok(re) = regex::Regex::new(r"\b\d+\b") {
-            pattern = re.replace_all(&pattern, "[NUM]").to_string();
-        }
+        pattern = NUM_REGEX.replace_all(&pattern, "[NUM]").to_string();
 
         // Replace specific function or error names
-        if let Ok(re) = regex::Regex::new(r"'[^']+'") {
-            pattern = re.replace_all(&pattern, "'[NAME]'").to_string();
-        }
+        pattern = NAME_REGEX.replace_all(&pattern, "'[NAME]'").to_string();
 
         // Replace quoted strings with placeholders
-        if let Ok(re) = regex::Regex::new(r#""[^"]+""#) {
-            pattern = re.replace_all(&pattern, "\"[STRING]\"").to_string();
-        }
+        pattern = STRING_REGEX
+            .replace_all(&pattern, "\"[STRING]\"")
+            .to_string();
 
         pattern
     }
@@ -425,28 +429,28 @@ impl ErrorPredictor {
         // Check patterns
         for pattern in &self.error_patterns {
             if let Some(cmd_pattern) = &pattern.command_pattern
-                && self.pattern_matches(cmd_pattern, command) {
-                    // This pattern might apply to this command
-                    let suggestion =
-                        self.get_suggestion_for_error(command, &pattern.message_pattern);
+                && self.pattern_matches(cmd_pattern, command)
+            {
+                // This pattern might apply to this command
+                let suggestion = self.get_suggestion_for_error(command, &pattern.message_pattern);
 
-                    let base_confidence = pattern.frequency as f64 / 10.0;
-                    let decay_factor = 1.0
-                        - (pattern.last_seen.elapsed().as_secs() as f64
-                            / (MAX_ERROR_AGE_HOURS * 3600) as f64)
-                            .min(1.0);
+                let base_confidence = pattern.frequency as f64 / 10.0;
+                let decay_factor = 1.0
+                    - (pattern.last_seen.elapsed().as_secs() as f64
+                        / (MAX_ERROR_AGE_HOURS * 3600) as f64)
+                        .min(1.0);
 
-                    let confidence = (base_confidence * decay_factor).min(1.0);
+                let confidence = (base_confidence * decay_factor).min(1.0);
 
-                    if confidence >= PREDICTION_CONFIDENCE_THRESHOLD {
-                        predictions.push(ErrorPrediction {
-                            error_type: pattern.error_type.clone(),
-                            message_pattern: pattern.message_pattern.clone(),
-                            confidence,
-                            prevention: suggestion,
-                        });
-                    }
+                if confidence >= PREDICTION_CONFIDENCE_THRESHOLD {
+                    predictions.push(ErrorPrediction {
+                        error_type: pattern.error_type.clone(),
+                        message_pattern: pattern.message_pattern.clone(),
+                        confidence,
+                        prevention: suggestion,
+                    });
                 }
+            }
         }
 
         predictions
@@ -489,31 +493,32 @@ impl ErrorPredictor {
         let file_pattern = self.extract_file_pattern(file_path);
         for pattern in &self.error_patterns {
             if let Some(pat) = &pattern.file_pattern
-                && self.pattern_matches(pat, &file_pattern) {
-                    // This pattern might apply to this file
-                    let suggestion = self.get_suggestion_for_file_error(
-                        file_path,
-                        &pattern.message_pattern,
-                        operation,
-                    );
+                && self.pattern_matches(pat, &file_pattern)
+            {
+                // This pattern might apply to this file
+                let suggestion = self.get_suggestion_for_file_error(
+                    file_path,
+                    &pattern.message_pattern,
+                    operation,
+                );
 
-                    let base_confidence = pattern.frequency as f64 / 10.0;
-                    let decay_factor = 1.0
-                        - (pattern.last_seen.elapsed().as_secs() as f64
-                            / (MAX_ERROR_AGE_HOURS * 3600) as f64)
-                            .min(1.0);
+                let base_confidence = pattern.frequency as f64 / 10.0;
+                let decay_factor = 1.0
+                    - (pattern.last_seen.elapsed().as_secs() as f64
+                        / (MAX_ERROR_AGE_HOURS * 3600) as f64)
+                        .min(1.0);
 
-                    let confidence = (base_confidence * decay_factor).min(1.0);
+                let confidence = (base_confidence * decay_factor).min(1.0);
 
-                    if confidence >= PREDICTION_CONFIDENCE_THRESHOLD {
-                        predictions.push(ErrorPrediction {
-                            error_type: pattern.error_type.clone(),
-                            message_pattern: pattern.message_pattern.clone(),
-                            confidence,
-                            prevention: suggestion,
-                        });
-                    }
+                if confidence >= PREDICTION_CONFIDENCE_THRESHOLD {
+                    predictions.push(ErrorPrediction {
+                        error_type: pattern.error_type.clone(),
+                        message_pattern: pattern.message_pattern.clone(),
+                        confidence,
+                        prevention: suggestion,
+                    });
                 }
+            }
         }
 
         // Check for common file operation errors
@@ -608,14 +613,15 @@ impl ErrorPredictor {
                 // Check if parent directory exists for new files
                 if !file_exists
                     && let Some(parent) = path.parent()
-                        && !parent.exists() {
-                            predictions.push(ErrorPrediction {
+                    && !parent.exists()
+                {
+                    predictions.push(ErrorPrediction {
                                 error_type: "directory_not_found".to_string(),
                                 message_pattern: "Directory not found".to_string(),
                                 confidence: 0.9,
                                 prevention: format!("The parent directory for '{}' does not exist. Create it first with mkdir -p.", parent.display()),
                             });
-                        }
+                }
             }
             _ => {}
         }
@@ -726,9 +732,10 @@ impl ErrorPredictor {
                     return format!("'{}' is a directory, not a file", file_path);
                 }
                 if error_pattern.contains("No such file or directory")
-                    && let Some(parent) = path.parent() {
-                        return format!("Create the parent directory '{}' first", parent.display());
-                    }
+                    && let Some(parent) = path.parent()
+                {
+                    return format!("Create the parent directory '{}' first", parent.display());
+                }
             }
             _ => {}
         }
