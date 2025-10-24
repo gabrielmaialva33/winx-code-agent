@@ -797,9 +797,10 @@ impl FuzzyMatcher {
                 // End of token
                 if !current_token.is_empty() {
                     if current_token.len() >= MIN_TOKEN_LENGTH {
-                        tokens.push(current_token.clone());
+                        tokens.push(std::mem::take(&mut current_token));
+                    } else {
+                        current_token.clear();
                     }
-                    current_token.clear();
                 }
 
                 // Include delimiters that might be significant in code
