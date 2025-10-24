@@ -1078,185 +1078,106 @@ async fn send_ascii_to_interactive(
     bash_state: &mut BashState,
     ascii_codes: &[u8],
 ) -> Result<String> {
-    debug!("Sending ASCII to interactive process: {:?}", ascii_codes);
+    send_input_to_interactive(
+        bash_state,
+        || {
+            if ascii_codes.is_empty() {
+                Err(WinxError::CommandExecutionError {
+                    message: Arc::new("Empty ASCII input".to_string()),
+                })
+            } else {
+                Ok(())
+            }
+        },
+        |bash| {
+            let ascii_codes = ascii_codes.to_vec(); // Clone the codes to avoid lifetime issues
+            Box::pin(async move {
+                // Track codes that were successfully sent
+                let mut sent_codes = Vec::new();
+                let mut send_errors = Vec::new();
 
-    // Validate input
-    if ascii_codes.is_empty() {
-        return Err(WinxError::CommandExecutionError {
-            message: Arc::new("Empty ASCII input".to_string()),
-        });
-    }
-
-    // Acquire lock with timeout and better error handling
-    let bash_guard = match tokio::time::timeout(
-        std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
-        async { bash_state.interactive_bash.lock().await },
-    )
-    .await
-    {
-        Ok(guard) => guard,
-        Err(_) => {
-            return Err(WinxError::BashStateLockError {
-                message: Arc::new("Lock acquisition timed out".to_string()),
-            });
-        }
-    };
-
-    // Cannot clone a reference to InteractiveBash, we need to check command state here
-    let command_state = match bash_guard.as_ref() {
-        Some(bash) => bash.command_state.clone(),
-        None => return Err(WinxError::BashStateNotInitialized),
-    };
-
-    // Check if a command is running
-    if let CommandState::Idle = command_state {
-        return Err(WinxError::CommandExecutionError {
-            message: Arc::new("No command is currently running".to_string()),
-        });
-    }
-
-    // Get command info for better error messages
-    let _command_info = match &command_state {
-        CommandState::Running {
-            command,
-            start_time,
-        } => {
-            let elapsed = start_time
-                .elapsed()
-                .unwrap_or_else(|_| std::time::Duration::from_secs(0));
-            format!("'{}' (running for {:.2?})", command, elapsed)
-        }
-        _ => "unknown".to_string(),
-    };
-
-    // Drop guard and acquire mutable reference to bash state
-    drop(bash_guard);
-    let mut bash_guard = bash_state.interactive_bash.lock().await;
-
-    let bash = bash_guard
-        .as_mut()
-        .ok_or(WinxError::BashStateNotInitialized)?;
-
-    // Track codes that were successfully sent
-    let mut sent_codes = Vec::new();
-    let mut send_errors = Vec::new();
-
-    // Handle special case for Ctrl+C (ASCII 3)
-    let contains_ctrl_c = ascii_codes.contains(&3);
-    if contains_ctrl_c {
-        match bash.send_interrupt() {
-            Ok(_) => sent_codes.push(3),
-            Err(e) => send_errors.push(format!("Failed to send Ctrl+C interrupt: {}", e)),
-        }
-    }
-
-    // Send the ASCII codes
-    if let Some(mut stdin) = bash.process.stdin.take() {
-        for &code in ascii_codes {
-            if code != 3 {
-                // Skip Ctrl+C as it's handled by send_interrupt
-                match std::io::Write::write_all(&mut stdin, &[code]) {
-                    Ok(_) => sent_codes.push(code),
-                    Err(e) => {
-                        send_errors.push(format!("Failed to send ASCII code {}: {}", code, e))
+                // Handle special case for Ctrl+C (ASCII 3)
+                let contains_ctrl_c = ascii_codes.contains(&3);
+                if contains_ctrl_c {
+                    match bash.send_interrupt() {
+                        Ok(_) => sent_codes.push(3),
+                        Err(e) => {
+                            send_errors.push(format!("Failed to send Ctrl+C interrupt: {}", e))
+                        }
                     }
                 }
+
+                // Send the ASCII codes
+                if let Some(mut stdin) = bash.process.stdin.take() {
+                    for &code in &ascii_codes {
+                        if code != 3 {
+                            // Skip Ctrl+C as it's handled by send_interrupt
+                            match std::io::Write::write_all(&mut stdin, &[code]) {
+                                Ok(_) => sent_codes.push(code),
+                                Err(e) => send_errors
+                                    .push(format!("Failed to send ASCII code {}: {}", code, e)),
+                            }
+                        }
+                    }
+
+                    // Flush stdin with error handling
+                    if let Err(e) = stdin.flush() {
+                        send_errors.push(format!("Failed to flush stdin: {}", e));
+                    }
+
+                    // Return stdin to the process
+                    bash.process.stdin = Some(stdin);
+                } else {
+                    return Err(WinxError::CommandExecutionError {
+                        message: Arc::new("No stdin available for the process".to_string()),
+                    });
+                }
+
+                // Check if we've sent anything successfully
+                if sent_codes.is_empty() && !send_errors.is_empty() {
+                    return Err(WinxError::CommandExecutionError {
+                        message: Arc::new("Failed to send any ASCII codes".to_string()),
+                    });
+                }
+
+                // Format ASCII codes for display with enhanced readability
+                let ascii_display = sent_codes
+                    .iter()
+                    .map(|code| match code {
+                        3 => "^C (Ctrl+C)".to_string(),
+                        4 => "^D (Ctrl+D)".to_string(),
+                        9 => "\\t (tab)".to_string(),
+                        10 => "\\n (newline)".to_string(),
+                        13 => "\\r (carriage return)".to_string(),
+                        27 => "ESC (escape)".to_string(),
+                        32..=126 => format!("{} ({})", code, *code as char),
+                        _ => format!("{} (0x{:02x})", code, code),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let input_desc = format!("ASCII codes sent: {}", ascii_display);
+                let error_info = if !send_errors.is_empty() {
+                    format!(
+                        "Some ASCII codes could not be sent: {}",
+                        send_errors.join("; ")
+                    )
+                } else {
+                    "".to_string()
+                };
+
+                Ok((input_desc, error_info))
+            })
+        },
+        |input_desc, error_info, output| {
+            if error_info.is_empty() {
+                format!("{}\n\n{}", input_desc, output)
+            } else {
+                format!("{}\n\nWarning: {}\n\n{}", input_desc, error_info, output)
             }
-        }
-
-        // Flush stdin with error handling
-        if let Err(e) = stdin.flush() {
-            send_errors.push(format!("Failed to flush stdin: {}", e));
-        }
-
-        // Return stdin to the process
-        bash.process.stdin = Some(stdin);
-    } else {
-        return Err(WinxError::CommandExecutionError {
-            message: Arc::new("No stdin available for the process".to_string()),
-        });
-    }
-
-    // Check if we've sent anything successfully
-    if sent_codes.is_empty() && !send_errors.is_empty() {
-        return Err(WinxError::CommandExecutionError {
-            message: Arc::new("Failed to send any ASCII codes".to_string()),
-        });
-    }
-
-    // Read output after sending with error handling
-    let result = bash.read_output(0.5);
-    let (output, complete) = match result {
-        Ok((output, complete)) => (output, complete),
-        Err(e) => {
-            return Err(WinxError::CommandExecutionError {
-                message: Arc::new(format!("Failed to read output: {}", e)),
-            });
-        }
-    };
-
-    // Process the output through terminal emulation
-    let rendered_output = output.clone();
-
-    // Check if the process is still alive
-    let is_alive = bash.is_alive();
-
-    // Add comprehensive status information
-    let status = if !is_alive || complete {
-        "process exited"
-    } else {
-        "still running"
-    };
-
-    // Get elapsed time if available
-    let elapsed_info = if let CommandState::Running { start_time, .. } = &bash.command_state {
-        if let Ok(elapsed) = start_time.elapsed() {
-            format!(" (running for {:.2?})", elapsed)
-        } else {
-            "".to_string()
-        }
-    } else {
-        "".to_string()
-    };
-
-    // Format ASCII codes for display with enhanced readability
-    let ascii_display = sent_codes
-        .iter()
-        .map(|code| match code {
-            3 => "^C (Ctrl+C)".to_string(),
-            4 => "^D (Ctrl+D)".to_string(),
-            9 => "\\t (tab)".to_string(),
-            10 => "\\n (newline)".to_string(),
-            13 => "\\r (carriage return)".to_string(),
-            27 => "ESC (escape)".to_string(),
-            32..=126 => format!("{} ({})", code, *code as char),
-            _ => format!("{} (0x{:02x})", code, code),
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    // Include any errors in the output
-    let error_info = if !send_errors.is_empty() {
-        format!(
-            "\n\nWarning: Some ASCII codes could not be sent: {}",
-            send_errors.join("; ")
-        )
-    } else {
-        "".to_string()
-    };
-
-    // Assemble final result with more details
-    let final_result = format!(
-        "ASCII codes sent: {}{}\n\n{}\n\n---\n\nstatus = {}{}\ncwd = {}\n",
-        ascii_display,
-        error_info,
-        rendered_output,
-        status,
-        elapsed_info,
-        bash_state.cwd.display()
-    );
-
-    Ok(final_result)
+        },
+    )
+    .await
 }
 
 /// Execute an interactive command
