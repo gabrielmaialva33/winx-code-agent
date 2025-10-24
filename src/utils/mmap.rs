@@ -388,7 +388,10 @@ fn read_streaming(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
             Err(e) => {
                 return Err(WinxError::FileAccessError {
                     path: path.to_path_buf(),
-                    message: format!("Error reading file chunk at position {}: {}", bytes_read, e),
+                    message: Arc::new(format!(
+                        "Error reading file chunk at position {}: {}",
+                        bytes_read, e
+                    )),
                 });
             }
         }
@@ -538,10 +541,10 @@ fn read_segment_mmap(file: &File, offset: u64, length: u64, path: &Path) -> Resu
             .len(length as usize)
             .map(file)
     }
-        .map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: Arc::new(format!("Failed to memory-map file segment: {}", e)),
-        })?;    // Copy segment data to result
+    .map_err(|e| WinxError::FileAccessError {
+        path: path.to_path_buf(),
+        message: Arc::new(format!("Failed to memory-map file segment: {}", e)),
+    })?; // Copy segment data to result
     Ok(segment_mmap.to_vec())
 }
 

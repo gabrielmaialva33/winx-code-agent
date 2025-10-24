@@ -56,7 +56,7 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
     if !path.exists() {
         return Err(WinxError::FileAccessError {
             path: path.clone(),
-            message: "File does not exist".to_string(),
+            message: Arc::new("File does not exist".to_string()),
         });
     }
 
@@ -64,14 +64,14 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
     if !path.is_file() {
         return Err(WinxError::FileAccessError {
             path: path.clone(),
-            message: "Path exists but is not a file".to_string(),
+            message: Arc::new("Path exists but is not a file".to_string()),
         });
     }
 
     // Read the file as bytes
     let image_bytes = std::fs::read(&path).map_err(|e| WinxError::FileAccessError {
         path: path.clone(),
-        message: format!("Error reading file: {}", e),
+        message: Arc::new(format!("Error reading file: {}", e)),
     })?;
 
     // Encode the bytes to base64
@@ -141,9 +141,12 @@ pub async fn handle_tool_call(
 
     // Lock bash state to extract data
     {
-        let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
-        })?;
+        let bash_state_guard =
+            bash_state_arc
+                .lock()
+                .map_err(|e| WinxError::BashStateLockError {
+                    message: Arc::new(format!("Failed to lock bash state: {}", e)),
+                })?;
 
         // Ensure bash state is initialized
         let bash_state = match &*bash_state_guard {
