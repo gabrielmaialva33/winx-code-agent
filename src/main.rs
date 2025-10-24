@@ -139,10 +139,9 @@ async fn main() -> Result<()> {
             }
 
             // Convert anyhow error to our custom error type
-            Err(errors::WinxError::ShellInitializationError(format!(
-                "Failed to start server: {}",
-                e
-            )))
+            Err(errors::WinxError::ShellInitializationError {
+                message: format!("Failed to start server: {}", e),
+            })
         }
     }
 }
