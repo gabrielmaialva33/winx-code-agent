@@ -747,187 +747,38 @@ pub async fn handle_tool_call(
         }
     }
 }
-
-/// Send text to an interactive process
+/// Generic helper function for sending input to interactive processes
 ///
-/// This function sends text input to a running interactive process.
-/// It handles error cases robustly and provides detailed status information.
+/// This function handles the common pattern of validating input, acquiring locks,
+/// checking command state, sending input, and formatting results.
 ///
 /// # Arguments
 ///
 /// * `bash_state` - The current bash state
-/// * `text` - The text to send
+/// * `validate_input` - Closure that validates the input and returns an error if invalid
+/// * `send_input` - Async closure that sends the input to the bash process and returns (description, error_info)
+/// * `format_result` - Closure that formats the final result string
 ///
 /// # Returns
 ///
 /// A Result containing the command output with status information
-async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Result<String> {
-    debug!("Sending text to interactive process: {}", text);
-
-    // Validate input
-    if text.trim().is_empty() {
-        return Err(WinxError::CommandExecutionError {
-            message: Arc::new("Empty text input".to_string()),
-        });
-    }
-
-    // Acquire lock with timeout and better error handling
-    let bash_guard = match tokio::time::timeout(
-        std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
-        async { bash_state.interactive_bash.lock().await },
-    )
-    .await
-    {
-        Ok(guard) => guard,
-        Err(_) => {
-            return Err(WinxError::BashStateLockError {
-                message: Arc::new("Lock acquisition timed out".to_string()),
-            });
-        }
-    };
-
-    // Cannot clone a reference to InteractiveBash, we need to check command state here
-    let command_state = match bash_guard.as_ref() {
-        Some(bash) => bash.command_state.clone(),
-        None => return Err(WinxError::BashStateNotInitialized),
-    };
-
-    // Check if a command is running
-    if let CommandState::Idle = command_state {
-        return Err(WinxError::CommandExecutionError {
-            message: Arc::new("No command is currently running".to_string()),
-        });
-    }
-
-    // Get command info for better error messages
-    let _command_info = match &command_state {
-        CommandState::Running {
-            command,
-            start_time,
-        } => {
-            let elapsed = start_time
-                .elapsed()
-                .unwrap_or_else(|_| std::time::Duration::from_secs(0));
-            format!("'{}' (running for {:.2?})", command, elapsed)
-        }
-        _ => "unknown".to_string(),
-    };
-
-    // Drop guard and acquire mutable reference to bash state
-    drop(bash_guard);
-    let mut bash_guard = bash_state.interactive_bash.lock().await;
-
-    let bash = bash_guard
-        .as_mut()
-        .ok_or(WinxError::BashStateNotInitialized)?;
-
-    // Send the text to the process
-    if let Some(mut stdin) = bash.process.stdin.take() {
-        // Try to send the text with detailed error handling
-        let text_result = std::io::Write::write_all(&mut stdin, text.as_bytes());
-        let newline_result = std::io::Write::write_all(&mut stdin, b"\n");
-        let flush_result = stdin.flush();
-
-        // Return stdin to the process regardless of write success
-        bash.process.stdin = Some(stdin);
-
-        // Check for errors in send operations
-        if let Err(e) = text_result {
-            return Err(WinxError::CommandExecutionError {
-                message: Arc::new(format!("Failed to write text: {}", e)),
-            });
-        }
-
-        if let Err(e) = newline_result {
-            return Err(WinxError::CommandExecutionError {
-                message: Arc::new(format!("Failed to write newline: {}", e)),
-            });
-        }
-
-        if let Err(e) = flush_result {
-            return Err(WinxError::CommandExecutionError {
-                message: Arc::new(format!("Failed to flush stdin: {}", e)),
-            });
-        }
-
-        // Read output after sending with error handling
-        let result = bash.read_output(0.5);
-        let (output, complete) = match result {
-            Ok((output, complete)) => (output, complete),
-            Err(e) => {
-                return Err(WinxError::CommandExecutionError {
-                    message: Arc::new(format!("Failed to read output: {}", e)),
-                });
-            }
-        };
-
-        // Process the output through terminal emulation
-        let rendered_output = output.clone();
-
-        // Check if the process is still alive
-        let is_alive = bash.is_alive();
-
-        // Add comprehensive status information
-        let status = if !is_alive || complete {
-            "process exited"
-        } else {
-            "still running"
-        };
-
-        // Get elapsed time if available
-        let elapsed_info = if let CommandState::Running { start_time, .. } = &bash.command_state {
-            if let Ok(elapsed) = start_time.elapsed() {
-                format!(" (running for {:.2?})", elapsed)
-            } else {
-                "".to_string()
-            }
-        } else {
-            "".to_string()
-        };
-
-        // Assemble final result with more details
-        let final_result = format!(
-            "Text sent: {}\n\n{}\n\n---\n\nstatus = {}{}\ncwd = {}\n",
-            text,
-            rendered_output,
-            status,
-            elapsed_info,
-            bash_state.cwd.display()
-        );
-
-        Ok(final_result)
-    } else {
-        Err(WinxError::CommandExecutionError {
-            message: Arc::new("No stdin available for the process".to_string()),
-        })
-    }
-}
-
-/// Send special keys to an interactive process
-///
-/// This function sends special keys to a running interactive process.
-/// It includes robust error handling and detailed status information.
-///
-/// # Arguments
-///
-/// * `bash_state` - The current bash state
-/// * `keys` - The special keys to send
-///
-/// # Returns
-///
-/// A Result containing the command output with detailed status
-async fn send_special_keys_to_interactive(
+async fn send_input_to_interactive<F, G, H>(
     bash_state: &mut BashState,
-    keys: &[SpecialKey],
-) -> Result<String> {
-    debug!("Sending special keys to interactive process: {:?}", keys);
-
+    validate_input: F,
+    send_input: G,
+    format_result: H,
+) -> Result<String>
+where
+    F: FnOnce() -> Result<()>,
+    G: FnOnce(
+        &mut crate::state::bash_state::InteractiveBash,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<(String, String)>> + Send + '_>,
+    >,
+    H: FnOnce(String, String, String) -> String,
+{
     // Validate input
-    if keys.is_empty() {
-        return Err(WinxError::CommandExecutionError {
-            message: Arc::new("Empty special keys input".to_string()),
-        });
-    }
+    validate_input()?;
 
     // Acquire lock with timeout and better error handling
     let bash_guard = match tokio::time::timeout(
@@ -957,20 +808,6 @@ async fn send_special_keys_to_interactive(
         });
     }
 
-    // Get command info for better error messages
-    let _command_info = match &command_state {
-        CommandState::Running {
-            command,
-            start_time,
-        } => {
-            let elapsed = start_time
-                .elapsed()
-                .unwrap_or_else(|_| std::time::Duration::from_secs(0));
-            format!("'{}' (running for {:.2?})", command, elapsed)
-        }
-        _ => "unknown".to_string(),
-    };
-
     // Drop guard and acquire mutable reference to bash state
     drop(bash_guard);
     let mut bash_guard = bash_state.interactive_bash.lock().await;
@@ -979,72 +816,15 @@ async fn send_special_keys_to_interactive(
         .as_mut()
         .ok_or(WinxError::BashStateNotInitialized)?;
 
-    // Process each key
-    let mut key_descriptions = Vec::new();
-    let mut key_errors = Vec::new();
+    // Send the input using the provided closure
+    let (input_description, error_info) =
+        send_input(bash)
+            .await
+            .map_err(|e| WinxError::CommandExecutionError {
+                message: Arc::new(e.to_string()),
+            })?;
 
-    for key in keys {
-        // Handle special case for Ctrl+C to use the interrupt method
-        if *key == SpecialKey::CtrlC {
-            match bash.send_interrupt() {
-                Ok(_) => key_descriptions.push("Ctrl+C (interrupt)".to_string()),
-                Err(e) => {
-                    key_errors.push(format!("Failed to send Ctrl+C interrupt: {}", e));
-                    // Continue with other keys even if one fails
-                }
-            }
-            continue;
-        }
-
-        // Send the key
-        if let Some(mut stdin) = bash.process.stdin.take() {
-            // Convert key to bytes
-            let key_bytes = match key {
-                SpecialKey::Enter => b"\n".to_vec(),
-                SpecialKey::KeyUp => b"\x1b[A".to_vec(),
-                SpecialKey::KeyDown => b"\x1b[B".to_vec(),
-                SpecialKey::KeyLeft => b"\x1b[D".to_vec(),
-                SpecialKey::KeyRight => b"\x1b[C".to_vec(),
-                SpecialKey::CtrlD => b"\x04".to_vec(),
-                _ => Vec::new(),
-            };
-
-            // Send the key with error handling
-            let write_result = std::io::Write::write_all(&mut stdin, &key_bytes);
-            let flush_result = stdin.flush();
-
-            // Return stdin to the process regardless of write success
-            bash.process.stdin = Some(stdin);
-
-            // Process results
-            if let Err(e) = write_result {
-                key_errors.push(format!("Failed to send key {:?}: {}", key, e));
-            } else if let Err(e) = flush_result {
-                key_errors.push(format!(
-                    "Failed to flush stdin after sending key {:?}: {}",
-                    key, e
-                ));
-            } else {
-                // Key was sent successfully
-                key_descriptions.push(format!("{:?}", key));
-            }
-        } else {
-            key_errors.push(format!(
-                "Failed to get stdin for process when sending key {:?}",
-                key
-            ));
-            // Try to continue with other keys even if this one failed
-        }
-    }
-
-    // Check if we have any errors that would prevent continuing
-    if key_descriptions.is_empty() && !key_errors.is_empty() {
-        return Err(WinxError::CommandExecutionError {
-            message: Arc::new("Failed to send any special keys".to_string()),
-        });
-    }
-
-    // Read output after sending all keys
+    // Read output after sending with error handling
     let result = bash.read_output(0.5);
     let (output, complete) = match result {
         Ok((output, complete)) => (output, complete),
@@ -1079,28 +859,206 @@ async fn send_special_keys_to_interactive(
         "".to_string()
     };
 
-    // Include any errors in the output
-    let error_info = if !key_errors.is_empty() {
-        format!(
-            "\n\nWarning: Some keys could not be sent: {}",
-            key_errors.join("; ")
-        )
-    } else {
-        "".to_string()
-    };
-
-    // Assemble final result with more details
-    let final_result = format!(
-        "Special keys sent: {}{}\n\n{}\n\n---\n\nstatus = {}{}\ncwd = {}\n",
-        key_descriptions.join(", "),
+    // Format the final result
+    let final_result = format_result(
+        input_description,
         error_info,
-        rendered_output,
-        status,
-        elapsed_info,
-        bash_state.cwd.display()
+        format!(
+            "{}\n\n---\n\nstatus = {}{}\ncwd = {}\n",
+            rendered_output,
+            status,
+            elapsed_info,
+            bash_state.cwd.display()
+        ),
     );
 
     Ok(final_result)
+}
+
+/// Send text to an interactive process
+///
+/// This function sends text input to a running interactive process.
+/// It handles error cases robustly and provides detailed status information.
+///
+/// # Arguments
+///
+/// * `bash_state` - The current bash state
+/// * `text` - The text to send
+///
+/// # Returns
+///
+/// A Result containing the command output with status information
+async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Result<String> {
+    send_input_to_interactive(
+        bash_state,
+        || {
+            if text.trim().is_empty() {
+                Err(WinxError::CommandExecutionError {
+                    message: Arc::new("Empty text input".to_string()),
+                })
+            } else {
+                Ok(())
+            }
+        },
+        |bash| {
+            let text = text.to_string(); // Clone the text to avoid lifetime issues
+            Box::pin(async move {
+                if let Some(mut stdin) = bash.process.stdin.take() {
+                    let text_result = std::io::Write::write_all(&mut stdin, text.as_bytes());
+                    let newline_result = std::io::Write::write_all(&mut stdin, b"\n");
+                    let flush_result = stdin.flush();
+
+                    bash.process.stdin = Some(stdin);
+
+                    if let Err(e) = text_result {
+                        return Err(WinxError::CommandExecutionError {
+                            message: Arc::new(format!("Failed to write text: {}", e)),
+                        });
+                    }
+                    if let Err(e) = newline_result {
+                        return Err(WinxError::CommandExecutionError {
+                            message: Arc::new(format!("Failed to write newline: {}", e)),
+                        });
+                    }
+                    if let Err(e) = flush_result {
+                        return Err(WinxError::CommandExecutionError {
+                            message: Arc::new(format!("Failed to flush stdin: {}", e)),
+                        });
+                    }
+                    Ok((format!("Text sent: {}", text), "".to_string()))
+                } else {
+                    Err(WinxError::CommandExecutionError {
+                        message: Arc::new("No stdin available for the process".to_string()),
+                    })
+                }
+            })
+        },
+        |input_desc, error_info, output| {
+            if error_info.is_empty() {
+                format!("{}\n\n{}", input_desc, output)
+            } else {
+                format!("{}\n\nWarning: {}\n\n{}", input_desc, error_info, output)
+            }
+        },
+    )
+    .await
+}
+
+/// Send special keys to an interactive process
+///
+/// This function sends special keys to a running interactive process.
+/// It includes robust error handling and detailed status information.
+///
+/// # Arguments
+///
+/// * `bash_state` - The current bash state
+/// * `keys` - The special keys to send
+///
+/// # Returns
+///
+/// A Result containing the command output with detailed status
+async fn send_special_keys_to_interactive(
+    bash_state: &mut BashState,
+    keys: &[SpecialKey],
+) -> Result<String> {
+    send_input_to_interactive(
+        bash_state,
+        || {
+            if keys.is_empty() {
+                Err(WinxError::CommandExecutionError {
+                    message: Arc::new("Empty special keys input".to_string()),
+                })
+            } else {
+                Ok(())
+            }
+        },
+        |bash| {
+            let keys = keys.to_vec(); // Clone the keys to avoid lifetime issues
+            Box::pin(async move {
+                // Process each key
+                let mut key_descriptions = Vec::new();
+                let mut key_errors = Vec::new();
+
+                for key in keys {
+                    // Handle special case for Ctrl+C to use the interrupt method
+                    if key == SpecialKey::CtrlC {
+                        match bash.send_interrupt() {
+                            Ok(_) => key_descriptions.push("Ctrl+C (interrupt)".to_string()),
+                            Err(e) => {
+                                key_errors.push(format!("Failed to send Ctrl+C interrupt: {}", e));
+                                // Continue with other keys even if one fails
+                            }
+                        }
+                        continue;
+                    }
+
+                    // Send the key
+                    if let Some(mut stdin) = bash.process.stdin.take() {
+                        // Convert key to bytes
+                        let key_bytes = match key {
+                            SpecialKey::Enter => b"\n".to_vec(),
+                            SpecialKey::KeyUp => b"\x1b[A".to_vec(),
+                            SpecialKey::KeyDown => b"\x1b[B".to_vec(),
+                            SpecialKey::KeyLeft => b"\x1b[D".to_vec(),
+                            SpecialKey::KeyRight => b"\x1b[C".to_vec(),
+                            SpecialKey::CtrlD => b"\x04".to_vec(),
+                            _ => Vec::new(),
+                        };
+
+                        // Send the key with error handling
+                        let write_result = std::io::Write::write_all(&mut stdin, &key_bytes);
+                        let flush_result = stdin.flush();
+
+                        // Return stdin to the process regardless of write success
+                        bash.process.stdin = Some(stdin);
+
+                        // Process results
+                        if let Err(e) = write_result {
+                            key_errors.push(format!("Failed to send key {:?}: {}", key, e));
+                        } else if let Err(e) = flush_result {
+                            key_errors.push(format!(
+                                "Failed to flush stdin after sending key {:?}: {}",
+                                key, e
+                            ));
+                        } else {
+                            // Key was sent successfully
+                            key_descriptions.push(format!("{:?}", key));
+                        }
+                    } else {
+                        key_errors.push(format!(
+                            "Failed to get stdin for process when sending key {:?}",
+                            key
+                        ));
+                        // Try to continue with other keys even if this one failed
+                    }
+                }
+
+                // Check if we have any errors that would prevent continuing
+                if key_descriptions.is_empty() && !key_errors.is_empty() {
+                    return Err(WinxError::CommandExecutionError {
+                        message: Arc::new("Failed to send any special keys".to_string()),
+                    });
+                }
+
+                let input_desc = format!("Special keys sent: {}", key_descriptions.join(", "));
+                let error_info = if !key_errors.is_empty() {
+                    format!("Some keys could not be sent: {}", key_errors.join("; "))
+                } else {
+                    "".to_string()
+                };
+
+                Ok((input_desc, error_info))
+            })
+        },
+        |input_desc, error_info, output| {
+            if error_info.is_empty() {
+                format!("{}\n\n{}", input_desc, output)
+            } else {
+                format!("{}\n\nWarning: {}\n\n{}", input_desc, error_info, output)
+            }
+        },
+    )
+    .await
 }
 
 /// Send ASCII characters to an interactive process
