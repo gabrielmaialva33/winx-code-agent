@@ -1,6 +1,7 @@
 //! Winx MCP Server implementation using rmcp 0.5.0
 //! Enhanced server with NVIDIA AI integration
 
+use lazy_static::lazy_static;
 use rmcp::{
     ErrorData as McpError, ServerHandler, ServiceExt,
     model::*,
@@ -39,6 +40,481 @@ const PROJECT_STRUCTURE: &str = "# Winx Code Agent - Project Structure\n\n\
 - Shell command execution with state management\n\
 - File operations and context saving\n\
 - AI-powered code analysis and generation\n";
+
+lazy_static! {
+    static ref CACHED_TOOLS: Vec<Tool> = vec![
+        Tool {
+            name: "ping".into(),
+            title: Some("Ping".to_string()),
+            description: Some("Test server connectivity".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Optional message to echo back"
+                    }
+                }
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "initialize".into(),
+            title: Some("Initialize".to_string()),
+            description: Some("Initialize the bash shell environment".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "shell": {
+                        "type": "string",
+                        "description": "Shell to use (default: bash)"
+                    }
+                }
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "bash_command".into(),
+            title: Some("Bash Command".to_string()),
+            description: Some("Execute a command in the bash shell".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "description": "Command to execute"
+                    },
+                    "timeout_seconds": {
+                        "type": "integer",
+                        "description": "Timeout in seconds (default: 30)"
+                    }
+                },
+                "required": ["command"]
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "read_files".into(),
+            title: Some("Read Files".to_string()),
+            description: Some("Read contents of one or more files".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "File paths to read"
+                    }
+                },
+                "required": ["paths"]
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "file_write_or_edit".into(),
+            title: Some("File Write/Edit".to_string()),
+            description: Some("Write or edit file contents".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path to write"
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "Content to write"
+                    },
+                    "create_if_missing": {
+                        "type": "boolean",
+                        "description": "Create file if it doesn't exist (default: true)"
+                    }
+                },
+                "required": ["path", "content"]
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "context_save".into(),
+            title: Some("Context Save".to_string()),
+            description: Some("Save task context to a file for resumption".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "Unique identifier for the task"
+                    },
+                    "project_root_path": {
+                        "type": "string",
+                        "description": "Root path of the project"
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "Description of the task"
+                    },
+                    "relevant_file_globs": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "List of file glob patterns to include"
+                    }
+                },
+                "required": ["id", "project_root_path", "description", "relevant_file_globs"]
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "read_image".into(),
+            title: Some("Read Image".to_string()),
+            description: Some("Read image file and return as base64".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the image file"
+                    }
+                },
+                "required": ["file_path"]
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "command_suggestions".into(),
+            title: Some("Command Suggestions".to_string()),
+            description: Some("Get command suggestions based on context".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "partial_command": {
+                        "type": "string",
+                        "description": "Partial command to get suggestions for"
+                    },
+                    "current_dir": {
+                        "type": "string",
+                        "description": "Optional directory context"
+                    },
+                    "previous_command": {
+                        "type": "string",
+                        "description": "Optional previous command"
+                    },
+                    "max_suggestions": {
+                        "type": "integer",
+                        "description": "Maximum number of suggestions to return (default: 5)"
+                    },
+                    "include_explanations": {
+                        "type": "boolean",
+                        "description": "Whether to include command explanations"
+                    }
+                }
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "code_analyzer".into(),
+            title: Some("Code Analyzer".to_string()),
+            description: Some(
+                "AI-powered code analysis for bugs, security, and performance".into(),
+            ),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the code file to analyze"
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Programming language (optional, auto-detected if not provided)"
+                    }
+                },
+                "required": ["file_path"]
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "ai_generate_code".into(),
+            title: Some("AI Generate Code".to_string()),
+            description: Some(
+                "Generate code from natural language description using NVIDIA AI".into(),
+            ),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Natural language description of the code to generate"
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Target programming language (e.g., 'Rust', 'Python', 'JavaScript')"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Additional context or requirements"
+                    },
+                    "max_tokens": {
+                        "type": "integer",
+                        "description": "Maximum tokens to generate (default: 1000)"
+                    },
+                    "temperature": {
+                        "type": "number",
+                        "description": "Creativity level 0.0-1.0 (default: 0.7)"
+                    }
+                },
+                "required": ["prompt"]
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "multi_file_editor".into(),
+            title: Some("Multi File Editor".to_string()),
+            description: Some(
+                "Create and edit multiple files simultaneously with atomic operations"
+                    .into(),
+            ),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "operations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "oneOf": [
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "const": "create" },
+                                        "file_path": { "type": "string" },
+                                        "content": { "type": "string" },
+                                        "create_dirs": { "type": "boolean" }
+                                    },
+                                    "required": ["type", "file_path", "content"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "const": "replace" },
+                                        "file_path": { "type": "string" },
+                                        "content": { "type": "string" }
+                                    },
+                                    "required": ["type", "file_path", "content"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "const": "append" },
+                                        "file_path": { "type": "string" },
+                                        "content": { "type": "string" }
+                                    },
+                                    "required": ["type", "file_path", "content"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "const": "prepend" },
+                                        "file_path": { "type": "string" },
+                                        "content": { "type": "string" }
+                                    },
+                                    "required": ["type", "file_path", "content"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "const": "insert_at_line" },
+                                        "file_path": { "type": "string" },
+                                        "content": { "type": "string" },
+                                        "line_number": { "type": "integer", "minimum": 1 }
+                                    },
+                                    "required": ["type", "file_path", "content", "line_number"]
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "type": { "const": "search_replace" },
+                                        "file_path": { "type": "string" },
+                                        "search": { "type": "string" },
+                                        "replace": { "type": "string" },
+                                        "all_occurrences": { "type": "boolean" }
+                                    },
+                                    "required": ["type", "file_path", "search", "replace"]
+                                }
+                            ]
+                        },
+                        "description": "List of file operations to perform"
+                    },
+                    "create_backups": {
+                        "type": "boolean",
+                        "description": "Create backup files before modification (default: true)"
+                    },
+                    "atomic": {
+                        "type": "boolean",
+                        "description": "Perform operations atomically - all or nothing (default: true)"
+                    },
+                    "continue_on_error": {
+                        "type": "boolean",
+                        "description": "Continue processing on errors (default: false)"
+                    },
+                    "max_file_size": {
+                        "type": "integer",
+                        "description": "Maximum file size to process in bytes (default: 10MB)"
+                    },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "Validate operations without executing (default: false)"
+                    }
+                },
+                "required": ["operations"]
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "ai_explain_code".into(),
+            title: Some("AI Explain Code".to_string()),
+            description: Some("Get AI explanation and documentation for code".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "Path to the code file to explain"
+                    },
+                    "code": {
+                        "type": "string",
+                        "description": "Code snippet to explain (alternative to file_path)"
+                    },
+                    "language": {
+                        "type": "string",
+                        "description": "Programming language (optional, auto-detected if not provided)"
+                    },
+                    "detail_level": {
+                        "type": "string",
+                        "enum": ["basic", "detailed", "expert"],
+                        "description": "Level of detail for explanation (default: detailed)"
+                    }
+                }
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "winx_chat".into(),
+            title: Some("Winx Chat".to_string()),
+            description: Some("Chat with Winx, your AI assistant fairy".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "message": {
+                        "type": "string",
+                        "description": "Your message to Winx"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional context about current work or project"
+                    },
+                    "conversation_mode": {
+                        "type": "string",
+                        "enum": ["casual", "technical", "help", "debug", "creative", "mentor"],
+                        "description": "Conversation mode (default: casual)"
+                    },
+                    "include_system_info": {
+                        "type": "boolean",
+                        "description": "Include current system information in response"
+                    },
+                    "personality_level": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10,
+                        "description": "Personality level from 0 (formal) to 10 (very playful, default: 7)"
+                    },
+                    "session_id": {
+                        "type": "string",
+                        "description": "Session ID for conversation continuity"
+                    }
+                },
+                "required": ["message"]
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+        Tool {
+            name: "smart_search_replace".into(),
+            title: Some("Smart Search Replace".to_string()),
+            description: Some("AI-powered smart search and replace across multiple files with context understanding".into()),
+            icons: None,
+            input_schema: json_to_schema(serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "file_paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "description": "List of file paths to perform smart search and replace on"
+                    },
+                    "search_pattern": {
+                        "type": "string",
+                        "description": "Pattern to search for (can be literal text or regex pattern)"
+                    },
+                    "replace_hint": {
+                        "type": "string",
+                        "description": "Natural language description of how to replace the found patterns"
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Optional context about the codebase or replacement intent"
+                    },
+                    "use_ai_provider": {
+                        "type": "string",
+                        "enum": ["dashscope", "nvidia", "gemini", "auto"],
+                        "description": "AI provider to use (auto tries DashScope->NVIDIA->Gemini, default: auto)"
+                    },
+                    "confidence_threshold": {
+                        "type": "number",
+                        "minimum": 0.0,
+                        "maximum": 1.0,
+                        "description": "Minimum confidence score for AI suggestions (default: 0.7)"
+                    },
+                    "preview_mode": {
+                        "type": "boolean",
+                        "description": "Preview changes without applying them (default: false)"
+                    }
+                },
+                "required": ["file_paths", "search_pattern", "replace_hint"]
+            })),
+            output_schema: None,
+            annotations: None,
+        },
+    ];
+}
 
 /// Helper function to create JSON schema from serde_json::Value
 fn json_to_schema(value: Value) -> Arc<serde_json::Map<String, Value>> {
@@ -238,478 +714,7 @@ impl ServerHandler for WinxService {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
-            tools: vec![
-                Tool {
-                    name: "ping".into(),
-                    title: Some("Ping".to_string()),
-                    description: Some("Test server connectivity".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "message": {
-                                "type": "string",
-                                "description": "Optional message to echo back"
-                            }
-                        }
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "initialize".into(),
-                    title: Some("Initialize".to_string()),
-                    description: Some("Initialize the bash shell environment".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "shell": {
-                                "type": "string",
-                                "description": "Shell to use (default: bash)"
-                            }
-                        }
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "bash_command".into(),
-                    title: Some("Bash Command".to_string()),
-                    description: Some("Execute a command in the bash shell".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "command": {
-                                "type": "string",
-                                "description": "Command to execute"
-                            },
-                            "timeout_seconds": {
-                                "type": "integer",
-                                "description": "Timeout in seconds (default: 30)"
-                            }
-                        },
-                        "required": ["command"]
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "read_files".into(),
-                    title: Some("Read Files".to_string()),
-                    description: Some("Read contents of one or more files".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "paths": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string"
-                                },
-                                "description": "File paths to read"
-                            }
-                        },
-                        "required": ["paths"]
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "file_write_or_edit".into(),
-                    title: Some("File Write/Edit".to_string()),
-                    description: Some("Write or edit file contents".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "path": {
-                                "type": "string",
-                                "description": "File path to write"
-                            },
-                            "content": {
-                                "type": "string",
-                                "description": "Content to write"
-                            },
-                            "create_if_missing": {
-                                "type": "boolean",
-                                "description": "Create file if it doesn't exist (default: true)"
-                            }
-                        },
-                        "required": ["path", "content"]
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "context_save".into(),
-                    title: Some("Context Save".to_string()),
-                    description: Some("Save task context to a file for resumption".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "id": {
-                                "type": "string",
-                                "description": "Unique identifier for the task"
-                            },
-                            "project_root_path": {
-                                "type": "string",
-                                "description": "Root path of the project"
-                            },
-                            "description": {
-                                "type": "string",
-                                "description": "Description of the task"
-                            },
-                            "relevant_file_globs": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string"
-                                },
-                                "description": "List of file glob patterns to include"
-                            }
-                        },
-                        "required": ["id", "project_root_path", "description", "relevant_file_globs"]
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "read_image".into(),
-                    title: Some("Read Image".to_string()),
-                    description: Some("Read image file and return as base64".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "file_path": {
-                                "type": "string",
-                                "description": "Path to the image file"
-                            }
-                        },
-                        "required": ["file_path"]
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "command_suggestions".into(),
-                    title: Some("Command Suggestions".to_string()),
-                    description: Some("Get command suggestions based on context".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "partial_command": {
-                                "type": "string",
-                                "description": "Partial command to get suggestions for"
-                            },
-                            "current_dir": {
-                                "type": "string",
-                                "description": "Optional directory context"
-                            },
-                            "previous_command": {
-                                "type": "string",
-                                "description": "Optional previous command"
-                            },
-                            "max_suggestions": {
-                                "type": "integer",
-                                "description": "Maximum number of suggestions to return (default: 5)"
-                            },
-                            "include_explanations": {
-                                "type": "boolean",
-                                "description": "Whether to include command explanations"
-                            }
-                        }
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "code_analyzer".into(),
-                    title: Some("Code Analyzer".to_string()),
-                    description: Some(
-                        "AI-powered code analysis for bugs, security, and performance".into(),
-                    ),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "file_path": {
-                                "type": "string",
-                                "description": "Path to the code file to analyze"
-                            },
-                            "language": {
-                                "type": "string",
-                                "description": "Programming language (optional, auto-detected if not provided)"
-                            }
-                        },
-                        "required": ["file_path"]
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "ai_generate_code".into(),
-                    title: Some("AI Generate Code".to_string()),
-                    description: Some(
-                        "Generate code from natural language description using NVIDIA AI".into(),
-                    ),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "prompt": {
-                                "type": "string",
-                                "description": "Natural language description of the code to generate"
-                            },
-                            "language": {
-                                "type": "string",
-                                "description": "Target programming language (e.g., 'Rust', 'Python', 'JavaScript')"
-                            },
-                            "context": {
-                                "type": "string",
-                                "description": "Additional context or requirements"
-                            },
-                            "max_tokens": {
-                                "type": "integer",
-                                "description": "Maximum tokens to generate (default: 1000)"
-                            },
-                            "temperature": {
-                                "type": "number",
-                                "description": "Creativity level 0.0-1.0 (default: 0.7)"
-                            }
-                        },
-                        "required": ["prompt"]
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "multi_file_editor".into(),
-                    title: Some("Multi File Editor".to_string()),
-                    description: Some(
-                        "Create and edit multiple files simultaneously with atomic operations"
-                            .into(),
-                    ),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "operations": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "oneOf": [
-                                        {
-                                            "type": "object",
-                                            "properties": {
-                                                "type": { "const": "create" },
-                                                "file_path": { "type": "string" },
-                                                "content": { "type": "string" },
-                                                "create_dirs": { "type": "boolean" }
-                                            },
-                                            "required": ["type", "file_path", "content"]
-                                        },
-                                        {
-                                            "type": "object",
-                                            "properties": {
-                                                "type": { "const": "replace" },
-                                                "file_path": { "type": "string" },
-                                                "content": { "type": "string" }
-                                            },
-                                            "required": ["type", "file_path", "content"]
-                                        },
-                                        {
-                                            "type": "object",
-                                            "properties": {
-                                                "type": { "const": "append" },
-                                                "file_path": { "type": "string" },
-                                                "content": { "type": "string" }
-                                            },
-                                            "required": ["type", "file_path", "content"]
-                                        },
-                                        {
-                                            "type": "object",
-                                            "properties": {
-                                                "type": { "const": "prepend" },
-                                                "file_path": { "type": "string" },
-                                                "content": { "type": "string" }
-                                            },
-                                            "required": ["type", "file_path", "content"]
-                                        },
-                                        {
-                                            "type": "object",
-                                            "properties": {
-                                                "type": { "const": "insert_at_line" },
-                                                "file_path": { "type": "string" },
-                                                "content": { "type": "string" },
-                                                "line_number": { "type": "integer", "minimum": 1 }
-                                            },
-                                            "required": ["type", "file_path", "content", "line_number"]
-                                        },
-                                        {
-                                            "type": "object",
-                                            "properties": {
-                                                "type": { "const": "search_replace" },
-                                                "file_path": { "type": "string" },
-                                                "search": { "type": "string" },
-                                                "replace": { "type": "string" },
-                                                "all_occurrences": { "type": "boolean" }
-                                            },
-                                            "required": ["type", "file_path", "search", "replace"]
-                                        }
-                                    ]
-                                },
-                                "description": "List of file operations to perform"
-                            },
-                            "create_backups": {
-                                "type": "boolean",
-                                "description": "Create backup files before modification (default: true)"
-                            },
-                            "atomic": {
-                                "type": "boolean",
-                                "description": "Perform operations atomically - all or nothing (default: true)"
-                            },
-                            "continue_on_error": {
-                                "type": "boolean",
-                                "description": "Continue processing on errors (default: false)"
-                            },
-                            "max_file_size": {
-                                "type": "integer",
-                                "description": "Maximum file size to process in bytes (default: 10MB)"
-                            },
-                            "dry_run": {
-                                "type": "boolean",
-                                "description": "Validate operations without executing (default: false)"
-                            }
-                        },
-                        "required": ["operations"]
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "ai_explain_code".into(),
-                    title: Some("AI Explain Code".to_string()),
-                    description: Some("Get AI explanation and documentation for code".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "file_path": {
-                                "type": "string",
-                                "description": "Path to the code file to explain"
-                            },
-                            "code": {
-                                "type": "string",
-                                "description": "Code snippet to explain (alternative to file_path)"
-                            },
-                            "language": {
-                                "type": "string",
-                                "description": "Programming language (optional, auto-detected if not provided)"
-                            },
-                            "detail_level": {
-                                "type": "string",
-                                "enum": ["basic", "detailed", "expert"],
-                                "description": "Level of detail for explanation (default: detailed)"
-                            }
-                        }
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "winx_chat".into(),
-                    title: Some("Winx Chat".to_string()),
-                    description: Some("Chat with Winx, your AI assistant fairy".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "message": {
-                                "type": "string",
-                                "description": "Your message to Winx"
-                            },
-                            "context": {
-                                "type": "string",
-                                "description": "Optional context about current work or project"
-                            },
-                            "conversation_mode": {
-                                "type": "string",
-                                "enum": ["casual", "technical", "help", "debug", "creative", "mentor"],
-                                "description": "Conversation mode (default: casual)"
-                            },
-                            "include_system_info": {
-                                "type": "boolean",
-                                "description": "Include current system information in response"
-                            },
-                            "personality_level": {
-                                "type": "integer",
-                                "minimum": 0,
-                                "maximum": 10,
-                                "description": "Personality level from 0 (formal) to 10 (very playful, default: 7)"
-                            },
-                            "session_id": {
-                                "type": "string",
-                                "description": "Session ID for conversation continuity"
-                            }
-                        },
-                        "required": ["message"]
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-                Tool {
-                    name: "smart_search_replace".into(),
-                    title: Some("Smart Search Replace".to_string()),
-                    description: Some("AI-powered smart search and replace across multiple files with context understanding".into()),
-                    icons: None,
-                    input_schema: json_to_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "file_paths": {
-                                "type": "array",
-                                "items": {
-                                    "type": "string"
-                                },
-                                "description": "List of file paths to perform smart search and replace on"
-                            },
-                            "search_pattern": {
-                                "type": "string",
-                                "description": "Pattern to search for (can be literal text or regex pattern)"
-                            },
-                            "replace_hint": {
-                                "type": "string",
-                                "description": "Natural language description of how to replace the found patterns"
-                            },
-                            "context": {
-                                "type": "string",
-                                "description": "Optional context about the codebase or replacement intent"
-                            },
-                            "use_ai_provider": {
-                                "type": "string",
-                                "enum": ["dashscope", "nvidia", "gemini", "auto"],
-                                "description": "AI provider to use (auto tries DashScope->NVIDIA->Gemini, default: auto)"
-                            },
-                            "confidence_threshold": {
-                                "type": "number",
-                                "minimum": 0.0,
-                                "maximum": 1.0,
-                                "description": "Minimum confidence score for AI suggestions (default: 0.7)"
-                            },
-                            "preview_mode": {
-                                "type": "boolean",
-                                "description": "Preview changes without applying them (default: false)"
-                            }
-                        },
-                        "required": ["file_paths", "search_pattern", "replace_hint"]
-                    })),
-                    output_schema: None,
-                    annotations: None,
-                },
-            ],
+            tools: CACHED_TOOLS.clone(),
             next_cursor: None,
         })
     }
