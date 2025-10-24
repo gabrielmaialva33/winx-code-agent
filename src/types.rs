@@ -1,5 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 /// Type of shell environment initialization
 ///
@@ -116,7 +117,7 @@ impl CodeWriterConfig {
 #[serde(untagged)]
 pub enum AllowedGlobs {
     All(String),
-    List(Vec<String>),
+    List(HashSet<String>),
 }
 
 impl Default for AllowedGlobs {
@@ -130,7 +131,7 @@ impl AllowedGlobs {
     pub fn is_allowed(&self, glob: &str) -> bool {
         match self {
             AllowedGlobs::All(s) if s == "all" => true,
-            AllowedGlobs::List(globs) => globs.iter().any(|g| glob == g),
+            AllowedGlobs::List(globs) => globs.contains(glob),
             _ => false,
         }
     }
@@ -140,7 +141,7 @@ impl AllowedGlobs {
 #[serde(untagged)]
 pub enum AllowedCommands {
     All(String),
-    List(Vec<String>),
+    List(HashSet<String>),
 }
 
 impl Default for AllowedCommands {
@@ -154,7 +155,7 @@ impl AllowedCommands {
     pub fn is_allowed(&self, command: &str) -> bool {
         match self {
             AllowedCommands::All(s) if s == "all" => true,
-            AllowedCommands::List(commands) => commands.iter().any(|c| command == c),
+            AllowedCommands::List(commands) => commands.contains(command),
             _ => false,
         }
     }
@@ -385,7 +386,7 @@ impl<'de> Deserialize<'de> for ReadFiles {
             // Special error for null/undefined
             if input.is_null() {
                 return Err(serde::de::Error::custom(
-                    "Cannot convert null to ReadFiles object. Please provide a valid object with file_paths field."
+                    "Cannot convert null to ReadFiles object. Please provide a valid object with file_paths field.",
                 ));
             }
             return Err(serde::de::Error::custom(format!(
@@ -419,7 +420,7 @@ impl<'de> Deserialize<'de> for ReadFiles {
                 // Provide detailed error message for common issues
                 if e.to_string().contains("null") || e.to_string().contains("undefined") {
                     return Err(serde::de::Error::custom(
-                        "Cannot convert null or undefined value in ReadFiles. Please check the file_paths field."
+                        "Cannot convert null or undefined value in ReadFiles. Please check the file_paths field.",
                     ));
                 }
                 return Err(serde::de::Error::custom(format!(
@@ -430,27 +431,28 @@ impl<'de> Deserialize<'de> for ReadFiles {
         };
 
         // Validate that file_paths is provided and non-empty
-        let file_paths =
-            match helper.file_paths {
-                Some(paths) if !paths.is_empty() => {
-                    // Check for null/empty values in the paths array
-                    let has_empty = paths.iter().any(|p| p.trim().is_empty());
-                    if has_empty {
-                        return Err(serde::de::Error::custom(
-                            "file_paths array contains empty strings. Each path must be non-empty.",
-                        ));
-                    }
-                    paths
-                }
-                Some(_) => return Err(serde::de::Error::custom(
-                    "file_paths must not be empty. Please provide at least one file path to read.",
-                )),
-                None => {
+        let file_paths = match helper.file_paths {
+            Some(paths) if !paths.is_empty() => {
+                // Check for null/empty values in the paths array
+                let has_empty = paths.iter().any(|p| p.trim().is_empty());
+                if has_empty {
                     return Err(serde::de::Error::custom(
-                        "file_paths is required. Please provide a list of file paths to read.",
-                    ))
+                        "file_paths array contains empty strings. Each path must be non-empty.",
+                    ));
                 }
-            };
+                paths
+            }
+            Some(_) => {
+                return Err(serde::de::Error::custom(
+                    "file_paths must not be empty. Please provide at least one file path to read.",
+                ));
+            }
+            None => {
+                return Err(serde::de::Error::custom(
+                    "file_paths is required. Please provide a list of file paths to read.",
+                ));
+            }
+        };
 
         // Return the properly constructed ReadFiles
         Ok(ReadFiles {
