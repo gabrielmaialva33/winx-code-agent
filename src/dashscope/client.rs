@@ -85,7 +85,7 @@ impl DashScopeClient {
             .user_agent("Winx-Code-Agent/1.0")
             .build()
             .map_err(|e| WinxError::NetworkError {
-                message: format!("Failed to create HTTP client: {}", e),
+                message: Arc::new(format!("Failed to create HTTP client: {}", e)),
             })?;
 
         let rate_limit = Arc::new(Mutex::new(RateLimit::new(config.rate_limit_rpm)));
@@ -151,7 +151,7 @@ impl DashScopeClient {
         }
 
         Err(last_error.unwrap_or_else(|| WinxError::NetworkError {
-            message: ALL_ATTEMPTS_FAILED.to_string(),
+            message: Arc::new(ALL_ATTEMPTS_FAILED.to_string()),
         }))
     }
 

@@ -679,10 +679,10 @@ pub async fn handle_tool_call(
                 let enhanced_error = match e {
                     WinxError::InteractiveCommandDetected { command: cmd } => {
                         WinxError::InteractiveCommandDetected {
-                            command: format!(
+                            command: Arc::new(format!(
                                 "{} - Consider using non-interactive flags (e.g., git commit -m 'message') or automation tools",
                                 cmd
-                            ),
+                            )),
                         }
                     }
                     _ => e,
@@ -732,9 +732,9 @@ pub async fn handle_tool_call(
         BashCommandAction::SendText { send_text } => {
             debug!("Processing SendText action: {}", send_text);
             if send_text.is_empty() {
-                return Err(WinxError::CommandExecutionError(
+                return Err(WinxError::CommandExecutionError(Arc::new(
                     "send_text cannot be empty".to_string(),
-                ));
+                )));
             }
 
             send_text_to_interactive(&mut bash_state, send_text).await
@@ -854,24 +854,24 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
 
         // Check for errors in send operations
         if let Err(e) = text_result {
-            return Err(WinxError::CommandExecutionError(format!(
+            return Err(WinxError::CommandExecutionError(Arc::new(format!(
                 "Failed to write text to process {}: {}",
                 command_info, e
-            )));
+            ))));
         }
 
         if let Err(e) = newline_result {
-            return Err(WinxError::CommandExecutionError(format!(
+            return Err(WinxError::CommandExecutionError(Arc::new(format!(
                 "Failed to write newline to process {}: {}",
                 command_info, e
-            )));
+            ))));
         }
 
         if let Err(e) = flush_result {
-            return Err(WinxError::CommandExecutionError(format!(
+            return Err(WinxError::CommandExecutionError(Arc::new(format!(
                 "Failed to flush stdin for process {}: {}",
                 command_info, e
-            )));
+            ))));
         }
 
         // Read output after sending with error handling
@@ -879,10 +879,10 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
         let (output, complete) = match result {
             Ok((output, complete)) => (output, complete),
             Err(e) => {
-                return Err(WinxError::CommandExecutionError(format!(
+                return Err(WinxError::CommandExecutionError(Arc::new(format!(
                     "Failed to read output after sending text: {}",
                     e
-                )));
+                ))));
             }
         };
 
@@ -922,10 +922,10 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
 
         Ok(final_result)
     } else {
-        Err(WinxError::CommandExecutionError(format!(
+        Err(WinxError::CommandExecutionError(Arc::new(format!(
             "Failed to get stdin for process {}. The process may not accept input.",
             command_info
-        )))
+        ))))
     }
 }
 
@@ -950,9 +950,9 @@ async fn send_special_keys_to_interactive(
 
     // Validate input
     if keys.is_empty() {
-        return Err(WinxError::CommandExecutionError(
+        return Err(WinxError::CommandExecutionError(Arc::new(
             "Cannot send empty key list to interactive process".to_string(),
-        ));
+        )));
     }
 
     // Acquire lock with timeout and better error handling
@@ -983,9 +983,9 @@ async fn send_special_keys_to_interactive(
 
     // Check if a command is running
     if let CommandState::Idle = command_state {
-        return Err(WinxError::CommandExecutionError(
+        return Err(WinxError::CommandExecutionError(Arc::new(
             "No command is currently running to send keys to. Start a command first before sending input.".to_string()
-        ));
+        )));
     }
 
     // Get command info for better error messages
@@ -1072,11 +1072,11 @@ async fn send_special_keys_to_interactive(
 
     // Check if we have any errors that would prevent continuing
     if key_descriptions.is_empty() && !key_errors.is_empty() {
-        return Err(WinxError::CommandExecutionError(format!(
+        return Err(WinxError::CommandExecutionError(Arc::new(format!(
             "Failed to send any keys to process {}. Errors: {}",
             command_info,
             key_errors.join("; ")
-        )));
+        ))));
     }
 
     // Read output after sending all keys
@@ -1084,10 +1084,10 @@ async fn send_special_keys_to_interactive(
     let (output, complete) = match result {
         Ok((output, complete)) => (output, complete),
         Err(e) => {
-            return Err(WinxError::CommandExecutionError(format!(
+            return Err(WinxError::CommandExecutionError(Arc::new(format!(
                 "Failed to read output after sending keys: {}",
                 e
-            )));
+            ))));
         }
     };
 
@@ -1160,9 +1160,9 @@ async fn send_ascii_to_interactive(
 
     // Validate input
     if ascii_codes.is_empty() {
-        return Err(WinxError::CommandExecutionError(
+        return Err(WinxError::CommandExecutionError(Arc::new(
             "Cannot send empty ASCII code list to interactive process".to_string(),
-        ));
+        )));
     }
 
     // Acquire lock with timeout and better error handling
@@ -1193,9 +1193,9 @@ async fn send_ascii_to_interactive(
 
     // Check if a command is running
     if let CommandState::Idle = command_state {
-        return Err(WinxError::CommandExecutionError(
+        return Err(WinxError::CommandExecutionError(Arc::new(
             "No command is currently running to send ASCII to. Start a command first before sending input.".to_string()
-        ));
+        )));
     }
 
     // Get command info for better error messages
@@ -1257,19 +1257,19 @@ async fn send_ascii_to_interactive(
         // Return stdin to the process
         bash.process.stdin = Some(stdin);
     } else {
-        return Err(WinxError::CommandExecutionError(format!(
+        return Err(WinxError::CommandExecutionError(Arc::new(format!(
             "Failed to get stdin for process {}. The process may not accept input.",
             command_info
-        )));
+        ))));
     }
 
     // Check if we've sent anything successfully
     if sent_codes.is_empty() && !send_errors.is_empty() {
-        return Err(WinxError::CommandExecutionError(format!(
+        return Err(WinxError::CommandExecutionError(Arc::new(format!(
             "Failed to send any ASCII codes to process {}. Errors: {}",
             command_info,
             send_errors.join("; ")
-        )));
+        ))));
     }
 
     // Read output after sending with error handling
@@ -1277,10 +1277,10 @@ async fn send_ascii_to_interactive(
     let (output, complete) = match result {
         Ok((output, complete)) => (output, complete),
         Err(e) => {
-            return Err(WinxError::CommandExecutionError(format!(
+            return Err(WinxError::CommandExecutionError(Arc::new(format!(
                 "Failed to read output after sending ASCII codes: {}",
                 e
-            )));
+            ))));
         }
     };
 
@@ -1387,7 +1387,7 @@ async fn execute_interactive_command(
             {
                 let duration = start_time.elapsed().unwrap_or_default().as_secs_f64();
                 return Err(WinxError::CommandAlreadyRunning {
-                    current_command: current_cmd.clone(),
+                    current_command: Arc::new(current_cmd.clone()),
                     duration_seconds: duration,
                 });
             }
@@ -1397,10 +1397,10 @@ async fn execute_interactive_command(
         if command_safety.is_interactive(command) {
             warn!("Interactive command detected: {}", command);
             return Err(WinxError::InteractiveCommandDetected {
-                command: format!(
+                command: Arc::new(format!(
                     "{} - Interactive commands may hang. Use non-interactive alternatives or flags",
                     command
-                ),
+                )),
             });
         }
 
@@ -1599,7 +1599,7 @@ async fn execute_interactive_command(
             // Check if this might be a timeout
             if execution_duration.as_secs_f32() >= effective_timeout * 0.95 {
                 err = WinxError::CommandTimeout {
-                    command: command.to_string(),
+                    command: Arc::new(command.to_string()),
                     timeout_seconds: effective_timeout as u64,
                 };
             }
@@ -1610,7 +1610,7 @@ async fn execute_interactive_command(
                     if msg.contains("already running") {
                         // Already have a running command - provide more helpful info
                         Err(WinxError::CommandAlreadyRunning {
-                            current_command: command.to_string(),
+                            current_command: Arc::new(command.to_string()),
                             duration_seconds: execution_duration.as_secs_f64(),
                         })
                     } else {

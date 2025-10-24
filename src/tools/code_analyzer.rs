@@ -149,14 +149,14 @@ pub async fn handle_tool_call(
     if !file_path.exists() {
         return Err(WinxError::FileAccessError {
             path: file_path.clone(),
-            message: "File does not exist".to_string(),
+            message: Arc::new("File does not exist".to_string()),
         });
     }
 
     if !file_path.is_file() {
         return Err(WinxError::FileAccessError {
             path: file_path.clone(),
-            message: "Path exists but is not a file".to_string(),
+            message: Arc::new("Path exists but is not a file".to_string()),
         });
     }
 
@@ -173,7 +173,7 @@ pub async fn handle_tool_call(
     let file_content =
         std::fs::read_to_string(&file_path).map_err(|e| WinxError::FileAccessError {
             path: file_path.clone(),
-            message: format!("Failed to read file: {}", e),
+            message: Arc::new(format!("Failed to read file: {}", e)),
         })?;
 
     // Perform static analysis based on the language

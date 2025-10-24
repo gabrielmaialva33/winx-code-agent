@@ -803,10 +803,10 @@ impl MultiMatchResolver {
 /// Enhanced search/replace syntax error with WCGW-style detailed reporting
 #[derive(Debug)]
 struct SearchReplaceSyntaxError {
-    message: String,
+    message: Arc<String>,
     line_number: Option<usize>,
-    block_type: Option<String>,
-    suggestions: Vec<String>,
+    block_type: Option<Arc<String>>,
+    suggestions: Arc<Vec<String>>,
 }
 
 impl std::fmt::Display for SearchReplaceSyntaxError {
@@ -820,10 +820,10 @@ impl SearchReplaceSyntaxError {
     fn with_help_text(message: impl Into<String>) -> Self {
         let msg = message.into();
         Self {
-            message: msg,
+            message: Arc::new(msg),
             line_number: None,
             block_type: None,
-            suggestions: vec![
+            suggestions: Arc::new(vec![
                 "Make sure blocks are in correct sequence, and the markers are in separate lines:"
                     .to_string(),
                 "".to_string(),
@@ -832,7 +832,7 @@ impl SearchReplaceSyntaxError {
                 "=======".to_string(),
                 " example new".to_string(),
                 ">>>>>>> REPLACE".to_string(),
-            ],
+            ]),
         }
     }
 
@@ -844,9 +844,9 @@ impl SearchReplaceSyntaxError {
         suggestions: Vec<String>,
     ) -> Self {
         Self {
-            message: message.into(),
-            line_number: line_number.map(Arc::new),
-            block_type,
+            message: Arc::new(message.into()),
+            line_number,
+            block_type: block_type.map(Arc::new),
             suggestions: Arc::new(suggestions),
         }
     }
@@ -1261,8 +1261,7 @@ fn check_can_overwrite(file_path: &str, bash_state: &BashState) -> Result<()> {
     if !bash_state.whitelist_for_overwrite.contains_key(file_path) {
         return Err(WinxError::FileAccessError {
             path: PathBuf::from(file_path),
-            message: "You need to read the file at least once before it can be overwritten. Use the ReadFiles tool with this file path first."
-                .to_string(),
+            message: Arc::new("You need to read the file at least once before it can be overwritten. Use the ReadFiles tool with this file path first.".to_string()),
         });
     }
 
@@ -1275,7 +1274,7 @@ fn check_can_overwrite(file_path: &str, bash_state: &BashState) -> Result<()> {
     if curr_hash != whitelist_data.file_hash {
         return Err(WinxError::FileAccessError {
             path: PathBuf::from(file_path),
-            message: "The file has changed since it was last read. Use the ReadFiles tool to read the current version before modifying.".to_string(),
+            message: Arc::new("The file has changed since it was last read. Use the ReadFiles tool to read the current version before modifying.".to_string()),
         });
     }
 
@@ -1290,10 +1289,10 @@ fn check_can_overwrite(file_path: &str, bash_state: &BashState) -> Result<()> {
 
         return Err(WinxError::FileAccessError {
             path: PathBuf::from(file_path),
-            message: format!(
+            message: Arc::new(format!(
                 "You need to read more of the file before it can be overwritten. Unread line ranges: {}. Use the ReadFiles tool with line range specifications to read these sections.",
                 ranges_str
-            ),
+            )),
         });
     }
 
@@ -1332,13 +1331,13 @@ fn check_path_allowed(file_path: &str, bash_state: &BashState) -> Result<()> {
                 }
             }
 
-            Err(WinxError::CommandNotAllowed(format!(
+            Err(WinxError::CommandNotAllowed(Arc::new(format!(
                 "Updating file {} not allowed in current mode. Doesn't match allowed globs: {:?}",
                 file_path, globs
-            )))
+            ))))
         }
         _ => Err(WinxError::CommandNotAllowed(
-            "No file paths are allowed in current mode".to_string(),
+            Arc::new("No file paths are allowed in current mode".to_string()),
         )),
     }
 }
@@ -1442,10 +1441,10 @@ pub async fn handle_tool_call(
                 "Chat ID mismatch: expected {}, got {}",
                 chat_id, file_write_or_edit.chat_id
             );
-            return Err(WinxError::ChatIdMismatch(format!(
+            return Err(WinxError::ChatIdMismatch(Arc::new(format!(
                 "Error: No saved bash state found for chat ID \"{}\". Please initialize first with this ID.",
                 file_write_or_edit.chat_id
-            )));
+            ))));
         }
 
         // Expand the path

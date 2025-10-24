@@ -28,9 +28,9 @@ pub async fn handle_tool_call(
     args: ContextSave,
 ) -> Result<String> {
     // Ensure bash state is initialized
-    let bash_state_guard = bash_state
-        .lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+    let bash_state_guard = bash_state.lock().map_err(|e| {
+        WinxError::BashStateLockError(Arc::new(format!("Failed to lock bash state: {}", e)))
+    })?;
 
     let bash_state = bash_state_guard
         .as_ref()
@@ -87,7 +87,10 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
 
         // Use the glob crate to find matching files
         let matches = glob(&final_glob).map_err(|e| {
-            WinxError::ArgumentParseError(format!("Invalid glob pattern '{}': {}", final_glob, e))
+            WinxError::ArgumentParseError(Arc::new(format!(
+                "Invalid glob pattern '{}': {}",
+                final_glob, e
+            )))
         })?;
 
         let mut found_files = false;
@@ -130,10 +133,10 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
             debug!("Using fallback directory: {}", fallback.display());
             fs::create_dir_all(&fallback).map_err(|e2| WinxError::FileAccessError {
                 path: fallback.clone(),
-                message: format!(
+                message: Arc::new(format!(
                     "Failed to create fallback directory: {} (after previous error: {:?})",
                     e2, e
-                ),
+                )),
             })?;
             fallback
         }
@@ -152,9 +155,9 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
 
     // Validate the task ID
     if context.id.is_empty() {
-        return Err(WinxError::ArgumentParseError(
+        return Err(WinxError::ArgumentParseError(Arc::new(
             "Task ID cannot be empty".to_string(),
-        ));
+        )));
     }
 
     // Read the content of the relevant files
@@ -198,7 +201,7 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
     });
 
     let state_json = serde_json::to_string_pretty(&bash_state_dict).map_err(|e| {
-        WinxError::SerializationError(format!("Failed to serialize bash state: {}", e))
+        WinxError::SerializationError(Arc::new(format!("Failed to serialize bash state: {}", e)))
     })?;
 
     // Try to create and write state file, but don't fail if it doesn't work
@@ -315,7 +318,7 @@ fn get_primary_app_dir() -> Result<PathBuf> {
     // No successful primary location
     Err(WinxError::FileAccessError {
         path: PathBuf::from("<primary-paths>"),
-        message: "Could not create app directory in primary locations".to_string(),
+        message: Arc::new("Could not create app directory in primary locations".to_string()),
     })
 }
 
@@ -333,7 +336,10 @@ fn get_fallback_app_dir() -> Result<PathBuf> {
     let temp_dir = std::env::temp_dir().join("winx-data");
     fs::create_dir_all(&temp_dir).map_err(|e| WinxError::FileAccessError {
         path: temp_dir.clone(),
-        message: format!("Failed to create app directory in any location: {}", e),
+        message: Arc::new(format!(
+            "Failed to create app directory in any location: {}",
+            e
+        )),
     })?;
 
     Ok(temp_dir)
@@ -355,7 +361,7 @@ fn read_files_content(file_paths: &[PathBuf], max_files: usize) -> Result<String
     for (i, path) in file_paths.iter().take(max_files).enumerate() {
         let file_content = fs::read_to_string(path).map_err(|e| WinxError::FileAccessError {
             path: path.clone(),
-            message: format!("Failed to read file: {}", e),
+            message: Arc::new(format!("Failed to read file: {}", e)),
         })?;
 
         result.push_str(&format!("--- File {}: {} ---\n", i + 1, path.display()));
@@ -409,10 +415,10 @@ fn try_open_file(file_path: &str) -> Result<()> {
                     .arg(file_path)
                     .spawn()
                     .map_err(|e| {
-                        WinxError::CommandExecutionError(format!(
+                        WinxError::CommandExecutionError(Arc::new(format!(
                             "Failed to spawn open command: {}",
                             e
-                        ))
+                        )))
                     })?;
 
                 // We don't wait for the command to complete
@@ -429,7 +435,10 @@ fn try_open_file(file_path: &str) -> Result<()> {
         .arg(file_path)
         .spawn()
         .map_err(|e| {
-            WinxError::CommandExecutionError(format!("Failed to spawn open command: {}", e))
+            WinxError::CommandExecutionError(Arc::new(format!(
+                "Failed to spawn open command: {}",
+                e
+            )))
         })?;
 
     // We don't actually need to wait for the command to complete
@@ -447,13 +456,13 @@ fn save_to_temp_file(memory_data: String, context: &ContextSave) -> Result<Strin
 
     let mut file = File::create(&temp_file_path).map_err(|e| WinxError::FileAccessError {
         path: temp_file_path.clone(),
-        message: format!("Failed to create temporary file: {}", e),
+        message: Arc::new(format!("Failed to create temporary file: {}", e)),
     })?;
 
     file.write_all(memory_data.as_bytes())
         .map_err(|e| WinxError::FileAccessError {
             path: temp_file_path.clone(),
-            message: format!("Failed to write to temporary file: {}", e),
+            message: Arc::new(format!("Failed to write to temporary file: {}", e)),
         })?;
 
     let path_str = temp_file_path.to_string_lossy().to_string();

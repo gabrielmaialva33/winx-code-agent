@@ -1288,7 +1288,13 @@ impl WinxService {
         let paths = args
             .get("paths")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| McpError::invalid_request("Missing paths array", None))?;
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|item| item.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .ok_or_else(|| McpError::invalid_request("Missing or invalid paths array", None))?;
 
         // Create futures for parallel file reading
         let read_futures: Vec<_> = paths.iter().map(|path_value| {
