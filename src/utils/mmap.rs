@@ -45,12 +45,12 @@ pub fn read_file_optimized(path: &Path, max_file_size: u64) -> Result<Vec<u8>> {
     // Get file metadata
     let file = File::open(path).map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Error opening file: {}", e),
+        message: Arc::new(format!("Error opening file: {}", e)),
     })?;
 
     let metadata = file.metadata().map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Failed to get file metadata: {}", e),
+        message: Arc::new(format!("Failed to get file metadata: {}", e)),
     })?;
 
     // Check file size
@@ -111,14 +111,14 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
         // Create a mutable file handle and seek to the beginning
         let mut file_handle = file.try_clone().map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
-            message: format!("Error cloning file handle: {}", e),
+            message: Arc::new(format!("Error cloning file handle: {}", e)),
         })?;
 
         file_handle
             .seek(SeekFrom::Start(0))
             .map_err(|e| WinxError::FileAccessError {
                 path: path.to_path_buf(),
-                message: format!("Error seeking to start of file: {}", e),
+                message: Arc::new(format!("Error seeking to start of file: {}", e)),
             })?;
 
         // Use a BufReader with an appropriate buffer size (4K-64K)
@@ -129,7 +129,7 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
             .read_to_end(&mut buffer)
             .map_err(|e| WinxError::FileAccessError {
                 path: path.to_path_buf(),
-                message: format!("Error reading file: {}", e),
+                message: Arc::new(format!("Error reading file: {}", e)),
             })?;
 
         return Ok(buffer);
@@ -141,14 +141,14 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
     // Create a mutable file handle and seek to the beginning
     let mut file_handle = file.try_clone().map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Error cloning file handle: {}", e),
+        message: Arc::new(format!("Error cloning file handle: {}", e)),
     })?;
 
     file_handle
         .seek(SeekFrom::Start(0))
         .map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
-            message: format!("Error seeking to start of file: {}", e),
+            message: Arc::new(format!("Error seeking to start of file: {}", e)),
         })?;
 
     let mut reader = BufReader::with_capacity(262_144, file_handle); // 256KB buffer
@@ -178,7 +178,7 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
             Err(e) => {
                 return Err(WinxError::FileAccessError {
                     path: path.to_path_buf(),
-                    message: format!("Error reading file chunk: {}", e),
+                    message: Arc::new(format!("Error reading file chunk: {}", e)),
                 });
             }
         }
@@ -208,7 +208,7 @@ fn read_mmap(file: &File, path: &Path) -> Result<Vec<u8>> {
     // Safety: We've already checked the file size and permissions
     let mmap = unsafe { MmapOptions::new().map(file) }.map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Failed to memory-map file: {}", e),
+        message: Arc::new(format!("Failed to memory-map file: {}", e)),
     })?;
 
     // Use Rayon for parallel processing if the file is large enough
@@ -302,7 +302,7 @@ fn read_segmented_mmap(_file: &File, file_size: u64, path: &Path) -> Result<Vec<
         // Open a new file handle for each segment to avoid position conflicts
         let segment_file = File::open(path).map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
-            message: format!("Error opening file for segment {}: {}", i, e),
+            message: Arc::new(format!("Error opening file for segment {}: {}", i, e)),
         })?;
 
         // Seek to segment start
@@ -311,7 +311,7 @@ fn read_segmented_mmap(_file: &File, file_size: u64, path: &Path) -> Result<Vec<
             .seek(SeekFrom::Start(segment_start))
             .map_err(|e| WinxError::FileAccessError {
                 path: path.to_path_buf(),
-                message: format!("Error seeking to segment start: {}", e),
+                message: Arc::new(format!("Error seeking to segment start: {}", e)),
             })?;
 
         // Map the segment
@@ -323,7 +323,7 @@ fn read_segmented_mmap(_file: &File, file_size: u64, path: &Path) -> Result<Vec<
         }
         .map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
-            message: format!("Failed to memory-map file segment {}: {}", i, e),
+            message: Arc::new(format!("Failed to memory-map file segment {}: {}", i, e)),
         })?;
 
         // Append segment data to result
@@ -425,12 +425,12 @@ pub fn read_file_segment(
     // Get file metadata
     let file = File::open(path).map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Error opening file: {}", e),
+        message: Arc::new(format!("Error opening file: {}", e)),
     })?;
 
     let metadata = file.metadata().map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Failed to get file metadata: {}", e),
+        message: Arc::new(format!("Failed to get file metadata: {}", e)),
     })?;
 
     // Check file size
@@ -447,7 +447,7 @@ pub fn read_file_segment(
     if offset >= file_size {
         return Err(WinxError::FileAccessError {
             path: path.to_path_buf(),
-            message: format!("Offset {} exceeds file size {}", offset, file_size),
+            message: Arc::new(format!("Offset {} exceeds file size {}", offset, file_size)),
         });
     }
 
@@ -487,7 +487,7 @@ fn read_segment_direct(file: &File, offset: u64, length: u64, path: &Path) -> Re
     // Create a new file object that can be seeked
     let mut seekable_file = file.try_clone().map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Failed to clone file handle: {}", e),
+        message: Arc::new(format!("Failed to clone file handle: {}", e)),
     })?;
 
     // Seek to the specified offset
@@ -495,7 +495,7 @@ fn read_segment_direct(file: &File, offset: u64, length: u64, path: &Path) -> Re
         .seek(SeekFrom::Start(offset))
         .map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
-            message: format!("Failed to seek to offset {}: {}", offset, e),
+            message: Arc::new(format!("Failed to seek to offset {}: {}", offset, e)),
         })?;
 
     // Read the specified length
@@ -508,7 +508,7 @@ fn read_segment_direct(file: &File, offset: u64, length: u64, path: &Path) -> Re
         .read_to_end(&mut buffer)
         .map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
-            message: format!("Error reading file segment: {}", e),
+            message: Arc::new(format!("Error reading file segment: {}", e)),
         })?;
 
     Ok(buffer)
@@ -538,12 +538,10 @@ fn read_segment_mmap(file: &File, offset: u64, length: u64, path: &Path) -> Resu
             .len(length as usize)
             .map(file)
     }
-    .map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Failed to memory-map file segment: {}", e),
-    })?;
-
-    // Copy segment data to result
+        .map_err(|e| WinxError::FileAccessError {
+            path: path.to_path_buf(),
+            message: Arc::new(format!("Failed to memory-map file segment: {}", e)),
+        })?;    // Copy segment data to result
     Ok(segment_mmap.to_vec())
 }
 
@@ -569,7 +567,7 @@ pub fn read_file_to_string(path: &Path, max_file_size: u64) -> Result<String> {
 
     String::from_utf8(bytes).map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Failed to decode file as UTF-8: {}", e),
+        message: Arc::new(format!("Failed to decode file as UTF-8: {}", e)),
     })
 }
 
@@ -643,7 +641,7 @@ pub fn read_file_segment_to_string(
 
     String::from_utf8(bytes).map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Failed to decode file segment as UTF-8: {}", e),
+        message: Arc::new(format!("Failed to decode file segment as UTF-8: {}", e)),
     })
 }
 
@@ -676,13 +674,13 @@ impl ShareableMap {
     pub fn new(path: &Path) -> Result<Self> {
         let file = File::open(path).map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
-            message: format!("Error opening file: {}", e),
+            message: Arc::new(format!("Error opening file: {}", e)),
         })?;
 
         let mmap =
             unsafe { MmapOptions::new().map(&file) }.map_err(|e| WinxError::FileAccessError {
                 path: path.to_path_buf(),
-                message: format!("Failed to memory-map file: {}", e),
+                message: Arc::new(format!("Failed to memory-map file: {}", e)),
             })?;
 
         Ok(Self {
@@ -709,7 +707,7 @@ impl ShareableMap {
     pub fn new_segment(path: &Path, offset: u64, length: u64) -> Result<Self> {
         let file = File::open(path).map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
-            message: format!("Error opening file: {}", e),
+            message: Arc::new(format!("Error opening file: {}", e)),
         })?;
 
         let mmap = unsafe {
@@ -720,7 +718,7 @@ impl ShareableMap {
         }
         .map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
-            message: format!("Failed to memory-map file segment: {}", e),
+            message: Arc::new(format!("Failed to memory-map file segment: {}", e)),
         })?;
 
         Ok(Self {
