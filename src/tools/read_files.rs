@@ -521,11 +521,12 @@ pub async fn handle_tool_call(
 
     // Lock bash state to extract data
     {
-        let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError {
-                message: Arc::new(format!("Failed to lock bash state: {}", e)),
-            }
-        })?;
+        let bash_state_guard =
+            bash_state_arc
+                .lock()
+                .map_err(|e| WinxError::BashStateLockError {
+                    message: Arc::new(format!("Failed to lock bash state: {}", e)),
+                })?;
 
         // Ensure bash state is initialized
         let bash_state = match &*bash_state_guard {
@@ -656,6 +657,7 @@ pub async fn handle_tool_call(
     // Build a structure to hold results
     struct FileReadInfo {
         original_path: String,
+        clean_path: String,
         result: Result<FileReadResult>,
     }
 
@@ -679,11 +681,10 @@ pub async fn handle_tool_call(
                     let clean_path = clean_path.clone();
                     let original_path = original_path.clone();
                     let cwd = cwd.clone();
-                    let start = *start_line_num;
-                    let end = *end_line_num;
-                    let file_tokens = *allocated_tokens;
-
                     tokio::spawn(async move {
+                        let start = *start_line_num;
+                        let end = *end_line_num;
+                        let file_tokens = *allocated_tokens;
                         let result = read_file(
                             &clean_path,
                             file_tokens,
@@ -702,6 +703,7 @@ pub async fn handle_tool_call(
 
                         FileReadInfo {
                             original_path,
+                            clean_path,
                             result,
                         }
                     })
@@ -713,11 +715,10 @@ pub async fn handle_tool_call(
         for task in chunk_tasks {
             file_read_tasks.push(task.await.unwrap_or_else(|e| FileReadInfo {
                 original_path: "unknown".to_string(),
+                clean_path: "unknown".to_string(),
                 result: Err(WinxError::CommandExecutionError {
-                    message: Arc::new(format!(
-                    "Task panicked: {}",
-                    e
-                )))),
+                    message: Arc::new(format!("Task panicked: {}", e)),
+                }),
             }));
         }
     }
@@ -735,6 +736,7 @@ pub async fn handle_tool_call(
         }
 
         let file_path = &file_info.original_path;
+        let clean_path = &file_info.clean_path;
 
         match file_info.result {
             Ok((content, file_truncated, tokens_used, canon_path, line_range)) => {
@@ -769,7 +771,7 @@ pub async fn handle_tool_call(
                 write!(
                     message,
                     "\n{}{}\n```\n{}\n",
-                    file_path, range_formatted, content
+                    clean_path, range_formatted, content
                 )
                 .unwrap();
 
@@ -810,7 +812,7 @@ pub async fn handle_tool_call(
                     _ => format!("{}", e),
                 };
 
-                write!(message, "\n{}: {}\n", file_path, error_msg).unwrap();
+                write!(message, "\n{}: {}\n", clean_path, error_msg).unwrap();
                 had_errors = true;
             }
         }
@@ -854,16 +856,14 @@ pub async fn handle_tool_call(
         let whitelist_data: HashMap<String, Vec<(usize, usize)>> = file_ranges_dict.clone();
 
         move || {
-            if let Ok(mut bash_state_guard) = bash_state_arc.lock()
-                && let Some(bash_state) = bash_state_guard.as_mut()
-            {
-                for (file_path, ranges) in whitelist_data {
-                    // The cache already has the file hash and metadata,
-                    // so we just need to ensure it's in the whitelist
+            if let Ok(mut bash_state_guard) = bash_state_arc.lock() {
+                if let Some(bash_state) = bash_state_guard.as_mut() {
+                    for (file_path, ranges) in whitelist_data {
+                        // The cache already has the file hash and metadata,
+                        // so we just need to ensure it's in the whitelist
 
-                    // Get the hash from the cache
-                    let file_hash =
-                        cache
+                        // Get the hash from the cache
+                        let file_hash = cache
                             .get_cached_hash(Path::new(&file_path))
                             .unwrap_or_else(|| {
                                 // If not in cache (shouldn't happen), calculate it
@@ -877,42 +877,45 @@ pub async fn handle_tool_call(
                                 }
                             });
 
-                    // Add or update the whitelist entry
-                    if let Some(existing) = bash_state.whitelist_for_overwrite.get_mut(&file_path) {
-                        existing.file_hash = file_hash.clone();
+                        // Add or update the whitelist entry
+                        if let Some(existing) =
+                            bash_state.whitelist_for_overwrite.get_mut(&file_path)
+                        {
+                            existing.file_hash = file_hash.clone();
 
-                        // Get total lines from the cache
-                        let total_lines = cache
-                            .get_unread_ranges(Path::new(&file_path))
-                            .iter()
-                            .map(|&(_, end)| end)
-                            .max()
-                            .unwrap_or(0);
+                            // Get total lines from the cache
+                            let total_lines = cache
+                                .get_unread_ranges(Path::new(&file_path))
+                                .iter()
+                                .map(|&(_, end)| end)
+                                .max()
+                                .unwrap_or(0);
 
-                        if total_lines > 0 {
-                            existing.total_lines = total_lines;
+                            if total_lines > 0 {
+                                existing.total_lines = total_lines;
+                            }
+
+                            for range in ranges {
+                                existing.add_range(range.0, range.1);
+                            }
+                        } else {
+                            // Create new entry
+                            let total_lines = cache
+                                .get_unread_ranges(Path::new(&file_path))
+                                .iter()
+                                .map(|&(_, end)| end)
+                                .max()
+                                .unwrap_or(ranges.iter().map(|&(_, end)| end).max().unwrap_or(0));
+
+                            bash_state.whitelist_for_overwrite.insert(
+                                file_path.clone(),
+                                crate::state::bash_state::FileWhitelistData::new(
+                                    file_hash,
+                                    ranges,
+                                    total_lines,
+                                ),
+                            );
                         }
-
-                        for range in ranges {
-                            existing.add_range(range.0, range.1);
-                        }
-                    } else {
-                        // Create new entry
-                        let total_lines = cache
-                            .get_unread_ranges(Path::new(&file_path))
-                            .iter()
-                            .map(|&(_, end)| end)
-                            .max()
-                            .unwrap_or(ranges.iter().map(|&(_, end)| end).max().unwrap_or(0));
-
-                        bash_state.whitelist_for_overwrite.insert(
-                            file_path.clone(),
-                            crate::state::bash_state::FileWhitelistData::new(
-                                file_hash,
-                                ranges,
-                                total_lines,
-                            ),
-                        );
                     }
                 }
             }
