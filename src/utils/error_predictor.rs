@@ -414,7 +414,7 @@ impl ErrorPredictor {
                 {
                     let frequency = *count as f64 / errors.len() as f64;
                     if frequency >= ERROR_FREQUENCY_THRESHOLD {
-                        let suggestion = self.get_suggestion_for_error(base_command, pattern);
+                        let suggestion = Self::get_suggestion_for_error(base_command, pattern);
                         predictions.push(ErrorPrediction {
                             error_type: "command_error".to_string(),
                             message_pattern: pattern.clone(),
@@ -426,32 +426,43 @@ impl ErrorPredictor {
             }
         }
 
-        // Check patterns
-        for pattern in &self.error_patterns {
-            if let Some(cmd_pattern) = &pattern.command_pattern
-                && self.pattern_matches(cmd_pattern, command)
-            {
-                // This pattern might apply to this command
-                let suggestion = self.get_suggestion_for_error(command, &pattern.message_pattern);
+        // Check patterns in parallel for better performance
+        let pattern_predictions: Vec<ErrorPrediction> = self
+            .error_patterns
+            .iter()
+            .filter_map(|pattern| {
+                if let Some(cmd_pattern) = &pattern.command_pattern
+                    && Self::pattern_matches(cmd_pattern, command)
+                {
+                    // This pattern might apply to this command
+                    let suggestion =
+                        Self::get_suggestion_for_error(command, &pattern.message_pattern);
 
-                let base_confidence = pattern.frequency as f64 / 10.0;
-                let decay_factor = 1.0
-                    - (pattern.last_seen.elapsed().as_secs() as f64
-                        / (MAX_ERROR_AGE_HOURS * 3600) as f64)
-                        .min(1.0);
+                    let base_confidence = pattern.frequency as f64 / 10.0;
+                    let decay_factor = 1.0
+                        - (pattern.last_seen.elapsed().as_secs() as f64
+                            / (MAX_ERROR_AGE_HOURS * 3600) as f64)
+                            .min(1.0);
 
-                let confidence = (base_confidence * decay_factor).min(1.0);
+                    let confidence = (base_confidence * decay_factor).min(1.0);
 
-                if confidence >= PREDICTION_CONFIDENCE_THRESHOLD {
-                    predictions.push(ErrorPrediction {
-                        error_type: pattern.error_type.clone(),
-                        message_pattern: pattern.message_pattern.clone(),
-                        confidence,
-                        prevention: suggestion,
-                    });
+                    if confidence >= PREDICTION_CONFIDENCE_THRESHOLD {
+                        Some(ErrorPrediction {
+                            error_type: pattern.error_type.clone(),
+                            message_pattern: pattern.message_pattern.clone(),
+                            confidence,
+                            prevention: suggestion,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
-            }
-        }
+            })
+            .collect();
+
+        predictions.extend(pattern_predictions);
 
         predictions
     }
@@ -477,7 +488,7 @@ impl ErrorPredictor {
                     let frequency = *count as f64 / errors.len() as f64;
                     if frequency >= ERROR_FREQUENCY_THRESHOLD {
                         let suggestion =
-                            self.get_suggestion_for_file_error(file_path, pattern, operation);
+                            Self::get_suggestion_for_file_error(file_path, pattern, operation);
                         predictions.push(ErrorPrediction {
                             error_type: "file_error".to_string(),
                             message_pattern: pattern.clone(),
@@ -491,35 +502,45 @@ impl ErrorPredictor {
 
         // Check patterns
         let file_pattern = self.extract_file_pattern(file_path);
-        for pattern in &self.error_patterns {
-            if let Some(pat) = &pattern.file_pattern
-                && self.pattern_matches(pat, &file_pattern)
-            {
-                // This pattern might apply to this file
-                let suggestion = self.get_suggestion_for_file_error(
-                    file_path,
-                    &pattern.message_pattern,
-                    operation,
-                );
+        let pattern_predictions: Vec<ErrorPrediction> = self
+            .error_patterns
+            .iter()
+            .filter_map(|pattern| {
+                if let Some(pat) = &pattern.file_pattern
+                    && Self::pattern_matches(pat, &file_pattern)
+                {
+                    // This pattern might apply to this file
+                    let suggestion = Self::get_suggestion_for_file_error(
+                        file_path,
+                        &pattern.message_pattern,
+                        operation,
+                    );
 
-                let base_confidence = pattern.frequency as f64 / 10.0;
-                let decay_factor = 1.0
-                    - (pattern.last_seen.elapsed().as_secs() as f64
-                        / (MAX_ERROR_AGE_HOURS * 3600) as f64)
-                        .min(1.0);
+                    let base_confidence = pattern.frequency as f64 / 10.0;
+                    let decay_factor = 1.0
+                        - (pattern.last_seen.elapsed().as_secs() as f64
+                            / (MAX_ERROR_AGE_HOURS * 3600) as f64)
+                            .min(1.0);
 
-                let confidence = (base_confidence * decay_factor).min(1.0);
+                    let confidence = (base_confidence * decay_factor).min(1.0);
 
-                if confidence >= PREDICTION_CONFIDENCE_THRESHOLD {
-                    predictions.push(ErrorPrediction {
-                        error_type: pattern.error_type.clone(),
-                        message_pattern: pattern.message_pattern.clone(),
-                        confidence,
-                        prevention: suggestion,
-                    });
+                    if confidence >= PREDICTION_CONFIDENCE_THRESHOLD {
+                        Some(ErrorPrediction {
+                            error_type: pattern.error_type.clone(),
+                            message_pattern: pattern.message_pattern.clone(),
+                            confidence,
+                            prevention: suggestion,
+                        })
+                    } else {
+                        None
+                    }
+                } else {
+                    None
                 }
-            }
-        }
+            })
+            .collect();
+
+        predictions.extend(pattern_predictions);
 
         // Check for common file operation errors
         self.add_common_file_operation_predictions(file_path, operation, &mut predictions);
@@ -528,7 +549,7 @@ impl ErrorPredictor {
     }
 
     /// Check if a pattern matches a string
-    fn pattern_matches(&self, pattern: &str, s: &str) -> bool {
+    fn pattern_matches(pattern: &str, s: &str) -> bool {
         if pattern == "*" || pattern.is_empty() {
             return true;
         }
@@ -628,7 +649,7 @@ impl ErrorPredictor {
     }
 
     /// Get a suggestion for fixing a command error
-    fn get_suggestion_for_error(&self, command: &str, error_pattern: &str) -> String {
+    fn get_suggestion_for_error(command: &str, error_pattern: &str) -> String {
         // Extract base command
         let base_command = command.split_whitespace().next().unwrap_or(command);
 
@@ -701,7 +722,6 @@ impl ErrorPredictor {
 
     /// Get a suggestion for fixing a file error
     fn get_suggestion_for_file_error(
-        &self,
         file_path: &str,
         error_pattern: &str,
         operation: &str,
