@@ -2,6 +2,7 @@
 
 use crate::errors::{Result, WinxError};
 use std::env;
+use std::sync::Arc;
 
 const DEFAULT_MODEL: &str = "gemini-2.5-pro";
 const DEFAULT_FALLBACK_MODEL: &str = "gemini-2.5-flash";
@@ -24,9 +25,9 @@ const ERR_RATE_LIMIT_RANGE: &str = "Rate limit must be between 1 and 1000 RPM";
 
 lazy_static::lazy_static! {
     /// Cached endpoint for Gemini 2.5 Pro
-    static ref GEMINI_25_PRO_ENDPOINT: &str = "models/gemini-2.5-pro:generateContent";
+    static ref GEMINI_25_PRO_ENDPOINT: &'static str = "models/gemini-2.5-pro:generateContent";
     /// Cached endpoint for Gemini 2.5 Flash
-    static ref GEMINI_25_FLASH_ENDPOINT: &str = "models/gemini-2.5-flash:generateContent";
+    static ref GEMINI_25_FLASH_ENDPOINT: &'static str = "models/gemini-2.5-flash:generateContent";
 }
 
 /// Available Gemini models
@@ -95,8 +96,9 @@ impl Default for GeminiConfig {
 impl GeminiConfig {
     /// Create configuration from environment variables
     pub fn from_env() -> Result<Self> {
-        let api_key = env::var("GEMINI_API_KEY")
-            .map_err(|_| WinxError::ConfigurationError(ERR_API_KEY_NOT_SET.to_string()))?;
+        let api_key = env::var("GEMINI_API_KEY").map_err(|_| WinxError::ConfigurationError {
+            message: Arc::new(ERR_API_KEY_NOT_SET.to_string()),
+        })?;
 
         let model = env::var("GEMINI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let model = Self::parse_model(&model)?;
@@ -108,17 +110,23 @@ impl GeminiConfig {
         let timeout_seconds = env::var("GEMINI_TIMEOUT_SECONDS")
             .unwrap_or_else(|_| DEFAULT_TIMEOUT.to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_TIMEOUT.to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_TIMEOUT.to_string()),
+            })?;
 
         let max_retries = env::var("GEMINI_MAX_RETRIES")
             .unwrap_or_else(|_| DEFAULT_MAX_RETRIES.to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_MAX_RETRIES.to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_MAX_RETRIES.to_string()),
+            })?;
 
         let rate_limit_rpm = env::var("GEMINI_RATE_LIMIT_RPM")
             .unwrap_or_else(|_| DEFAULT_RATE_LIMIT.to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_RATE_LIMIT.to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_RATE_LIMIT.to_string()),
+            })?;
 
         Ok(Self {
             api_key,
@@ -135,39 +143,45 @@ impl GeminiConfig {
         match model_str {
             "gemini-2.5-pro" => Ok(GeminiModel::Gemini25Pro),
             "gemini-2.5-flash" => Ok(GeminiModel::Gemini25Flash),
-            _ => Err(WinxError::ConfigurationError(format!(
-                ERR_UNKNOWN_MODEL,
-                model_str
-            ))),
+            _ => Err(WinxError::ConfigurationError {
+                message: Arc::new(format!(
+                    "Unknown Gemini model: {}. Supported models: gemini-2.5-pro, gemini-2.5-flash",
+                    model_str
+                )),
+            }),
         }
     }
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
         if self.api_key.is_empty() {
-            return Err(WinxError::ConfigurationError(ERR_API_KEY_EMPTY.to_string()));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_API_KEY_EMPTY.to_string()),
+            });
         }
 
         if !self.api_key.starts_with("AIza") {
-            return Err(WinxError::ConfigurationError(
-                ERR_INVALID_API_KEY_FORMAT.to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_API_KEY_FORMAT.to_string()),
+            });
         }
 
         if self.timeout_seconds == 0 || self.timeout_seconds > 300 {
-            return Err(WinxError::ConfigurationError(ERR_TIMEOUT_RANGE.to_string()));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_TIMEOUT_RANGE.to_string()),
+            });
         }
 
         if self.max_retries > 10 {
-            return Err(WinxError::ConfigurationError(
-                ERR_MAX_RETRIES_EXCEED.to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_MAX_RETRIES_EXCEED.to_string()),
+            });
         }
 
         if self.rate_limit_rpm == 0 || self.rate_limit_rpm > 1000 {
-            return Err(WinxError::ConfigurationError(
-                ERR_RATE_LIMIT_RANGE.to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_RATE_LIMIT_RANGE.to_string()),
+            });
         }
 
         Ok(())

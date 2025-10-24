@@ -5,6 +5,7 @@ use crate::nvidia::NvidiaClient;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::Arc;
 use tracing::{debug, info};
 
 const DEFAULT_MIN_SEVERITY: &str = "Warning";
@@ -153,9 +154,12 @@ async fn get_code_and_metadata(
     match (&params.file_path, &params.code) {
         (Some(file_path), _) => {
             // Read from file
-            let code = tokio::fs::read_to_string(file_path)
-                .await
-                .map_err(|e| WinxError::FileError(format!(ERR_READ_FILE, file_path, e)))?;
+            let code =
+                tokio::fs::read_to_string(file_path)
+                    .await
+                    .map_err(|e| WinxError::FileError {
+                        message: Arc::new(format!("Failed to read file {}: {}", file_path, e)),
+                    })?;
 
             let language = params
                 .language
@@ -168,7 +172,9 @@ async fn get_code_and_metadata(
             // Use provided code
             Ok((code.clone(), None, params.language.clone()))
         }
-        (None, None) => Err(WinxError::InvalidInput(ERR_NO_FILE_OR_CODE.to_string())),
+        (None, None) => Err(WinxError::InvalidInput {
+            message: Arc::new(ERR_NO_FILE_OR_CODE.to_string()),
+        }),
     }
 }
 

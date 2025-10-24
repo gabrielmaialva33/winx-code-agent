@@ -178,7 +178,13 @@ impl PathScorer {
     pub fn new(model_path: &Path, vocab_path: &Path) -> Result<Self> {
         let tokenizer =
             Tokenizer::from_file(model_path.to_string_lossy().as_ref()).map_err(|e| {
-                WinxError::DataLoadingError(format!("Failed to load tokenizer model: {}", e))
+                WinxError::DataLoadingError {
+                    message: Arc::new(format!(
+                        "Failed to load tokenizer from {}: {}",
+                        model_path.display(),
+                        e
+                    )),
+                }
             })?;
 
         let vocab_probs = Self::load_vocab_probs(vocab_path)?;
@@ -240,9 +246,12 @@ impl PathScorer {
         }
 
         if vocab_probs.is_empty() {
-            return Err(WinxError::DataLoadingError(
-                "Vocabulary file is empty or has invalid format".to_string(),
-            )
+            return Err(WinxError::DataLoadingError {
+                message: Arc::new(format!(
+                    "No vocabulary entries found in file: {}",
+                    vocab_path.display()
+                )),
+            }
             .into());
         }
 

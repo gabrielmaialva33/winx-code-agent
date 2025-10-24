@@ -15,11 +15,11 @@ pub mod read_files;
 pub mod read_image;
 pub mod winx_chat;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::info;
 
-use crate::errors::WinxError;
 use crate::state::bash_state::BashState;
+use tokio::sync::Mutex;
 
 /// Version of the MCP protocol implemented by this service
 #[allow(dead_code)]
@@ -84,12 +84,11 @@ impl WinxService {
     ///
     /// A Result containing a MutexGuard for the bash state
     #[allow(dead_code)]
-    fn lock_bash_state(
+    async fn lock_bash_state(
         &self,
-    ) -> crate::errors::Result<std::sync::MutexGuard<'_, Option<BashState>>> {
-        self.bash_state
-            .lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))
+    ) -> crate::errors::Result<tokio::sync::MutexGuard<'_, Option<BashState>>> {
+        let guard = self.bash_state.lock().await;
+        Ok(guard)
     }
 }
 

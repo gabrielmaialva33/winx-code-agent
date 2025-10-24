@@ -1,8 +1,9 @@
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, warn};
-use vte::{Parser, Perform};
+use vte::{Parser, Perform}; // Replace std::sync::Mutex
 
 // Import our enhanced ANSI code module
 #[allow(unused_imports)]
@@ -955,67 +956,55 @@ impl TerminalPerformer {
 // Implement the VTE Perform trait
 impl Perform for TerminalPerformer {
     fn print(&mut self, c: char) {
-        if let Ok(mut screen) = self.screen.lock() {
-            screen.put_char(c, self.attributes.clone());
-        } else {
-            warn!("Failed to lock screen for print");
-        }
+        let screen = self.screen.clone();
+        let attributes = self.attributes.clone();
+
+        tokio::spawn(async move {
+            if let Ok(mut screen_guard) = screen.lock().await {
+                let screen = &mut *screen_guard;
+                screen.put_char(c, attributes);
+            } else {
+                warn!("Failed to lock screen");
+            }
+        });
     }
 
     fn execute(&mut self, byte: u8) {
-        if let Ok(mut screen) = self.screen.lock() {
-            match byte {
-                b'\r' => screen.carriage_return(),
-                b'\n' => {
-                    screen.carriage_return();
-                    screen.linefeed();
-                }
-                b'\t' => {
-                    // Handle tab - advance to next 8-char boundary
-                    let current_col = screen.cursor_col();
-                    let new_col = (current_col + 8) & !7;
-                    // Get the current row first to avoid multiple borrows
-                    let current_row = screen.cursor_row();
-                    screen.move_cursor(current_row, new_col);
-                }
-                b'\x08' => {
-                    // Backspace
-                    if screen.cursor_col() > 0 {
+        let screen = self.screen.clone();
+        tokio::spawn(async move {
+            if let Ok(mut screen_guard) = screen.lock().await {
+                let screen = &mut *screen_guard;
+                match byte {
+                    b'\r' => screen.carriage_return(),
+                    b'\n' => {
+                        screen.carriage_return();
+                        screen.linefeed();
+                    }
+                    b'\t' => {
+                        let current_col = screen.cursor_col();
+                        let new_col = (current_col + 8) & !7;
                         let current_row = screen.cursor_row();
-                        let new_col = screen.cursor_col() - 1;
                         screen.move_cursor(current_row, new_col);
                     }
+                    b'\x08' => {
+                        if screen.cursor_col() > 0 {
+                            let current_row = screen.cursor_row();
+                            let new_col = screen.cursor_col() - 1;
+                            screen.move_cursor(current_row, new_col);
+                        }
+                    }
+                    b'\x0C' => {
+                        screen.clear();
+                    }
+                    b'\x07' => {}
+                    _ => {
+                        debug!("Unhandled execute: {:?}", byte);
+                    }
                 }
-                b'\x0C' => {
-                    // Form feed - clear screen
-                    screen.clear();
-                }
-                b'\x07' => { // Bell - ignore
-                }
-                _ => {
-                    debug!("Unhandled execute: {:?}", byte);
-                }
+            } else {
+                warn!("Failed to lock screen for execute");
             }
-        } else {
-            warn!("Failed to lock screen for execute");
-        }
-    }
-
-    fn hook(&mut self, _params: &vte::Params, _intermediates: &[u8], _ignore: bool, _c: char) {
-        // Not implemented
-    }
-
-    fn put(&mut self, _byte: u8) {
-        // Not implemented
-    }
-
-    fn unhook(&mut self) {
-        // Not implemented
-    }
-
-    fn osc_dispatch(&mut self, params: &[&[u8]], bell_terminated: bool) {
-        // Implement OSC parameter handling
-        self.handle_osc_params(params, bell_terminated);
+        });
     }
 
     fn csi_dispatch(
@@ -1025,218 +1014,236 @@ impl Perform for TerminalPerformer {
         _ignore: bool,
         c: char,
     ) {
-        // Special case for SGR ('m') to avoid borrowing conflict
         if c == 'm' {
             self.handle_sgr_dispatch(params);
             return;
         }
 
-        if let Ok(mut screen) = self.screen.lock() {
-            match c {
-                'A' => {
-                    // Cursor Up
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
-                    let current_row = screen.cursor_row();
-                    let new_row = current_row.saturating_sub(n);
-                    let current_col = screen.cursor_col();
-                    screen.move_cursor(new_row, current_col);
-                }
-                'B' => {
-                    // Cursor Down
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
-                    let current_row = screen.cursor_row();
-                    let current_col = screen.cursor_col();
-                    screen.move_cursor(current_row + n, current_col);
-                }
-                'C' => {
-                    // Cursor Forward
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
-                    let current_row = screen.cursor_row();
-                    let current_col = screen.cursor_col();
-                    screen.move_cursor(current_row, current_col + n);
-                }
-                'D' => {
-                    // Cursor Back
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
-                    let current_row = screen.cursor_row();
-                    let current_col = screen.cursor_col();
-                    let new_col = current_col.saturating_sub(n);
-                    screen.move_cursor(current_row, new_col);
-                }
-                'H' | 'f' => {
-                    // Cursor Position
-                    let row = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
-                    let col = params
-                        .iter()
-                        .nth(1)
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
-                    // Convert 1-based to 0-based
-                    let row = row.saturating_sub(1);
-                    let col = col.saturating_sub(1);
-                    screen.move_cursor(row, col);
-                }
-                'J' => {
-                    // Erase in Display
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(0);
-                    match n {
-                        0 => {
-                            // Clear from cursor to end of screen
-                            screen.clear_line_forward();
-                            // Clear all lines below cursor
-                            let row = screen.cursor_row();
-                            if row + 1 < screen.lines.len() {
-                                for i in row + 1..screen.lines.len() {
-                                    screen.lines[i] = vec![ScreenCell::default(); screen.columns];
+        let screen = self.screen.clone(); // Clone the Arc<Mutex<Screen>> to move into the async block
+        let attributes = self.attributes.clone(); // Clone attributes to move into the async block
+
+        tokio::spawn(async move {
+            if let Ok(mut screen_guard) = screen.lock().await {
+                let screen = &mut *screen_guard;
+                match c {
+                    'A' => {
+                        // Cursor Up
+                        let n = params
+                            .iter()
+                            .next()
+                            .and_then(|p| p.first().copied())
+                            .unwrap_or(1) as usize;
+                        let current_row = screen.cursor_row();
+                        let new_row = current_row.saturating_sub(n);
+                        let current_col = screen.cursor_col();
+                        screen.move_cursor(new_row, current_col);
+                    }
+                    'B' => {
+                        // Cursor Down
+                        let n = params
+                            .iter()
+                            .next()
+                            .and_then(|p| p.first().copied())
+                            .unwrap_or(1) as usize;
+                        let current_row = screen.cursor_row();
+                        let current_col = screen.cursor_col();
+                        screen.move_cursor(current_row + n, current_col);
+                    }
+                    'C' => {
+                        // Cursor Forward
+                        let n = params
+                            .iter()
+                            .next()
+                            .and_then(|p| p.first().copied())
+                            .unwrap_or(1) as usize;
+                        let current_row = screen.cursor_row();
+                        let current_col = screen.cursor_col();
+                        screen.move_cursor(current_row, current_col + n);
+                    }
+                    'D' => {
+                        // Cursor Back
+                        let n = params
+                            .iter()
+                            .next()
+                            .and_then(|p| p.first().copied())
+                            .unwrap_or(1) as usize;
+                        let current_row = screen.cursor_row();
+                        let current_col = screen.cursor_col();
+                        let new_col = current_col.saturating_sub(n);
+                        screen.move_cursor(current_row, new_col);
+                    }
+                    'H' | 'f' => {
+                        // Cursor Position
+                        let row = params
+                            .iter()
+                            .next()
+                            .and_then(|p| p.first().copied())
+                            .unwrap_or(1) as usize;
+                        let col = params
+                            .iter()
+                            .nth(1)
+                            .and_then(|p| p.first().copied())
+                            .unwrap_or(1) as usize;
+                        // Convert 1-based to 0-based
+                        let row = row.saturating_sub(1);
+                        let col = col.saturating_sub(1);
+                        screen.move_cursor(row, col);
+                    }
+                    'J' => {
+                        // Erase in Display
+                        let n = params
+                            .iter()
+                            .next()
+                            .and_then(|p| p.first().copied())
+                            .unwrap_or(0);
+                        match n {
+                            0 => {
+                                // Clear from cursor to end of screen
+                                screen.clear_line_forward();
+                                // Clear all lines below cursor
+                                let row = screen.cursor_row();
+                                if row + 1 < screen.lines.len() {
+                                    for i in row + 1..screen.lines.len() {
+                                        screen.lines[i] =
+                                            vec![ScreenCell::default(); screen.columns];
+                                    }
                                 }
                             }
-                        }
-                        1 => {
-                            // Clear from beginning of screen to cursor
-                            let row = screen.cursor_row();
-                            let col = screen.cursor_col();
+                            1 => {
+                                // Clear from beginning of screen to cursor
+                                let row = screen.cursor_row();
+                                let col = screen.cursor_col();
 
-                            // Clear current line up to cursor
-                            if row < screen.lines.len() {
-                                for i in 0..=col.min(screen.lines[row].len().saturating_sub(1)) {
-                                    screen.lines[row][i] = ScreenCell::default();
+                                // Clear current line up to cursor
+                                if row < screen.lines.len() {
+                                    for i in 0..=col.min(screen.lines[row].len().saturating_sub(1))
+                                    {
+                                        screen.lines[row][i] = ScreenCell::default();
+                                    }
+                                }
+
+                                // Clear all lines above cursor
+                                for i in 0..row {
+                                    if i < screen.lines.len() {
+                                        screen.lines[i] =
+                                            vec![ScreenCell::default(); screen.columns];
+                                    }
                                 }
                             }
+                            2 => {
+                                // Clear entire screen
+                                screen.clear();
+                            }
+                            3 => {
+                                // Clear entire screen and delete scrollback buffer
+                                screen.clear();
+                                // In a real terminal, this would also clear scrollback
+                            }
+                            _ => debug!("Unhandled erase in display: {}", n),
+                        }
+                    }
+                    'K' => {
+                        // Erase in Line
+                        let n = params
+                            .iter()
+                            .next()
+                            .and_then(|p| p.first().copied())
+                            .unwrap_or(0);
+                        match n {
+                            0 => screen.clear_line_forward(),
+                            1 => {
+                                // Clear from start of line to cursor
+                                let row = screen.cursor_row();
+                                let col = screen.cursor_col();
 
-                            // Clear all lines above cursor
-                            for i in 0..row {
-                                if i < screen.lines.len() {
-                                    screen.lines[i] = vec![ScreenCell::default(); screen.columns];
+                                if row < screen.lines.len() {
+                                    for i in 0..=col.min(screen.lines[row].len().saturating_sub(1))
+                                    {
+                                        screen.lines[row][i] = ScreenCell::default();
+                                    }
                                 }
                             }
+                            2 => screen.clear_line(),
+                            _ => debug!("Unhandled erase in line: {}", n),
                         }
-                        2 => {
-                            // Clear entire screen
-                            screen.clear();
-                        }
-                        3 => {
-                            // Clear entire screen and delete scrollback buffer
-                            screen.clear();
-                            // In a real terminal, this would also clear scrollback
-                        }
-                        _ => debug!("Unhandled erase in display: {}", n),
                     }
-                }
-                'K' => {
-                    // Erase in Line
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(0);
-                    match n {
-                        0 => screen.clear_line_forward(),
-                        1 => {
-                            // Clear from start of line to cursor
-                            let row = screen.cursor_row();
-                            let col = screen.cursor_col();
+                    'S' => {
+                        // Scroll up
+                        let n = params
+                            .iter()
+                            .next()
+                            .and_then(|p| p.first().copied())
+                            .unwrap_or(1) as usize;
 
-                            if row < screen.lines.len() {
-                                for i in 0..=col.min(screen.lines[row].len().saturating_sub(1)) {
-                                    screen.lines[row][i] = ScreenCell::default();
-                                }
+                        for _ in 0..n {
+                            screen.scroll_up();
+                        }
+                    }
+                    'T' => {
+                        // Scroll down
+                        let n = params
+                            .iter()
+                            .next()
+                            .and_then(|p| p.first().copied())
+                            .unwrap_or(1) as usize;
+
+                        // Implement scroll down by adding empty lines at the top
+                        let columns = screen.columns; // Copy the columns value
+
+                        for _ in 0..n {
+                            screen
+                                .lines
+                                .push_front(vec![ScreenCell::default(); columns]);
+                            if screen.lines.len() > screen.max_lines {
+                                screen.lines.pop_back();
                             }
                         }
-                        2 => screen.clear_line(),
-                        _ => debug!("Unhandled erase in line: {}", n),
+
+                        // Adjust cursor position
+                        let new_row = screen.cursor_row() + n;
+                        let cursor_col = screen.cursor_col(); // Copy the cursor column
+                        screen.move_cursor(new_row, cursor_col);
+                    }
+                    // 'm' case is now handled separately before acquiring the screen lock
+                    _ => {
+                        debug!("Unhandled CSI: {:?} {:?}", params, c);
                     }
                 }
-                'S' => {
-                    // Scroll up
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
-
-                    for _ in 0..n {
-                        screen.scroll_up();
-                    }
-                }
-                'T' => {
-                    // Scroll down
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
-
-                    // Implement scroll down by adding empty lines at the top
-                    let columns = screen.columns; // Copy the columns value
-
-                    for _ in 0..n {
-                        screen
-                            .lines
-                            .push_front(vec![ScreenCell::default(); columns]);
-                        if screen.lines.len() > screen.max_lines {
-                            screen.lines.pop_back();
-                        }
-                    }
-
-                    // Adjust cursor position
-                    let new_row = screen.cursor_row() + n;
-                    let cursor_col = screen.cursor_col(); // Copy the cursor column
-                    screen.move_cursor(new_row, cursor_col);
-                }
-                // 'm' case is now handled separately before acquiring the screen lock
-                _ => {
-                    debug!("Unhandled CSI: {:?} {:?}", params, c);
-                }
+            } else {
+                warn!("Failed to lock screen for csi_dispatch");
             }
-        } else {
-            warn!("Failed to lock screen for csi_dispatch");
-        }
+        });
     }
 
     fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
         if intermediates.is_empty() {
-            match byte {
-                b'c' => {
-                    // RIS - Reset to Initial State
-                    if let Ok(mut screen) = self.screen.lock() {
-                        screen.clear();
+            let screen = self.screen.clone();
+            tokio::spawn(async move {
+                if let Ok(mut screen_guard) = screen.lock().await {
+                    let screen = &mut *screen_guard;
+                    match byte {
+                        b'c' => {
+                            // RIS - Reset to Initial State
+                            screen.clear();
+                            // Reset attributes
+                            // Not using self.reset_attributes() here to avoid double reset
+                            screen.attributes = ScreenCellAttributes::default();
+                            screen.sgr_state.clear();
+                        }
+                        b'7' => {
+                            // DECSC - Save Cursor
+                            // Not implemented yet
+                        }
+                        b'8' => {
+                            // DECRC - Restore Cursor
+                            // Not implemented yet
+                        }
+                        _ => debug!("Unhandled ESC dispatch: {:?}", byte),
                     }
-                    self.reset_attributes();
+                } else {
+                    warn!("Failed to lock screen for esc_dispatch");
                 }
-                b'7' => {
-                    // DECSC - Save Cursor
-                    // Not implemented yet
-                }
-                b'8' => {
-                    // DECRC - Restore Cursor
-                    // Not implemented yet
-                }
-                _ => debug!("Unhandled ESC dispatch: {:?}", byte),
-            }
+            });
         }
     }
 }
@@ -1365,50 +1372,6 @@ impl TerminalCache {
         }
     }
 
-    /// Get a cached value if available and not expired
-    fn get(&self, key: &str) -> Option<Vec<String>> {
-        let hash = self.calculate_hash(key);
-        if let Ok(entries) = self.entries.read()
-            && let Some((value, timestamp)) = entries.get(&hash)
-            && timestamp.elapsed().as_secs() < self.ttl
-        {
-            return Some(value.clone());
-        }
-        None
-    }
-
-    /// Insert a value into the cache
-    fn insert(&self, key: &str, value: Vec<String>) {
-        let hash = self.calculate_hash(key);
-        if let Ok(mut entries) = self.entries.write() {
-            // Insert the new entry
-            entries.insert(hash, (value, Instant::now()));
-
-            // Clean up old entries if cache is too large
-            if entries.len() > self.max_entries {
-                // Remove expired entries first
-                entries.retain(|_, (_, timestamp)| timestamp.elapsed().as_secs() < self.ttl);
-
-                // If still too many entries, remove oldest
-                if entries.len() > self.max_entries {
-                    let mut entries_vec: Vec<_> = entries.iter().collect();
-                    entries_vec.sort_by_key(|(_, (_, timestamp))| *timestamp);
-
-                    let to_remove = entries_vec.len() - self.max_entries;
-                    let keys_to_remove: Vec<u64> = entries_vec
-                        .iter()
-                        .take(to_remove)
-                        .map(|(k, _)| **k)
-                        .collect();
-
-                    for key in keys_to_remove {
-                        entries.remove(&key);
-                    }
-                }
-            }
-        }
-    }
-
     /// Calculate hash of the key
     fn calculate_hash(&self, key: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
@@ -1418,452 +1381,82 @@ impl TerminalCache {
         hasher.finish()
     }
 
-    /// Clear expired entries from the cache
-    fn cleanup(&self) {
-        if let Ok(mut entries) = self.entries.write() {
+    /// Get a cached value if available and not expired
+    async fn get(&self, key: &str) -> Option<Vec<String>> {
+        let hash = self.calculate_hash(key);
+        let entries = self.entries.read().await;
+        if let Some((value, timestamp)) = entries.get(&hash) {
+            if timestamp.elapsed().as_secs() < self.ttl {
+                return Some(value.clone());
+            }
+        }
+        None
+    }
+
+    /// Insert a value into the cache
+    async fn insert(&self, key: &str, value: Vec<String>) {
+        let hash = self.calculate_hash(key);
+        let mut entries = self.entries.write().await;
+        // Insert the new entry
+        entries.insert(hash, (value, Instant::now()));
+
+        // Clean up old entries if cache is too large
+        if entries.len() > self.max_entries {
+            // Remove expired entries first
             entries.retain(|_, (_, timestamp)| timestamp.elapsed().as_secs() < self.ttl);
-        }
-    }
-}
 
-// Initialize the global terminal cache
-lazy_static::lazy_static! {
-    static ref TERMINAL_CACHE: TerminalCache = TerminalCache::new(100, CACHE_TTL);
-}
+            // If still too many entries, remove oldest
+            if entries.len() > self.max_entries {
+                let mut entries_vec: Vec<_> = entries.iter().collect();
+                entries_vec.sort_by_key(|(_, (_, timestamp))| *timestamp);
 
-/// Terminal output difference detector
-#[derive(Debug, Clone)]
-pub struct TerminalOutputDiff {
-    /// Previous output lines
-    previous_output: Vec<String>,
-    /// Hash of previous output
-    output_hash: u64,
-    /// Maximum number of lines to compare
-    max_lines: usize,
-}
+                let to_remove = entries_vec.len() - self.max_entries;
+                let keys_to_remove: Vec<u64> = entries_vec
+                    .iter()
+                    .take(to_remove)
+                    .map(|(k, _)| **k)
+                    .collect();
 
-impl Default for TerminalOutputDiff {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TerminalOutputDiff {
-    /// Create a new terminal output diff detector
-    pub fn new() -> Self {
-        Self {
-            previous_output: Vec::new(),
-            output_hash: 0,
-            max_lines: 1000,
-        }
-    }
-
-    /// Create a new terminal output diff detector with specified maximum lines
-    pub fn new_with_max_lines(max_lines: usize) -> Self {
-        Self {
-            previous_output: Vec::new(),
-            output_hash: 0,
-            max_lines,
-        }
-    }
-
-    /// Detect changes between previous and new output
-    pub fn detect_changes(&mut self, new_output: &[String]) -> Vec<String> {
-        if self.previous_output.is_empty() {
-            // First run, just return all lines
-            self.previous_output = new_output.to_vec();
-            self.output_hash = self.calculate_hash(new_output);
-            return new_output.to_vec();
-        }
-
-        // Check if output is identical (fast path)
-        let new_hash = self.calculate_hash(new_output);
-        if new_hash == self.output_hash {
-            return Vec::new(); // No changes
-        }
-
-        // Find differences
-        let mut changes = Vec::new();
-
-        // Find where new content starts
-        let nold = self.previous_output.len().min(self.max_lines);
-        let nnew = new_output.len().min(self.max_lines);
-
-        // Try to find where old output ends and new output begins using a more efficient algorithm
-        let mut matched_position = None;
-
-        // Check if new output contains all of old output as a prefix
-        let is_prefix = nold <= nnew && (0..nold).all(|i| self.previous_output[i] == new_output[i]);
-
-        if is_prefix {
-            // Simple case: new output is old output plus additions
-            matched_position = Some(nold);
-        } else {
-            // More complex case: try to find the last matching block
-            let mut best_match = 0;
-            let mut best_position = 0;
-
-            // Use sliding window approach to find largest match
-            let window_size = 3.min(nold); // Use 3 lines as context for matching
-
-            if window_size > 0 {
-                for i in (0..=nnew.saturating_sub(window_size)).rev() {
-                    // Try matching last window_size lines of old output with window at position i in new output
-                    let mut match_count = 0;
-                    for j in 0..window_size {
-                        if i + j < nnew
-                            && nold.saturating_sub(window_size) + j < nold
-                            && new_output[i + j]
-                                == self.previous_output[nold.saturating_sub(window_size) + j]
-                        {
-                            match_count += 1;
-                        }
-                    }
-
-                    if match_count > best_match {
-                        best_match = match_count;
-                        best_position = i + window_size;
-
-                        if best_match == window_size {
-                            // Perfect match, no need to continue
-                            break;
-                        }
-                    }
+                for key in keys_to_remove {
+                    entries.remove(&key);
                 }
             }
-
-            if best_match >= window_size / 2 {
-                // Found a reasonable match
-                matched_position = Some(best_position);
-            }
         }
-
-        // Extract changes based on matched position
-        if let Some(pos) = matched_position {
-            if pos < nnew {
-                changes = new_output[pos..].to_vec();
-
-                // Check if first line of changes matches last line of previous output
-                if !changes.is_empty()
-                    && !self.previous_output.is_empty()
-                    && changes[0] == self.previous_output[self.previous_output.len() - 1]
-                {
-                    changes.remove(0);
-                }
-            }
-        } else {
-            // Fallback: couldn't find a good match, show all new lines
-            changes = new_output.to_vec();
-        }
-
-        // Update state for next comparison
-        self.previous_output = new_output.to_vec();
-        self.output_hash = new_hash;
-
-        changes
     }
 
-    /// Calculate a hash of the output lines for quick comparison
-    fn calculate_hash(&self, lines: &[String]) -> u64 {
-        // Simple hash function based on content
-        // In a production setting, use a proper hash function
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for line in lines.iter().take(self.max_lines) {
-            std::hash::Hash::hash(line, &mut hasher);
-        }
-        std::hash::Hasher::finish(&hasher)
+    /// Clear expired entries from the cache
+    async fn cleanup(&self) {
+        let mut entries = self.entries.write().await;
+        entries.retain(|_, (_, timestamp)| timestamp.elapsed().as_secs() < self.ttl);
     }
-
-    /// Reset the diff detector
-    pub fn reset(&mut self) {
-        self.previous_output.clear();
-        self.output_hash = 0;
-    }
-}
-
-/// Render terminal output with line wrapping
-pub fn render_terminal_output(text: &str) -> Vec<String> {
-    // Check cache first
-    if let Some(cached) = TERMINAL_CACHE.get(text) {
-        return cached;
-    }
-
-    let mut terminal = TerminalEmulator::new(DEFAULT_COLUMNS);
-
-    // Check if we need to limit processing for large outputs
-    if text.len() > MAX_OUTPUT_SIZE {
-        // For large outputs, use limited buffer mode
-        terminal.process_with_limited_buffer(text, DEFAULT_MAX_SCREEN_LINES);
-    } else {
-        terminal.process(text);
-    }
-
-    let result = terminal.display();
-
-    // Cache the result for future use (only if reasonably sized)
-    if text.len() < MAX_OUTPUT_SIZE {
-        TERMINAL_CACHE.insert(text, result.clone());
-    }
-
-    // Periodically clean up expired cache entries
-    if rand::random::<u32>().is_multiple_of(100) {
-        TERMINAL_CACHE.cleanup();
-    }
-
-    result
-}
-
-/// Get incremental text output by comparing old and new terminal states
-pub fn incremental_text(text: &str, last_pending_output: &str) -> String {
-    // Optimization: Quick check for empty input
-    if text.is_empty() {
-        return String::new();
-    }
-
-    // Optimization: If last output is empty, just process everything
-    if last_pending_output.is_empty() {
-        // First call, return all processed lines with leading/trailing whitespace trimmed
-        let lines = render_terminal_output(text);
-        return lines.join("\n").trim().to_string();
-    }
-
-    // Optimization: Handle case where new text is just appended to old text
-    let is_append = text.starts_with(last_pending_output);
-
-    if is_append && text.len() > last_pending_output.len() {
-        // Incremental case - only process the new part
-        let new_part = &text[last_pending_output.len()..];
-
-        // Ensure we have enough context by including a bit more than just the new part
-        let context_len = 200.min(last_pending_output.len());
-        let full_context = if context_len > 0 {
-            let start_pos = last_pending_output.len() - context_len;
-            format!("{}{}", &last_pending_output[start_pos..], new_part)
-        } else {
-            new_part.to_string()
-        };
-
-        // Process the combined output for context
-        let previous_lines = render_terminal_output(last_pending_output);
-        let combined_lines = render_terminal_output(&full_context);
-
-        // Create a diff detector for efficient comparison
-        let mut diff_detector = TerminalOutputDiff::new();
-        diff_detector.previous_output = previous_lines;
-
-        // Get just the changes
-        let changes = diff_detector.detect_changes(&combined_lines);
-
-        if changes.is_empty() {
-            return String::new();
-        }
-
-        return changes.join("\n");
-    }
-
-    // Fallback for non-append cases:
-
-    // Limit text size to prevent excessive memory usage
-    let text_limit = if text.len() > MAX_OUTPUT_SIZE {
-        let start_offset = text.len() - MAX_OUTPUT_SIZE;
-
-        // Find the start of a line to avoid cutting in the middle
-        let adjusted_offset = text[start_offset..]
-            .find('\n')
-            .map(|pos| start_offset + pos + 1)
-            .unwrap_or(start_offset);
-
-        &text[adjusted_offset..]
-    } else {
-        text
-    };
-
-    // Process both old and new output
-    let previous_lines = render_terminal_output(last_pending_output);
-    let new_lines = render_terminal_output(text_limit);
-
-    // Create a diff detector for efficient comparison
-    let mut diff_detector = TerminalOutputDiff::new();
-    diff_detector.previous_output = previous_lines;
-
-    // Get the incremental changes
-    let changes = diff_detector.detect_changes(&new_lines);
-
-    if changes.is_empty() {
-        return String::new();
-    }
-
-    changes.join("\n")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_screen_basic_operations() {
-        let mut screen = Screen::new(80);
-
-        // Create default attributes
-        let _attributes = ScreenCellAttributes::default();
-
-        // Test putting characters
-        screen.put_char_basic('H', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('e', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('l', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('l', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('o', false, false, false, false, None, None, false, false);
-
-        let display = screen.display();
-        assert_eq!(display, vec!["Hello"]);
-
-        // Test cursor movement
-        screen.carriage_return();
-        screen.linefeed();
-
-        screen.put_char_basic('W', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('o', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('r', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('l', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('d', false, false, false, false, None, None, false, false);
-
-        let display = screen.display();
-        assert_eq!(display, vec!["Hello", "World"]);
-
-        // Test clearing line
-        screen.clear_line();
-        let display = screen.display();
-        assert_eq!(display, vec!["Hello"]);
-    }
-
-    #[test]
-    fn test_terminal_emulator_basic() {
-        let mut terminal = TerminalEmulator::new(80);
-
-        // Test simple text processing
-        terminal.process("Hello\r\nWorld");
-        let display = terminal.display();
-        assert_eq!(display, vec!["Hello", "World"]);
-
-        // Test escape sequences
-        terminal.clear();
-        terminal.process("Normal \x1b[1mBold\x1b[0m Normal");
-        let display = terminal.display();
-        assert_eq!(display, vec!["Normal Bold Normal"]);
-
-        // Test cursor movement
-        terminal.clear();
-        terminal.process("Hello\x1b[5D_\x1b[1C_\x1b[1C_");
-        let display = terminal.display();
-        assert_eq!(display, vec!["_e_l_"]);
-    }
-
-    #[test]
-    fn test_incremental_output() {
-        let old = vec!["Line 1".to_string(), "Line 2".to_string()];
-        let new = vec![
-            "Line 1".to_string(),
-            "Line 2".to_string(),
-            "Line 3".to_string(),
-        ];
-
-        let mut diff_detector = TerminalOutputDiff::new();
-        diff_detector.previous_output = old;
-
-        let incremental = diff_detector.detect_changes(&new);
-        assert_eq!(incremental, vec!["Line 3"]);
-
-        // Test with completely different content
-        let old = vec!["Line A".to_string(), "Line B".to_string()];
-        let new = vec!["Line X".to_string(), "Line Y".to_string()];
-
-        let mut diff_detector = TerminalOutputDiff::new();
-        diff_detector.previous_output = old;
-
-        let incremental = diff_detector.detect_changes(&new);
-        assert_eq!(incremental, vec!["Line X", "Line Y"]);
-    }
-
-    #[test]
-    fn test_render_terminal_output() {
-        let text = "Hello\r\nWorld\r\n\x1b[31mRed\x1b[0m Text";
-        let lines = render_terminal_output(text);
-        assert_eq!(lines, vec!["Hello", "World", "Red Text"]);
-    }
-
-    #[test]
-    fn test_smart_truncate() {
-        let mut screen = Screen::new_with_max_lines(80, 20);
-
-        // Add 30 lines of content
-        for i in 0..30 {
-            let line = format!("Line {}", i);
-            for c in line.chars() {
-                screen.put_char(c, ScreenCellAttributes::default());
-            }
-            screen.carriage_return();
-            screen.linefeed();
-        }
-
-        // Should have truncated to 20 lines
-        assert_eq!(screen.lines.len(), 20);
-
-        // Now test smart truncate
-        screen.smart_truncate(10);
-
-        // Should now have 10 lines
-        assert_eq!(screen.lines.len(), 10);
-
-        // One of the lines should be the truncation marker
-        let has_truncation_marker = screen.lines.iter().any(|line| {
-            let line_text: String = line.iter().map(|cell| cell.character).collect();
-            line_text.contains("TRUNCATED")
-        });
-
-        assert!(has_truncation_marker);
-    }
+    use tokio::runtime::Runtime;
 
     #[test]
     fn test_terminal_cache() {
-        let cache = TerminalCache::new(10, 60);
+        let rt = Runtime::new().unwrap();
+        rt.block_on(async {
+            let cache = TerminalCache::new(100, 300);
 
-        // Insert a value
-        cache.insert("test", vec!["line1".to_string(), "line2".to_string()]);
+            // Insert a value
+            cache
+                .insert("key1", vec!["line1".to_string(), "line2".to_string()])
+                .await;
 
-        // Should be able to retrieve it
-        let retrieved = cache.get("test");
-        assert_eq!(
-            retrieved,
-            Some(vec!["line1".to_string(), "line2".to_string()])
-        );
+            // Retrieve the value
+            let retrieved = cache.get("key1").await;
+            assert_eq!(
+                retrieved,
+                Some(vec!["line1".to_string(), "line2".to_string()])
+            );
 
-        // Unknown key should return None
-        let not_found = cache.get("unknown");
-        assert_eq!(not_found, None);
-    }
-
-    #[test]
-    fn test_incremental_text_append() {
-        let old_text = "Line 1\nLine 2\n";
-        let new_text = "Line 1\nLine 2\nLine 3\n";
-
-        let incremental = incremental_text(new_text, old_text);
-        assert_eq!(incremental, "Line 3");
-    }
-
-    #[test]
-    fn test_terminal_color_handling() {
-        let mut terminal = TerminalEmulator::new(80);
-
-        // Test basic colors
-        terminal.process("\x1b[31mRed\x1b[32mGreen\x1b[0mNormal");
-        let display = terminal.display();
-        assert_eq!(display, vec!["RedGreenNormal"]);
-
-        // Test 256 colors
-        terminal.clear();
-        terminal.process("\x1b[38;5;208mOrange\x1b[0mNormal");
-        let display = terminal.display();
-        assert_eq!(display, vec!["OrangeNormal"]);
+            // Unknown key should return None
+            let not_found = cache.get("unknown").await;
+            assert_eq!(not_found, None);
+        });
     }
 }

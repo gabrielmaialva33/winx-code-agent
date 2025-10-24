@@ -6,8 +6,9 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use tracing::debug;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::debug; // Replace std::sync::Mutex
 
 use crate::errors::WinxError;
 
@@ -17,7 +18,7 @@ pub struct CodeAnalysisResult {
     /// File path being analyzed
     pub file_path: PathBuf,
     /// Programming language detected
-    pub language: Cow<'_, str>,
+    pub language: Cow<'static, str>,
     /// List of issues found
     pub issues: Vec<CodeIssue>,
     /// List of improvement suggestions
@@ -32,32 +33,32 @@ pub struct CodeAnalysisResult {
 #[derive(Debug, Clone)]
 pub struct CodeIssue {
     /// Type of issue (error, warning, etc.)
-    pub issue_type: Cow<'_, str>,
+    pub issue_type: Cow<'static, str>,
     /// Description of the issue
-    pub description: Cow<'_, str>,
+    pub description: Cow<'static, str>,
     /// Line number where the issue occurs
     pub line: Option<usize>,
     /// Column where the issue starts
     pub column: Option<usize>,
     /// Severity level (high, medium, low)
-    pub severity: Cow<'_, str>,
+    pub severity: Cow<'static, str>,
     /// Possible solutions to fix the issue
-    pub solutions: Vec<Cow<'_, str>>,
+    pub solutions: Vec<Cow<'static, str>>,
 }
 
 /// A suggestion for code improvement
 #[derive(Debug, Clone)]
 pub struct CodeSuggestion {
     /// Type of suggestion (performance, style, etc.)
-    pub suggestion_type: Cow<'_, str>,
+    pub suggestion_type: Cow<'static, str>,
     /// Description of the suggestion
-    pub description: Cow<'_, str>,
+    pub description: Cow<'static, str>,
     /// Line number where the suggestion applies
     pub line: Option<usize>,
     /// Confidence level (0.0-1.0)
     pub confidence: f64,
     /// The actual code suggestion
-    pub code_sample: Option<Cow<'_, str>>,
+    pub code_sample: Option<Cow<'static, str>>,
 }
 
 /// Code complexity metrics
@@ -122,9 +123,7 @@ pub async fn handle_tool_call(
     debug!("CodeAnalyzer tool call with params: {:?}", params);
 
     // Get bash state guard
-    let bash_state_guard = bash_state
-        .lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+    let bash_state_guard = bash_state.lock().await;
 
     // Check if bash state is initialized
     let bash_state = bash_state_guard
@@ -133,10 +132,12 @@ pub async fn handle_tool_call(
 
     // Verify chat_id
     if !params.chat_id.is_empty() && params.chat_id != bash_state.current_chat_id {
-        return Err(WinxError::ChatIdMismatch(format!(
-            "Chat ID mismatch: expected {}, got {}",
-            bash_state.current_chat_id, params.chat_id
-        )));
+        return Err(WinxError::ChatIdMismatch {
+            message: Arc::new(format!(
+                "Chat ID mismatch: expected {}, got {}",
+                bash_state.current_chat_id, params.chat_id
+            )),
+        });
     }
 
     // Resolve and validate file path
@@ -166,7 +167,7 @@ pub async fn handle_tool_call(
     // Detect language if not provided
     let language = match &params.language {
         Some(lang) => Cow::Owned(lang.clone()),
-        None => detect_language(&file_path)?,
+        None => detect_language(&file_path)?.into_owned().into(),
     };
 
     // Read file content

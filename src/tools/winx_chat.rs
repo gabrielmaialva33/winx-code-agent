@@ -7,8 +7,9 @@
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use tracing::{debug, info};
+use std::sync::Arc;
+use tokio::sync::Mutex; // Replace std::sync::Mutex
+use tracing::info;
 
 use crate::errors::{Result, WinxError};
 use crate::state::BashState;
@@ -191,7 +192,9 @@ impl WinxPersonality {
         }
         let duration = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| WinxError::DataLoadingError(format!("Time error: {}", e)))?;
+            .map_err(|e| WinxError::DataLoadingError {
+                message: Arc::new(format!("Failed to get system time duration: {}", e)),
+            })?;
         let index = (duration.as_nanos() as usize) % self.tips_database.len();
         Ok(Some(self.tips_database[index]))
     }
@@ -313,15 +316,18 @@ impl WinxChatProcessor {
         let include_system_info = chat.include_system_info.unwrap_or(false);
         let duration = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| WinxError::DataLoadingError(format!("Time error: {}", e)))?;
+            .map_err(|e| WinxError::DataLoadingError {
+                message: Arc::new(format!("Failed to get system time duration: {}", e)),
+            })?;
         let session_id = chat
             .session_id
             .clone()
             .unwrap_or_else(|| format!("winx_{}", duration.as_nanos()));
 
-        debug!(
+        tracing::debug!(
             "Processing Winx chat: mode={:?}, personality={}",
-            mode, personality_level
+            mode,
+            personality_level
         );
 
         // Generate response based on conversation mode and personality
@@ -344,10 +350,7 @@ impl WinxChatProcessor {
 
         // Update conversation history
         {
-            let mut personality = self
-                .personality
-                .lock()
-                .map_err(|e| WinxError::DataLoadingError(format!("Mutex lock error: {}", e)))?;
+            let mut personality = self.personality.lock().await;
             personality.add_to_history(chat.message.clone(), response_message.clone());
         }
 
@@ -374,10 +377,7 @@ impl WinxChatProcessor {
     ) -> Result<String> {
         // Check for easter eggs first
         {
-            let personality = self
-                .personality
-                .lock()
-                .map_err(|e| WinxError::DataLoadingError(format!("Mutex lock error: {}", e)))?;
+            let personality = self.personality.lock().await;
             if let Some(easter_egg) = personality.check_easter_egg(message) {
                 return Ok(easter_egg.to_string());
             }
@@ -400,10 +400,7 @@ impl WinxChatProcessor {
 
         // Add personality touches based on level
         if personality_level >= 5 {
-            let personality = self
-                .personality
-                .lock()
-                .map_err(|e| WinxError::DataLoadingError(format!("Mutex lock error: {}", e)))?;
+            let personality = self.personality.lock().await;
             response.push_str(&format!(" {}", personality.mood_emoji()));
         }
 
@@ -563,15 +560,12 @@ impl WinxChatProcessor {
     }
 
     /// Get a fun fact based on personality level
-    fn get_fun_fact(&self, personality_level: u8) -> Result<Option<&'static str>> {
+    async fn get_fun_fact(&self, personality_level: u8) -> Result<Option<&'static str>> {
         if personality_level < 6 {
             return Ok(None);
         }
 
-        let personality = self
-            .personality
-            .lock()
-            .map_err(|e| WinxError::DataLoadingError(format!("Mutex lock error: {}", e)))?;
+        let personality = self.personality.lock().await;
         personality.get_random_tip()
     }
 
@@ -628,8 +622,8 @@ pub async fn handle_tool_call(
     let response = processor.process_chat(&chat, system_info).await?;
 
     // Format response as JSON for structured output
-    serde_json::to_string_pretty(&response).map_err(|e| {
-        WinxError::SerializationError(format!("Failed to serialize Winx response: {}", e))
+    serde_json::to_string_pretty(&response).map_err(|e| WinxError::SerializationError {
+        message: Arc::new(format!("Failed to serialize response to JSON: {}", e)),
     })
 }
 

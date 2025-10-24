@@ -6,9 +6,10 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tracing::debug;
+use tokio::sync::Mutex;
+use tracing::debug; // Replace std::sync::Mutex
 
 use crate::errors::WinxError;
 
@@ -823,7 +824,7 @@ impl SharedErrorPredictor {
     }
 
     /// Record an error for future pattern recognition
-    pub fn record_error(
+    pub async fn record_error(
         &self,
         error_type: &str,
         message: &str,
@@ -831,19 +832,14 @@ impl SharedErrorPredictor {
         file_path: Option<&str>,
         directory: Option<&str>,
     ) -> Result<(), WinxError> {
-        let mut predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(Arc::new(format!(
-                "Failed to lock error predictor: {}",
-                e
-            )))
-        })?;
+        let mut predictor = self.inner.lock().await;
 
         predictor.record_error(error_type, message, command, file_path, directory);
         Ok(())
     }
 
     /// Record a WinxError for future pattern recognition
-    pub fn record_winx_error(
+    pub async fn record_winx_error(
         &self,
         error: &WinxError,
         command: Option<&str>,
@@ -884,12 +880,12 @@ impl SharedErrorPredictor {
             WinxError::ResourceAllocationError { .. } => "resource_allocation",
             WinxError::IoError(_) => "io_error",
             WinxError::ApiError { message: _ } => "api_error",
-            WinxError::NetworkError(_) => "network_error",
-            WinxError::ConfigurationError(_) => "configuration_error",
-            WinxError::ParseError(_) => "parse_error",
-            WinxError::InvalidInput(_) => "invalid_input",
-            WinxError::FileError(_) => "file_error",
-            WinxError::AIError(_) => "ai_error",
+            WinxError::NetworkError { message: _ } => "network_error",
+            WinxError::ConfigurationError { message: _ } => "configuration_error",
+            WinxError::ParseError { message: _ } => "parse_error",
+            WinxError::InvalidInput { message: _ } => "invalid_input",
+            WinxError::FileError { message: _ } => "file_error",
+            WinxError::AIError { message: _ } => "ai_error",
         };
 
         let message = format!("{}", error);
@@ -907,33 +903,29 @@ impl SharedErrorPredictor {
             file_path.as_deref(),
             directory,
         )
+        .await
     }
 
     /// Predict potential errors for a command
-    pub fn predict_command_errors(&self, command: &str) -> Result<Vec<ErrorPrediction>, WinxError> {
-        let predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(Arc::new(format!(
-                "Failed to lock error predictor: {}",
-                e
-            )))
-        })?;
-
+    pub async fn predict_command_errors(
+        &self,
+        command: &str,
+    ) -> Result<Vec<ErrorPrediction>, WinxError> {
+        let predictor = self.inner.lock().await;
         Ok(predictor.predict_command_errors(command))
     }
 
     /// Predict potential errors for a file operation
-    pub fn predict_file_errors(
+    pub async fn predict_file_errors(
         &self,
         file_path: &str,
         operation: &str,
     ) -> Result<Vec<ErrorPrediction>, WinxError> {
-        let predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(Arc::new(format!(
-                "Failed to lock error predictor: {}",
-                e
-            )))
-        })?;
+        let predictor = self.inner.lock().await;
 
-        Ok(predictor.predict_file_errors(file_path, operation))
+        // Directly use the predictor to call predict_file_errors
+        let predictions = predictor.predict_file_errors(file_path, operation);
+
+        Ok(predictions)
     }
 }

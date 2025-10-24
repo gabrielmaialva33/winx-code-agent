@@ -9,9 +9,10 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::task;
-use tracing::{debug, error, info, instrument, trace, warn};
+use tracing::{debug, error, info, instrument, trace, warn}; // Replace std::sync::Mutex
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, FileWhitelistData};
@@ -249,15 +250,15 @@ impl SearchReplaceHelper {
                 });
 
             // Create a more detailed error message
-            let error_message = format!(
-                "Search block {} of {} not found in content:\n```\n{}\n```\n\n{}\n\nThis might be due to:\n- Mismatched whitespace or line endings\n- Different indentation or formatting\n- The code has been significantly changed\n- Case sensitivity differences\n\nConsider using percentage_to_change > 50 to replace the entire file instead.",
-                i + 1,
-                total_blocks,
-                search.trim(),
-                suggestion
-            );
-
-            return Err(WinxError::SearchBlockNotFound(error_message));
+            return Err(WinxError::SearchBlockNotFound {
+                message: Arc::new(format!(
+                    "Search block {} of {} not found in content:\n```\n{}\n```\n\n{}\n\nThis might be due to:\n- Mismatched whitespace or line endings\n- Different indentation or formatting\n- The code has been significantly changed\n- Case sensitivity differences\n\nConsider using percentage_to_change > 50 to replace the entire file instead.",
+                    i + 1,
+                    total_blocks,
+                    search.trim(),
+                    suggestion
+                )),
+            });
         }
 
         Ok(content)
@@ -274,9 +275,9 @@ impl SearchReplaceHelper {
         let matcher = match &mut self.fuzzy_matcher {
             Some(matcher) => matcher,
             None => {
-                return Err(WinxError::SearchBlockNotFound(
-                    "Fuzzy matching not available".to_string(),
-                ));
+                return Err(WinxError::SearchBlockNotFound {
+                    message: Arc::new("Fuzzy matcher not available".to_string()),
+                });
             }
         };
 
@@ -284,9 +285,9 @@ impl SearchReplaceHelper {
         let matches = matcher.find_matches(search, content);
 
         if matches.is_empty() {
-            return Err(WinxError::SearchBlockNotFound(
-                "No fuzzy matches found for search block".to_string(),
-            ));
+            return Err(WinxError::SearchBlockNotFound {
+                message: Arc::new("No fuzzy matches found for search block".to_string()),
+            });
         }
 
         // Find highest confidence match
@@ -330,14 +331,18 @@ impl SearchReplaceHelper {
                 "Found potential match with high confidence ({confidence_percent}%) but automatic replacement is disabled.\n\n{}\n\nTo enable automatic fixing with high-confidence matches, set auto_apply_fuzzy_fixes=true.",
                 match_suggestions
             );
-            Err(WinxError::SearchBlockNotFound(error_message))
+            Err(WinxError::SearchBlockNotFound {
+                message: Arc::new(error_message),
+            })
         } else {
             // Low confidence match
             let error_message = format!(
                 "Found potential match but confidence is too low ({confidence_percent}%).\n\n{}",
                 match_suggestions
             );
-            Err(WinxError::SearchBlockNotFound(error_message))
+            Err(WinxError::SearchBlockNotFound {
+                message: Arc::new(error_message),
+            })
         }
     }
 
@@ -709,6 +714,7 @@ impl MatchAnalysis {
                 "Consider adding more context before and after this block to make the match unique.".to_string(),
                 "Include additional surrounding lines in your search block.".to_string(),
                 "Use more specific content that uniquely identifies the location to change.".to_string(),
+                "Break large changes into smaller, more specific blocks".to_string(),
             ]);
 
             return Err(WinxError::SearchBlockAmbiguous {
@@ -870,7 +876,7 @@ impl SearchReplaceSyntaxError {
 
         if !self.suggestions.is_empty() {
             msg.push_str("\nSuggestions:\n");
-            for suggestion in &self.suggestions {
+            for suggestion in self.suggestions.as_ref() {
                 if suggestion.is_empty() {
                     msg.push('\n');
                 } else {
@@ -1331,14 +1337,16 @@ fn check_path_allowed(file_path: &str, bash_state: &BashState) -> Result<()> {
                 }
             }
 
-            Err(WinxError::CommandNotAllowed(Arc::new(format!(
-                "Updating file {} not allowed in current mode. Doesn't match allowed globs: {:?}",
-                file_path, globs
-            ))))
+            Err(WinxError::CommandNotAllowed {
+                message: Arc::new(format!(
+                    "Updating file {} not allowed in current mode. Doesn't match allowed globs: {:?}",
+                    file_path, globs
+                )),
+            })
         }
-        _ => Err(WinxError::CommandNotAllowed(Arc::new(
-            "No file paths are allowed in current mode".to_string(),
-        ))),
+        _ => Err(WinxError::CommandNotAllowed {
+            message: Arc::new("No file paths are allowed in current mode".to_string()),
+        }),
     }
 }
 
@@ -1418,18 +1426,14 @@ pub async fn handle_tool_call(
         let bash_state_guard =
             bash_state_arc
                 .lock()
+                .await
                 .map_err(|e| WinxError::BashStateLockError {
                     message: Arc::new(format!("Failed to lock bash state: {}", e)),
                 })?;
 
-        // Ensure bash state is initialized
-        let bash_state = match &*bash_state_guard {
-            Some(state) => state,
-            None => {
-                error!("BashState not initialized");
-                return Err(WinxError::BashStateNotInitialized);
-            }
-        };
+        let bash_state = bash_state_guard
+            .as_ref()
+            .ok_or(WinxError::BashStateNotInitialized)?;
 
         // Extract needed data
         chat_id = bash_state.current_chat_id.clone();
@@ -1441,10 +1445,12 @@ pub async fn handle_tool_call(
                 "Chat ID mismatch: expected {}, got {}",
                 chat_id, file_write_or_edit.chat_id
             );
-            return Err(WinxError::ChatIdMismatch(Arc::new(format!(
-                "Error: No saved bash state found for chat ID \"{}\". Please initialize first with this ID.",
-                file_write_or_edit.chat_id
-            ))));
+            return Err(WinxError::ChatIdMismatch {
+                message: Arc::new(format!(
+                    "Error: No saved bash state found for chat ID \"{}\". Please initialize first with this ID.",
+                    file_write_or_edit.chat_id
+                )),
+            });
         }
 
         // Expand the path
@@ -1467,14 +1473,18 @@ pub async fn handle_tool_call(
             if !bash_state.is_file_edit_allowed(&file_path) {
                 let violation_message =
                     bash_state.get_mode_violation_message("file editing", &file_path);
-                return Err(WinxError::CommandNotAllowed(violation_message));
+                return Err(WinxError::CommandNotAllowed {
+                    message: Arc::new(violation_message),
+                });
             }
         } else {
             // New file, check write permissions
             if !bash_state.is_file_write_allowed(&file_path) {
                 let violation_message =
                     bash_state.get_mode_violation_message("file writing", &file_path);
-                return Err(WinxError::CommandNotAllowed(violation_message));
+                return Err(WinxError::CommandNotAllowed {
+                    message: Arc::new(violation_message),
+                });
             }
         }
     }
@@ -1491,11 +1501,15 @@ pub async fn handle_tool_call(
     let mut potential_errors = Vec::new();
 
     // Get a mutex guard for the BashState
-    let mut bash_state_guard = bash_state_arc
-        .lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+    let mut bash_state_guard =
+        bash_state_arc
+            .lock()
+            .await
+            .map_err(|e| WinxError::BashStateLockError {
+                message: Arc::new(format!("Failed to lock bash state: {}", e)),
+            })?;
 
-    if let Some(bash_state) = bash_state_guard.as_mut() {
+    if let Some(bash_state) = bash_state_guard.as_ref() {
         // Enhanced file access validation for existing files
         if Path::new(&file_path).exists() {
             bash_state.validate_file_access(Path::new(&file_path))?;
@@ -1680,10 +1694,9 @@ pub async fn handle_tool_call(
             );
 
             // Record the error for future prediction
-            let bash_state_guard = bash_state_arc.lock().ok();
-            if let Some(guard) = bash_state_guard
-                && let Some(bash_state) = guard.as_ref()
-                && let Err(record_err) = bash_state.error_predictor.record_error(
+            let bash_state_guard = bash_state_arc.lock().await;
+            if let Some(bash_state) = bash_state_guard.as_ref() {
+                bash_state.error_predictor.record_error(
                     "file_write",
                     &format!("Failed to write file: {}", e),
                     None,
@@ -1695,9 +1708,7 @@ pub async fn handle_tool_call(
                             .to_string_lossy()
                             .as_ref(),
                     ),
-                )
-            {
-                warn!("Failed to record error for prediction: {}", record_err);
+                )?;
             }
 
             return Err(WinxError::FileWriteError {

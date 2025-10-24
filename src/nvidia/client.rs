@@ -97,7 +97,9 @@ impl NvidiaClient {
         headers.insert(
             header::AUTHORIZATION,
             header::HeaderValue::from_str(&format!("Bearer {}", config.api_key)).map_err(|e| {
-                WinxError::ConfigurationError(format!("Invalid API key format: {}", e))
+                WinxError::ConfigurationError {
+                    message: Arc::new(e.to_string()),
+                }
             })?,
         );
         headers.insert(
@@ -117,7 +119,9 @@ impl NvidiaClient {
             .timeout(Duration::from_secs(config.timeout_seconds))
             .default_headers(headers)
             .build()
-            .map_err(|e| WinxError::NetworkError(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| WinxError::NetworkError {
+                message: Arc::new(e.to_string()),
+            })?;
 
         info!(
             "NVIDIA client initialized with base URL: {}",
@@ -188,7 +192,9 @@ impl NvidiaClient {
             }
         }
 
-        Err(WinxError::NetworkError(ALL_RETRIES_FAILED.to_string()))
+        Err(WinxError::NetworkError {
+            message: Arc::new(ALL_RETRIES_FAILED.to_string()),
+        })
     }
 
     /// Make the actual HTTP request
@@ -204,7 +210,9 @@ impl NvidiaClient {
             .json(request)
             .send()
             .await
-            .map_err(|e| WinxError::NetworkError(format!("Request failed: {}", e)))?;
+            .map_err(|e| WinxError::NetworkError {
+                message: Arc::new(format!("Request failed: {}", e)),
+            })?;
 
         self.handle_response(response).await
     }
@@ -212,31 +220,33 @@ impl NvidiaClient {
     /// Handle HTTP response and convert to ChatCompletionResponse
     async fn handle_response(&self, response: Response) -> Result<ChatCompletionResponse> {
         let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| WinxError::NetworkError(format!("Failed to read response: {}", e)))?;
+        let response_text = response.text().await.map_err(|e| WinxError::NetworkError {
+            message: Arc::new(format!("Failed to read response: {}", e)),
+        })?;
 
         if !status.is_success() {
             // Try to parse as API error
             if let Ok(api_error) = serde_json::from_str::<ApiError>(&response_text) {
-                return Err(WinxError::ApiError(format!(
-                    "NVIDIA API error ({}): {}",
-                    status, api_error.error.message
-                )));
+                return Err(WinxError::ApiError {
+                    message: Arc::new(format!(
+                        "NVIDIA API error ({}): {}",
+                        status, api_error.error.message
+                    )),
+                });
             }
 
-            return Err(WinxError::ApiError(format!(
-                "HTTP error {}: {}",
-                status, response_text
-            )));
+            return Err(WinxError::ApiError {
+                message: Arc::new(format!("HTTP error {}: {}", status, response_text)),
+            });
         }
 
         serde_json::from_str::<ChatCompletionResponse>(&response_text).map_err(|e| {
-            WinxError::ParseError(format!(
-                "Failed to parse response: {}. Response body: {}",
-                e, response_text
-            ))
+            WinxError::ParseError {
+                message: Arc::new(format!(
+                    "Failed to parse response: {}. Response body: {}",
+                    e, response_text
+                )),
+            }
         })
     }
 
@@ -252,7 +262,10 @@ impl NvidiaClient {
 
         let system_prompt = ANALYZE_SYSTEM_PROMPT;
 
-        let user_prompt = format!(ANALYZE_CODE_PROMPT, language_context, code);
+        let user_prompt = format!(
+            "Analyze this code{}:\n\n```\n{}\n```",
+            language_context, code
+        );
 
         let request = ChatCompletionRequest {
             model: NvidiaModel::for_task(TaskType::CodeAnalysis).as_str(),
@@ -284,7 +297,9 @@ impl NvidiaClient {
                 })
             }
         } else {
-            Err(WinxError::ApiError(EMPTY_RESPONSE.to_string()))
+            Err(WinxError::ApiError {
+                message: Arc::new(EMPTY_RESPONSE.to_string()),
+            })
         }
     }
 
@@ -296,16 +311,20 @@ impl NvidiaClient {
         let language_context = request
             .language
             .as_ref()
-            .map(|l| format!(GENERATE_LANGUAGE_CONTEXT, l))
+            .map(|l| format!(" in {}", l))
             .unwrap_or_default();
 
         let context_info = request
             .context
             .as_ref()
-            .map(|c| format!(GENERATE_CONTEXT_INFO, c))
+            .map(|c| format!("\n\nContext: {}", c))
             .unwrap_or_default();
 
-        let system_prompt = format!(GENERATE_SYSTEM_PROMPT, language_context, context_info);
+        let system_prompt = format!(
+            "You are an expert software developer. Generate high-quality code{} based on the user's request. \
+Provide clean, well-documented, and efficient code. Always include explanatory comments for complex logic.{}\n\nReturn only the code without any markdown formatting or explanations.",
+            language_context, context_info
+        );
 
         let chat_request = ChatCompletionRequest {
             model: NvidiaModel::for_task(TaskType::CodeGeneration).as_str(),
@@ -329,7 +348,9 @@ impl NvidiaClient {
                 tests: None,
             })
         } else {
-            Err(WinxError::ApiError(EMPTY_RESPONSE.to_string()))
+            Err(WinxError::ApiError {
+                message: Arc::new(EMPTY_RESPONSE.to_string()),
+            })
         }
     }
 

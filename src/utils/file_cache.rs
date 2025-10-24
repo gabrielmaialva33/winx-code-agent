@@ -4,14 +4,14 @@
 //! allowing for more efficient file operations when the same file is accessed
 //! multiple times.
 
+use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
-
-use anyhow::{Context, Result};
-use sha2::{Digest, Sha256};
+use tokio::sync::RwLock;
 use tracing::{debug, info, trace, warn};
 
 use crate::utils::repo::WorkspaceStats;
@@ -100,15 +100,16 @@ impl FileStats {
 
         // Apply a recency factor if we have access times
         if let Some(last_access) = self.last_accessed
-            && let Ok(duration) = last_access.elapsed() {
-                // Reduce importance for files not accessed recently
-                // But never below 20% of its base value
-                let seconds = duration.as_secs() as f64;
-                let recency_factor = (1.0 / (1.0 + seconds / 86400.0)).max(0.2); // 86400 = seconds in a day
+            && let Ok(duration) = last_access.elapsed()
+        {
+            // Reduce importance for files not accessed recently
+            // But never below 20% of its base value
+            let seconds = duration.as_secs() as f64;
+            let recency_factor = (1.0 / (1.0 + seconds / 86400.0)).max(0.2); // 86400 = seconds in a day
 
-                self.importance_score = base_score * recency_factor;
-                return;
-            }
+            self.importance_score = base_score * recency_factor;
+            return;
+        }
 
         // Default case if we can't calculate recency
         self.importance_score = base_score;
@@ -117,9 +118,10 @@ impl FileStats {
     /// Get recent access flag - true if accessed in the last hour
     pub fn is_recently_accessed(&self) -> bool {
         if let Some(last_access) = self.last_accessed
-            && let Ok(duration) = last_access.elapsed() {
-                return duration < Duration::from_secs(3600); // 1 hour
-            }
+            && let Ok(duration) = last_access.elapsed()
+        {
+            return duration < Duration::from_secs(3600); // 1 hour
+        }
 
         false
     }
@@ -511,53 +513,44 @@ impl FileCache {
     }
 
     /// Configure memory budget for content caching (in bytes)
-    pub fn set_memory_budget(&self, budget_bytes: u64) {
-        if let Ok(mut memory_budget) = self.memory_budget.write() {
-            *memory_budget = budget_bytes;
-            debug!("File cache memory budget set to {} bytes", budget_bytes);
-        }
+    pub async fn set_memory_budget(&self, budget_bytes: u64) {
+        let mut memory_budget = self.memory_budget.write().await;
+        *memory_budget = budget_bytes;
+        debug!("File cache memory budget set to {} bytes", budget_bytes);
     }
 
     /// Get current memory usage (in bytes)
-    pub fn get_memory_usage(&self) -> u64 {
-        if let Ok(memory_usage) = self.memory_usage.read() {
-            *memory_usage
-        } else {
-            0
-        }
+    pub async fn get_memory_usage(&self) -> u64 {
+        let memory_usage = self.memory_usage.read().await;
+        *memory_usage
     }
 
     /// Pin a file in memory to prevent eviction
-    pub fn pin_file(&self, path: &Path) {
-        if let Ok(mut entries) = self.entries.write()
-            && let Some(entry) = entries.get_mut(path) {
-                entry.is_pinned = true;
-            }
-
-        if let Ok(mut pinned) = self.pinned_files.write() {
-            pinned.insert(path.to_path_buf());
+    pub async fn pin_file(&self, path: &Path) {
+        let mut entries = self.entries.write().await;
+        if let Some(entry) = entries.get_mut(path) {
+            entry.is_pinned = true;
         }
+
+        let mut pinned = self.pinned_files.write().await;
+        pinned.insert(path.to_path_buf());
     }
 
     /// Unpin a file, allowing it to be evicted
-    pub fn unpin_file(&self, path: &Path) {
-        if let Ok(mut entries) = self.entries.write()
-            && let Some(entry) = entries.get_mut(path) {
-                entry.is_pinned = false;
-            }
-
-        if let Ok(mut pinned) = self.pinned_files.write() {
-            pinned.remove(path);
+    pub async fn unpin_file(&self, path: &Path) {
+        let mut entries = self.entries.write().await;
+        if let Some(entry) = entries.get_mut(path) {
+            entry.is_pinned = false;
         }
+
+        let mut pinned = self.pinned_files.write().await;
+        pinned.remove(path);
     }
 
     /// Check if a file is pinned
-    pub fn is_file_pinned(&self, path: &Path) -> bool {
-        if let Ok(pinned) = self.pinned_files.read() {
-            pinned.contains(path)
-        } else {
-            false
-        }
+    pub async fn is_file_pinned(&self, path: &Path) -> bool {
+        let pinned = self.pinned_files.read().await;
+        pinned.contains(path)
     }
 
     /// Initialize workspace statistics
@@ -618,7 +611,7 @@ impl FileCache {
     }
 
     /// Remove expired entries from the cache
-    pub fn cleanup(&self) {
+    pub async fn cleanup(&self) {
         // Track removed entries for memory accounting
         let mut memory_freed = 0;
         let mut removed_paths = Vec::new();
@@ -648,16 +641,18 @@ impl FileCache {
 
         // Update memory usage
         if memory_freed > 0
-            && let Ok(mut usage) = self.memory_usage.write() {
-                *usage = usage.saturating_sub(memory_freed);
-                debug!("Freed {} bytes from expired cache entries", memory_freed);
-            }
+            && let Ok(mut usage) = self.memory_usage.write()
+        {
+            *usage = usage.saturating_sub(memory_freed);
+            debug!("Freed {} bytes from expired cache entries", memory_freed);
+        }
 
         // Update access order list
         if !removed_paths.is_empty()
-            && let Ok(mut access_order) = self.access_order.write() {
-                access_order.retain(|path| !removed_paths.contains(path));
-            }
+            && let Ok(mut access_order) = self.access_order.write()
+        {
+            access_order.retain(|path| !removed_paths.contains(path));
+        }
     }
 
     /// Check memory pressure and perform eviction if needed
@@ -758,9 +753,10 @@ impl FileCache {
                     if let Ok(budget) = self.memory_budget.read() {
                         let target_usage = (*budget * 7) / 10;
                         if let Ok(usage) = self.memory_usage.read()
-                            && *usage > target_usage {
-                                memory_to_free = *usage - target_usage;
-                            }
+                            && *usage > target_usage
+                        {
+                            memory_to_free = *usage - target_usage;
+                        }
                     }
                 } else if pressure_level == 2 {
                     unload_content = true;
@@ -920,13 +916,15 @@ impl FileCache {
     pub fn get_metadata(&self, path: &Path) -> Result<fs::Metadata> {
         // Check if we have a cached entry
         if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path) {
-                // Check if the file has been modified
-                if let Ok(metadata) = fs::metadata(path)
-                    && metadata.modified()? == entry.last_modified {
-                        return Ok(metadata);
-                    }
+            && let Some(entry) = entries.get(path)
+        {
+            // Check if the file has been modified
+            if let Ok(metadata) = fs::metadata(path)
+                && metadata.modified()? == entry.last_modified
+            {
+                return Ok(metadata);
             }
+        }
 
         // Not in cache or modified, get fresh metadata
         fs::metadata(path).with_context(|| format!("Failed to get metadata for {}", path.display()))
@@ -937,13 +935,15 @@ impl FileCache {
     pub fn calculate_hash(&self, path: &Path) -> Result<String> {
         // Check if we have a cached entry with content
         if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path) {
-                // Check if the file has been modified
-                if let Ok(metadata) = fs::metadata(path)
-                    && metadata.modified()? == entry.last_modified {
-                        return Ok(entry.hash.clone());
-                    }
+            && let Some(entry) = entries.get(path)
+        {
+            // Check if the file has been modified
+            if let Ok(metadata) = fs::metadata(path)
+                && metadata.modified()? == entry.last_modified
+            {
+                return Ok(entry.hash.clone());
             }
+        }
 
         // Not in cache or modified, calculate hash
         let content = fs::read(path)
@@ -974,34 +974,36 @@ impl FileCache {
                         // Check if the file has been modified
                         if let Ok(metadata) = fs::metadata(path)
                             && let Ok(last_mod) = metadata.modified()
-                                && last_mod == entry.last_modified {
-                                    // Return cached content if available
-                                    if let Some(content) = &entry.content {
-                                        trace!("Returning cached content for {}", path.display());
-                                        // Update access time and LRU order in a background thread
-                                        let cache_ref = self.clone();
-                                        let path_copy = path.to_path_buf();
-                                        std::thread::spawn(move || {
-                                            // Update LRU order first (read lock)
-                                            cache_ref.update_lru_order(&path_copy);
+                            && last_mod == entry.last_modified
+                        {
+                            // Return cached content if available
+                            if let Some(content) = &entry.content {
+                                trace!("Returning cached content for {}", path.display());
+                                // Update access time and LRU order in a background thread
+                                let cache_ref = self.clone();
+                                let path_copy = path.to_path_buf();
+                                std::thread::spawn(move || {
+                                    // Update LRU order first (read lock)
+                                    cache_ref.update_lru_order(&path_copy);
 
-                                            // Then update entry (write lock)
-                                            if let Ok(mut entries) = cache_ref.entries.write()
-                                                && let Some(entry) = entries.get_mut(&path_copy) {
-                                                    entry.touch();
-                                                }
-                                        });
-
-                                        return Ok(content.clone());
-                                    } else if !under_pressure {
-                                        // Content not cached but entry exists - try loading
-                                        debug!(
-                                            "Content not cached for {}, loading from disk",
-                                            path.display()
-                                        );
-                                        // Fall through to load from disk but use existing entry
+                                    // Then update entry (write lock)
+                                    if let Ok(mut entries) = cache_ref.entries.write()
+                                        && let Some(entry) = entries.get_mut(&path_copy)
+                                    {
+                                        entry.touch();
                                     }
-                                }
+                                });
+
+                                return Ok(content.clone());
+                            } else if !under_pressure {
+                                // Content not cached but entry exists - try loading
+                                debug!(
+                                    "Content not cached for {}, loading from disk",
+                                    path.display()
+                                );
+                                // Fall through to load from disk but use existing entry
+                            }
+                        }
                     }
                     Ok(None)
                 }
@@ -1030,7 +1032,7 @@ impl FileCache {
                     "Failed to read file {}: {}",
                     path.display(),
                     e
-                ))
+                ));
             }
         };
 
@@ -1143,7 +1145,7 @@ impl FileCache {
                                 loading_strategy,
                                 last_content_access: Instant::now(),
                                 access_count_since_load: 1,
-                                is_pinned: self.is_file_pinned(path),
+                                is_pinned: self.is_file_pinned(path).await,
                                 fully_read: false,
                                 read_ranges: Vec::new(),
                                 total_lines,
@@ -1423,9 +1425,10 @@ impl FileCache {
 
         // Update access order list to remove evicted entries
         if !removed_paths.is_empty()
-            && let Ok(mut access_order) = self.access_order.write() {
-                access_order.retain(|path| !removed_paths.contains(path));
-            }
+            && let Ok(mut access_order) = self.access_order.write()
+        {
+            access_order.retain(|path| !removed_paths.contains(path));
+        }
     }
 
     /// Record that a range of lines has been read from a file
@@ -1487,9 +1490,10 @@ impl FileCache {
     pub fn record_file_edit(&self, path: &Path) -> Result<()> {
         // Update the cache entry
         if let Ok(mut entries) = self.entries.write()
-            && let Some(entry) = entries.get_mut(path) {
-                entry.record_edit();
-            }
+            && let Some(entry) = entries.get_mut(path)
+        {
+            entry.record_edit();
+        }
 
         // Update workspace stats
         self.update_workspace_stats_file_edit(path);
@@ -1501,9 +1505,10 @@ impl FileCache {
     pub fn record_file_write(&self, path: &Path) -> Result<()> {
         // Update the cache entry
         if let Ok(mut entries) = self.entries.write()
-            && let Some(entry) = entries.get_mut(path) {
-                entry.record_write();
-            }
+            && let Some(entry) = entries.get_mut(path)
+        {
+            entry.record_write();
+        }
 
         // Update workspace stats
         self.update_workspace_stats_file_edit(path);
@@ -1516,9 +1521,10 @@ impl FileCache {
         let path_str = path.to_string_lossy().to_string();
 
         if let Ok(mut ws_guard) = self.workspace_stats.write()
-            && let Some(stats) = ws_guard.as_mut() {
-                stats.record_file_access(&path_str);
-            }
+            && let Some(stats) = ws_guard.as_mut()
+        {
+            stats.record_file_access(&path_str);
+        }
     }
 
     /// Update workspace stats with file edit
@@ -1526,17 +1532,19 @@ impl FileCache {
         let path_str = path.to_string_lossy().to_string();
 
         if let Ok(mut ws_guard) = self.workspace_stats.write()
-            && let Some(stats) = ws_guard.as_mut() {
-                stats.record_file_edit(&path_str);
-            }
+            && let Some(stats) = ws_guard.as_mut()
+        {
+            stats.record_file_edit(&path_str);
+        }
     }
 
     /// Get file statistics for a particular file
     pub fn get_file_stats(&self, path: &Path) -> Option<FileStats> {
         if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path) {
-                return Some(entry.stats.clone());
-            }
+            && let Some(entry) = entries.get(path)
+        {
+            return Some(entry.stats.clone());
+        }
 
         None
     }
@@ -1570,9 +1578,10 @@ impl FileCache {
     #[allow(dead_code)]
     pub fn is_file_fully_read(&self, path: &Path) -> bool {
         if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path) {
-                return entry.fully_read;
-            }
+            && let Some(entry) = entries.get(path)
+        {
+            return entry.fully_read;
+        }
 
         false
     }
@@ -1581,9 +1590,10 @@ impl FileCache {
     #[allow(dead_code)]
     pub fn is_file_read_enough(&self, path: &Path) -> bool {
         if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path) {
-                return entry.is_read_enough();
-            }
+            && let Some(entry) = entries.get(path)
+        {
+            return entry.is_read_enough();
+        }
 
         false
     }
@@ -1591,20 +1601,22 @@ impl FileCache {
     /// Get the unread ranges for a file
     pub fn get_unread_ranges(&self, path: &Path) -> Vec<(usize, usize)> {
         if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path) {
-                return entry.get_unread_ranges();
-            }
+            && let Some(entry) = entries.get(path)
+        {
+            return entry.get_unread_ranges();
+        }
 
         if let Ok(metadata) = fs::metadata(path)
-            && metadata.is_file() {
-                // File exists but not in cache, consider the whole file unread
-                if let Ok(content) = fs::read(path) {
-                    let total_lines = count_lines(&content);
-                    if total_lines > 0 {
-                        return vec![(1, total_lines)];
-                    }
+            && metadata.is_file()
+        {
+            // File exists but not in cache, consider the whole file unread
+            if let Ok(content) = fs::read(path) {
+                let total_lines = count_lines(&content);
+                if total_lines > 0 {
+                    return vec![(1, total_lines)];
                 }
             }
+        }
 
         Vec::new()
     }
@@ -1614,10 +1626,11 @@ impl FileCache {
     pub fn has_file_changed(&self, path: &Path) -> Result<bool> {
         if let Ok(entries) = self.entries.read()
             && let Some(entry) = entries.get(path)
-                && let Ok(metadata) = fs::metadata(path) {
-                    let current_modified = metadata.modified()?;
-                    return Ok(current_modified != entry.last_modified);
-                }
+            && let Ok(metadata) = fs::metadata(path)
+        {
+            let current_modified = metadata.modified()?;
+            return Ok(current_modified != entry.last_modified);
+        }
 
         // Not in cache or can't get metadata, consider changed
         Ok(true)
@@ -1626,9 +1639,10 @@ impl FileCache {
     /// Get the hash for a file from the cache
     pub fn get_cached_hash(&self, path: &Path) -> Option<String> {
         if let Ok(entries) = self.entries.read()
-            && let Some(entry) = entries.get(path) {
-                return Some(entry.hash.clone());
-            }
+            && let Some(entry) = entries.get(path)
+        {
+            return Some(entry.hash.clone());
+        }
 
         None
     }
@@ -1722,7 +1736,8 @@ mod tests {
         assert_eq!(read_content, content.as_bytes());
 
         // Should be cached now
-        assert!(cache.entries.read().unwrap().contains_key(path));
+        let entries = cache.entries.read().await;
+        assert!(entries.contains_key(path));
     }
 
     #[test]
@@ -1738,7 +1753,8 @@ mod tests {
         // Record some reads
         cache.record_read_range(path, 1, 2).unwrap(); // Read lines 1-2
 
-        let entry = cache.entries.read().unwrap().get(path).unwrap().clone();
+        let entries = cache.entries.read().await;
+        let entry = entries.get(path).unwrap().clone();
         assert_eq!(entry.read_ranges, vec![(1, 2)]);
         assert!(entry.is_line_read(1));
         assert!(entry.is_line_read(2));
@@ -1747,7 +1763,8 @@ mod tests {
         // Read more lines
         cache.record_read_range(path, 4, 5).unwrap(); // Read lines 4-5
 
-        let entry = cache.entries.read().unwrap().get(path).unwrap().clone();
+        let entries = cache.entries.read().await;
+        let entry = entries.get(path).unwrap().clone();
         assert_eq!(entry.read_ranges, vec![(1, 2), (4, 5)]);
 
         // Get unread ranges
@@ -1757,7 +1774,8 @@ mod tests {
         // Read the rest
         cache.record_read_range(path, 3, 3).unwrap();
 
-        let entry = cache.entries.read().unwrap().get(path).unwrap().clone();
+        let entries = cache.entries.read().await;
+        let entry = entries.get(path).unwrap().clone();
         assert!(entry.fully_read);
 
         // No more unread ranges
@@ -1778,19 +1796,22 @@ mod tests {
         // Record some reads
         cache.record_read_range(path, 1, 2).unwrap(); // Read lines 1-2
 
-        let entry = cache.entries.read().unwrap().get(path).unwrap().clone();
+        let entries = cache.entries.read().await;
+        let entry = entries.get(path).unwrap().clone();
         assert_eq!(entry.read_percentage(), 40.0); // 2/5 = 40%
 
         // Read more lines
         cache.record_read_range(path, 4, 5).unwrap(); // Read lines 4-5
 
-        let entry = cache.entries.read().unwrap().get(path).unwrap().clone();
+        let entries = cache.entries.read().await;
+        let entry = entries.get(path).unwrap().clone();
         assert_eq!(entry.read_percentage(), 80.0); // 4/5 = 80%
 
         // Read everything
         cache.record_read_range(path, 1, 5).unwrap();
 
-        let entry = cache.entries.read().unwrap().get(path).unwrap().clone();
+        let entries = cache.entries.read().await;
+        let entry = entries.get(path).unwrap().clone();
         assert_eq!(entry.read_percentage(), 100.0);
     }
 

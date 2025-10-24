@@ -1,4 +1,3 @@
-use std::fmt;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -210,7 +209,9 @@ pub type Result<T> = std::result::Result<T, WinxError>;
 /// Conversion from anyhow::Error to WinxError
 impl From<anyhow::Error> for WinxError {
     fn from(error: anyhow::Error) -> Self {
-        WinxError::CommandExecutionError(Arc::new(format!("{}", error)))
+        WinxError::CommandExecutionError {
+            message: Arc::new(error.to_string()),
+        }
     }
 }
 
@@ -234,28 +235,41 @@ impl AnyhowErrorExt for anyhow::Error {
 
         // Classify based on error content
         if root_cause.contains("command not found") {
-            WinxError::CommandExecutionError(Arc::new(format!("Command not found: {}", self)))
+            WinxError::CommandExecutionError {
+                message: Arc::new(err_string),
+            }
         } else if root_cause.contains("permission denied") {
-            WinxError::CommandExecutionError(Arc::new(format!("Permission denied: {}", self)))
+            WinxError::CommandExecutionError {
+                message: Arc::new(err_string),
+            }
         } else if err_string.contains("bash state") {
-            WinxError::BashStateLockError(Arc::new(err_string))
+            WinxError::BashStateLockError {
+                message: Arc::new(err_string),
+            }
         } else if err_string.contains("workspace") || err_string.contains("directory") {
-            WinxError::WorkspacePathError(Arc::new(err_string))
+            WinxError::WorkspacePathError {
+                message: err_string,
+            }
         } else if err_string.contains("command") {
-            WinxError::CommandExecutionError(Arc::new(err_string))
+            WinxError::CommandExecutionError {
+                message: Arc::new(err_string),
+            }
         } else if err_string.contains("null") || err_string.contains("undefined") {
             WinxError::NullValueError {
                 field: Arc::new("unknown".to_string()),
             }
         } else if err_string.contains("parse") || err_string.contains("deserializ") {
-            WinxError::DeserializationError(Arc::new(err_string))
+            WinxError::DeserializationError {
+                message: Arc::new(err_string),
+            }
         } else if err_string.contains("serialize") {
-            WinxError::SerializationError(Arc::new(err_string))
+            WinxError::SerializationError {
+                message: Arc::new(err_string),
+            }
         } else {
-            WinxError::ShellInitializationError(Arc::new(format!(
-                "{}: {}",
-                default_message, err_string
-            )))
+            WinxError::ShellInitializationError {
+                message: format!("{}: {}", default_message, err_string),
+            }
         }
     }
 }
@@ -271,8 +285,8 @@ pub fn with_suggestion(error: WinxError, suggestion: &str) -> WinxError {
             )),
             suggestion: Arc::new(suggestion.to_string()),
         },
-        WinxError::DeserializationError(msg) => WinxError::RecoverableSuggestionError {
-            message: Arc::new(format!("Failed to parse input: {}", msg)),
+        WinxError::DeserializationError { message } => WinxError::RecoverableSuggestionError {
+            message: Arc::new(format!("Failed to parse input: {}", message)),
             suggestion: Arc::new(suggestion.to_string()),
         },
         WinxError::NullValueError { field } => WinxError::RecoverableSuggestionError {
@@ -433,9 +447,9 @@ impl ErrorRecovery {
     /// Check if an error is potentially recoverable
     pub fn is_recoverable(err: &WinxError) -> bool {
         match err {
-            WinxError::BashStateLockError(_) => true,
+            WinxError::BashStateLockError { .. } => true,
             WinxError::FileAccessError { .. } => true,
-            WinxError::CommandExecutionError(msg) if msg.contains("timed out") => true,
+            WinxError::CommandExecutionError { message } if message.contains("timed out") => true,
             WinxError::RecoverableSuggestionError { .. } => true,
             _ => false,
         }

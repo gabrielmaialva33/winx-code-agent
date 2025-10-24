@@ -8,14 +8,15 @@ use rand::Rng;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn}; // Replace std::sync::Mutex
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, CommandState};
-use crate::state::terminal::render_terminal_output;
+use crate::state::terminal::incremental_text; // Removed render_terminal_output as it doesn't exist
 use crate::types::{BashCommand, BashCommandAction, SpecialKey};
 use crate::utils::command_safety::{CommandContext, CommandSafety};
 
@@ -161,10 +162,9 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
     if !screen_start.status.success() {
         let stderr = String::from_utf8_lossy(&screen_start.stderr).to_string();
         error!("Failed to start screen session: {}", stderr);
-        return Err(WinxError::CommandExecutionError(format!(
-            "Failed to start screen session: {}",
-            stderr
-        )));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("Failed to start screen session".to_string()),
+        });
     }
 
     // Wait briefly for screen to initialize
@@ -298,7 +298,7 @@ async fn execute_screen_command(bash_state: &mut BashState, command: &str) -> Re
         To reattach: screen -r {}\n\
         To terminate: screen -X -S {} quit\n\n\
         Note: Background process will be automatically terminated if still running after 1 hour.\n\n\
-        Current screen sessions:\n{}\n",
+        Current screen sessions:\n{}",
         screen_name, result, screen_name, screen_name, screen_list
     );
 
@@ -499,10 +499,9 @@ async fn send_to_screen(input: &str, screen_name: &str, is_special: bool) -> Res
 
     if !screen_list.contains(screen_name) {
         warn!("Screen session '{}' not found", screen_name);
-        return Err(WinxError::CommandExecutionError(format!(
-            "No running command or screen session '{}' not found",
-            screen_name
-        )));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("Screen session not found".to_string()),
+        });
     }
 
     // Construct the stuff command
@@ -526,10 +525,9 @@ async fn send_to_screen(input: &str, screen_name: &str, is_special: bool) -> Res
     if !stuff.status.success() {
         let stderr = String::from_utf8_lossy(&stuff.stderr).to_string();
         error!("Failed to send input to screen session: {}", stderr);
-        return Err(WinxError::CommandExecutionError(format!(
-            "Failed to send input to screen session: {}",
-            stderr
-        )));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("Failed to send input to screen session".to_string()),
+        });
     }
 
     // Give a small delay to allow the screen session to process the input
@@ -610,49 +608,36 @@ pub async fn handle_tool_call(
 ) -> Result<String> {
     info!("BashCommand tool called with: {:?}", bash_command);
 
-    // Check if chat_id is empty - handle this case first
     if bash_command.chat_id.is_empty() {
         error!("Empty chat_id provided in BashCommand");
-        return Err(WinxError::ChatIdMismatch(
-            "Error: No saved bash state found for chat ID \"\". Please initialize first with this ID.".to_string()
-        ));
+        return Err(WinxError::ChatIdMismatch {
+            message: Arc::new(
+                "Error: No saved bash state found for chat ID \"\". Please initialize first with this ID.".to_string(),
+            ),
+        });
     }
 
-    // We need to extract data from bash_state and make a clone to work with
-    // to avoid holding the MutexGuard across await points
-
-    // Data to extract from bash_state
-    let mut bash_state: BashState;
-
-    // Lock bash state to extract data
-    {
-        let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
-        })?;
-
-        // Ensure bash state is initialized
-        let state = match &*bash_state_guard {
-            Some(state) => state,
-            None => {
-                error!("BashState not initialized");
-                return Err(WinxError::BashStateNotInitialized);
-            }
-        };
-
-        // Clone the bash state to work with
-        bash_state = state.clone();
-    }
+    let bash_state_guard = bash_state_arc.lock().await;
+    let state = match &*bash_state_guard {
+        Some(state) => state.clone(),
+        None => {
+            error!("BashState not initialized");
+            return Err(WinxError::BashStateNotInitialized);
+        }
+    };
 
     // Verify chat ID matches
-    if bash_command.chat_id != bash_state.current_chat_id {
+    if bash_command.chat_id != state.current_chat_id {
         warn!(
             "Chat ID mismatch: expected {}, got {}",
-            bash_state.current_chat_id, bash_command.chat_id
+            state.current_chat_id, bash_command.chat_id
         );
-        return Err(WinxError::ChatIdMismatch(format!(
-            "Error: No saved bash state found for chat ID \"{}\". Please initialize first with this ID.",
-            bash_command.chat_id
-        )));
+        return Err(WinxError::ChatIdMismatch {
+            message: Arc::new(format!(
+                "Error: No saved bash state found for chat ID \"{}\". Please initialize first with this ID.",
+                bash_command.chat_id
+            )),
+        });
     }
 
     // Process the command based on action type
@@ -665,7 +650,9 @@ pub async fn handle_tool_call(
                 error!("Command '{}' not allowed in current mode", command);
                 let violation_message =
                     bash_state.get_mode_violation_message("command execution", command);
-                return Err(WinxError::CommandNotAllowed(violation_message));
+                return Err(WinxError::CommandNotAllowed {
+                    message: Arc::new(violation_message),
+                });
             }
 
             // WCGW-style command safety analysis
@@ -732,9 +719,9 @@ pub async fn handle_tool_call(
         BashCommandAction::SendText { send_text } => {
             debug!("Processing SendText action: {}", send_text);
             if send_text.is_empty() {
-                return Err(WinxError::CommandExecutionError(Arc::new(
-                    "send_text cannot be empty".to_string(),
-                )));
+                return Err(WinxError::CommandExecutionError {
+                    message: Arc::new("Empty text input".to_string()),
+                });
             }
 
             send_text_to_interactive(&mut bash_state, send_text).await
@@ -742,9 +729,9 @@ pub async fn handle_tool_call(
         BashCommandAction::SendSpecials { send_specials } => {
             debug!("Processing SendSpecials action: {:?}", send_specials);
             if send_specials.is_empty() {
-                return Err(WinxError::CommandExecutionError(
-                    "send_specials cannot be empty".to_string(),
-                ));
+                return Err(WinxError::CommandExecutionError {
+                    message: Arc::new("Empty special keys input".to_string()),
+                });
             }
 
             send_special_keys_to_interactive(&mut bash_state, send_specials).await
@@ -752,9 +739,9 @@ pub async fn handle_tool_call(
         BashCommandAction::SendAscii { send_ascii } => {
             debug!("Processing SendAscii action: {:?}", send_ascii);
             if send_ascii.is_empty() {
-                return Err(WinxError::CommandExecutionError(
-                    "send_ascii cannot be empty".to_string(),
-                ));
+                return Err(WinxError::CommandExecutionError {
+                    message: Arc::new("Empty ASCII input".to_string()),
+                });
             }
 
             send_ascii_to_interactive(&mut bash_state, send_ascii).await
@@ -780,30 +767,33 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
 
     // Validate input
     if text.trim().is_empty() {
-        return Err(WinxError::CommandExecutionError(
-            "Cannot send empty text to interactive process".to_string(),
-        ));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("Empty text input".to_string()),
+        });
     }
 
     // Acquire lock with timeout and better error handling
-    let bash_guard = match tokio::time::timeout(
-        std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
-        async {
-            bash_state.interactive_bash.lock().map_err(|e| {
-                WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
-            })
-        },
-    )
-    .await
-    {
-        Ok(Ok(guard)) => guard,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => {
-            return Err(WinxError::BashStateLockError(
-                "Timed out waiting to acquire bash state lock".to_string(),
-            ));
-        }
-    };
+    let bash_guard =
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
+            async {
+                bash_state.interactive_bash.lock().await.map_err(|e| {
+                    WinxError::BashStateLockError {
+                        message: Arc::new(e.to_string()),
+                    }
+                })
+            },
+        )
+        .await
+        {
+            Ok(Ok(guard)) => guard,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(WinxError::BashStateLockError {
+                    message: Arc::new("Lock acquisition timed out".to_string()),
+                });
+            }
+        };
 
     // Cannot clone a reference to InteractiveBash, we need to check command state here
     let command_state = match bash_guard.as_ref() {
@@ -813,9 +803,9 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
 
     // Check if a command is running
     if let CommandState::Idle = command_state {
-        return Err(WinxError::CommandExecutionError(
-            "No command is currently running to send text to. Start a command first before sending input.".to_string()
-        ));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("No command is currently running".to_string()),
+        });
     }
 
     // Get command info for better error messages
@@ -834,9 +824,14 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
 
     // Drop guard and acquire mutable reference to bash state
     drop(bash_guard);
-    let mut bash_guard = bash_state.interactive_bash.lock().map_err(|e| {
-        WinxError::BashStateLockError(format!("Failed to lock bash state for writing: {}", e))
-    })?;
+    let mut bash_guard =
+        bash_state
+            .interactive_bash
+            .lock()
+            .await
+            .map_err(|e| WinxError::BashStateLockError {
+                message: Arc::new(e.to_string()),
+            })?;
 
     let bash = bash_guard
         .as_mut()
@@ -854,24 +849,21 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
 
         // Check for errors in send operations
         if let Err(e) = text_result {
-            return Err(WinxError::CommandExecutionError(Arc::new(format!(
-                "Failed to write text to process {}: {}",
-                command_info, e
-            ))));
+            return Err(WinxError::CommandExecutionError {
+                message: Arc::new(format!("Failed to write text: {}", e)),
+            });
         }
 
         if let Err(e) = newline_result {
-            return Err(WinxError::CommandExecutionError(Arc::new(format!(
-                "Failed to write newline to process {}: {}",
-                command_info, e
-            ))));
+            return Err(WinxError::CommandExecutionError {
+                message: Arc::new(format!("Failed to write newline: {}", e)),
+            });
         }
 
         if let Err(e) = flush_result {
-            return Err(WinxError::CommandExecutionError(Arc::new(format!(
-                "Failed to flush stdin for process {}: {}",
-                command_info, e
-            ))));
+            return Err(WinxError::CommandExecutionError {
+                message: Arc::new(format!("Failed to flush stdin: {}", e)),
+            });
         }
 
         // Read output after sending with error handling
@@ -879,10 +871,9 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
         let (output, complete) = match result {
             Ok((output, complete)) => (output, complete),
             Err(e) => {
-                return Err(WinxError::CommandExecutionError(Arc::new(format!(
-                    "Failed to read output after sending text: {}",
-                    e
-                ))));
+                return Err(WinxError::CommandExecutionError {
+                    message: Arc::new(format!("Failed to read output: {}", e)),
+                });
             }
         };
 
@@ -922,10 +913,9 @@ async fn send_text_to_interactive(bash_state: &mut BashState, text: &str) -> Res
 
         Ok(final_result)
     } else {
-        Err(WinxError::CommandExecutionError(Arc::new(format!(
-            "Failed to get stdin for process {}. The process may not accept input.",
-            command_info
-        ))))
+        Err(WinxError::CommandExecutionError {
+            message: Arc::new("No stdin available for the process".to_string()),
+        })
     }
 }
 
@@ -950,30 +940,33 @@ async fn send_special_keys_to_interactive(
 
     // Validate input
     if keys.is_empty() {
-        return Err(WinxError::CommandExecutionError(Arc::new(
-            "Cannot send empty key list to interactive process".to_string(),
-        )));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("Empty special keys input".to_string()),
+        });
     }
 
     // Acquire lock with timeout and better error handling
-    let bash_guard = match tokio::time::timeout(
-        std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
-        async {
-            bash_state.interactive_bash.lock().map_err(|e| {
-                WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
-            })
-        },
-    )
-    .await
-    {
-        Ok(Ok(guard)) => guard,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => {
-            return Err(WinxError::BashStateLockError(
-                "Timed out waiting to acquire bash state lock".to_string(),
-            ));
-        }
-    };
+    let bash_guard =
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
+            async {
+                bash_state.interactive_bash.lock().await.map_err(|e| {
+                    WinxError::BashStateLockError {
+                        message: Arc::new(e.to_string()),
+                    }
+                })
+            },
+        )
+        .await
+        {
+            Ok(Ok(guard)) => guard,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(WinxError::BashStateLockError {
+                    message: Arc::new("Lock acquisition timed out".to_string()),
+                });
+            }
+        };
 
     // Cannot clone a reference to InteractiveBash, we need to check command state here
     let command_state = match bash_guard.as_ref() {
@@ -983,9 +976,9 @@ async fn send_special_keys_to_interactive(
 
     // Check if a command is running
     if let CommandState::Idle = command_state {
-        return Err(WinxError::CommandExecutionError(Arc::new(
-            "No command is currently running to send keys to. Start a command first before sending input.".to_string()
-        )));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("No command is currently running".to_string()),
+        });
     }
 
     // Get command info for better error messages
@@ -1004,9 +997,14 @@ async fn send_special_keys_to_interactive(
 
     // Drop guard and acquire mutable reference to bash state
     drop(bash_guard);
-    let mut bash_guard = bash_state.interactive_bash.lock().map_err(|e| {
-        WinxError::BashStateLockError(format!("Failed to lock bash state for writing: {}", e))
-    })?;
+    let mut bash_guard =
+        bash_state
+            .interactive_bash
+            .lock()
+            .await
+            .map_err(|e| WinxError::BashStateLockError {
+                message: Arc::new(e.to_string()),
+            })?;
 
     let bash = bash_guard
         .as_mut()
@@ -1072,11 +1070,9 @@ async fn send_special_keys_to_interactive(
 
     // Check if we have any errors that would prevent continuing
     if key_descriptions.is_empty() && !key_errors.is_empty() {
-        return Err(WinxError::CommandExecutionError(Arc::new(format!(
-            "Failed to send any keys to process {}. Errors: {}",
-            command_info,
-            key_errors.join("; ")
-        ))));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("Failed to send any special keys".to_string()),
+        });
     }
 
     // Read output after sending all keys
@@ -1084,10 +1080,9 @@ async fn send_special_keys_to_interactive(
     let (output, complete) = match result {
         Ok((output, complete)) => (output, complete),
         Err(e) => {
-            return Err(WinxError::CommandExecutionError(Arc::new(format!(
-                "Failed to read output after sending keys: {}",
-                e
-            ))));
+            return Err(WinxError::CommandExecutionError {
+                message: Arc::new(format!("Failed to read output: {}", e)),
+            });
         }
     };
 
@@ -1160,30 +1155,33 @@ async fn send_ascii_to_interactive(
 
     // Validate input
     if ascii_codes.is_empty() {
-        return Err(WinxError::CommandExecutionError(Arc::new(
-            "Cannot send empty ASCII code list to interactive process".to_string(),
-        )));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("Empty ASCII input".to_string()),
+        });
     }
 
     // Acquire lock with timeout and better error handling
-    let bash_guard = match tokio::time::timeout(
-        std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
-        async {
-            bash_state.interactive_bash.lock().map_err(|e| {
-                WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
-            })
-        },
-    )
-    .await
-    {
-        Ok(Ok(guard)) => guard,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => {
-            return Err(WinxError::BashStateLockError(
-                "Timed out waiting to acquire bash state lock".to_string(),
-            ));
-        }
-    };
+    let bash_guard =
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5), // 5 second timeout for lock acquisition
+            async {
+                bash_state.interactive_bash.lock().await.map_err(|e| {
+                    WinxError::BashStateLockError {
+                        message: Arc::new(e.to_string()),
+                    }
+                })
+            },
+        )
+        .await
+        {
+            Ok(Ok(guard)) => guard,
+            Ok(Err(e)) => return Err(e),
+            Err(_) => {
+                return Err(WinxError::BashStateLockError {
+                    message: Arc::new("Lock acquisition timed out".to_string()),
+                });
+            }
+        };
 
     // Cannot clone a reference to InteractiveBash, we need to check command state here
     let command_state = match bash_guard.as_ref() {
@@ -1193,9 +1191,9 @@ async fn send_ascii_to_interactive(
 
     // Check if a command is running
     if let CommandState::Idle = command_state {
-        return Err(WinxError::CommandExecutionError(Arc::new(
-            "No command is currently running to send ASCII to. Start a command first before sending input.".to_string()
-        )));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("No command is currently running".to_string()),
+        });
     }
 
     // Get command info for better error messages
@@ -1214,9 +1212,14 @@ async fn send_ascii_to_interactive(
 
     // Drop guard and acquire mutable reference to bash state
     drop(bash_guard);
-    let mut bash_guard = bash_state.interactive_bash.lock().map_err(|e| {
-        WinxError::BashStateLockError(format!("Failed to lock bash state for writing: {}", e))
-    })?;
+    let mut bash_guard =
+        bash_state
+            .interactive_bash
+            .lock()
+            .await
+            .map_err(|e| WinxError::BashStateLockError {
+                message: Arc::new(e.to_string()),
+            })?;
 
     let bash = bash_guard
         .as_mut()
@@ -1257,19 +1260,16 @@ async fn send_ascii_to_interactive(
         // Return stdin to the process
         bash.process.stdin = Some(stdin);
     } else {
-        return Err(WinxError::CommandExecutionError(Arc::new(format!(
-            "Failed to get stdin for process {}. The process may not accept input.",
-            command_info
-        ))));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("No stdin available for the process".to_string()),
+        });
     }
 
     // Check if we've sent anything successfully
     if sent_codes.is_empty() && !send_errors.is_empty() {
-        return Err(WinxError::CommandExecutionError(Arc::new(format!(
-            "Failed to send any ASCII codes to process {}. Errors: {}",
-            command_info,
-            send_errors.join("; ")
-        ))));
+        return Err(WinxError::CommandExecutionError {
+            message: Arc::new("Failed to send any ASCII codes".to_string()),
+        });
     }
 
     // Read output after sending with error handling
@@ -1277,10 +1277,9 @@ async fn send_ascii_to_interactive(
     let (output, complete) = match result {
         Ok((output, complete)) => (output, complete),
         Err(e) => {
-            return Err(WinxError::CommandExecutionError(Arc::new(format!(
-                "Failed to read output after sending ASCII codes: {}",
-                e
-            ))));
+            return Err(WinxError::CommandExecutionError {
+                message: Arc::new(format!("Failed to read output: {}", e)),
+            });
         }
     };
 
@@ -1375,8 +1374,10 @@ async fn execute_interactive_command(
 
         // Check for command already running before validation
         {
-            let bash_guard = bash_state.interactive_bash.lock().map_err(|e| {
-                WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
+            let bash_guard = bash_state.interactive_bash.lock().await.map_err(|e| {
+                WinxError::BashStateLockError {
+                    message: Arc::new(e.to_string()),
+                }
             })?;
 
             if let Some(ref bash) = *bash_guard
@@ -1606,8 +1607,8 @@ async fn execute_interactive_command(
 
             // Enhance error messages with WCGW-style suggestions
             match &err {
-                WinxError::CommandExecutionError(msg) => {
-                    if msg.contains("already running") {
+                WinxError::CommandExecutionError { message } => {
+                    if message.as_ref().contains("already running") {
                         // Already have a running command - provide more helpful info
                         Err(WinxError::CommandAlreadyRunning {
                             current_command: Arc::new(command.to_string()),
@@ -1655,10 +1656,9 @@ async fn check_command_status(bash_state: &mut BashState) -> Result<String> {
         let bash_guard = match bash_state.interactive_bash.lock() {
             Ok(guard) => guard,
             Err(e) => {
-                return Err(WinxError::BashStateLockError(format!(
-                    "Failed to lock bash state: {}",
-                    e
-                )));
+                return Err(WinxError::BashStateLockError {
+                    message: Arc::new("Failed to acquire bash state lock".to_string()),
+                });
             }
         };
 
@@ -1719,4 +1719,9 @@ async fn check_command_status(bash_state: &mut BashState) -> Result<String> {
     }
 
     Ok(result)
+}
+
+// Define a local render_terminal_output function to handle missing functionality
+fn render_terminal_output(text: &str) -> Vec<String> {
+    text.lines().map(|line| line.to_string()).collect()
 }

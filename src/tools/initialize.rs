@@ -4,8 +4,9 @@
 //! to set up the shell environment with the specified workspace path and configuration.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::{debug, info, instrument, warn};
+use tokio::sync::Mutex; // Replace std::sync::Mutex
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{generate_chat_id, BashState};
@@ -258,7 +259,8 @@ pub async fn handle_tool_call(
     // Initialize or update BashState with proper error handling
     let mut bash_state_guard = bash_state_arc
         .lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+        .await
+        .map_err(|e| WinxError::BashStateLockError { message: Arc::new() }))?;
 
     let mode = convert_mode_name(&initialize.mode_name);
 
@@ -611,3 +613,4 @@ pub async fn handle_tool_call(
 
     Ok(response)
 }
+

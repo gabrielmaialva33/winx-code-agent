@@ -2,7 +2,8 @@ use glob::glob;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex; // Replace std::sync::Mutex
 use tracing::{debug, warn};
 
 use crate::errors::{Result, WinxError};
@@ -28,9 +29,7 @@ pub async fn handle_tool_call(
     args: ContextSave,
 ) -> Result<String> {
     // Ensure bash state is initialized
-    let bash_state_guard = bash_state.lock().map_err(|e| {
-        WinxError::BashStateLockError(Arc::new(format!("Failed to lock bash state: {}", e)))
-    })?;
+    let bash_state_guard = bash_state.lock().await;
 
     let bash_state = bash_state_guard
         .as_ref()
@@ -86,11 +85,8 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
         debug!("Processing glob pattern: {}", final_glob);
 
         // Use the glob crate to find matching files
-        let matches = glob(&final_glob).map_err(|e| {
-            WinxError::ArgumentParseError(Arc::new(format!(
-                "Invalid glob pattern '{}': {}",
-                final_glob, e
-            )))
+        let matches = glob(&final_glob).map_err(|e| WinxError::ArgumentParseError {
+            message: Arc::new(e.to_string()),
         })?;
 
         let mut found_files = false;
@@ -155,9 +151,9 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
 
     // Validate the task ID
     if context.id.is_empty() {
-        return Err(WinxError::ArgumentParseError(Arc::new(
-            "Task ID cannot be empty".to_string(),
-        )));
+        return Err(WinxError::ArgumentParseError {
+            message: Arc::new("Task ID is empty".to_string()),
+        });
     }
 
     // Read the content of the relevant files
@@ -201,7 +197,9 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
     });
 
     let state_json = serde_json::to_string_pretty(&bash_state_dict).map_err(|e| {
-        WinxError::SerializationError(Arc::new(format!("Failed to serialize bash state: {}", e)))
+        WinxError::SerializationError {
+            message: Arc::new(e.to_string()),
+        }
     })?;
 
     // Try to create and write state file, but don't fail if it doesn't work
@@ -414,11 +412,8 @@ fn try_open_file(file_path: &str) -> Result<()> {
                 let _ = std::process::Command::new(cmd)
                     .arg(file_path)
                     .spawn()
-                    .map_err(|e| {
-                        WinxError::CommandExecutionError(Arc::new(format!(
-                            "Failed to spawn open command: {}",
-                            e
-                        )))
+                    .map_err(|e| WinxError::CommandExecutionError {
+                        message: Arc::new(e.to_string()),
                     })?;
 
                 // We don't wait for the command to complete
@@ -434,11 +429,8 @@ fn try_open_file(file_path: &str) -> Result<()> {
     let _ = std::process::Command::new(cmd)
         .arg(file_path)
         .spawn()
-        .map_err(|e| {
-            WinxError::CommandExecutionError(Arc::new(format!(
-                "Failed to spawn open command: {}",
-                e
-            )))
+        .map_err(|e| WinxError::CommandExecutionError {
+            message: Arc::new(e.to_string()),
         })?;
 
     // We don't actually need to wait for the command to complete

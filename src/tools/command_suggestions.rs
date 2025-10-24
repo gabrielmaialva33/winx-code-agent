@@ -5,8 +5,9 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use tracing::debug;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::debug; // Replace std::sync::Mutex
 
 use crate::errors::WinxError;
 use crate::types::CommandSuggestions;
@@ -38,11 +39,8 @@ pub async fn handle_tool_call(
     // Scope for the lock
     {
         // Get bash state guard
-        let bash_state_guard = bash_state.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
-        })?;
+        let bash_state_guard = bash_state.lock().await;
 
-        // Check if bash state is initialized
         let bash_state = bash_state_guard
             .as_ref()
             .ok_or(WinxError::BashStateNotInitialized)?;
@@ -50,29 +48,21 @@ pub async fn handle_tool_call(
         // Determine current directory
         current_dir = match &args.current_dir {
             Some(dir) if !dir.is_empty() => dir.clone(),
-            _ => bash_state.cwd.display().to_string(),
+            _ => bash_state.cwd.clone(),
         };
 
         // Get the last command from arguments or from bash state
-        let last_command_opt = match &args.last_command {
+        let last_command_opt: Option<String> = match &args.last_command {
             Some(cmd) if !cmd.is_empty() => Some(cmd.clone()),
             _ => {
-                // Create a separate scope for the lock to ensure it's dropped before we assign the result
-
-                {
-                    if let Ok(bash_guard) = bash_state.interactive_bash.lock() {
-                        if let Some(bash) = bash_guard.as_ref() {
-                            if !bash.last_command.is_empty() {
-                                Some(bash.last_command.clone())
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
+                if let Some(interactive_bash) = bash_state.interactive_bash.as_ref() {
+                    if !interactive_bash.last_command.is_empty() {
+                        Some(interactive_bash.last_command.clone())
                     } else {
                         None
                     }
+                } else {
+                    None
                 }
             }
         };

@@ -11,8 +11,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use tracing::{debug, error, info, instrument, warn};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tracing::{debug, error, info, instrument, warn}; // Replace std::sync::Mutex
 
 use crate::errors::{ErrorRecovery, Result, WinxError};
 use crate::state::bash_state::BashState;
@@ -521,27 +522,18 @@ pub async fn handle_tool_call(
 
     // Lock bash state to extract data
     {
-        let bash_state_guard =
-            bash_state_arc
-                .lock()
-                .map_err(|e| WinxError::BashStateLockError {
-                    message: Arc::new(format!("Failed to lock bash state: {}", e)),
-                })?;
+        let mut bash_state_guard = bash_state_arc.lock().await; // Declare as mutable
 
-        // Ensure bash state is initialized
-        let bash_state = match &*bash_state_guard {
-            Some(state) => state,
-            None => {
-                error!("BashState not initialized");
-                return Err(ErrorRecovery::suggest(
-                    WinxError::BashStateNotInitialized,
-                    "Please call Initialize first with type=\"first_call\" and a valid workspace path",
-                ));
-            }
-        };
-
-        // Extract needed data
-        cwd = bash_state.cwd.clone();
+        if let Some(bash_state) = bash_state_guard.as_mut() {
+            // Extract needed data
+            cwd = bash_state.cwd.clone();
+        } else {
+            error!("BashState not initialized");
+            return Err(ErrorRecovery::suggest(
+                WinxError::BashStateNotInitialized,
+                "Please call Initialize first with type=\"first_call\" and a valid workspace path",
+            ));
+        }
     }
 
     // Process file paths and line ranges
@@ -674,17 +666,18 @@ pub async fn handle_tool_call(
 
     // Process files in chunks
     for chunk in cloned_params.chunks(chunk_size.max(1)) {
+        let chunk = chunk.to_vec(); // Clone the chunk to ensure ownership
         let chunk_tasks = chunk
-            .iter()
+            .into_iter()
             .map(
                 |(clean_path, original_path, start_line_num, end_line_num, allocated_tokens)| {
                     let clean_path = clean_path.clone();
                     let original_path = original_path.clone();
                     let cwd = cwd.clone();
                     tokio::spawn(async move {
-                        let start = *start_line_num;
-                        let end = *end_line_num;
-                        let file_tokens = *allocated_tokens;
+                        let start = start_line_num;
+                        let end = end_line_num;
+                        let file_tokens = allocated_tokens;
                         let result = read_file(
                             &clean_path,
                             file_tokens,
@@ -856,17 +849,14 @@ pub async fn handle_tool_call(
         let whitelist_data: HashMap<String, Vec<(usize, usize)>> = file_ranges_dict.clone();
 
         move || {
-            if let Ok(mut bash_state_guard) = bash_state_arc.lock() {
+            // Correctly structured async block for tokio::spawn
+            tokio::spawn(async move {
+                let mut bash_state_guard = bash_state_arc.lock().await;
                 if let Some(bash_state) = bash_state_guard.as_mut() {
                     for (file_path, ranges) in whitelist_data {
-                        // The cache already has the file hash and metadata,
-                        // so we just need to ensure it's in the whitelist
-
-                        // Get the hash from the cache
                         let file_hash = cache
                             .get_cached_hash(Path::new(&file_path))
                             .unwrap_or_else(|| {
-                                // If not in cache (shouldn't happen), calculate it
                                 match read_file_optimized(Path::new(&file_path), MAX_FILE_SIZE) {
                                     Ok(content) => {
                                         let mut hasher = Sha256::new();
@@ -877,13 +867,10 @@ pub async fn handle_tool_call(
                                 }
                             });
 
-                        // Add or update the whitelist entry
                         if let Some(existing) =
                             bash_state.whitelist_for_overwrite.get_mut(&file_path)
                         {
                             existing.file_hash = file_hash.clone();
-
-                            // Get total lines from the cache
                             let total_lines = cache
                                 .get_unread_ranges(Path::new(&file_path))
                                 .iter()
@@ -899,7 +886,6 @@ pub async fn handle_tool_call(
                                 existing.add_range(range.0, range.1);
                             }
                         } else {
-                            // Create new entry
                             let total_lines = cache
                                 .get_unread_ranges(Path::new(&file_path))
                                 .iter()
@@ -918,7 +904,7 @@ pub async fn handle_tool_call(
                         }
                     }
                 }
-            }
+            });
         }
     });
 

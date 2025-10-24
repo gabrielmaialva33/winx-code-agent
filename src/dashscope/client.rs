@@ -166,13 +166,15 @@ impl DashScopeClient {
 
         let response = self
             .client
-            .post(url.as_ref())
+            .post(url)
             .header("Authorization", &*self.config.authorization_header)
             .header("Content-Type", "application/json")
             .json(request)
             .send()
             .await
-            .map_err(|e| WinxError::NetworkError(format!(REQUEST_FAILED, e)))?;
+            .map_err(|e| WinxError::NetworkError {
+                message: Arc::new(format!("Failed to send request: {}", e)),
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -182,20 +184,24 @@ impl DashScopeClient {
                 .unwrap_or_else(|_| UNKNOWN_ERROR.to_string());
 
             error!("DashScope API error {}: {}", status, error_text);
-            return Err(WinxError::NetworkError(format!(
-                API_ERROR,
-                status, error_text
-            )));
+            return Err(WinxError::NetworkError {
+                message: Arc::new(format!("DashScope API error {}: {}", status, error_text)),
+            });
         }
 
-        let completion_response: ChatCompletionResponse = response
-            .json()
-            .await
-            .map_err(|e| WinxError::SerializationError(format!(PARSE_FAILED, e)))?;
+        let completion_response: ChatCompletionResponse =
+            response
+                .json()
+                .await
+                .map_err(|e| WinxError::SerializationError {
+                    message: Arc::new(format!("Failed to parse response: {}", e)),
+                })?;
 
         if !completion_response.is_success() {
             warn!("DashScope response has no choices");
-            return Err(WinxError::ApiError(EMPTY_RESPONSE.to_string()));
+            return Err(WinxError::ApiError {
+                message: Arc::new(EMPTY_RESPONSE.to_string()),
+            });
         }
 
         Ok(completion_response)
@@ -216,7 +222,9 @@ impl DashScopeClient {
         response
             .get_content()
             .map(|s| s.to_string())
-            .ok_or_else(|| WinxError::ApiError(EMPTY_RESPONSE.to_string()))
+            .ok_or_else(|| WinxError::ApiError {
+                message: Arc::new("No content in response".to_string()),
+            })
     }
 
     /// Generate code using DashScope
@@ -247,7 +255,9 @@ impl DashScopeClient {
         response
             .get_content()
             .map(|s| s.to_string())
-            .ok_or_else(|| WinxError::ApiError(EMPTY_RESPONSE.to_string()))
+            .ok_or_else(|| WinxError::ApiError {
+                message: Arc::new("No content in response".to_string()),
+            })
     }
 
     /// Explain code using DashScope
@@ -274,7 +284,9 @@ impl DashScopeClient {
         response
             .get_content()
             .map(|s| s.to_string())
-            .ok_or_else(|| WinxError::ApiError(EMPTY_RESPONSE.to_string()))
+            .ok_or_else(|| WinxError::ApiError {
+                message: Arc::new("No content in response".to_string()),
+            })
     }
 
     /// Test the connection to DashScope API
@@ -290,7 +302,9 @@ impl DashScopeClient {
             info!("DashScope API connection test successful");
             Ok(())
         } else {
-            Err(WinxError::ApiError(CONNECTION_TEST_FAILED.to_string()))
+            Err(WinxError::ApiError {
+                message: Arc::new("API connection test failed".to_string()),
+            })
         }
     }
 
@@ -313,7 +327,7 @@ mod tests {
     fn test_rate_limit() {
         let mut rate_limit = RateLimit::new(5);
 
-        // Should allow first 5 requests
+        // Should allow first
         for _ in 0..5 {
             assert_eq!(rate_limit.can_make_request(), Some(Duration::from_secs(0)));
             rate_limit.record_request();

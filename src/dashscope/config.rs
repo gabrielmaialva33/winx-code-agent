@@ -1,8 +1,6 @@
 //! DashScope configuration
 
 use crate::errors::{Result, WinxError};
-use lazy_static::lazy_static;
-use std::borrow::Cow;
 use std::env;
 use std::sync::Arc;
 
@@ -118,8 +116,9 @@ impl Default for DashScopeConfig {
 impl DashScopeConfig {
     /// Create configuration from environment variables
     pub fn from_env() -> Result<Self> {
-        let api_key = env::var("DASHSCOPE_API_KEY")
-            .map_err(|_| WinxError::ConfigurationError(ERR_API_KEY_NOT_SET.to_string()))?;
+        let api_key = env::var("DASHSCOPE_API_KEY").map_err(|_| WinxError::ConfigurationError {
+            message: Arc::new(ERR_API_KEY_NOT_SET.to_string()),
+        })?;
 
         let model = env::var("DASHSCOPE_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string());
         let model = Self::parse_model(&model)?;
@@ -130,32 +129,44 @@ impl DashScopeConfig {
         let timeout_seconds = env::var("DASHSCOPE_TIMEOUT_SECONDS")
             .unwrap_or_else(|_| DEFAULT_TIMEOUT.to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_TIMEOUT.to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_TIMEOUT.to_string()),
+            })?;
 
         let max_retries = env::var("DASHSCOPE_MAX_RETRIES")
             .unwrap_or_else(|_| DEFAULT_MAX_RETRIES.to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_MAX_RETRIES.to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_MAX_RETRIES.to_string()),
+            })?;
 
         let rate_limit_rpm = env::var("DASHSCOPE_RATE_LIMIT_RPM")
             .unwrap_or_else(|_| DEFAULT_RATE_LIMIT.to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_RATE_LIMIT.to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_RATE_LIMIT.to_string()),
+            })?;
 
         let temperature = env::var("DASHSCOPE_TEMPERATURE")
             .unwrap_or_else(|_| DEFAULT_TEMPERATURE.to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_TEMPERATURE.to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_TEMPERATURE.to_string()),
+            })?;
 
         let top_p = env::var("DASHSCOPE_TOP_P")
             .unwrap_or_else(|_| DEFAULT_TOP_P.to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_TOP_P.to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_TOP_P.to_string()),
+            })?;
 
         let stream = env::var("DASHSCOPE_STREAM")
             .unwrap_or_else(|_| DEFAULT_STREAM.to_string())
             .parse()
-            .map_err(|_| WinxError::ConfigurationError(ERR_INVALID_STREAM.to_string()))?;
+            .map_err(|_| WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_STREAM.to_string()),
+            })?;
 
         let authorization_header = Arc::from(format!("Bearer {}", api_key));
         let chat_completions_url_cached = if base_url == "https://dashscope-intl.aliyuncs.com" {
@@ -185,49 +196,57 @@ impl DashScopeConfig {
             "qwen3-coder-plus" => Ok(DashScopeModel::Qwen3CoderPlus),
             "qwen3-32b" => Ok(DashScopeModel::Qwen3_32B),
             "qwen3-72b" => Ok(DashScopeModel::Qwen3_72B),
-            _ => Err(WinxError::ConfigurationError(format!(
-                ERR_UNKNOWN_MODEL,
-                model_str
-            ))),
+            _ => Err(WinxError::ConfigurationError {
+                message: Arc::new(format!(
+                    "Unknown DashScope model: {}. Supported models: qwen3-coder-plus, qwen3-32b, qwen3-72b",
+                    model_str
+                )),
+            }),
         }
     }
 
     /// Validate the configuration
     pub fn validate(&self) -> Result<()> {
         if self.api_key.is_empty() {
-            return Err(WinxError::ConfigurationError(ERR_API_KEY_EMPTY.to_string()));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_API_KEY_EMPTY.to_string()),
+            });
         }
 
         if !self.api_key.starts_with("sk-") {
-            return Err(WinxError::ConfigurationError(
-                ERR_INVALID_API_KEY_FORMAT.to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_INVALID_API_KEY_FORMAT.to_string()),
+            });
         }
 
         if self.timeout_seconds == 0 || self.timeout_seconds > 300 {
-            return Err(WinxError::ConfigurationError(ERR_TIMEOUT_RANGE.to_string()));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_TIMEOUT_RANGE.to_string()),
+            });
         }
 
         if self.max_retries > 10 {
-            return Err(WinxError::ConfigurationError(
-                ERR_MAX_RETRIES_EXCEED.to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_MAX_RETRIES_EXCEED.to_string()),
+            });
         }
 
         if self.rate_limit_rpm == 0 || self.rate_limit_rpm > 1000 {
-            return Err(WinxError::ConfigurationError(
-                ERR_RATE_LIMIT_RANGE.to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_RATE_LIMIT_RANGE.to_string()),
+            });
         }
 
         if !(0.0..=2.0).contains(&self.temperature) {
-            return Err(WinxError::ConfigurationError(
-                ERR_TEMPERATURE_RANGE.to_string(),
-            ));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_TEMPERATURE_RANGE.to_string()),
+            });
         }
 
         if !(0.0..=1.0).contains(&self.top_p) {
-            return Err(WinxError::ConfigurationError(ERR_TOP_P_RANGE.to_string()));
+            return Err(WinxError::ConfigurationError {
+                message: Arc::new(ERR_TOP_P_RANGE.to_string()),
+            });
         }
 
         Ok(())

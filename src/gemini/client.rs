@@ -68,7 +68,9 @@ impl GeminiClient {
             .timeout(Duration::from_secs(config.timeout_seconds))
             .user_agent("Winx-Code-Agent/1.0")
             .build()
-            .map_err(|e| WinxError::NetworkError(format!("Failed to create HTTP client: {}", e)))?;
+            .map_err(|e| WinxError::NetworkError {
+                message: Arc::new(e.to_string()),
+            })?;
 
         let rate_limit = Arc::new(Mutex::new(RateLimit::new(config.rate_limit_rpm)));
 
@@ -123,7 +125,9 @@ impl GeminiClient {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| WinxError::NetworkError(ALL_ATTEMPTS_FAILED.to_string())))
+        Err(last_error.unwrap_or_else(|| WinxError::NetworkError {
+            message: Arc::new(ALL_ATTEMPTS_FAILED.to_string()),
+        }))
     }
 
     /// Make a single request to the Gemini API
@@ -143,7 +147,9 @@ impl GeminiClient {
             .json(request)
             .send()
             .await
-            .map_err(|e| WinxError::NetworkError(format!(REQUEST_FAILED, e)))?;
+            .map_err(|e| WinxError::NetworkError {
+                message: Arc::new(e.to_string()),
+            })?;
 
         let status = response.status();
         if !status.is_success() {
@@ -153,20 +159,21 @@ impl GeminiClient {
                 .unwrap_or_else(|_| UNKNOWN_ERROR.to_string());
 
             error!("Gemini API error {}: {}", status, error_text);
-            return Err(WinxError::NetworkError(format!(
-                API_ERROR,
-                status, error_text
-            )));
+            return Err(WinxError::ApiError {
+                message: Arc::new(format!("Gemini API error {}: {}", status, error_text)),
+            });
         }
 
-        let gemini_response: GenerateContentResponse = response
-            .json()
-            .await
-            .map_err(|e| WinxError::SerializationError(format!(PARSE_FAILED, e)))?;
+        let gemini_response: GenerateContentResponse =
+            response.json().await.map_err(|e| WinxError::ParseError {
+                message: Arc::new(e.to_string()),
+            })?;
 
         if gemini_response.is_blocked() {
             warn!("Gemini response was blocked by safety filters");
-            return Err(WinxError::ApiError(BLOCKED_RESPONSE.to_string()));
+            return Err(WinxError::ApiError {
+                message: Arc::new(BLOCKED_RESPONSE.to_string()),
+            });
         }
 
         Ok(gemini_response)
@@ -180,9 +187,9 @@ impl GeminiClient {
 
         let response = self.generate_content(&request).await?;
 
-        response
-            .get_text()
-            .ok_or_else(|| WinxError::ApiError(EMPTY_RESPONSE.to_string()))
+        response.get_text().ok_or_else(|| WinxError::ApiError {
+            message: Arc::new(EMPTY_RESPONSE.to_string()),
+        })
     }
 
     /// Generate code using Gemini
@@ -206,9 +213,9 @@ impl GeminiClient {
 
         let response = self.generate_content(&request).await?;
 
-        response
-            .get_text()
-            .ok_or_else(|| WinxError::ApiError("Empty response from Gemini".to_string()))
+        response.get_text().ok_or_else(|| WinxError::ApiError {
+            message: Arc::new(EMPTY_RESPONSE.to_string()),
+        })
     }
 
     /// Explain code using Gemini
@@ -224,9 +231,9 @@ impl GeminiClient {
 
         let response = self.generate_content(&request).await?;
 
-        response
-            .get_text()
-            .ok_or_else(|| WinxError::ApiError("Empty response from Gemini".to_string()))
+        response.get_text().ok_or_else(|| WinxError::ApiError {
+            message: Arc::new(EMPTY_RESPONSE.to_string()),
+        })
     }
 
     /// Test the connection to Gemini API
@@ -241,7 +248,9 @@ impl GeminiClient {
             info!("Gemini API connection test successful");
             Ok(())
         } else {
-            Err(WinxError::ApiError(CONNECTION_TEST_FAILED.to_string()))
+            Err(WinxError::ApiError {
+                message: Arc::new(CONNECTION_TEST_FAILED.to_string()),
+            })
         }
     }
 

@@ -6,6 +6,7 @@
 
 use lazy_static::lazy_static;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Default command timeout in seconds

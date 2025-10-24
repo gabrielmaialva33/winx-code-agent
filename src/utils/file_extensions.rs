@@ -5,6 +5,8 @@
 //! It supports intelligent token allocation for source code vs non-source files.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::path::Path;
 
 /// Set of file extensions considered to be source code
 /// Each extension is listed without the dot (e.g., 'rs' not '.rs')
@@ -345,7 +347,11 @@ impl FileExtensionAnalyzer {
     ///
     /// # Returns
     /// Vector of (filename, allocated_tokens) pairs
-    pub fn allocate_token_budget(&self, files: &[&str], total_budget: usize) -> Vec<(&str, usize)> {
+    pub fn allocate_token_budget<'a>(
+        &'a self,
+        files: &'a [&'a str],
+        total_budget: usize,
+    ) -> Vec<(&'a str, usize)> {
         if files.is_empty() {
             return Vec::new();
         }
@@ -389,6 +395,7 @@ impl FileExtensionAnalyzer {
             }
         }
 
+        // Return the allocations directly without creating intermediate references
         allocations
     }
 }

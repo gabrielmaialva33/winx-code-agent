@@ -38,6 +38,7 @@ mime_guess = "2.0"
 memmap2 = "0.9"
 tempfile = "3.0"
 chrono = { version = "0.4", features = ["serde"] }
+similar = "2.0"
 
 # Performance and concurrency
 rayon = "1.0"

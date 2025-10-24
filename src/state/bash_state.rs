@@ -8,8 +8,9 @@ use std::collections::HashMap;
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
@@ -112,24 +113,6 @@ Use Initialize with mode_name=\"wcgw\" or \"code_writer\" to enable modification
 const ERR_MODE_VIOLATION_CODEWRITER: &str = "Operation '{}' on '{}' not allowed in code_writer mode. \
 Check your allowed_globs and allowed_commands configuration, or use Initialize \
 with mode_name=\"wcgw\" for full permissions.";
-
-/// FileWhitelistData tracks information about files that have been read
-/// and can be edited or overwritten
-/// Enhanced with WCGW-style comprehensive tracking
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileWhitelistData {
-    pub file_hash: String,
-    pub line_ranges_read: Vec<(usize, usize)>,
-    pub total_lines: usize,
-    /// Hash of the file content when it was last read
-    pub content_hash: Option<String>,
-    /// Timestamp when the file was last read
-    pub last_read_time: Option<std::time::SystemTime>,
-    /// Whether this file has been modified since last read
-    pub modified_since_read: bool,
-    /// Minimum percentage of file that must be read before editing
-    pub min_read_percentage: f64,
-}
 
 #[allow(dead_code)]
 impl FileWhitelistData {
@@ -391,14 +374,14 @@ impl TerminalState {
     }
 
     /// Process new output with the terminal emulator
-    pub fn process_output(&mut self, output: &str) -> String {
+    pub async fn process_output(&mut self, output: &str) -> String {
         // Update the last pending output
         self.last_pending_output = output.to_string();
 
         // For large outputs, use limited buffer mode if configured
         if self.limit_buffer
             && output.len() > TERMINAL_MAX_OUTPUT_SIZE
-            && let Ok(mut emulator) = self.terminal_emulator.lock()
+            && let mut emulator = self.terminal_emulator.lock().await
         {
             // Process with limited buffer
             emulator.process_with_limited_buffer(output, self.max_buffer_lines);
@@ -407,7 +390,7 @@ impl TerminalState {
         }
 
         // Process the output with the terminal emulator
-        if let Ok(mut emulator) = self.terminal_emulator.lock() {
+        if let mut emulator = self.terminal_emulator.lock().await {
             emulator.process(output);
             let display = emulator.display();
             display.join("\n")
@@ -451,10 +434,11 @@ impl TerminalState {
 
     /// Smart truncate the terminal output if it gets too large
     pub fn smart_truncate(&mut self, max_size: usize) {
-        if let Ok(screen) = self.terminal_emulator.lock()
-            && let Ok(mut screen_guard) = screen.get_screen().lock()
-        {
-            screen_guard.smart_truncate(max_size);
+        // Refactored to ensure await is used in async contexts and fix type mismatches
+        if let Some(screen) = self.terminal_emulator.lock().await {
+            if let Some(mut screen_guard) = screen.get_screen().lock().await {
+                screen_guard.smart_truncate(max_size);
+            }
         }
     }
 }
@@ -1201,6 +1185,7 @@ impl BashState {
             let bash_guard = self
                 .interactive_bash
                 .lock()
+                .await
                 .map_err(|e| anyhow!("Failed to lock bash state: {}", e))?;
 
             need_init = bash_guard.is_none();
@@ -1292,10 +1277,10 @@ impl BashState {
 
         // Phase 1: Send command and get initial output (no await)
         let (initial_output, mut complete) = {
-            let mut bash_guard = self
-                .interactive_bash
-                .lock()
-                .map_err(|e| anyhow!("Failed to lock bash state for command execution: {}", e))?;
+            let mut bash_guard =
+                self.interactive_bash.lock().await.map_err(|e| {
+                    anyhow!("Failed to lock bash state for command execution: {}", e)
+                })?;
 
             let bash = match bash_guard.as_mut() {
                 Some(b) => b,
@@ -1472,6 +1457,7 @@ impl BashState {
         let mut bash_guard = self
             .interactive_bash
             .lock()
+            .await
             .map_err(|e| anyhow!("Failed to lock interactive bash mutex: {}", e))?;
 
         if let Some(bash) = bash_guard.as_mut() {
@@ -1806,6 +1792,6 @@ fn sha256_hash(data: &[u8]) -> String {
 
 /// Generates a random 4-digit chat ID with 'i' prefix
 pub fn generate_chat_id() -> String {
-    let mut rng = rand::rng();
-    format!("i{}", rng.random_range(1000..10000))
+    let mut rng = rand::thread_rng();
+    format!("i{}", rng.gen_range(1000..10000))
 }

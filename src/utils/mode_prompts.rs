@@ -212,6 +212,8 @@ pub fn generate_mode_instructions(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]

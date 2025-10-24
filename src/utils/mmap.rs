@@ -825,8 +825,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_parallel_processing() {
+    #[tokio::test]
+    async fn test_parallel_processing() {
         // Create a test file with lines
         let mut file = NamedTempFile::new().unwrap();
         let mut lines = Vec::new();
@@ -839,15 +839,22 @@ mod tests {
         file.flush().unwrap();
 
         // Test parallel processing
-        let processed_lines = std::sync::Mutex::new(Vec::new());
+        let processed_lines = Arc::new(tokio::sync::Mutex::new(Vec::new())); // Use Arc for shared ownership
 
-        process_text_file_parallel(file.path(), 1_000_000, |line| {
-            processed_lines.lock().unwrap().push(line.to_string());
+        process_text_file_parallel(file.path(), 1_000_000, {
+            let processed_lines = Arc::clone(&processed_lines); // Clone Arc for the closure
+            move |line| {
+                let line = line.to_string(); // Clone the line to ensure it doesn't escape
+                let processed_lines = Arc::clone(&processed_lines); // Clone Arc for tokio::spawn
+                tokio::spawn(async move {
+                    processed_lines.lock().await.push(line);
+                });
+            }
         })
         .unwrap();
 
         // Verify results (order may differ due to parallel processing)
-        let result = processed_lines.lock().unwrap();
+        let result = processed_lines.lock().await;
         assert_eq!(result.len(), lines.len());
 
         // Check that all lines are present
