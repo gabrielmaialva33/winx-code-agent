@@ -1251,29 +1251,22 @@ impl WinxService {
             .and_then(|v| v.as_u64())
             .unwrap_or(30) as f32;
 
-        // Clone the bash state to avoid holding the mutex across await
-        let mut bash_state_clone = {
-            let bash_state_guard = self.bash_state.lock().unwrap();
-            if bash_state_guard.is_none() {
-                return Err(McpError::invalid_request(
-                    "Shell not initialized. Call initialize first.",
-                    None,
-                ));
-            }
-            bash_state_guard.as_ref().unwrap().clone()
-        };
+        let mut bash_state_guard = self.bash_state.lock().unwrap();
+        if bash_state_guard.is_none() {
+            return Err(McpError::invalid_request(
+                "Shell not initialized. Call initialize first.",
+                None,
+            ));
+        }
 
-        match bash_state_clone
+        match bash_state_guard
+            .as_mut()
+            .unwrap()
             .execute_interactive(command, timeout_seconds)
             .await
         {
             Ok(output) => {
-                // Update the original state with any changes
-                {
-                    let mut bash_state_guard = self.bash_state.lock().unwrap();
-                    *bash_state_guard = Some(bash_state_clone.clone());
-                }
-                let working_dir = bash_state_clone.cwd.display().to_string();
+                let working_dir = bash_state_guard.as_ref().unwrap().cwd.display().to_string();
                 let content = format!("Working directory: {}\n\n{}", working_dir, output);
                 Ok(CallToolResult::success(vec![Content::text(content)]))
             }
