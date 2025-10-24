@@ -234,11 +234,7 @@ impl AnyhowErrorExt for anyhow::Error {
         let root_cause = self.root_cause().to_string();
 
         // Classify based on error content
-        if root_cause.contains("command not found") {
-            WinxError::CommandExecutionError {
-                message: Arc::new(err_string),
-            }
-        } else if root_cause.contains("permission denied") {
+        if root_cause.contains("command not found") || root_cause.contains("permission denied") {
             WinxError::CommandExecutionError {
                 message: Arc::new(err_string),
             }

@@ -22,7 +22,7 @@ use crate::types::{CommandSuggestions, ContextSave, ReadImage};
 
 /// AI clients container for efficient storage
 #[derive(Default)]
-struct AiClients {
+pub struct AiClients {
     dashscope: Option<DashScopeClient>,
     nvidia: Option<NvidiaClient>,
     gemini: Option<GeminiClient>,

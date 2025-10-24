@@ -162,16 +162,11 @@ impl CommandSafety {
     /// Check if a command might run for a long time
     pub fn is_long_running(&self, command: &str) -> bool {
         let normalized = self.normalize_command(command);
-
-        for long_cmd in LONG_RUNNING_COMMANDS.iter() {
-            if let Some(rest) = normalized.strip_prefix(long_cmd) {
-                if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
-                    return true;
-                }
-            }
-        }
-
-        false
+        LONG_RUNNING_COMMANDS.iter().any(|&long_cmd| {
+            normalized.strip_prefix(long_cmd).is_some_and(|rest| {
+                rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t')
+            })
+        })
     }
 
     /// Check if a command spawns background processes
@@ -184,10 +179,10 @@ impl CommandSafety {
         }
 
         for bg_cmd in BACKGROUND_COMMANDS.iter() {
-            if let Some(rest) = normalized.strip_prefix(bg_cmd) {
-                if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
-                    return true;
-                }
+            if let Some(rest) = normalized.strip_prefix(bg_cmd)
+                && (rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t'))
+            {
+                return true;
             }
         }
 
