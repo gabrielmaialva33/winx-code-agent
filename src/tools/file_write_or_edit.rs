@@ -6,6 +6,7 @@
 use anyhow::Context as AnyhowContext;
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use similar::TextDiff;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -1367,31 +1368,14 @@ fn detect_file_changes(original: &str, new: &str) -> Option<String> {
         return None;
     }
 
-    // Create temporary files for diff
-    let mut original_file = tempfile::NamedTempFile::new().ok()?;
-    let mut new_file = tempfile::NamedTempFile::new().ok()?;
+    let diff = TextDiff::from_lines(original, new);
+    let unified_diff = diff.unified_diff().to_string();
 
-    // Write content to temp files
-    if original_file.write_all(original.as_bytes()).is_err()
-        || new_file.write_all(new.as_bytes()).is_err()
-    {
-        return None;
+    if unified_diff.trim().is_empty() {
+        None
+    } else {
+        Some(unified_diff)
     }
-
-    // Get file paths
-    let original_path = original_file.path();
-    let new_path = new_file.path();
-
-    // Run diff command
-    let output = std::process::Command::new("diff")
-        .args(["-u", original_path.to_str()?, new_path.to_str()?])
-        .output()
-        .ok()?;
-
-    // Parse output
-    let diff = String::from_utf8_lossy(&output.stdout).to_string();
-
-    if diff.is_empty() { None } else { Some(diff) }
 }
 
 /// Handle the FileWriteOrEdit tool call
@@ -1526,7 +1510,7 @@ pub async fn handle_tool_call(
     // Release the lock before continuing with file operations
     drop(bash_state_guard);
 
-    // Get the original content if file exists (for diff and incremental updates)
+    // Get the original content if file exists (for similar diff and incremental updates)
     let original_content = if Path::new(&file_path).exists() {
         fs::read_to_string(&file_path).ok()
     } else {
@@ -1663,8 +1647,8 @@ pub async fn handle_tool_call(
             ));
         }
 
-        // Generate diff if requested
-        let diff_info = if file_write_or_edit.show_diff.unwrap_or(false) {
+        // Generate similar diff if requested
+        let similar_info = if file_write_or_edit.show_diff.unwrap_or(false) {
             match detect_file_changes(&original_content, &new_content) {
                 Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
                 None => "".to_string(),
@@ -1753,7 +1737,7 @@ pub async fn handle_tool_call(
 
         Ok(format!(
             "Successfully edited file {}{}",
-            file_path, diff_info
+            file_path, similar_info
         ))
     } else {
         // This is a full file write operation
@@ -1776,8 +1760,8 @@ pub async fn handle_tool_call(
             ));
         }
 
-        // Generate diff if requested and file exists
-        let diff_info = if file_write_or_edit.show_diff.unwrap_or(false) {
+        // Generate similar diff if requested and file exists
+        let similar_info = if file_write_or_edit.show_diff.unwrap_or(false) {
             if let Some(orig) = &original_content {
                 match detect_file_changes(orig, content) {
                     Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
@@ -1848,7 +1832,7 @@ pub async fn handle_tool_call(
 
         Ok(format!(
             "Successfully wrote file {}{}",
-            file_path, diff_info
+            file_path, similar_info
         ))
     }
 }
