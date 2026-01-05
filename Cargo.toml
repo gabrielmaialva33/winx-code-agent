@@ -53,7 +53,7 @@ rand = "0.9"
 tokenizers = "0.21.4"
 
 # HTTP client for NVIDIA API integration
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.13", features = ["json", "stream"] }
 uuid = { version = "1.0", features = ["v4"] }
 
 [dev-dependencies]
