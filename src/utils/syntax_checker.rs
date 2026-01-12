@@ -1,7 +1,7 @@
 //! Syntax checking module for post-edit validation
 //!
 //! This module provides syntax checking capabilities for edited files,
-//! matching the behavior of wcgw Python's syntax_checker.
+//! matching the behavior of wcgw Python's `syntax_checker`.
 //! Currently provides a basic implementation that can be expanded with
 //! tree-sitter support in the future.
 
@@ -70,14 +70,14 @@ pub fn is_syntax_check_available(extension: &str) -> bool {
 
 /// Check syntax of content based on file extension
 ///
-/// This is the main entry point matching wcgw Python's check_syntax function.
+/// This is the main entry point matching wcgw Python's `check_syntax` function.
 ///
 /// # Arguments
 /// * `extension` - File extension (without dot)
 /// * `content` - File content to check
 ///
 /// # Returns
-/// SyntaxCheckOutput with any errors found
+/// `SyntaxCheckOutput` with any errors found
 pub fn check_syntax(extension: &str, content: &str) -> SyntaxCheckOutput {
     let ext_lower = extension.to_lowercase();
 
@@ -99,7 +99,7 @@ pub fn check_file_syntax(path: &Path) -> SyntaxCheckOutput {
     match std::fs::read_to_string(path) {
         Ok(content) => check_syntax(extension, &content),
         Err(e) => SyntaxCheckOutput::with_errors(
-            format!("Failed to read file: {}", e),
+            format!("Failed to read file: {e}"),
             Vec::new(),
         ),
     }
@@ -113,7 +113,7 @@ fn check_json_syntax(content: &str) -> SyntaxCheckOutput {
             let line = e.line();
             let column = e.column();
             SyntaxCheckOutput::with_errors(
-                format!("JSON syntax error at line {}, column {}: {}", line, column, e),
+                format!("JSON syntax error at line {line}, column {column}: {e}"),
                 vec![(line, column)],
             )
         }
@@ -231,8 +231,7 @@ pub fn format_syntax_error_context(
     let context = context_lines.join("\n");
 
     format!(
-        "Here's relevant snippet from {} where the syntax errors occurred:\n<snippet>\n{}\n</snippet>",
-        filename, context
+        "Here's relevant snippet from {filename} where the syntax errors occurred:\n<snippet>\n{context}\n</snippet>"
     )
 }
 

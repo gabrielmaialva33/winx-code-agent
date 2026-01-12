@@ -63,7 +63,7 @@ impl MemorySystem {
     fn get_app_dir_xdg() -> PathBuf {
         let xdg_data_dir = std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| {
             let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-            format!("{}/.local/share", home)
+            format!("{home}/.local/share")
         });
 
         PathBuf::from(xdg_data_dir).join(APP_NAME)
@@ -141,16 +141,16 @@ impl MemorySystem {
 
         // Format and save the main memory data
         let memory_data = self.format_memory(task_memory, relevant_files);
-        let memory_file_path = self.memory_dir.join(format!("{}.txt", task_id));
+        let memory_file_path = self.memory_dir.join(format!("{task_id}.txt"));
 
         fs::write(&memory_file_path, memory_data)
-            .with_context(|| format!("Failed to write memory file: {:?}", memory_file_path))?;
+            .with_context(|| format!("Failed to write memory file: {memory_file_path:?}"))?;
 
         debug!("Saved memory data to: {:?}", memory_file_path);
 
         // Save bash state if provided (simplified serialization)
         if let Some(bash_state) = bash_state {
-            let state_file_path = self.memory_dir.join(format!("{}_bash_state.json", task_id));
+            let state_file_path = self.memory_dir.join(format!("{task_id}_bash_state.json"));
 
             // Create a simplified representation of the bash state
             let state_data = serde_json::json!({
@@ -165,7 +165,7 @@ impl MemorySystem {
                 .context("Failed to serialize bash state")?;
 
             fs::write(&state_file_path, state_json).with_context(|| {
-                format!("Failed to write bash state file: {:?}", state_file_path)
+                format!("Failed to write bash state file: {state_file_path:?}")
             })?;
 
             debug!("Saved bash state to: {:?}", state_file_path);
@@ -182,19 +182,18 @@ impl MemorySystem {
     /// * `noncoding_max_tokens` - Maximum tokens for non-source code files
     ///
     /// # Returns
-    /// Tuple of (project_root_path, memory_data, bash_state_json)
+    /// Tuple of (`project_root_path`, `memory_data`, `bash_state_json`)
     pub fn load_memory(
         &self,
         task_id: &str,
         _coding_max_tokens: Option<usize>,
         noncoding_max_tokens: Option<usize>,
     ) -> Result<(String, String, Option<serde_json::Value>)> {
-        let memory_file_path = self.memory_dir.join(format!("{}.txt", task_id));
+        let memory_file_path = self.memory_dir.join(format!("{task_id}.txt"));
 
         if !memory_file_path.exists() {
             return Err(anyhow::anyhow!(
-                "Memory file not found for task: {}",
-                task_id
+                "Memory file not found for task: {task_id}"
             ));
         }
 
@@ -202,7 +201,7 @@ impl MemorySystem {
 
         // Read memory data
         let mut data = fs::read_to_string(&memory_file_path)
-            .with_context(|| format!("Failed to read memory file: {:?}", memory_file_path))?;
+            .with_context(|| format!("Failed to read memory file: {memory_file_path:?}"))?;
 
         // Apply token limits if specified (memory files are considered non-coding)
         if let Some(max_tokens) = noncoding_max_tokens {
@@ -213,7 +212,7 @@ impl MemorySystem {
         let project_root_path = self.extract_project_root(&data);
 
         // Try to load bash state if it exists
-        let state_file_path = self.memory_dir.join(format!("{}_bash_state.json", task_id));
+        let state_file_path = self.memory_dir.join(format!("{task_id}_bash_state.json"));
         let bash_state_json = if state_file_path.exists() {
             match fs::read_to_string(&state_file_path) {
                 Ok(state_json) => match serde_json::from_str::<serde_json::Value>(&state_json) {
@@ -268,22 +267,22 @@ impl MemorySystem {
 
     /// Delete saved memory for a task
     pub fn delete_memory(&self, task_id: &str) -> Result<()> {
-        let memory_file_path = self.memory_dir.join(format!("{}.txt", task_id));
-        let state_file_path = self.memory_dir.join(format!("{}_bash_state.json", task_id));
+        let memory_file_path = self.memory_dir.join(format!("{task_id}.txt"));
+        let state_file_path = self.memory_dir.join(format!("{task_id}_bash_state.json"));
 
         info!("Deleting memory for task: {}", task_id);
 
         // Remove memory file
         if memory_file_path.exists() {
             fs::remove_file(&memory_file_path)
-                .with_context(|| format!("Failed to remove memory file: {:?}", memory_file_path))?;
+                .with_context(|| format!("Failed to remove memory file: {memory_file_path:?}"))?;
             debug!("Removed memory file: {:?}", memory_file_path);
         }
 
         // Remove bash state file if it exists
         if state_file_path.exists() {
             fs::remove_file(&state_file_path).with_context(|| {
-                format!("Failed to remove bash state file: {:?}", state_file_path)
+                format!("Failed to remove bash state file: {state_file_path:?}")
             })?;
             debug!("Removed bash state file: {:?}", state_file_path);
         }

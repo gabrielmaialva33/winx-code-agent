@@ -35,7 +35,7 @@ pub fn read_alignment_file(base_dir: &PathBuf) -> Option<(String, String)> {
 }
 
 /// Read global alignment file from ~/.wcgw/
-/// Matches wcgw Python: checking global_dir = os.path.join(expanduser("~"), ".wcgw")
+/// Matches wcgw Python: checking `global_dir` = os.path.join(expanduser("~"), ".wcgw")
 pub fn read_global_alignment_file() -> Option<String> {
     let home_dir = home::home_dir()?;
     let wcgw_dir = home_dir.join(".wcgw");
@@ -54,7 +54,7 @@ pub fn read_workspace_alignment_file(workspace_path: &PathBuf) -> Option<(String
 }
 
 /// Read initial files and return their content
-/// Matches wcgw Python behavior for initial_files_to_read
+/// Matches wcgw Python behavior for `initial_files_to_read`
 pub fn read_initial_files(
     file_paths: &[String],
     folder_to_start: &PathBuf,
@@ -111,7 +111,7 @@ pub fn read_initial_files(
 }
 
 /// Load saved task context for resumption
-/// Matches wcgw Python: load_memory()
+/// Matches wcgw Python: `load_memory()`
 pub fn load_task_context(task_id: &str) -> Option<(PathBuf, String, Option<String>)> {
     // Get the memory directory
     let app_dir = get_app_dir()?;
@@ -119,8 +119,8 @@ pub fn load_task_context(task_id: &str) -> Option<(PathBuf, String, Option<Strin
 
     // Sanitize task_id for filename
     let safe_id = sanitize_filename(task_id);
-    let memory_file = memory_dir.join(format!("{}.txt", safe_id));
-    let state_file = memory_dir.join(format!("{}_bash_state.json", safe_id));
+    let memory_file = memory_dir.join(format!("{safe_id}.txt"));
+    let state_file = memory_dir.join(format!("{safe_id}_bash_state.json"));
 
     // Check if memory file exists
     if !memory_file.exists() {
@@ -139,9 +139,7 @@ pub fn load_task_context(task_id: &str) -> Option<(PathBuf, String, Option<Strin
             let path_str = line.trim_start_matches("# PROJECT ROOT = ").trim();
             // Handle shell-quoted paths
             shell_unquote(path_str)
-        })
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
+        }).map_or_else(|| PathBuf::from("."), PathBuf::from);
 
     // Try to read bash state
     let bash_state = fs::read_to_string(&state_file).ok();
@@ -149,7 +147,7 @@ pub fn load_task_context(task_id: &str) -> Option<(PathBuf, String, Option<Strin
     Some((project_root, memory_content, bash_state))
 }
 
-/// Application name for data directory (must match memory_system.rs)
+/// Application name for data directory (must match `memory_system.rs`)
 const APP_NAME: &str = "winx-code-agent";
 
 /// Get application directory for storing data
@@ -171,7 +169,7 @@ pub fn get_app_dir() -> Option<PathBuf> {
     }
 
     // Fallback to temp directory
-    let temp_dir = std::env::temp_dir().join(format!("{}-data", APP_NAME));
+    let temp_dir = std::env::temp_dir().join(format!("{APP_NAME}-data"));
     if temp_dir.exists() || fs::create_dir_all(&temp_dir).is_ok() {
         return Some(temp_dir);
     }

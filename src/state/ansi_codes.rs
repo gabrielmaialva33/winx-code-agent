@@ -38,62 +38,62 @@ pub mod csi {
 
     /// Cursor Up
     pub fn cursor_up(n: usize) -> String {
-        format!("\x1B[{}A", n)
+        format!("\x1B[{n}A")
     }
 
     /// Cursor Down
     pub fn cursor_down(n: usize) -> String {
-        format!("\x1B[{}B", n)
+        format!("\x1B[{n}B")
     }
 
     /// Cursor Forward
     pub fn cursor_forward(n: usize) -> String {
-        format!("\x1B[{}C", n)
+        format!("\x1B[{n}C")
     }
 
     /// Cursor Back
     pub fn cursor_back(n: usize) -> String {
-        format!("\x1B[{}D", n)
+        format!("\x1B[{n}D")
     }
 
     /// Cursor Next Line
     pub fn cursor_next_line(n: usize) -> String {
-        format!("\x1B[{}E", n)
+        format!("\x1B[{n}E")
     }
 
     /// Cursor Previous Line
     pub fn cursor_prev_line(n: usize) -> String {
-        format!("\x1B[{}F", n)
+        format!("\x1B[{n}F")
     }
 
     /// Cursor Horizontal Absolute
     pub fn cursor_horizontal(n: usize) -> String {
-        format!("\x1B[{}G", n)
+        format!("\x1B[{n}G")
     }
 
     /// Cursor Position (row, column)
     pub fn cursor_position(row: usize, col: usize) -> String {
-        format!("\x1B[{};{}H", row, col)
+        format!("\x1B[{row};{col}H")
     }
 
     /// Erase in Display
     pub fn erase_in_display(n: usize) -> String {
-        format!("\x1B[{}J", n)
+        format!("\x1B[{n}J")
     }
 
     /// Erase in Line
     pub fn erase_in_line(n: usize) -> String {
-        format!("\x1B[{}K", n)
+        format!("\x1B[{n}K")
     }
 
     /// Scroll Up
     pub fn scroll_up(n: usize) -> String {
-        format!("\x1B[{}S", n)
+        format!("\x1B[{n}S")
     }
 
     /// Scroll Down
     pub fn scroll_down(n: usize) -> String {
-        format!("\x1B[{}T", n)
+        format!("\x1B[{n}T")
     }
 
     /// Request Cursor Position
@@ -156,7 +156,7 @@ pub mod sgr {
     /// Alternative Font 1-9
     pub fn alt_font(n: usize) -> String {
         if !(1..=9).contains(&n) {
-            return "".to_string();
+            return String::new();
         }
         format!("\x1B[{}m", 10 + n)
     }
@@ -193,32 +193,32 @@ pub mod sgr {
 
     /// Foreground Color (30-37 for basic colors, 90-97 for bright)
     pub fn fg_color(n: usize) -> String {
-        format!("\x1B[{}m", n)
+        format!("\x1B[{n}m")
     }
 
     /// Background Color (40-47 for basic colors, 100-107 for bright)
     pub fn bg_color(n: usize) -> String {
-        format!("\x1B[{}m", n)
+        format!("\x1B[{n}m")
     }
 
     /// 8-bit Foreground Color (0-255)
     pub fn fg_color_256(n: u8) -> String {
-        format!("\x1B[38;5;{}m", n)
+        format!("\x1B[38;5;{n}m")
     }
 
     /// 8-bit Background Color (0-255)
     pub fn bg_color_256(n: u8) -> String {
-        format!("\x1B[48;5;{}m", n)
+        format!("\x1B[48;5;{n}m")
     }
 
     /// 24-bit Foreground Color (RGB)
     pub fn fg_color_rgb(r: u8, g: u8, b: u8) -> String {
-        format!("\x1B[38;2;{};{};{}m", r, g, b)
+        format!("\x1B[38;2;{r};{g};{b}m")
     }
 
     /// 24-bit Background Color (RGB)
     pub fn bg_color_rgb(r: u8, g: u8, b: u8) -> String {
-        format!("\x1B[48;2;{};{};{}m", r, g, b)
+        format!("\x1B[48;2;{r};{g};{b}m")
     }
 
     /// Default Foreground Color
@@ -277,27 +277,27 @@ pub mod sgr {
 pub mod osc {
     /// Set window title
     pub fn set_title(title: &str) -> String {
-        format!("\x1B]0;{}\x07", title)
+        format!("\x1B]0;{title}\x07")
     }
 
     /// Set window and icon title
     pub fn set_window_icon_title(title: &str) -> String {
-        format!("\x1B]2;{}\x07", title)
+        format!("\x1B]2;{title}\x07")
     }
 
     /// Set icon title
     pub fn set_icon_title(title: &str) -> String {
-        format!("\x1B]1;{}\x07", title)
+        format!("\x1B]1;{title}\x07")
     }
 
     /// Set color definition
     pub fn set_color(num: u8, rgb: &str) -> String {
-        format!("\x1B]4;{};{}\x07", num, rgb)
+        format!("\x1B]4;{num};{rgb}\x07")
     }
 
     /// Hyperlink
     pub fn hyperlink(url: &str, text: &str) -> String {
-        format!("\x1B]8;;{}\x07{}\x1B]8;;\x07", url, text)
+        format!("\x1B]8;;{url}\x07{text}\x1B]8;;\x07")
     }
 }
 
@@ -545,7 +545,7 @@ pub fn color_name_to_code(name: &str) -> Option<TermColor> {
     None
 }
 
-/// Parse a hex color into TermColor
+/// Parse a hex color into `TermColor`
 ///
 /// Supports formats like #RGB, #RRGGBB
 fn parse_hex_color(hex: &str) -> Option<TermColor> {
@@ -702,7 +702,7 @@ fn extract_color_from_seq(seq: &str) -> String {
         let parts: Vec<&str> = seq.split(';').collect();
         if parts.len() >= 3 {
             if let Some(color_part) = parts[2].strip_suffix('m') {
-                return format!("color-{}", color_part);
+                return format!("color-{color_part}");
             }
         }
     } else if seq.starts_with("\x1B[38;2;") || seq.starts_with("\x1B[48;2;") {
@@ -716,7 +716,7 @@ fn extract_color_from_seq(seq: &str) -> String {
             } else {
                 parts[4]
             };
-            return format!("rgb({},{},{})", r, g, b);
+            return format!("rgb({r},{g},{b})");
         }
     }
 

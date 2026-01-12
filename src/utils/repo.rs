@@ -21,7 +21,7 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
     if !abs_path.exists() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!("Path does not exist: {:?}", abs_path),
+            format!("Path does not exist: {abs_path:?}"),
         ));
     }
 
@@ -55,7 +55,7 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
 
-        if dir_name.starts_with(".") && dir_name != "." && depth > 0 {
+        if dir_name.starts_with('.') && dir_name != "." && depth > 0 {
             continue;
         }
 
@@ -90,7 +90,7 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
                             let file_name = path.file_name().unwrap_or_default().to_string_lossy();
 
                             // Skip hidden files except at root
-                            if file_name.starts_with(".") && depth > 0 && file_name != ".gitignore"
+                            if file_name.starts_with('.') && depth > 0 && file_name != ".gitignore"
                             {
                                 continue;
                             }
@@ -174,17 +174,17 @@ pub fn get_git_info(path: &Path) -> Option<String> {
     // Format the git info
     let mut info = String::new();
     info.push_str("Git Repository Information:\n");
-    info.push_str(&format!("  Root: {}\n", git_root));
+    info.push_str(&format!("  Root: {git_root}\n"));
 
     if let Some(branch) = current_branch {
-        info.push_str(&format!("  Branch: {}\n", branch));
+        info.push_str(&format!("  Branch: {branch}\n"));
     }
 
     if let Some(hash) = last_commit_hash {
-        info.push_str(&format!("  Last commit: {}", hash));
+        info.push_str(&format!("  Last commit: {hash}"));
 
         if let Some(msg) = last_commit_msg {
-            info.push_str(&format!(" - {}", msg));
+            info.push_str(&format!(" - {msg}"));
         }
 
         info.push('\n');
@@ -222,7 +222,7 @@ impl Default for WorkspaceStats {
 }
 
 impl WorkspaceStats {
-    /// Create a new WorkspaceStats
+    /// Create a new `WorkspaceStats`
     pub fn new() -> Self {
         Self {
             file_modified_times: HashMap::new(),
@@ -456,7 +456,7 @@ fn collect_files_par(
             .flat_map(|subdir| {
                 let exclude_patterns_refs = exclude_patterns_owned
                     .as_ref()
-                    .map(|patterns| patterns.iter().map(|s| s.as_str()).collect::<Vec<_>>());
+                    .map(|patterns| patterns.iter().map(std::string::String::as_str).collect::<Vec<_>>());
 
                 collect_files_par(&subdir, exclude_patterns_refs.as_deref()).unwrap_or_default()
             })
@@ -708,7 +708,7 @@ pub fn get_repo_summary(
     if let Some(git_info) = get_git_info(workspace_path) {
         writeln!(output)?;
         writeln!(output, "## Git Information")?;
-        writeln!(output, "{}", git_info)?;
+        writeln!(output, "{git_info}")?;
     }
 
     // Get most relevant files
@@ -769,14 +769,14 @@ pub fn get_repo_summary(
     let file_types = calculate_file_type_stats(workspace_path)?;
     let total_files: usize = file_types.values().sum();
 
-    writeln!(output, "Total files: {}", total_files)?;
+    writeln!(output, "Total files: {total_files}")?;
 
     let mut file_type_entries: Vec<_> = file_types.into_iter().collect();
     file_type_entries.sort_by(|a, b| b.1.cmp(&a.1));
 
     for (ext, count) in file_type_entries.iter().take(10) {
         let percentage = (*count as f64 / total_files as f64) * 100.0;
-        writeln!(output, "{}: {} files ({:.1}%)", ext, count, percentage)?;
+        writeln!(output, "{ext}: {count} files ({percentage:.1}%)")?;
     }
 
     Ok(String::from_utf8_lossy(&output).to_string())
@@ -814,9 +814,7 @@ fn calculate_file_type_stats(workspace_path: &Path) -> std::io::Result<HashMap<S
                 |mut thread_map, path| {
                     // Process each file in the thread's chunk
                     let extension = path
-                        .extension()
-                        .map(|ext| ext.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "no_extension".to_string());
+                        .extension().map_or_else(|| "no_extension".to_string(), |ext| ext.to_string_lossy().to_string());
 
                     *thread_map.entry(extension).or_insert(0) += 1;
                     thread_map
@@ -826,7 +824,7 @@ fn calculate_file_type_stats(workspace_path: &Path) -> std::io::Result<HashMap<S
                 HashMap::new, // Identity value
                 |mut result_map, thread_map| {
                     // Merge thread results
-                    for (ext, count) in thread_map.into_iter() {
+                    for (ext, count) in thread_map {
                         *result_map.entry(ext).or_insert(0) += count;
                     }
                     result_map
@@ -840,9 +838,7 @@ fn calculate_file_type_stats(workspace_path: &Path) -> std::io::Result<HashMap<S
 
         for path in files {
             let extension = path
-                .extension()
-                .map(|ext| ext.to_string_lossy().to_string())
-                .unwrap_or_else(|| "no_extension".to_string());
+                .extension().map_or_else(|| "no_extension".to_string(), |ext| ext.to_string_lossy().to_string());
 
             *file_types.entry(extension).or_insert(0) += 1;
         }

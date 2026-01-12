@@ -1,6 +1,6 @@
 //! Bash state persistence module
 //!
-//! Provides disk persistence for BashState, compatible with WCGW Python implementation.
+//! Provides disk persistence for `BashState`, compatible with WCGW Python implementation.
 //! State is stored in `~/.local/share/wcgw/bash_state/` as JSON files.
 
 use anyhow::{Context, Result};
@@ -14,7 +14,7 @@ use crate::types::{AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, Fil
 
 use super::bash_state::FileWhitelistData;
 
-/// Snapshot of BashState that can be serialized to disk
+/// Snapshot of `BashState` that can be serialized to disk
 /// Compatible with WCGW Python's bash state format
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BashStateSnapshot {
@@ -26,7 +26,7 @@ pub struct BashStateSnapshot {
     pub write_if_empty_mode: WriteIfEmptyModeSnapshot,
     /// Whitelist for file overwriting
     pub whitelist_for_overwrite: HashMap<String, FileWhitelistDataSnapshot>,
-    /// Operation mode (wcgw, architect, code_writer)
+    /// Operation mode (wcgw, architect, `code_writer`)
     pub mode: String,
     /// Workspace root directory
     pub workspace_root: String,
@@ -37,14 +37,14 @@ pub struct BashStateSnapshot {
     pub cwd: String,
 }
 
-/// Serializable version of BashCommandMode
+/// Serializable version of `BashCommandMode`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BashCommandModeSnapshot {
     pub bash_mode: String,
     pub allowed_commands: AllowedCommandsSnapshot,
 }
 
-/// Serializable version of AllowedCommands
+/// Serializable version of `AllowedCommands`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AllowedCommandsSnapshot {
@@ -52,19 +52,19 @@ pub enum AllowedCommandsSnapshot {
     List(Vec<String>),
 }
 
-/// Serializable version of FileEditMode
+/// Serializable version of `FileEditMode`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileEditModeSnapshot {
     pub allowed_globs: AllowedGlobsSnapshot,
 }
 
-/// Serializable version of WriteIfEmptyMode
+/// Serializable version of `WriteIfEmptyMode`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WriteIfEmptyModeSnapshot {
     pub allowed_globs: AllowedGlobsSnapshot,
 }
 
-/// Serializable version of AllowedGlobs
+/// Serializable version of `AllowedGlobs`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum AllowedGlobsSnapshot {
@@ -72,7 +72,7 @@ pub enum AllowedGlobsSnapshot {
     List(Vec<String>),
 }
 
-/// Serializable version of FileWhitelistData
+/// Serializable version of `FileWhitelistData`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileWhitelistDataSnapshot {
     pub file_hash: String,
@@ -99,7 +99,7 @@ pub fn get_state_dir() -> Result<PathBuf> {
     // Create directory if it doesn't exist
     if !bash_state_dir.exists() {
         fs::create_dir_all(&bash_state_dir)
-            .with_context(|| format!("Failed to create bash state directory: {:?}", bash_state_dir))?;
+            .with_context(|| format!("Failed to create bash state directory: {bash_state_dir:?}"))?;
         debug!("Created bash state directory: {:?}", bash_state_dir);
     }
 
@@ -109,14 +109,14 @@ pub fn get_state_dir() -> Result<PathBuf> {
 /// Get the path to the state file for a given thread ID
 fn get_state_file_path(thread_id: &str) -> Result<PathBuf> {
     let state_dir = get_state_dir()?;
-    Ok(state_dir.join(format!("{}_bash_state.json", thread_id)))
+    Ok(state_dir.join(format!("{thread_id}_bash_state.json")))
 }
 
 /// Save bash state to disk
 ///
 /// # Arguments
 /// * `thread_id` - The thread/chat ID to save state for
-/// * `state` - The BashStateSnapshot to save
+/// * `state` - The `BashStateSnapshot` to save
 ///
 /// # Returns
 /// * `Ok(())` if the state was saved successfully
@@ -133,7 +133,7 @@ pub fn save_bash_state(thread_id: &str, state: &BashStateSnapshot) -> Result<()>
         .with_context(|| "Failed to serialize bash state to JSON")?;
 
     fs::write(&state_file, json)
-        .with_context(|| format!("Failed to write bash state to file: {:?}", state_file))?;
+        .with_context(|| format!("Failed to write bash state to file: {state_file:?}"))?;
 
     debug!("Saved bash state for thread_id '{}' to {:?}", thread_id, state_file);
     Ok(())
@@ -161,10 +161,10 @@ pub fn load_bash_state(thread_id: &str) -> Result<Option<BashStateSnapshot>> {
     }
 
     let json = fs::read_to_string(&state_file)
-        .with_context(|| format!("Failed to read bash state from file: {:?}", state_file))?;
+        .with_context(|| format!("Failed to read bash state from file: {state_file:?}"))?;
 
     let state: BashStateSnapshot = serde_json::from_str(&json)
-        .with_context(|| format!("Failed to parse bash state JSON from file: {:?}", state_file))?;
+        .with_context(|| format!("Failed to parse bash state JSON from file: {state_file:?}"))?;
 
     info!("Loaded bash state for thread_id '{}' from {:?}", thread_id, state_file);
     Ok(Some(state))
@@ -187,7 +187,7 @@ pub fn delete_bash_state(thread_id: &str) -> Result<()> {
 
     if state_file.exists() {
         fs::remove_file(&state_file)
-            .with_context(|| format!("Failed to delete bash state file: {:?}", state_file))?;
+            .with_context(|| format!("Failed to delete bash state file: {state_file:?}"))?;
         info!("Deleted bash state for thread_id '{}' from {:?}", thread_id, state_file);
     }
 
@@ -221,7 +221,7 @@ pub fn list_saved_states() -> Result<Vec<String>> {
 // Conversion implementations
 
 impl BashStateSnapshot {
-    /// Create a snapshot from BashState components
+    /// Create a snapshot from `BashState` components
     pub fn from_state(
         cwd: &str,
         workspace_root: &str,
@@ -244,15 +244,15 @@ impl BashStateSnapshot {
             workspace_root: workspace_root.to_string(),
             chat_id: thread_id.to_string(),
             // Only store cwd if different from workspace_root (for backward compatibility)
-            cwd: if cwd != workspace_root {
-                cwd.to_string()
-            } else {
+            cwd: if cwd == workspace_root {
                 String::new()
+            } else {
+                cwd.to_string()
             },
         }
     }
 
-    /// Convert snapshot back to BashState components
+    /// Convert snapshot back to `BashState` components
     pub fn to_state_components(
         &self,
     ) -> (

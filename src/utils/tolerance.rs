@@ -26,7 +26,7 @@ pub enum ToleranceSeverity {
 }
 
 /// Common character translations from Unicode to ASCII
-/// Based on wcgw's COMMON_MISTAKE_TRANSLATION
+/// Based on wcgw's `COMMON_MISTAKE_TRANSLATION`
 pub const COMMON_MISTAKES: &[(&str, &str)] = &[
     // Smart quotes to ASCII
     ("\u{2018}", "'"),  // LEFT SINGLE QUOTATION MARK
@@ -123,7 +123,7 @@ impl ToleranceHit {
 pub struct MatchResult {
     /// The slice of the original content that matched
     pub matched_slice: (usize, usize),
-    /// Line range (start_line, end_line) - 1-indexed
+    /// Line range (`start_line`, `end_line`) - 1-indexed
     pub line_range: (usize, usize),
     /// Tolerances that were used to achieve the match
     pub tolerances_hit: Vec<ToleranceHit>,
@@ -397,7 +397,7 @@ pub fn match_with_tolerance(
         let active_tolerances: Vec<ToleranceHit> =
             tolerances_hit.into_iter().filter(|t| t.count > 0).collect();
 
-        let score: f64 = active_tolerances.iter().map(|t| t.score()).sum();
+        let score: f64 = active_tolerances.iter().map(ToleranceHit::score).sum();
 
         // Collect warnings
         let warnings: HashSet<String> = active_tolerances
@@ -409,7 +409,7 @@ pub fn match_with_tolerance(
         // Get matched lines
         let matched_lines: Vec<String> = content_lines[start..end]
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| (*s).to_string())
             .collect();
 
         // Check for removed indentation
@@ -424,10 +424,10 @@ pub fn match_with_tolerance(
                 .map(|l| get_removed_indentation(l))
                 .collect();
 
-            if !indents.is_empty() {
-                Some(indents[0].clone())
-            } else {
+            if indents.is_empty() {
                 None
+            } else {
+                Some(indents[0].clone())
             }
         } else {
             None
@@ -492,7 +492,7 @@ pub fn match_with_tolerance_empty_lines(
             result.line_range = (*orig_start + 1, orig_end);
             result.matched_lines = content_lines[*orig_start..orig_end]
                 .iter()
-                .map(|s| s.to_string())
+                .map(|s| (*s).to_string())
                 .collect();
 
             Some((result, indices))
@@ -566,11 +566,11 @@ pub fn fix_indentation(
             if diff < 0 {
                 // Add indentation
                 let add_indent = " ".repeat((-diff) as usize);
-                format!("{}{}", add_indent, line)
+                format!("{add_indent}{line}")
             } else {
                 // Remove indentation
                 let diff_usize = diff as usize;
-                if line.len() >= diff_usize && line[..diff_usize].chars().all(|c| c.is_whitespace())
+                if line.len() >= diff_usize && line[..diff_usize].chars().all(char::is_whitespace)
                 {
                     line[diff_usize..].to_string()
                 } else {
@@ -639,10 +639,10 @@ impl std::fmt::Display for ApplyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.message)?;
         if let Some(ref block) = self.failed_block {
-            write!(f, "\n\nFailed search block:\n```\n{}\n```", block)?;
+            write!(f, "\n\nFailed search block:\n```\n{block}\n```")?;
         }
         if let Some(ref ctx) = self.context {
-            write!(f, "\n\nRelevant context from file:\n```\n{}\n```", ctx)?;
+            write!(f, "\n\nRelevant context from file:\n```\n{ctx}\n```")?;
         }
         Ok(())
     }
@@ -657,14 +657,14 @@ pub fn apply_search_replace_with_tolerance(
     blocks: Vec<SearchReplaceBlock>,
 ) -> Result<ApplyResult, ApplyError> {
     let tolerances = default_tolerances();
-    let mut content_lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+    let mut content_lines: Vec<String> = content.lines().map(std::string::ToString::to_string).collect();
     let mut all_warnings = HashSet::new();
     let mut total_score = 0.0;
     let mut offset: i64 = 0;
 
     for (block_idx, block) in blocks.iter().enumerate() {
-        let search_refs: Vec<&str> = block.search.iter().map(|s| s.as_str()).collect();
-        let content_refs: Vec<&str> = content_lines.iter().map(|s| s.as_str()).collect();
+        let search_refs: Vec<&str> = block.search.iter().map(std::string::String::as_str).collect();
+        let content_refs: Vec<&str> = content_lines.iter().map(std::string::String::as_str).collect();
 
         trace!(
             "Processing block {}/{}: {} search lines",
@@ -676,33 +676,7 @@ pub fn apply_search_replace_with_tolerance(
         // Try exact match first
         let exact_matches = match_exact(&content_refs, 0, &search_refs);
 
-        let (match_result, replace_lines) = if !exact_matches.is_empty() {
-            if exact_matches.len() > 1 {
-                return Err(ApplyError {
-                    message: format!(
-                        "Search block {} matched {} times. Add more context to make it unique.",
-                        block_idx + 1,
-                        exact_matches.len()
-                    ),
-                    failed_block: Some(block.search.join("\n")),
-                    context: None,
-                });
-            }
-
-            let (start, end) = exact_matches[0];
-            (
-                MatchResult {
-                    matched_slice: (start, end),
-                    line_range: (start + 1, end),
-                    tolerances_hit: vec![],
-                    score: 0.0,
-                    warnings: HashSet::new(),
-                    matched_lines: content_lines[start..end].to_vec(),
-                    removed_indentation: None,
-                },
-                block.replace.clone(),
-            )
-        } else {
+        let (match_result, replace_lines) = if exact_matches.is_empty() {
             // Try tolerance matching
             let tolerance_matches =
                 match_with_tolerance(&content_refs, 0, &search_refs, &tolerances);
@@ -744,6 +718,32 @@ pub fn apply_search_replace_with_tolerance(
                 let (result, _) = tolerance_matches.into_iter().next().unwrap();
                 (result, block.replace.clone())
             }
+        } else {
+            if exact_matches.len() > 1 {
+                return Err(ApplyError {
+                    message: format!(
+                        "Search block {} matched {} times. Add more context to make it unique.",
+                        block_idx + 1,
+                        exact_matches.len()
+                    ),
+                    failed_block: Some(block.search.join("\n")),
+                    context: None,
+                });
+            }
+
+            let (start, end) = exact_matches[0];
+            (
+                MatchResult {
+                    matched_slice: (start, end),
+                    line_range: (start + 1, end),
+                    tolerances_hit: vec![],
+                    score: 0.0,
+                    warnings: HashSet::new(),
+                    matched_lines: content_lines[start..end].to_vec(),
+                    removed_indentation: None,
+                },
+                block.replace.clone(),
+            )
         };
 
         // Apply indentation fix if needed
@@ -768,8 +768,7 @@ pub fn apply_search_replace_with_tolerance(
         if total_score > MAX_TOLERANCE_SCORE {
             return Err(ApplyError {
                 message: format!(
-                    "Too many tolerance warnings accumulated (score: {:.1} > {}). Not applying edits.",
-                    total_score, MAX_TOLERANCE_SCORE
+                    "Too many tolerance warnings accumulated (score: {total_score:.1} > {MAX_TOLERANCE_SCORE}). Not applying edits."
                 ),
                 failed_block: None,
                 context: None,

@@ -2,7 +2,7 @@
 //! Core WCGW tools only - no AI integration
 
 use rmcp::{
-    model::*,
+    model::{ServerInfo, Implementation, ProtocolVersion, ServerCapabilities, PaginatedRequestParam, ListToolsResult, Tool, ListResourcesResult, Annotated, RawResource, ReadResourceRequestParam, ReadResourceResult, ResourceContents, ListPromptsResult, GetPromptRequestParam, GetPromptResult, CallToolRequestParam, CallToolResult, ConstString, Content},
     service::{RequestContext, RoleServer},
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
@@ -42,7 +42,7 @@ impl Default for WinxService {
 }
 
 impl WinxService {
-    /// Create a new WinxService instance
+    /// Create a new `WinxService` instance
     pub fn new() -> Self {
         info!("Creating new WinxService instance");
         Self {
@@ -84,7 +84,7 @@ impl WinxService {
             while let Some(entry) = read_dir.next_entry().await.unwrap_or(None) {
                 entries.push(entry);
             }
-            entries.sort_by_key(|a| a.file_name());
+            entries.sort_by_key(tokio::fs::DirEntry::file_name);
 
             for entry in entries {
                 let name = entry.file_name().to_string_lossy().to_string();
@@ -94,9 +94,9 @@ impl WinxService {
                     .map(|ft| ft.is_dir())
                     .unwrap_or(false);
                 if is_dir {
-                    structure.push_str(&format!("- {}/\n", name));
+                    structure.push_str(&format!("- {name}/\n"));
                 } else {
-                    structure.push_str(&format!("- {}\n", name));
+                    structure.push_str(&format!("- {name}\n"));
                 }
             }
         } else {
@@ -112,7 +112,7 @@ impl WinxService {
     }
 }
 
-/// ServerHandler implementation with manual tool handling
+/// `ServerHandler` implementation with manual tool handling
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -414,14 +414,16 @@ impl WinxService {
                 if let Value::Object(map) = v {
                     map.get("shell")
                         .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
+                        .map(std::string::ToString::to_string)
                 } else {
                     None
                 }
             })
             .unwrap_or_else(|| "bash".to_string());
 
-        let mut bash_state_guard = self.bash_state.lock().unwrap();
+        let mut bash_state_guard = self.bash_state.lock().map_err(|e| {
+            McpError::internal_error(format!("Failed to acquire lock: {e}"), None)
+        })?;
         if bash_state_guard.is_some() {
             return Ok(CallToolResult::success(vec![Content::text(
                 "Shell environment is already initialized".to_string(),
@@ -430,18 +432,17 @@ impl WinxService {
 
         let mut state = crate::state::BashState::new();
         match state.init_interactive_bash() {
-            Ok(_) => {
+            Ok(()) => {
                 *bash_state_guard = Some(state);
                 info!("Shell environment initialized with {}", shell);
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Shell environment initialized with {}",
-                    shell
+                    "Shell environment initialized with {shell}"
                 ))]))
             }
             Err(e) => {
                 warn!("Failed to initialize shell: {}", e);
                 Err(McpError::internal_error(
-                    format!("Failed to initialize shell: {}", e),
+                    format!("Failed to initialize shell: {e}"),
                     None,
                 ))
             }
@@ -456,19 +457,23 @@ impl WinxService {
             .ok_or_else(|| McpError::invalid_request("Missing command", None))?;
         let timeout_seconds = args
             .get("timeout_seconds")
-            .and_then(|v| v.as_u64())
+            .and_then(serde_json::Value::as_u64)
             .unwrap_or(30) as f32;
 
         // Clone the bash state to avoid holding the mutex across await
         let mut bash_state_clone = {
-            let bash_state_guard = self.bash_state.lock().unwrap();
-            if bash_state_guard.is_none() {
-                return Err(McpError::invalid_request(
-                    "Shell not initialized. Call initialize first.",
-                    None,
-                ));
+            let bash_state_guard = self.bash_state.lock().map_err(|e| {
+                McpError::internal_error(format!("Failed to acquire lock: {e}"), None)
+            })?;
+            match bash_state_guard.as_ref() {
+                Some(state) => state.clone(),
+                None => {
+                    return Err(McpError::invalid_request(
+                        "Shell not initialized. Call initialize first.",
+                        None,
+                    ));
+                }
             }
-            bash_state_guard.as_ref().unwrap().clone()
         };
 
         match bash_state_clone
@@ -478,17 +483,19 @@ impl WinxService {
             Ok(output) => {
                 // Update the original state with any changes
                 {
-                    let mut bash_state_guard = self.bash_state.lock().unwrap();
+                    let mut bash_state_guard = self.bash_state.lock().map_err(|e| {
+                        McpError::internal_error(format!("Failed to acquire lock: {e}"), None)
+                    })?;
                     *bash_state_guard = Some(bash_state_clone.clone());
                 }
                 let working_dir = bash_state_clone.cwd.display().to_string();
-                let content = format!("Working directory: {}\n\n{}", working_dir, output);
+                let content = format!("Working directory: {working_dir}\n\n{output}");
                 Ok(CallToolResult::success(vec![Content::text(content)]))
             }
             Err(e) => {
                 warn!("Command execution failed: {}", e);
                 Err(McpError::internal_error(
-                    format!("Command execution failed: {}", e),
+                    format!("Command execution failed: {e}"),
                     None,
                 ))
             }
@@ -498,9 +505,9 @@ impl WinxService {
     async fn handle_read_files(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
         let paths = args
-            .get("paths")
+            .get("file_paths")
             .and_then(|v| v.as_array())
-            .ok_or_else(|| McpError::invalid_request("Missing paths array", None))?;
+            .ok_or_else(|| McpError::invalid_request("Missing file_paths array", None))?;
 
         let mut content_parts = Vec::new();
 
@@ -519,7 +526,7 @@ impl WinxService {
                     ));
                 }
                 Err(e) => {
-                    content_parts.push(format!("=== {} ===\nERROR: {}\n", path, e));
+                    content_parts.push(format!("=== {path} ===\nERROR: {e}\n"));
                 }
             }
         }
@@ -544,18 +551,18 @@ impl WinxService {
             .ok_or_else(|| McpError::invalid_request("Missing content", None))?;
         let create = args
             .get("create_if_missing")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
 
         if !create && !tokio::fs::try_exists(path).await.unwrap_or(false) {
             return Err(McpError::invalid_request(
-                format!("File does not exist: {}", path),
+                format!("File does not exist: {path}"),
                 None,
             ));
         }
 
         match tokio::fs::write(path, content).await {
-            Ok(_) => {
+            Ok(()) => {
                 info!("File written successfully: {}", path);
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "File written successfully: {} ({} bytes)",
@@ -566,7 +573,7 @@ impl WinxService {
             Err(e) => {
                 warn!("Failed to write file {}: {}", path, e);
                 Err(McpError::internal_error(
-                    format!("Failed to write file {}: {}", path, e),
+                    format!("Failed to write file {path}: {e}"),
                     None,
                 ))
             }
@@ -597,7 +604,7 @@ impl WinxService {
             .iter()
             .map(|v| {
                 v.as_str()
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
                     .ok_or_else(|| McpError::invalid_request("Invalid glob in array", None))
             })
             .collect();
@@ -618,7 +625,7 @@ impl WinxService {
             Err(e) => {
                 warn!("Failed to save context: {}", e);
                 Err(McpError::internal_error(
-                    format!("Failed to save context: {}", e),
+                    format!("Failed to save context: {e}"),
                     None,
                 ))
             }
@@ -641,15 +648,14 @@ impl WinxService {
             Ok((mime_type, base64_data)) => {
                 info!("Image read successfully: {}", file_path);
                 let result_text = format!(
-                    "Image: {}\nMIME Type: {}\nBase64 Data: {}",
-                    file_path, mime_type, base64_data
+                    "Image: {file_path}\nMIME Type: {mime_type}\nBase64 Data: {base64_data}"
                 );
                 Ok(CallToolResult::success(vec![Content::text(result_text)]))
             }
             Err(e) => {
                 warn!("Failed to read image {}: {}", file_path, e);
                 Err(McpError::internal_error(
-                    format!("Failed to read image: {}", e),
+                    format!("Failed to read image: {e}"),
                     None,
                 ))
             }
@@ -666,7 +672,7 @@ pub async fn start_winx_server() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create and run the server with STDIO transport
     let server = service.serve(stdio()).await.inspect_err(|e| {
-        eprintln!("Error starting server: {}", e);
+        eprintln!("Error starting server: {e}");
     })?;
     server.waiting().await?;
 

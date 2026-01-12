@@ -367,7 +367,7 @@ impl FuzzyMatcher {
 
             // Calculate similarity score based on matching lines
             if total_lines > 0 && matching_lines > 0 {
-                let similarity = matching_lines as f64 / total_lines as f64;
+                let similarity = f64::from(matching_lines) / f64::from(total_lines);
 
                 // Only include matches with reasonable similarity
                 if similarity >= 0.5 {
@@ -423,7 +423,7 @@ impl FuzzyMatcher {
         // Create a token frequency map for the pattern
         let mut pattern_token_freq = HashMap::new();
         for token in &pattern_tokens {
-            *pattern_token_freq.entry(token.to_string()).or_insert(0) += 1;
+            *pattern_token_freq.entry(token.clone()).or_insert(0) += 1;
         }
 
         // Calculate token matches and scores for sliding windows in the text
@@ -440,7 +440,7 @@ impl FuzzyMatcher {
 
             for token in window {
                 if pattern_token_freq.contains_key(token) {
-                    let count = token_matches.entry(token.to_string()).or_insert(0);
+                    let count = token_matches.entry(token.clone()).or_insert(0);
                     *count += 1;
 
                     if *count <= pattern_token_freq[token] {
@@ -450,7 +450,7 @@ impl FuzzyMatcher {
             }
 
             // Calculate similarity score
-            let similarity = (matched_tokens as f64 / pattern_tokens.len() as f64).min(1.0); // Cap at 1.0
+            let similarity = (f64::from(matched_tokens) / pattern_tokens.len() as f64).min(1.0); // Cap at 1.0
 
             if similarity >= 0.6 {
                 // Find the actual text positions for this window
@@ -692,7 +692,7 @@ impl FuzzyMatcher {
         let min_length = min(20, pattern.len() / 2);
 
         // Try different window sizes for pattern
-        for window_size in [50, 40, 30, 20].iter() {
+        for window_size in &[50, 40, 30, 20] {
             if pattern.len() < *window_size {
                 continue;
             }
@@ -852,11 +852,7 @@ pub fn levenshtein_distance(s1: &str, s2: &str) -> usize {
         curr_row.push(i); // First column
 
         for j in 1..=n {
-            let cost = if s1_chars[i - 1] == s2_chars[j - 1] {
-                0
-            } else {
-                1
-            };
+            let cost = usize::from(s1_chars[i - 1] != s2_chars[j - 1]);
 
             // Choose the minimum of:
             // - Delete (j-1)th character from s2 (cell to the left + 1)

@@ -189,7 +189,7 @@ impl RepoTraverser {
                 let rel_path = if prefix.is_empty() {
                     name.clone()
                 } else {
-                    format!("{}/{}", prefix, name)
+                    format!("{prefix}/{name}")
                 };
 
                 // Check if ignored
@@ -252,8 +252,8 @@ impl RepoTraverser {
             score += match ext.to_str() {
                 Some("rs") => 10.0,
                 Some("py") => 9.0,
-                Some("js") | Some("ts") => 8.0,
-                Some("json") | Some("toml") | Some("yaml") | Some("yml") => 7.0,
+                Some("js" | "ts") => 8.0,
+                Some("json" | "toml" | "yaml" | "yml") => 7.0,
                 Some("md") => 5.0,
                 Some("txt") => 3.0,
                 _ => 1.0,
@@ -316,7 +316,7 @@ impl RepoTraverser {
         }
 
         // Calculate importance scores
-        for (path, stats) in file_stats.iter_mut() {
+        for (path, stats) in &mut file_stats {
             stats.importance_score = self.calculate_importance_score(path, stats);
         }
 
@@ -406,7 +406,7 @@ impl RepoContextAnalyzer {
         types.sort_by(|a, b| b.1.cmp(&a.1));
 
         for (file_type, count) in types.into_iter().take(10) {
-            summary.push_str(&format!("- {}: {} files\n", file_type, count));
+            summary.push_str(&format!("- {file_type}: {count} files\n"));
         }
 
         // Project structure hint

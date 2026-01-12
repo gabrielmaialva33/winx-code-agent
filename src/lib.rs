@@ -1,9 +1,7 @@
+// Library code - some functions are part of public API but may not be used internally
 #![allow(dead_code)]
+// Clippy lints for library flexibility
 #![allow(clippy::too_many_arguments)]
-#![allow(clippy::type_complexity)]
-#![allow(clippy::to_string_in_format_args)]
-#![allow(clippy::let_and_return)]
-#![allow(clippy::needless_return)]
 
 //! # Winx Code Agent
 //!

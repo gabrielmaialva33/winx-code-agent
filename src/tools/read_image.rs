@@ -1,6 +1,6 @@
-//! Implementation of the ReadImage tool.
+//! Implementation of the `ReadImage` tool.
 //!
-//! This module provides the implementation for the ReadImage tool, which is used
+//! This module provides the implementation for the `ReadImage` tool, which is used
 //! to read image files and return their contents as base64-encoded data with
 //! the appropriate MIME type.
 
@@ -71,7 +71,7 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
     // Read the file as bytes
     let image_bytes = std::fs::read(&path).map_err(|e| WinxError::FileAccessError {
         path: path.clone(),
-        message: format!("Error reading file: {}", e),
+        message: format!("Error reading file: {e}"),
     })?;
 
     // Encode the bytes to base64
@@ -84,7 +84,9 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
         .to_string();
 
     // Verify the MIME type is a supported image type
-    if !SUPPORTED_MIME_TYPES.contains(&mime_type.as_str()) {
+    if SUPPORTED_MIME_TYPES.contains(&mime_type.as_str()) {
+        Ok((mime_type, image_b64))
+    } else {
         debug!(
             "Detected MIME type '{}' is not in the supported list",
             mime_type
@@ -106,14 +108,12 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
 
         debug!("Using fallback MIME type: {}", mime_type);
         Ok((mime_type.to_string(), image_b64))
-    } else {
-        Ok((mime_type, image_b64))
     }
 }
 
-/// Handle the ReadImage tool call
+/// Handle the `ReadImage` tool call
 ///
-/// This function processes the ReadImage tool call, which reads an image file
+/// This function processes the `ReadImage` tool call, which reads an image file
 /// and returns its contents as base64-encoded data with the appropriate MIME type.
 ///
 /// # Arguments
@@ -142,16 +142,13 @@ pub async fn handle_tool_call(
     // Lock bash state to extract data
     {
         let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
+            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
         })?;
 
         // Ensure bash state is initialized
-        let bash_state = match &*bash_state_guard {
-            Some(state) => state,
-            None => {
-                error!("BashState not initialized");
-                return Err(WinxError::BashStateNotInitialized);
-            }
+        let bash_state = if let Some(state) = &*bash_state_guard { state } else {
+            error!("BashState not initialized");
+            return Err(WinxError::BashStateNotInitialized);
         };
 
         // Extract needed data

@@ -827,7 +827,7 @@ impl TerminalPerformer {
         self.handle_sgr_params(params);
 
         // Handle extended color params (38, 48) manually since they require sequences
-        let param_arrays: Vec<Vec<u16>> = params.iter().map(|p| p.to_vec()).collect();
+        let param_arrays: Vec<Vec<u16>> = params.iter().map(<[u16]>::to_vec).collect();
 
         if param_arrays.len() >= 3 {
             let mut i = 0;
@@ -1662,8 +1662,7 @@ pub fn incremental_text(text: &str, last_pending_output: &str) -> String {
         // Find the start of a line to avoid cutting in the middle
         let adjusted_offset = text[start_offset..]
             .find('\n')
-            .map(|pos| start_offset + pos + 1)
-            .unwrap_or(start_offset);
+            .map_or(start_offset, |pos| start_offset + pos + 1);
 
         &text[adjusted_offset..]
     } else {

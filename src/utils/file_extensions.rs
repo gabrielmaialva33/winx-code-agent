@@ -206,7 +206,7 @@ impl FileExtensionAnalyzer {
         }
     }
 
-    /// Select the appropriate max_tokens limit based on file type
+    /// Select the appropriate `max_tokens` limit based on file type
     ///
     /// # Arguments
     /// * `filename` - The name of the file to check
@@ -214,7 +214,7 @@ impl FileExtensionAnalyzer {
     /// * `noncoding_max_tokens` - Maximum tokens for non-source code files
     ///
     /// # Returns
-    /// The appropriate max_tokens limit for the file
+    /// The appropriate `max_tokens` limit for the file
     pub fn select_max_tokens(
         &self,
         filename: &str,
@@ -347,7 +347,7 @@ impl FileExtensionAnalyzer {
     /// * `total_budget` - Total token budget available
     ///
     /// # Returns
-    /// Vector of (filename, allocated_tokens) pairs
+    /// Vector of (filename, `allocated_tokens`) pairs
     pub fn allocate_token_budget(
         &self,
         files: &[String],

@@ -1,6 +1,6 @@
-//! Implementation of the FileWriteOrEdit tool.
+//! Implementation of the `FileWriteOrEdit` tool.
 //!
-//! This module provides the implementation for the FileWriteOrEdit tool, which is used
+//! This module provides the implementation for the `FileWriteOrEdit` tool, which is used
 //! to write or edit files, with support for both full file content and search/replace blocks.
 
 use anyhow::Context as AnyhowContext;
@@ -152,8 +152,8 @@ impl SearchReplaceHelper {
                         suggestions: vec![
                             format!("Block {} matches {} times in the file at lines: {}", 
                                 i + 1, count_before,
-                                match_locations.iter().map(|l| l.to_string()).collect::<Vec<_>>().join(", ")),
-                            "".to_string(),
+                                match_locations.iter().map(std::string::ToString::to_string).collect::<Vec<_>>().join(", ")),
+                            String::new(),
                             "To resolve this ambiguity:".to_string(),
                             "• Add more context lines before and after the search block".to_string(),
                             "• Include surrounding function names, comments, or unique identifiers".to_string(),
@@ -188,48 +188,50 @@ impl SearchReplaceHelper {
             ));
 
             // Try fuzzy matching if enabled
-            if self.use_fuzzy_matching && self.fuzzy_matcher.is_some() {
-                let mut fuzzy_matcher = self.fuzzy_matcher.as_ref().unwrap().clone();
-                let matches = fuzzy_matcher.find_matches(search, &content);
+            if self.use_fuzzy_matching {
+                if let Some(matcher) = &self.fuzzy_matcher {
+                    let mut fuzzy_matcher = matcher.clone();
+                    let matches = fuzzy_matcher.find_matches(search, &content);
 
-                if !matches.is_empty() {
-                    let best_match = &matches[0];
-                    self.debug_info.push(format!(
-                        "Best fuzzy match for block {} (similarity: {:.2})",
-                        i + 1,
-                        best_match.similarity
-                    ));
-
-                    // If confidence is high enough and auto-apply is enabled, perform the replacement
-                    if best_match.similarity >= self.fuzzy_threshold && self.auto_apply_fuzzy_fixes
-                    {
+                    if !matches.is_empty() {
+                        let best_match = &matches[0];
                         self.debug_info.push(format!(
-                            "Auto-applying fuzzy fix for block {} (similarity: {:.2})",
+                            "Best fuzzy match for block {} (similarity: {:.2})",
                             i + 1,
                             best_match.similarity
                         ));
 
-                        // Replace the matched text with the replacement text
-                        let before = &content[..best_match.start_pos];
-                        let after = &content[best_match.end_pos..];
-                        content = format!("{}{}{}", before, replace, after);
-                        _success_count += 1;
-                        continue;
-                    }
+                        // If confidence is high enough and auto-apply is enabled, perform the replacement
+                        if best_match.similarity >= self.fuzzy_threshold && self.auto_apply_fuzzy_fixes
+                        {
+                            self.debug_info.push(format!(
+                                "Auto-applying fuzzy fix for block {} (similarity: {:.2})",
+                                i + 1,
+                                best_match.similarity
+                            ));
 
-                    // Add suggestions if the match wasn't automatically applied
-                    for (j, m) in matches.iter().enumerate().take(self.max_suggestions) {
-                        self.debug_info.push(format!(
-                            "Suggestion {}: similarity={:.2}, match_type={:?}, text={}",
-                            j + 1,
-                            m.similarity,
-                            m.match_type,
-                            if m.text.len() > 100 {
-                                format!("{}...", &m.text[..100])
-                            } else {
-                                m.text.clone()
-                            }
-                        ));
+                            // Replace the matched text with the replacement text
+                            let before = &content[..best_match.start_pos];
+                            let after = &content[best_match.end_pos..];
+                            content = format!("{before}{replace}{after}");
+                            _success_count += 1;
+                            continue;
+                        }
+
+                        // Add suggestions if the match wasn't automatically applied
+                        for (j, m) in matches.iter().enumerate().take(self.max_suggestions) {
+                            self.debug_info.push(format!(
+                                "Suggestion {}: similarity={:.2}, match_type={:?}, text={}",
+                                j + 1,
+                                m.similarity,
+                                m.match_type,
+                                if m.text.len() > 100 {
+                                    format!("{}...", &m.text[..100])
+                                } else {
+                                    m.text.clone()
+                                }
+                            ));
+                        }
                     }
                 }
             }
@@ -297,7 +299,7 @@ impl SearchReplaceHelper {
             // Replace the matched text with the replacement text
             let before = &content[..best_match.start_pos];
             let after = &content[best_match.end_pos..];
-            *content = format!("{}{}{}", before, replace, after);
+            *content = format!("{before}{replace}{after}");
 
             self.debug_info.push(format!(
                 "Block {} automatically replaced using fuzzy matching (confidence: {:.1}%)",
@@ -317,15 +319,13 @@ impl SearchReplaceHelper {
         if best_match.similarity >= self.fuzzy_threshold {
             // High confidence match, but auto-apply is disabled
             let error_message = format!(
-                "Found potential match with high confidence ({confidence_percent}%) but automatic replacement is disabled.\n\n{}\n\nTo enable automatic fixing with high-confidence matches, set auto_apply_fuzzy_fixes=true.",
-                match_suggestions
+                "Found potential match with high confidence ({confidence_percent}%) but automatic replacement is disabled.\n\n{match_suggestions}\n\nTo enable automatic fixing with high-confidence matches, set auto_apply_fuzzy_fixes=true."
             );
             Err(WinxError::SearchBlockNotFound(error_message))
         } else {
             // Low confidence match
             let error_message = format!(
-                "Found potential match but confidence is too low ({confidence_percent}%).\n\n{}",
-                match_suggestions
+                "Found potential match but confidence is too low ({confidence_percent}%).\n\n{match_suggestions}"
             );
             Err(WinxError::SearchBlockNotFound(error_message))
         }
@@ -369,8 +369,8 @@ impl SearchReplaceHelper {
         let mut suggestions = Vec::new();
 
         // Strategy 1: Check for whitespace/line ending differences
-        let search_no_whitespace = search.replace(" ", "").replace("\n", "").replace("\t", "");
-        let content_no_whitespace = content.replace(" ", "").replace("\n", "").replace("\t", "");
+        let search_no_whitespace = search.replace([' ', '\n', '\t'], "");
+        let content_no_whitespace = content.replace([' ', '\n', '\t'], "");
 
         if content_no_whitespace.contains(&search_no_whitespace) {
             suggestions.push("Your search block might have different whitespace or line endings than the content. Try normalizing whitespace.".to_string());
@@ -398,7 +398,7 @@ impl SearchReplaceHelper {
                 let matches_display = matching_lines
                     .iter()
                     .take(3)
-                    .map(|(line_num, preview)| format!("Line {}: {}", line_num, preview))
+                    .map(|(line_num, preview)| format!("Line {line_num}: {preview}"))
                     .collect::<Vec<_>>()
                     .join("\n");
 
@@ -407,13 +407,11 @@ impl SearchReplaceHelper {
 
                 let message = if total > shown {
                     format!(
-                        "Found {} matching lines in your search block (showing {}):\n{}",
-                        total, shown, matches_display
+                        "Found {total} matching lines in your search block (showing {shown}):\n{matches_display}"
                     )
                 } else {
                     format!(
-                        "Found {} matching lines in your search block:\n{}",
-                        total, matches_display
+                        "Found {total} matching lines in your search block:\n{matches_display}"
                     )
                 };
 
@@ -457,7 +455,7 @@ impl SearchReplaceHelper {
                 .collect::<Vec<_>>()
                 .join("\n\n");
 
-            return Some(format!("Suggestions:\n{}", filtered_suggestions));
+            return Some(format!("Suggestions:\n{filtered_suggestions}"));
         }
 
         None
@@ -514,7 +512,7 @@ impl SearchReplaceHelper {
         let mut best_length = min_length - 1;
 
         // Try with different window sizes to find a reasonable match quickly
-        for window_size in [50, 40, 30, 20].iter() {
+        for window_size in &[50, 40, 30, 20] {
             let s1_chars: Vec<char> = s1.chars().collect();
 
             // Use a sliding window over s1
@@ -652,7 +650,7 @@ impl MatchAnalysis {
                     "The search block appears {} times in the file:",
                     self.exact_matches.len()
                 ),
-                "".to_string(),
+                String::new(),
             ];
 
             for (i, location) in self.exact_matches.iter().enumerate() {
@@ -692,7 +690,7 @@ impl MatchAnalysis {
                             .join(" / ")
                     ));
                 }
-                suggestions.push("".to_string());
+                suggestions.push(String::new());
             }
 
             suggestions.extend(vec![
@@ -773,10 +771,9 @@ impl MultiMatchResolver {
 
         if conflicting_count > 0 {
             suggestions.push(format!(
-                "{} search block(s) have matching conflicts",
-                conflicting_count
+                "{conflicting_count} search block(s) have matching conflicts"
             ));
-            suggestions.push("".to_string());
+            suggestions.push(String::new());
             suggestions.push("Resolution strategies:".to_string());
             suggestions
                 .push("• Add more context lines before and after ambiguous blocks".to_string());
@@ -816,7 +813,7 @@ impl SearchReplaceSyntaxError {
             suggestions: vec![
                 "Make sure blocks are in correct sequence, and the markers are in separate lines:"
                     .to_string(),
-                "".to_string(),
+                String::new(),
                 "<<<<<<< SEARCH".to_string(),
                 " example old".to_string(),
                 "=======".to_string(),
@@ -849,11 +846,11 @@ impl SearchReplaceSyntaxError {
         );
 
         if let Some(line) = self.line_number {
-            msg.push_str(&format!("\nLine {}", line));
+            msg.push_str(&format!("\nLine {line}"));
         }
 
         if let Some(ref block_type) = self.block_type {
-            msg.push_str(&format!(" in {} block", block_type));
+            msg.push_str(&format!(" in {block_type} block"));
         }
 
         msg.push_str("\n---\n");
@@ -864,7 +861,7 @@ impl SearchReplaceSyntaxError {
                 if suggestion.is_empty() {
                     msg.push('\n');
                 } else {
-                    msg.push_str(&format!("• {}\n", suggestion));
+                    msg.push_str(&format!("• {suggestion}\n"));
                 }
             }
         }
@@ -873,7 +870,7 @@ impl SearchReplaceSyntaxError {
     }
 }
 
-/// Convert internal SearchReplaceSyntaxError to WinxError
+/// Convert internal `SearchReplaceSyntaxError` to `WinxError`
 impl From<SearchReplaceSyntaxError> for WinxError {
     fn from(err: SearchReplaceSyntaxError) -> Self {
         WinxError::SearchReplaceSyntaxErrorDetailed {
@@ -888,7 +885,7 @@ impl From<SearchReplaceSyntaxError> for WinxError {
 /// Check if the content is an edit (search/replace blocks) or full content
 ///
 /// This function examines the content to determine if it contains search/replace blocks
-/// based on the specific markers and the percentage_to_change value.
+/// based on the specific markers and the `percentage_to_change` value.
 ///
 /// # Arguments
 ///
@@ -1112,13 +1109,13 @@ fn parse_search_replace_blocks(
             None,
             vec![
                 "Make sure your blocks follow this format:".to_string(),
-                "".to_string(),
+                String::new(),
                 "<<<<<<< SEARCH".to_string(),
                 "content to find".to_string(),
                 "=======".to_string(),
                 "content to replace with".to_string(),
                 ">>>>>>> REPLACE".to_string(),
-                "".to_string(),
+                String::new(),
                 "Check that all markers are on separate lines".to_string(),
                 "Ensure there are no typos in the marker syntax".to_string(),
             ],
@@ -1134,9 +1131,9 @@ fn parse_search_replace_blocks(
 /// a 5-level tolerance system:
 /// 1. rstrip - Remove trailing whitespace (SILENT)
 /// 2. lstrip - Remove leading indentation (WARNING, score 10x)
-/// 3. remove_leading_linenums - Remove line numbers (WARNING, score 5x)
-/// 4. normalize_unicode - Unicode to ASCII (WARNING, score 5x)
-/// 5. all_whitespace - Remove ALL whitespace (WARNING, score 50x)
+/// 3. `remove_leading_linenums` - Remove line numbers (WARNING, score 5x)
+/// 4. `normalize_unicode` - Unicode to ASCII (WARNING, score 5x)
+/// 5. `all_whitespace` - Remove ALL whitespace (WARNING, score 50x)
 ///
 /// # Arguments
 ///
@@ -1160,8 +1157,8 @@ fn apply_search_replace_blocks(
     let tolerance_blocks: Vec<SearchReplaceBlock> = blocks
         .into_iter()
         .map(|(search, replace)| SearchReplaceBlock {
-            search: search.lines().map(|s| s.to_string()).collect(),
-            replace: replace.lines().map(|s| s.to_string()).collect(),
+            search: search.lines().map(std::string::ToString::to_string).collect(),
+            replace: replace.lines().map(std::string::ToString::to_string).collect(),
         })
         .collect();
 
@@ -1190,18 +1187,17 @@ fn apply_search_replace_blocks(
     }
 }
 
-/// Format an ApplyError into a user-friendly error message
+/// Format an `ApplyError` into a user-friendly error message
 fn format_apply_error(error: &ApplyError) -> String {
     let mut msg = error.message.clone();
 
     if let Some(ref block) = error.failed_block {
-        msg.push_str(&format!("\n\nFailed search block:\n```\n{}\n```", block));
+        msg.push_str(&format!("\n\nFailed search block:\n```\n{block}\n```"));
     }
 
     if let Some(ref ctx) = error.context {
         msg.push_str(&format!(
-            "\n\nRelevant context from file:\n```\n{}\n```",
-            ctx
+            "\n\nRelevant context from file:\n```\n{ctx}\n```"
         ));
     }
 
@@ -1313,15 +1309,14 @@ fn check_can_overwrite(file_path: &str, bash_state: &BashState) -> Result<()> {
         let unread_ranges = whitelist_data.get_unread_ranges();
         let ranges_str = unread_ranges
             .iter()
-            .map(|(start, end)| format!("{}-{}", start, end))
+            .map(|(start, end)| format!("{start}-{end}"))
             .collect::<Vec<_>>()
             .join(", ");
 
         return Err(WinxError::FileAccessError {
             path: PathBuf::from(file_path),
             message: format!(
-                "You need to read more of the file before it can be overwritten. Unread line ranges: {}. Use the ReadFiles tool with line range specifications to read these sections.",
-                ranges_str
+                "You need to read more of the file before it can be overwritten. Unread line ranges: {ranges_str}. Use the ReadFiles tool with line range specifications to read these sections."
             ),
         });
     }
@@ -1362,8 +1357,7 @@ fn check_path_allowed(file_path: &str, bash_state: &BashState) -> Result<()> {
             }
 
             Err(WinxError::CommandNotAllowed(format!(
-                "Updating file {} not allowed in current mode. Doesn't match allowed globs: {:?}",
-                file_path, globs
+                "Updating file {file_path} not allowed in current mode. Doesn't match allowed globs: {globs:?}"
             )))
         }
         _ => Err(WinxError::CommandNotAllowed(
@@ -1421,9 +1415,9 @@ fn detect_file_changes(original: &str, new: &str) -> Option<String> {
     }
 }
 
-/// Handle the FileWriteOrEdit tool call
+/// Handle the `FileWriteOrEdit` tool call
 ///
-/// This function processes the FileWriteOrEdit tool call, which writes or edits files.
+/// This function processes the `FileWriteOrEdit` tool call, which writes or edits files.
 ///
 /// # Arguments
 ///
@@ -1450,16 +1444,13 @@ pub async fn handle_tool_call(
     // Lock bash state to extract data
     {
         let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
+            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
         })?;
 
         // Ensure bash state is initialized
-        let bash_state = match &*bash_state_guard {
-            Some(state) => state,
-            None => {
-                error!("BashState not initialized");
-                return Err(WinxError::BashStateNotInitialized);
-            }
+        let bash_state = if let Some(state) = &*bash_state_guard { state } else {
+            error!("BashState not initialized");
+            return Err(WinxError::BashStateNotInitialized);
         };
 
         // Extract needed data
@@ -1524,7 +1515,7 @@ pub async fn handle_tool_call(
     // Get a mutex guard for the BashState
     let mut bash_state_guard = bash_state_arc
         .lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?;
 
     if let Some(bash_state) = bash_state_guard.as_mut() {
         // Enhanced file access validation for existing files
@@ -1606,8 +1597,7 @@ pub async fn handle_tool_call(
                 return Err(WinxError::FileAccessError {
                     path: file_path_obj.to_path_buf(),
                     message: format!(
-                        "Failed to get file metadata: {}. Check file permissions.",
-                        e
+                        "Failed to get file metadata: {e}. Check file permissions."
                     ),
                 });
             }
@@ -1629,7 +1619,7 @@ pub async fn handle_tool_call(
                 tracing::error!("Failed to read file for search/replace edit: {}", e);
                 return Err(WinxError::FileAccessError {
                     path: file_path_obj.to_path_buf(),
-                    message: format!("Failed to read file: {}. The file might be binary or have encoding issues.", e),
+                    message: format!("Failed to read file: {e}. The file might be binary or have encoding issues."),
                 });
             }
         };
@@ -1681,19 +1671,18 @@ pub async fn handle_tool_call(
         // Check if content has actually changed
         if original_content == new_content {
             return Ok(format!(
-                "File {} unchanged - content is identical after applying search/replace blocks",
-                file_path
+                "File {file_path} unchanged - content is identical after applying search/replace blocks"
             ));
         }
 
         // Generate diff (disabled by default)
         let diff_info = if false {
             match detect_file_changes(&original_content, &new_content) {
-                Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
-                None => "".to_string(),
+                Some(diff) => format!("\n\nChanges made:\n```diff\n{diff}\n```"),
+                None => String::new(),
             }
         } else {
-            "".to_string()
+            String::new()
         };
 
         // Write the new content to the file
@@ -1710,7 +1699,7 @@ pub async fn handle_tool_call(
                 if let Some(bash_state) = guard.as_ref() {
                     if let Err(record_err) = bash_state.error_predictor.record_error(
                         "file_write",
-                        &format!("Failed to write file: {}", e),
+                        &format!("Failed to write file: {e}"),
                         None,
                         Some(&file_path),
                         Some(
@@ -1728,7 +1717,7 @@ pub async fn handle_tool_call(
 
             return Err(WinxError::FileWriteError {
                 path: file_path_obj.to_path_buf(),
-                message: format!("Failed to write file: {}", e),
+                message: format!("Failed to write file: {e}"),
             });
         }
 
@@ -1782,8 +1771,7 @@ pub async fn handle_tool_call(
         let syntax_warning = perform_syntax_check(file_path_obj, &new_content);
 
         Ok(format!(
-            "Successfully edited file {}{}{}",
-            file_path, diff_info, syntax_warning
+            "Successfully edited file {file_path}{diff_info}{syntax_warning}"
         ))
     } else {
         // This is a full file write operation
@@ -1801,8 +1789,7 @@ pub async fn handle_tool_call(
 
         if content_unchanged {
             return Ok(format!(
-                "File {} unchanged - content is identical to existing file",
-                file_path
+                "File {file_path} unchanged - content is identical to existing file"
             ));
         }
 
@@ -1813,7 +1800,7 @@ pub async fn handle_tool_call(
             // To enable, change the condition below to true
             if false {
                 match detect_file_changes(orig, content) {
-                    Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
+                    Some(diff) => format!("\n\nChanges made:\n```diff\n{diff}\n```"),
                     None => String::new(),
                 }
             } else {
@@ -1832,7 +1819,7 @@ pub async fn handle_tool_call(
             );
             return Err(WinxError::FileWriteError {
                 path: file_path_obj.to_path_buf(),
-                message: format!("Failed to write file: {}", e),
+                message: format!("Failed to write file: {e}"),
             });
         }
 
@@ -1886,8 +1873,7 @@ pub async fn handle_tool_call(
         let syntax_warning = perform_syntax_check(file_path_obj, content);
 
         Ok(format!(
-            "Successfully wrote file {}{}{}",
-            file_path, diff_info, syntax_warning
+            "Successfully wrote file {file_path}{diff_info}{syntax_warning}"
         ))
     }
 }

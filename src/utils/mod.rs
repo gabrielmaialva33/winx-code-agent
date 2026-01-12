@@ -29,7 +29,7 @@ pub fn test_json_parsing(json_str: &str) -> Result<(), String> {
     // First, try to parse as raw JSON to see if the format is valid
     let raw_json_result = serde_json::from_str::<Value>(json_str);
     if let Err(e) = raw_json_result {
-        return Err(format!("Invalid JSON format: {}", e));
+        return Err(format!("Invalid JSON format: {e}"));
     }
 
     // Now try to parse into our Initialize struct
@@ -45,8 +45,7 @@ pub fn test_json_parsing(json_str: &str) -> Result<(), String> {
             Ok(())
         }
         Err(e) => Err(format!(
-            "Failed to parse JSON into Initialize struct: {}",
-            e
+            "Failed to parse JSON into Initialize struct: {e}"
         )),
     }
 }
@@ -69,8 +68,8 @@ pub fn run_json_tests() -> Vec<String> {
     "#;
 
     match test_json_parsing(test1) {
-        Ok(_) => results.push("Test 1 (Basic case): PASSED".to_string()),
-        Err(e) => results.push(format!("Test 1 (Basic case): FAILED - {}", e)),
+        Ok(()) => results.push("Test 1 (Basic case): PASSED".to_string()),
+        Err(e) => results.push(format!("Test 1 (Basic case): FAILED - {e}")),
     }
 
     // Test 2: String "null" case
@@ -99,8 +98,8 @@ pub fn run_json_tests() -> Vec<String> {
     }"#;
 
     match test_json_parsing(test2) {
-        Ok(_) => results.push("Test 2 (String null case): PASSED".to_string()),
-        Err(e) => results.push(format!("Test 2 (String null case): FAILED - {}", e)),
+        Ok(()) => results.push("Test 2 (String null case): PASSED".to_string()),
+        Err(e) => results.push(format!("Test 2 (String null case): FAILED - {e}")),
     }
 
     // Test 3: Missing type
@@ -116,8 +115,8 @@ pub fn run_json_tests() -> Vec<String> {
     "#;
 
     match test_json_parsing(test3) {
-        Ok(_) => results.push("Test 3 (Missing type): PASSED".to_string()),
-        Err(e) => results.push(format!("Test 3 (Missing type): FAILED - {}", e)),
+        Ok(()) => results.push("Test 3 (Missing type): PASSED".to_string()),
+        Err(e) => results.push(format!("Test 3 (Missing type): FAILED - {e}")),
     }
 
     // Test 4: code_writer case
@@ -137,8 +136,8 @@ pub fn run_json_tests() -> Vec<String> {
     "#;
 
     match test_json_parsing(test4) {
-        Ok(_) => results.push("Test 4 (code_write): PASSED".to_string()),
-        Err(e) => results.push(format!("Test 4 (code_write): FAILED - {}", e)),
+        Ok(()) => results.push("Test 4 (code_write): PASSED".to_string()),
+        Err(e) => results.push(format!("Test 4 (code_write): FAILED - {e}")),
     }
 
     // Instead of using test_json_parsing, create a direct test for the specific error case
@@ -169,7 +168,7 @@ pub fn run_json_tests() -> Vec<String> {
                 "Test 5 (Exact error format simulation): PASSED".to_string()
             }
             Err(e) => {
-                format!("Test 5 (Exact error format simulation): FAILED - {}", e)
+                format!("Test 5 (Exact error format simulation): FAILED - {e}")
             }
         }
     };

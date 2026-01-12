@@ -51,7 +51,7 @@ pub struct FileStats {
 }
 
 impl FileStats {
-    /// Create a new FileStats instance
+    /// Create a new `FileStats` instance
     pub fn new() -> Self {
         Self {
             first_accessed: Some(SystemTime::now()),
@@ -788,7 +788,18 @@ impl FileCache {
                     let mut candidates = Vec::new();
 
                     // Use the access order when available to prioritize least recently used files
-                    if !access_order_copy.is_empty() {
+                    if access_order_copy.is_empty() {
+                        // Fallback if access order is not available
+                        for (path, entry) in entries.iter() {
+                            if entry.should_unload(pressure_level >= 3) && entry.content.is_some() {
+                                candidates.push((
+                                    path.clone(),
+                                    entry.retention_score(),
+                                    entry.memory_usage(),
+                                ));
+                            }
+                        }
+                    } else {
                         for path in access_order_copy {
                             if let Some(entry) = entries.get(&path) {
                                 // If this entry can be unloaded based on pressure
@@ -801,17 +812,6 @@ impl FileCache {
                                         entry.memory_usage(),
                                     ));
                                 }
-                            }
-                        }
-                    } else {
-                        // Fallback if access order is not available
-                        for (path, entry) in entries.iter() {
-                            if entry.should_unload(pressure_level >= 3) && entry.content.is_some() {
-                                candidates.push((
-                                    path.clone(),
-                                    entry.retention_score(),
-                                    entry.memory_usage(),
-                                ));
                             }
                         }
                     }
@@ -1019,7 +1019,7 @@ impl FileCache {
                     }
                     Ok(None)
                 }
-                Err(e) => Err(anyhow::anyhow!("Failed to acquire read lock: {}", e)),
+                Err(e) => Err(anyhow::anyhow!("Failed to acquire read lock: {e}")),
             }
         };
 
@@ -1326,7 +1326,57 @@ impl FileCache {
         }
 
         // If we have access order data, use it for eviction
-        if !lru_paths.is_empty() {
+        if lru_paths.is_empty() {
+            // Fallback if we don't have access order data: use traditional last_accessed time
+            let mut entry_data: Vec<_> = entries
+                .iter()
+                .map(|(path, entry)| {
+                    // Create a tuple with (path, is_pinned, importance, last_accessed)
+                    (
+                        path.clone(),
+                        entry.is_pinned,
+                        entry.stats.importance_score,
+                        entry.last_accessed,
+                        entry.content.as_ref().map_or(0, |c| c.len() as u64),
+                    )
+                })
+                .collect();
+
+            // Sort: unpinned first, then by importance (low to high), then by last_accessed (oldest first)
+            entry_data.sort_by(|a, b| {
+                // First criteria: pinned status (unpinned first)
+                match (a.1, b.1) {
+                    (true, false) => return std::cmp::Ordering::Greater,
+                    (false, true) => return std::cmp::Ordering::Less,
+                    _ => {}
+                }
+
+                // Second criteria: importance score (low to high)
+                match a.2.partial_cmp(&b.2) {
+                    Some(ord) if ord != std::cmp::Ordering::Equal => return ord,
+                    _ => {}
+                }
+
+                // Third criteria: access time (oldest first)
+                a.3.cmp(&b.3)
+            });
+
+            // Calculate how many entries to remove
+            let target_count = MAX_CACHE_ENTRIES;
+            let excess_count = entries.len().saturating_sub(target_count);
+
+            // Remove oldest/least important entries
+            for (path, is_pinned, _, _, content_size) in entry_data.iter().take(excess_count) {
+                // Skip pinned files
+                if *is_pinned {
+                    continue;
+                }
+
+                memory_freed += *content_size;
+                entries.remove(path);
+                removed_paths.push(path.clone());
+            }
+        } else {
             // Calculate target entries (keep at most MAX_CACHE_ENTRIES)
             let target_count = MAX_CACHE_ENTRIES;
             let excess_count = entries.len().saturating_sub(target_count);
@@ -1374,56 +1424,6 @@ impl FileCache {
                         }
                     }
                 }
-            }
-        } else {
-            // Fallback if we don't have access order data: use traditional last_accessed time
-            let mut entry_data: Vec<_> = entries
-                .iter()
-                .map(|(path, entry)| {
-                    // Create a tuple with (path, is_pinned, importance, last_accessed)
-                    (
-                        path.clone(),
-                        entry.is_pinned,
-                        entry.stats.importance_score,
-                        entry.last_accessed,
-                        entry.content.as_ref().map(|c| c.len() as u64).unwrap_or(0),
-                    )
-                })
-                .collect();
-
-            // Sort: unpinned first, then by importance (low to high), then by last_accessed (oldest first)
-            entry_data.sort_by(|a, b| {
-                // First criteria: pinned status (unpinned first)
-                match (a.1, b.1) {
-                    (true, false) => return std::cmp::Ordering::Greater,
-                    (false, true) => return std::cmp::Ordering::Less,
-                    _ => {}
-                }
-
-                // Second criteria: importance score (low to high)
-                match a.2.partial_cmp(&b.2) {
-                    Some(ord) if ord != std::cmp::Ordering::Equal => return ord,
-                    _ => {}
-                }
-
-                // Third criteria: access time (oldest first)
-                a.3.cmp(&b.3)
-            });
-
-            // Calculate how many entries to remove
-            let target_count = MAX_CACHE_ENTRIES;
-            let excess_count = entries.len().saturating_sub(target_count);
-
-            // Remove oldest/least important entries
-            for (path, is_pinned, _, _, content_size) in entry_data.iter().take(excess_count) {
-                // Skip pinned files
-                if *is_pinned {
-                    continue;
-                }
-
-                memory_freed += *content_size;
-                entries.remove(path);
-                removed_paths.push(path.clone());
             }
         }
 
@@ -1482,9 +1482,8 @@ impl FileCache {
                             self.update_workspace_stats_file_access(path);
 
                             return Ok(());
-                        } else {
-                            return Err(anyhow::anyhow!("File not in cache"));
                         }
+                        return Err(anyhow::anyhow!("File not in cache"));
                     }
                     Err(_) => {
                         // Couldn't get lock, sleep briefly and retry
@@ -1694,13 +1693,12 @@ impl FileCache {
             let unread_ranges = self.get_unread_ranges(path);
             let ranges_str = unread_ranges
                 .iter()
-                .map(|(start, end)| format!("{}-{}", start, end))
+                .map(|(start, end)| format!("{start}-{end}"))
                 .collect::<Vec<_>>()
                 .join(", ");
 
             return Ok(format!(
-                "You need to read more of the file before it can be overwritten. Unread line ranges: {}",
-                ranges_str
+                "You need to read more of the file before it can be overwritten. Unread line ranges: {ranges_str}"
             ));
         }
 

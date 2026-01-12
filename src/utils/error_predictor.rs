@@ -132,9 +132,9 @@ impl ErrorPredictor {
         let entry = ErrorHistoryEntry {
             error_type: error_type.to_string(),
             message: message.to_string(),
-            command: command.map(|s| s.to_string()),
-            file_path: file_path.map(|s| s.to_string()),
-            directory: directory.map(|s| s.to_string()),
+            command: command.map(std::string::ToString::to_string),
+            file_path: file_path.map(std::string::ToString::to_string),
+            directory: directory.map(std::string::ToString::to_string),
             timestamp: Instant::now(),
         };
 
@@ -308,7 +308,7 @@ impl ErrorPredictor {
         if let Some(extension) = path.extension() {
             if let Some(ext_str) = extension.to_str() {
                 // For files, we often care about the extension
-                return format!("*.{}", ext_str);
+                return format!("*.{ext_str}");
             }
         }
 
@@ -330,7 +330,7 @@ impl ErrorPredictor {
         // We often care about the last component of the directory
         if let Some(last_component) = path.file_name() {
             if let Some(name) = last_component.to_str() {
-                return format!("*/{}", name);
+                return format!("*/{name}");
             }
         }
 
@@ -415,7 +415,7 @@ impl ErrorPredictor {
                 // Find the most common error
                 if let Some((pattern, count)) = error_counts.iter().max_by_key(|(_, &count)| count)
                 {
-                    let frequency = *count as f64 / errors.len() as f64;
+                    let frequency = f64::from(*count) / errors.len() as f64;
                     if frequency >= ERROR_FREQUENCY_THRESHOLD {
                         let suggestion = self.get_suggestion_for_error(base_command, pattern);
                         predictions.push(ErrorPrediction {
@@ -437,7 +437,7 @@ impl ErrorPredictor {
                     let suggestion =
                         self.get_suggestion_for_error(command, &pattern.message_pattern);
 
-                    let base_confidence = pattern.frequency as f64 / 10.0;
+                    let base_confidence = f64::from(pattern.frequency) / 10.0;
                     let decay_factor = 1.0
                         - (pattern.last_seen.elapsed().as_secs() as f64
                             / (MAX_ERROR_AGE_HOURS * 3600) as f64)
@@ -478,7 +478,7 @@ impl ErrorPredictor {
                 // Find the most common error
                 if let Some((pattern, count)) = error_counts.iter().max_by_key(|(_, &count)| count)
                 {
-                    let frequency = *count as f64 / errors.len() as f64;
+                    let frequency = f64::from(*count) / errors.len() as f64;
                     if frequency >= ERROR_FREQUENCY_THRESHOLD {
                         let suggestion =
                             self.get_suggestion_for_file_error(file_path, pattern, operation);
@@ -505,7 +505,7 @@ impl ErrorPredictor {
                         operation,
                     );
 
-                    let base_confidence = pattern.frequency as f64 / 10.0;
+                    let base_confidence = f64::from(pattern.frequency) / 10.0;
                     let decay_factor = 1.0
                         - (pattern.last_seen.elapsed().as_secs() as f64
                             / (MAX_ERROR_AGE_HOURS * 3600) as f64)
@@ -587,7 +587,7 @@ impl ErrorPredictor {
                         error_type: "file_not_found".to_string(),
                         message_pattern: "File not found".to_string(),
                         confidence: 0.95,
-                        prevention: format!("The file '{}' does not exist. Check the path or create the file first.", file_path),
+                        prevention: format!("The file '{file_path}' does not exist. Check the path or create the file first."),
                     });
                 } else if path.is_dir() {
                     predictions.push(ErrorPrediction {
@@ -595,8 +595,7 @@ impl ErrorPredictor {
                         message_pattern: "Is a directory".to_string(),
                         confidence: 0.95,
                         prevention: format!(
-                            "'{}' is a directory, not a file. Use a file path instead.",
-                            file_path
+                            "'{file_path}' is a directory, not a file. Use a file path instead."
                         ),
                     });
                 }
@@ -608,8 +607,7 @@ impl ErrorPredictor {
                         message_pattern: "Is a directory".to_string(),
                         confidence: 0.95,
                         prevention: format!(
-                            "'{}' is a directory, not a file. Use a file path instead.",
-                            file_path
+                            "'{file_path}' is a directory, not a file. Use a file path instead."
                         ),
                     });
                 }
@@ -718,23 +716,22 @@ impl ErrorPredictor {
             "read" => {
                 if error_pattern.contains("not found") || error_pattern.contains("No such file") {
                     return format!(
-                        "The file '{}' does not exist. Check the path or create it first",
-                        file_path
+                        "The file '{file_path}' does not exist. Check the path or create it first"
                     );
                 }
                 if error_pattern.contains("permission denied") {
-                    return format!("Check read permissions for '{}'", file_path);
+                    return format!("Check read permissions for '{file_path}'");
                 }
                 if error_pattern.contains("directory") {
-                    return format!("'{}' is a directory, not a file", file_path);
+                    return format!("'{file_path}' is a directory, not a file");
                 }
             }
             "write" | "edit" => {
                 if error_pattern.contains("permission denied") {
-                    return format!("Check write permissions for '{}'", file_path);
+                    return format!("Check write permissions for '{file_path}'");
                 }
                 if error_pattern.contains("directory") {
-                    return format!("'{}' is a directory, not a file", file_path);
+                    return format!("'{file_path}' is a directory, not a file");
                 }
                 if error_pattern.contains("No such file or directory") {
                     if let Some(parent) = path.parent() {
@@ -817,14 +814,14 @@ impl SharedErrorPredictor {
         directory: Option<&str>,
     ) -> Result<(), WinxError> {
         let mut predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock error predictor: {}", e))
+            WinxError::BashStateLockError(format!("Failed to lock error predictor: {e}"))
         })?;
 
         predictor.record_error(error_type, message, command, file_path, directory);
         Ok(())
     }
 
-    /// Record a WinxError for future pattern recognition
+    /// Record a `WinxError` for future pattern recognition
     pub fn record_winx_error(
         &self,
         error: &WinxError,
@@ -874,7 +871,7 @@ impl SharedErrorPredictor {
             WinxError::AIError(_) => "ai_error",
         };
 
-        let message = format!("{}", error);
+        let message = format!("{error}");
         let file_path = match error {
             WinxError::FileAccessError { path, .. } => Some(path.to_string_lossy().to_string()),
             WinxError::FileWriteError { path, .. } => Some(path.to_string_lossy().to_string()),
@@ -894,7 +891,7 @@ impl SharedErrorPredictor {
     /// Predict potential errors for a command
     pub fn predict_command_errors(&self, command: &str) -> Result<Vec<ErrorPrediction>, WinxError> {
         let predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock error predictor: {}", e))
+            WinxError::BashStateLockError(format!("Failed to lock error predictor: {e}"))
         })?;
 
         Ok(predictor.predict_command_errors(command))
@@ -907,7 +904,7 @@ impl SharedErrorPredictor {
         operation: &str,
     ) -> Result<Vec<ErrorPrediction>, WinxError> {
         let predictor = self.inner.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock error predictor: {}", e))
+            WinxError::BashStateLockError(format!("Failed to lock error predictor: {e}"))
         })?;
 
         Ok(predictor.predict_file_errors(file_path, operation))

@@ -110,7 +110,7 @@ impl PatternAnalyzer {
         if let Some(file_path) = self.extract_file_path(command) {
             if let Some(file_ext) = Path::new(&file_path).extension() {
                 if let Some(ext_str) = file_ext.to_str() {
-                    let file_type = format!(".{}", ext_str);
+                    let file_type = format!(".{ext_str}");
                     let file_commands = self.file_patterns.entry(file_type).or_default();
 
                     if !file_commands.contains(&normalized) {
@@ -210,7 +210,7 @@ impl PatternAnalyzer {
             if error_message.contains("command not found")
                 && (cmd.contains("apt") || cmd.contains("brew") || cmd.contains("npm install"))
             {
-                return Some(format!("Install the required command first with: {}", cmd));
+                return Some(format!("Install the required command first with: {cmd}"));
             }
         }
 
@@ -254,7 +254,7 @@ impl PatternAnalyzer {
     fn extract_keywords(&self, text: &str) -> Vec<String> {
         text.split_whitespace()
             .filter(|word| word.len() > 3)
-            .map(|word| word.to_lowercase())
+            .map(str::to_lowercase)
             .collect()
     }
 

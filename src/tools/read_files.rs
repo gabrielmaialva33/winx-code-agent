@@ -1,6 +1,6 @@
-//! Implementation of the ReadFiles tool.
+//! Implementation of the `ReadFiles` tool.
 //!
-//! This module provides the implementation for the ReadFiles tool, which is used
+//! This module provides the implementation for the `ReadFiles` tool, which is used
 //! to read and display the contents of files, optionally with line numbers and
 //! line range filtering.
 
@@ -61,7 +61,7 @@ fn range_format(start_line_num: Option<usize>, end_line_num: Option<usize>) -> S
     if st.is_empty() && end.is_empty() {
         String::new()
     } else {
-        format!(":{}-{}", st, end)
+        format!(":{st}-{end}")
     }
 }
 
@@ -94,7 +94,7 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
 
     let file = File::open(path).map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Failed to open file for streaming: {}", e),
+        message: format!("Failed to open file for streaming: {e}"),
     })?;
 
     let mut reader = BufReader::new(file);
@@ -106,7 +106,7 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
             .read(&mut buffer)
             .map_err(|e| WinxError::FileAccessError {
                 path: path.to_path_buf(),
-                message: format!("Failed to read chunk from file: {}", e),
+                message: format!("Failed to read chunk from file: {e}"),
             })?;
 
         if bytes_read == 0 {
@@ -225,7 +225,7 @@ async fn read_file(
         Err(e) => {
             let error = WinxError::FileAccessError {
                 path: path.clone(),
-                message: format!("Failed to get file metadata: {}", e),
+                message: format!("Failed to get file metadata: {e}"),
             };
 
             return Err(ErrorRecovery::suggest(
@@ -244,8 +244,7 @@ async fn read_file(
             return Err(ErrorRecovery::suggest(
                 e,
                 &format!(
-                    "System is under memory pressure. Try reading smaller sections using line ranges (e.g., {}:1-1000) or wait for other operations to complete",
-                    file_path
+                    "System is under memory pressure. Try reading smaller sections using line ranges (e.g., {file_path}:1-1000) or wait for other operations to complete"
                 ),
             ));
         }
@@ -266,8 +265,7 @@ async fn read_file(
         return Err(ErrorRecovery::suggest(
             error,
             &format!(
-                "File is too large for current memory allocation. Try reading parts of this file by specifying a line range (e.g., {}:1-1000)",
-                file_path
+                "File is too large for current memory allocation. Try reading parts of this file by specifying a line range (e.g., {file_path}:1-1000)"
             ),
         ));
     }
@@ -301,7 +299,7 @@ async fn read_file(
 
     // Use more efficient line handling with better memory characteristics
     let lines: Vec<&str> = content.lines().collect();
-    let total_lines = lines.len() + if content.ends_with('\n') { 1 } else { 0 };
+    let total_lines = lines.len() + usize::from(content.ends_with('\n'));
 
     // Apply line range filtering with bounds checking
     let start_idx = start_line_num.map_or(0, |n| n.saturating_sub(1).min(lines.len()));
@@ -348,7 +346,7 @@ async fn read_file(
     if show_line_numbers {
         for (i, line) in filtered_lines.iter().enumerate() {
             let line_num = start_idx + i + 1; // Convert to 1-indexed
-            result_content.push_str(&format!("{} {}\n", line_num, line));
+            result_content.push_str(&format!("{line_num} {line}\n"));
         }
     } else {
         for line in filtered_lines {
@@ -427,10 +425,10 @@ async fn read_file(
     ))
 }
 
-/// Validate ReadFiles parameters and provide defaults for missing values
+/// Validate `ReadFiles` parameters and provide defaults for missing values
 ///
-/// This function performs validation on the ReadFiles struct and returns
-/// a Result containing either a validated ReadFiles struct or an appropriate error.
+/// This function performs validation on the `ReadFiles` struct and returns
+/// a Result containing either a validated `ReadFiles` struct or an appropriate error.
 fn validate_read_files(read_files: ReadFiles) -> Result<ReadFiles> {
     // Check if file_paths is empty
     if read_files.file_paths.is_empty() {
@@ -448,7 +446,7 @@ fn validate_read_files(read_files: ReadFiles) -> Result<ReadFiles> {
         if path.trim().is_empty() {
             return Err(ErrorRecovery::suggest(
                 ErrorRecovery::param_error(
-                    &format!("file_paths[{}]", i),
+                    &format!("file_paths[{i}]"),
                     "File path cannot be empty",
                 ),
                 "Please provide a valid file path for each element in the file_paths array",
@@ -488,9 +486,9 @@ fn validate_read_files(read_files: ReadFiles) -> Result<ReadFiles> {
     Ok(validated)
 }
 
-/// Handle the ReadFiles tool call
+/// Handle the `ReadFiles` tool call
 ///
-/// This function processes the ReadFiles tool call, which reads the contents
+/// This function processes the `ReadFiles` tool call, which reads the contents
 /// of one or more files and returns them with optional line numbers and filtering.
 ///
 /// # Arguments
@@ -527,19 +525,16 @@ pub async fn handle_tool_call(
     // Lock bash state to extract data
     {
         let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
+            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
         })?;
 
         // Ensure bash state is initialized
-        let bash_state = match &*bash_state_guard {
-            Some(state) => state,
-            None => {
-                error!("BashState not initialized");
-                return Err(ErrorRecovery::suggest(
-                    WinxError::BashStateNotInitialized,
-                    "Please call Initialize first with type=\"first_call\" and a valid workspace path",
-                ));
-            }
+        let bash_state = if let Some(state) = &*bash_state_guard { state } else {
+            error!("BashState not initialized");
+            return Err(ErrorRecovery::suggest(
+                WinxError::BashStateNotInitialized,
+                "Please call Initialize first with type=\"first_call\" and a valid workspace path",
+            ));
         };
 
         // Extract needed data
@@ -689,8 +684,7 @@ pub async fn handle_tool_call(
             file_read_tasks.push(task.await.unwrap_or_else(|e| FileReadInfo {
                 original_path: "unknown".to_string(),
                 result: Err(WinxError::CommandExecutionError(format!(
-                    "Task panicked: {}",
-                    e
+                    "Task panicked: {e}"
                 ))),
             }));
         }
@@ -732,8 +726,7 @@ pub async fn handle_tool_call(
                 };
                 let range_formatted = range_format(start_line_num, end_line_num);
                 message.push_str(&format!(
-                    "\n{}{}\n```\n{}\n",
-                    file_path, range_formatted, content
+                    "\n{file_path}{range_formatted}\n```\n{content}\n"
                 ));
 
                 // Check if we need to stop due to truncation (file exceeded its token limit)
@@ -770,12 +763,12 @@ pub async fn handle_tool_call(
                         message,
                         suggestion,
                     } => {
-                        format!("{} - Suggestion: {}", message, suggestion)
+                        format!("{message} - Suggestion: {suggestion}")
                     }
-                    _ => format!("{}", e),
+                    _ => format!("{e}"),
                 };
 
-                message.push_str(&format!("\n{}: {}\n", file_path, error_msg));
+                message.push_str(&format!("\n{file_path}: {error_msg}\n"));
                 had_errors = true;
             }
         }

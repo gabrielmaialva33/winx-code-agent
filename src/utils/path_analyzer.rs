@@ -38,13 +38,13 @@ pub const LOW_RELEVANCE_THRESHOLD: f32 = -30.0;
 /// Default relevance threshold
 pub const DEFAULT_RELEVANCE_THRESHOLD: f32 = -30.0;
 
-/// Simplified PathScorer using heuristics instead of NLP
+/// Simplified `PathScorer` using heuristics instead of NLP
 pub struct PathScorer {
     extension_weights: HashMap<String, f32>,
 }
 
 impl PathScorer {
-    /// Create a new PathScorer with default extension weights
+    /// Create a new `PathScorer` with default extension weights
     pub fn new() -> Self {
         let mut extension_weights = HashMap::new();
 
@@ -230,7 +230,7 @@ impl Default for PathScorer {
     }
 }
 
-/// Create a default PathScorer instance
+/// Create a default `PathScorer` instance
 pub fn create_default_path_scorer() -> Result<PathScorer> {
     Ok(PathScorer::new())
 }

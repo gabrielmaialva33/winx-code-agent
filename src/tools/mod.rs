@@ -43,11 +43,11 @@ impl Default for WinxService {
 }
 
 impl WinxService {
-    /// Create a new instance of the WinxService
+    /// Create a new instance of the `WinxService`
     ///
     /// # Returns
     ///
-    /// A new WinxService instance with an uninitialized bash state
+    /// A new `WinxService` instance with an uninitialized bash state
     pub fn new() -> Self {
         info!("Creating new WinxService instance");
         Self {
@@ -79,14 +79,14 @@ impl WinxService {
     ///
     /// # Returns
     ///
-    /// A Result containing a MutexGuard for the bash state
+    /// A Result containing a `MutexGuard` for the bash state
     #[allow(dead_code)]
     fn lock_bash_state(
         &self,
     ) -> crate::errors::Result<std::sync::MutexGuard<'_, Option<BashState>>> {
         self.bash_state
             .lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))
     }
 }
 

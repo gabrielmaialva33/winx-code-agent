@@ -7,7 +7,7 @@
 use crate::types::{AllowedCommands, AllowedGlobs, Modes};
 
 /// Main WCGW prompt for full access mode
-pub const WCGW_PROMPT: &str = r#"
+pub const WCGW_PROMPT: &str = r"
 # Instructions
 
     - You should use the provided bash execution, reading and writing file tools to complete objective.
@@ -21,7 +21,7 @@ pub const WCGW_PROMPT: &str = r#"
 Additional instructions:
     Always run `pwd` if you get any file or directory not found error to make sure you're not lost, or to get absolute cwd.
 
-"#;
+";
 
 /// Architect mode prompt for read-only operations
 pub const ARCHITECT_PROMPT: &str = r#"
@@ -47,13 +47,13 @@ Respond only after doing the following:
 "#;
 
 /// Common instructions for command execution
-const COMMAND_COMMON_INSTRUCTIONS: &str = r#"
+const COMMAND_COMMON_INSTRUCTIONS: &str = r"
     - Do not use Ctrl-c interrupt commands without asking the user, because often the programs don't show any update but they still are running.
     - Do not use echo to write multi-line files, always use FileWriteOrEdit tool to update a code.
     - Do not provide code snippets unless asked by the user, instead directly add/edit the code.
     - You should use the provided bash execution, reading and writing file tools to complete objective.
     - Do not use artifacts if you have access to the repository and not asked by the user to provide artifacts/snippets. Directly create/update using wcgw tools.
-"#;
+";
 
 /// Generate code writer mode prompt with specific permissions
 pub fn code_writer_prompt(
@@ -103,8 +103,7 @@ pub fn code_writer_prompt(
     let command_prompt = match allowed_commands {
         AllowedCommands::All(_) => {
             format!(
-                "    - You are only allowed to run commands for project setup, code writing, editing, updating, testing, running and debugging related to the project.\n    - Do not run anything that adds or removes packages, changes system configuration or environment.\n{}",
-                COMMAND_COMMON_INSTRUCTIONS
+                "    - You are only allowed to run commands for project setup, code writing, editing, updating, testing, running and debugging related to the project.\n    - Do not run anything that adds or removes packages, changes system configuration or environment.\n{COMMAND_COMMON_INSTRUCTIONS}"
             )
         }
         AllowedCommands::List(commands) => {
@@ -211,7 +210,7 @@ pub fn generate_mode_instructions(
 }
 
 /// Knowledge transfer prompt for wcgw mode
-/// Exact copy from wcgw Python: WCGW_KT
+/// Exact copy from wcgw Python: `WCGW_KT`
 pub const WCGW_KT: &str = "Use ContextSave tool to do a knowledge transfer of the task in hand.\n\
 Write detailed description in order to do a KT.\n\
 Save all information necessary for a person to understand the task and the problems.\n\n\
@@ -229,7 +228,7 @@ Provide all relevant file paths in order to understand and solve the the task. E
 (Note to self: this conversation can then be resumed later asking Resume wcgw task <generated id> which should call Initialize tool)\n";
 
 /// Knowledge transfer prompt for architect mode
-/// Exact copy from wcgw Python: ARCHITECT_KT
+/// Exact copy from wcgw Python: `ARCHITECT_KT`
 pub const ARCHITECT_KT: &str = "Use ContextSave tool to do a knowledge transfer of the task in hand.\n\
 Write detailed description in order to do a KT.\n\
 Save all information necessary for a person to understand the task and the problems.\n\n\
@@ -244,7 +243,7 @@ Provide all relevant file paths in order to understand and solve the the task. E
 (Note to self: this conversation can then be resumed later asking Resume wcgw task <generated id> which should call Initialize tool)\n";
 
 /// Get the appropriate knowledge transfer prompt for a mode
-/// Matches wcgw Python: get_kt_prompt()
+/// Matches wcgw Python: `get_kt_prompt()`
 pub fn get_kt_prompt(mode: &Modes) -> &'static str {
     match mode {
         Modes::Wcgw => WCGW_KT,

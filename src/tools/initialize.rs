@@ -3,7 +3,7 @@
 //! This module provides the implementation for the Initialize tool, which is used
 //! to set up the shell environment with the specified workspace path and configuration.
 //!
-//! This implementation aims for 1:1 parity with wcgw Python's initialize() function
+//! This implementation aims for 1:1 parity with wcgw Python's `initialize()` function
 //! in wcgw/src/wcgw/client/tools.py
 
 use std::path::PathBuf;
@@ -25,9 +25,9 @@ use crate::utils::path::{ensure_directory_exists, expand_user};
 use crate::utils::repo::get_repo_context;
 use crate::utils::repo_context::RepoContextAnalyzer;
 
-/// Converts ModeName to the internal Modes enum
+/// Converts `ModeName` to the internal Modes enum
 ///
-/// This function converts the ModeName enum (which is exposed externally)
+/// This function converts the `ModeName` enum (which is exposed externally)
 /// to the internal Modes enum used by the application.
 ///
 /// # Arguments
@@ -46,7 +46,7 @@ fn convert_mode_name(mode_name: &ModeName) -> Modes {
     }
 }
 
-/// Converts a mode to its corresponding bash_command_mode, file_edit_mode, and write_if_empty_mode
+/// Converts a mode to its corresponding `bash_command_mode`, `file_edit_mode`, and `write_if_empty_mode`
 ///
 /// This function returns the appropriate configuration for a given mode,
 /// including bash command restrictions, file edit permissions, and
@@ -58,7 +58,7 @@ fn convert_mode_name(mode_name: &ModeName) -> Modes {
 ///
 /// # Returns
 ///
-/// A tuple of (BashCommandMode, FileEditMode, WriteIfEmptyMode) for the mode
+/// A tuple of (`BashCommandMode`, `FileEditMode`, `WriteIfEmptyMode`) for the mode
 #[instrument(level = "debug", skip(mode))]
 fn mode_to_state(mode: &Modes) -> (BashCommandMode, FileEditMode, WriteIfEmptyMode) {
     debug!("Generating state configuration for mode: {:?}", mode);
@@ -228,21 +228,19 @@ pub async fn handle_tool_call(
                 .to_path_buf();
 
             response.push_str(&format!(
-                "Using parent directory of file: {:?}\n",
-                folder_to_start
+                "Using parent directory of file: {folder_to_start:?}\n"
             ));
 
             // If no files to read were specified, add the original file
             if initialize.initial_files_to_read.is_empty() {
                 info!("No files to read specified, suggesting the workspace file");
-                response.push_str(&format!("Adding file to read list: {:?}\n", workspace_path));
+                response.push_str(&format!("Adding file to read list: {workspace_path:?}\n"));
                 // We don't actually modify the initialize struct since we just use this for reporting
             }
         } else if workspace_path.is_dir() {
             info!("Using existing workspace directory: {:?}", folder_to_start);
             response.push_str(&format!(
-                "Using workspace directory: {:?}\n",
-                folder_to_start
+                "Using workspace directory: {folder_to_start:?}\n"
             ));
         } else {
             warn!(
@@ -250,8 +248,7 @@ pub async fn handle_tool_call(
                 workspace_path
             );
             return Err(WinxError::WorkspacePathError(format!(
-                "Path exists but is neither file nor directory: {:?}. Please provide a valid file or directory path.",
-                workspace_path
+                "Path exists but is neither file nor directory: {workspace_path:?}. Please provide a valid file or directory path."
             )));
         }
     } else {
@@ -264,14 +261,12 @@ pub async fn handle_tool_call(
             match ensure_directory_exists(&workspace_path) {
                 Ok(()) => {
                     response.push_str(&format!(
-                        "Created workspace directory: {:?}\n",
-                        workspace_path
+                        "Created workspace directory: {workspace_path:?}\n"
                     ));
                 }
                 Err(err) => {
                     return Err(WinxError::WorkspacePathError(format!(
-                        "Failed to create workspace directory: {}. Please check permissions and ensure the parent directories exist or provide an existing directory path.",
-                        err
+                        "Failed to create workspace directory: {err}. Please check permissions and ensure the parent directories exist or provide an existing directory path."
                     )));
                 }
             }
@@ -281,8 +276,7 @@ pub async fn handle_tool_call(
                 workspace_path
             );
             response.push_str(&format!(
-                "Warning: Workspace path {:?} does not exist\n",
-                workspace_path
+                "Warning: Workspace path {workspace_path:?} does not exist\n"
             ));
         }
     }
@@ -290,7 +284,7 @@ pub async fn handle_tool_call(
     // Initialize or update BashState with proper error handling
     let mut bash_state_guard = bash_state_arc
         .lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?;
 
     let mode = convert_mode_name(&initialize.mode_name);
 
@@ -347,8 +341,7 @@ pub async fn handle_tool_call(
                         thread_id
                     );
                     response.push_str(&format!(
-                        "Resumed existing session with thread_id: {}\n",
-                        thread_id
+                        "Resumed existing session with thread_id: {thread_id}\n"
                     ));
                     loaded_state
                 } else {
@@ -381,8 +374,7 @@ pub async fn handle_tool_call(
                 // Update CWD with error handling
                 new_bash_state.update_cwd(&folder_to_start).map_err(|e| {
                     WinxError::WorkspacePathError(format!(
-                        "Failed to update current working directory: {}",
-                        e
+                        "Failed to update current working directory: {e}"
                     ))
                 })?;
 
@@ -391,8 +383,7 @@ pub async fn handle_tool_call(
                     .update_workspace_root(&folder_to_start)
                     .map_err(|e| {
                         WinxError::WorkspacePathError(format!(
-                            "Failed to update workspace root: {}",
-                            e
+                            "Failed to update workspace root: {e}"
                         ))
                     })?;
 
@@ -401,8 +392,7 @@ pub async fn handle_tool_call(
                 if let Err(e) = new_bash_state.init_interactive_bash() {
                     warn!("Failed to initialize interactive bash: {}", e);
                     response.push_str(&format!(
-                        "\nWarning: Failed to initialize interactive bash: {}\nSome shell commands may not work properly.\n",
-                        e
+                        "\nWarning: Failed to initialize interactive bash: {e}\nSome shell commands may not work properly.\n"
                     ));
                 }
 
@@ -447,8 +437,7 @@ pub async fn handle_tool_call(
                     Err(e) => {
                         warn!("Failed to analyze repository context: {}", e);
                         response.push_str(&format!(
-                            "\nWarning: Could not analyze repository structure: {}\n",
-                            e
+                            "\nWarning: Could not analyze repository structure: {e}\n"
                         ));
                     }
                 }
@@ -478,8 +467,7 @@ pub async fn handle_tool_call(
             *bash_state_guard = Some(new_bash_state);
 
             response.push_str(&format!(
-                "Initialized new shell with thread_id: {}\n",
-                thread_id
+                "Initialized new shell with thread_id: {thread_id}\n"
             ));
         }
         InitializeType::UserAskedModeChange => {
@@ -498,7 +486,7 @@ pub async fn handle_tool_call(
                     warn!("Failed to save bash state after mode change: {}", e);
                 }
 
-                response.push_str(&format!("Changed mode to: {:?}\n", mode));
+                response.push_str(&format!("Changed mode to: {mode:?}\n"));
             } else {
                 warn!("BashState not initialized for UserAskedModeChange");
                 return Err(WinxError::BashStateNotInitialized);
@@ -536,8 +524,7 @@ pub async fn handle_tool_call(
                     // Update CWD with error handling
                     bash_state.update_cwd(&folder_to_start).map_err(|e| {
                         WinxError::WorkspacePathError(format!(
-                            "Failed to update current working directory: {}",
-                            e
+                            "Failed to update current working directory: {e}"
                         ))
                     })?;
 
@@ -546,8 +533,7 @@ pub async fn handle_tool_call(
                         .update_workspace_root(&folder_to_start)
                         .map_err(|e| {
                             WinxError::WorkspacePathError(format!(
-                                "Failed to update workspace root: {}",
-                                e
+                                "Failed to update workspace root: {e}"
                             ))
                         })?;
 
@@ -556,12 +542,11 @@ pub async fn handle_tool_call(
                         warn!("Failed to save bash state after workspace change: {}", e);
                     }
 
-                    response.push_str(&format!("Changed workspace to: {:?}\n", folder_to_start));
+                    response.push_str(&format!("Changed workspace to: {folder_to_start:?}\n"));
                 } else {
                     warn!("Workspace path does not exist: {:?}", folder_to_start);
                     response.push_str(&format!(
-                        "Warning: Workspace path {:?} does not exist\n",
-                        folder_to_start
+                        "Warning: Workspace path {folder_to_start:?} does not exist\n"
                     ));
                 }
             } else {
@@ -582,8 +567,7 @@ pub async fn handle_tool_call(
             match load_task_context(&initialize.task_id_to_resume) {
                 Some((_project_root, task_memory, _bash_state)) => {
                     response.push_str(&format!(
-                        "\n---\n# Retrieved task\n{}\n---\n",
-                        task_memory
+                        "\n---\n# Retrieved task\n{task_memory}\n---\n"
                     ));
                 }
                 None => {
@@ -614,8 +598,7 @@ pub async fn handle_tool_call(
     // Read global alignment file (~/.wcgw/CLAUDE.md or AGENTS.md)
     if let Some(global_content) = read_global_alignment_file() {
         alignment_context.push_str(&format!(
-            "---\n# Important guidelines from the user\n```\n{}\n```\n---\n\n",
-            global_content
+            "---\n# Important guidelines from the user\n```\n{global_content}\n```\n---\n\n"
         ));
     }
 
@@ -623,8 +606,7 @@ pub async fn handle_tool_call(
     if folder_to_start.exists() {
         if let Some((fname, ws_content)) = read_workspace_alignment_file(&folder_to_start) {
             alignment_context.push_str(&format!(
-                "---\n# {} - user shared project guidelines to follow\n```\n{}\n```\n---\n\n",
-                fname, ws_content
+                "---\n# {fname} - user shared project guidelines to follow\n```\n{ws_content}\n```\n---\n\n"
             ));
         }
     }
@@ -639,8 +621,7 @@ pub async fn handle_tool_call(
             read_initial_files(&initialize.initial_files_to_read, &folder_to_start);
         if !files_content.is_empty() {
             response.push_str(&format!(
-                "---\n# Requested files\nHere are the contents of the requested files:\n{}\n---\n",
-                files_content
+                "---\n# Requested files\nHere are the contents of the requested files:\n{files_content}\n---\n"
             ));
         }
     }
@@ -650,7 +631,7 @@ pub async fn handle_tool_call(
         match get_repo_context(&folder_to_start) {
             Ok((context, _)) => {
                 debug!("Successfully generated repository context");
-                format!("\n---\n{}\n", context)
+                format!("\n---\n{context}\n")
             }
             Err(e) => {
                 warn!("Failed to generate repository context: {}", e);

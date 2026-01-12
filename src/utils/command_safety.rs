@@ -116,14 +116,14 @@ impl Default for CommandSafety {
 impl CommandSafety {
     /// Create a new command safety analyzer
     pub fn new() -> Self {
-        let interactive_commands = INTERACTIVE_COMMANDS.iter().map(|s| s.to_string()).collect();
+        let interactive_commands = INTERACTIVE_COMMANDS.iter().map(|s| (*s).to_string()).collect();
 
         let long_running_commands = LONG_RUNNING_COMMANDS
             .iter()
-            .map(|s| s.to_string())
+            .map(|s| (*s).to_string())
             .collect();
 
-        let background_commands = BACKGROUND_COMMANDS.iter().map(|s| s.to_string()).collect();
+        let background_commands = BACKGROUND_COMMANDS.iter().map(|s| (*s).to_string()).collect();
 
         Self {
             interactive_commands,
@@ -224,24 +224,21 @@ impl CommandSafety {
 
         if self.is_interactive(command) {
             warnings.push(format!(
-                "Command '{}' appears to be interactive and may hang waiting for input",
-                command
+                "Command '{command}' appears to be interactive and may hang waiting for input"
             ));
             warnings.push("Consider using non-interactive flags or alternatives".to_string());
         }
 
         if self.is_long_running(command) {
             warnings.push(format!(
-                "Command '{}' may take a long time to complete",
-                command
+                "Command '{command}' may take a long time to complete"
             ));
             warnings.push("Consider using status_check to monitor progress".to_string());
         }
 
         if self.is_background_command(command) {
             warnings.push(format!(
-                "Command '{}' may spawn background processes",
-                command
+                "Command '{command}' may spawn background processes"
             ));
             warnings.push("Use explicit process management if needed".to_string());
         }

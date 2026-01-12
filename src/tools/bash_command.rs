@@ -1,6 +1,6 @@
-//! Implementation of the BashCommand tool with WCGW parity.
+//! Implementation of the `BashCommand` tool with WCGW parity.
 //!
-//! This module provides the implementation for the BashCommand tool, which is used
+//! This module provides the implementation for the `BashCommand` tool, which is used
 //! to execute shell commands, check command status, and interact with the shell.
 //! Matches the behavior of wcgw Python implementation 1:1.
 
@@ -25,10 +25,10 @@ use crate::types::{BashCommand, BashCommandAction, SpecialKey};
 /// Default timeout for command execution (seconds) - matches WCGW Python Config.timeout
 const DEFAULT_TIMEOUT: f64 = 5.0;
 
-/// Extended timeout while output is still being produced - matches WCGW Python Config.timeout_while_output
+/// Extended timeout while output is still being produced - matches WCGW Python `Config.timeout_while_output`
 const TIMEOUT_WHILE_OUTPUT: f64 = 20.0;
 
-/// Number of iterations to wait without new output before giving up - matches WCGW Python Config.output_wait_patience
+/// Number of iterations to wait without new output before giving up - matches WCGW Python `Config.output_wait_patience`
 const OUTPUT_WAIT_PATIENCE: i32 = 3;
 
 /// Chunk size for sending commands (characters) - matches WCGW Python (64 chars)
@@ -40,7 +40,7 @@ const TEXT_CHUNK_SIZE: usize = 128;
 /// Maximum output length to prevent excessive responses
 const MAX_OUTPUT_LENGTH: usize = 100_000;
 
-/// Message when a command is already running - matches WCGW Python WAITING_INPUT_MESSAGE
+/// Message when a command is already running - matches WCGW Python `WAITING_INPUT_MESSAGE`
 const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can't run multiple shell commands in main shell, likely a previous program hasn't exited.
 1. Get its output using status check.
 2. Use `send_ascii` or `send_specials` to give inputs to the running program OR
@@ -50,7 +50,7 @@ const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can
 
 // ==================== Background Shell Manager ====================
 
-/// Manages background shell sessions - matches WCGW Python's background_shells dict
+/// Manages background shell sessions - matches WCGW Python's `background_shells` dict
 #[derive(Debug, Default)]
 pub struct BackgroundShellManager {
     shells: HashMap<String, Arc<Mutex<Option<InteractiveBash>>>>,
@@ -69,7 +69,7 @@ impl BackgroundShellManager {
         let cid = format!("{:010x}", rand::rng().random::<u32>());
 
         let bash = InteractiveBash::new(working_dir, restricted_mode)
-            .map_err(|e| WinxError::CommandExecutionError(format!("Failed to start background shell: {}", e)))?;
+            .map_err(|e| WinxError::CommandExecutionError(format!("Failed to start background shell: {e}")))?;
 
         self.shells.insert(cid.clone(), Arc::new(Mutex::new(Some(bash))));
 
@@ -95,7 +95,7 @@ impl BackgroundShellManager {
         }
     }
 
-    /// Get info about all running background shells - matches WCGW Python get_bg_running_commandsinfo
+    /// Get info about all running background shells - matches WCGW Python `get_bg_running_commandsinfo`
     pub fn get_running_info(&self) -> String {
         if self.shells.is_empty() {
             return "No command running in background.\n".to_string();
@@ -125,7 +125,7 @@ lazy_static::lazy_static! {
 
 // ==================== WCGW-Style Helper Functions ====================
 
-/// Assert that command contains only a single statement - matches WCGW Python assert_single_statement
+/// Assert that command contains only a single statement - matches WCGW Python `assert_single_statement`
 fn assert_single_statement(command: &str) -> Result<()> {
     if command.contains('\n') {
         // Check if the newline is inside quotes or a heredoc
@@ -155,20 +155,20 @@ fn assert_single_statement(command: &str) -> Result<()> {
     Ok(())
 }
 
-/// Get WCGW-style status string - matches WCGW Python's get_status()
+/// Get WCGW-style status string - matches WCGW Python's `get_status()`
 fn get_status(bash_state: &BashState, is_bg: bool, bg_id: Option<&str>, is_running: bool, running_for: Option<&str>) -> String {
     let mut status = "\n\n---\n\n".to_string();
 
     if is_bg {
         if let Some(id) = bg_id {
-            status.push_str(&format!("bg_command_id = {}\n", id));
+            status.push_str(&format!("bg_command_id = {id}\n"));
         }
     }
 
     if is_running {
         status.push_str("status = still running\n");
         if let Some(duration) = running_for {
-            status.push_str(&format!("running for = {}\n", duration));
+            status.push_str(&format!("running for = {duration}\n"));
         }
     } else {
         status.push_str("status = process exited\n");
@@ -187,7 +187,7 @@ fn get_status(bash_state: &BashState, is_bg: bool, bg_id: Option<&str>, is_runni
     status.trim_end().to_string()
 }
 
-/// Process output with WCGW-style incremental text handling - matches WCGW Python _incremental_text
+/// Process output with WCGW-style incremental text handling - matches WCGW Python _`incremental_text`
 fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> String {
     let text = if text.len() > MAX_OUTPUT_LENGTH {
         &text[text.len() - MAX_OUTPUT_LENGTH..]
@@ -228,7 +228,7 @@ fn rstrip_lines(lines: &[String]) -> String {
         .join("\n")
 }
 
-/// Get incremental output between old and new - matches WCGW Python get_incremental_output
+/// Get incremental output between old and new - matches WCGW Python `get_incremental_output`
 fn get_incremental_output(old_output: &[String], new_output: &[String]) -> Vec<String> {
     if old_output.is_empty() {
         return new_output.to_vec();
@@ -263,7 +263,7 @@ fn get_incremental_output(old_output: &[String], new_output: &[String]) -> Vec<S
     new_output.to_vec()
 }
 
-/// Check if action is effectively a status check - matches WCGW Python is_status_check
+/// Check if action is effectively a status check - matches WCGW Python `is_status_check`
 #[allow(dead_code)]
 fn is_status_check_action(action: &BashCommandAction) -> bool {
     match action {
@@ -280,10 +280,10 @@ fn is_status_check_action(action: &BashCommandAction) -> bool {
 
 // ==================== Main Tool Handler ====================
 
-/// Handles the BashCommand tool call with WCGW parity
+/// Handles the `BashCommand` tool call with WCGW parity
 ///
-/// This function processes the BashCommand tool call following WCGW Python's
-/// execute_bash() function behavior exactly.
+/// This function processes the `BashCommand` tool call following WCGW Python's
+/// `execute_bash()` function behavior exactly.
 #[tracing::instrument(level = "info", skip(bash_state_arc, bash_command))]
 pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
@@ -303,15 +303,12 @@ pub async fn handle_tool_call(
     let mut bash_state: BashState;
     {
         let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e))
+            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
         })?;
 
-        let state = match &*bash_state_guard {
-            Some(state) => state,
-            None => {
-                error!("BashState not initialized");
-                return Err(WinxError::BashStateNotInitialized);
-            }
+        let state = if let Some(state) = &*bash_state_guard { state } else {
+            error!("BashState not initialized");
+            return Err(WinxError::BashStateNotInitialized);
         };
 
         bash_state = state.clone();
@@ -330,8 +327,7 @@ pub async fn handle_tool_call(
 
     // Calculate effective timeout - matches WCGW Python
     let timeout_s = bash_command.wait_for_seconds
-        .map(|t| t as f64)
-        .unwrap_or(DEFAULT_TIMEOUT)
+        .map_or(DEFAULT_TIMEOUT, f64::from)
         .min(TIMEOUT_WHILE_OUTPUT);
 
     // Execute the action based on type - matches WCGW Python's _execute_bash()
@@ -352,7 +348,7 @@ pub async fn handle_tool_call(
     }
 }
 
-/// Execute a bash action - matches WCGW Python's _execute_bash() function
+/// Execute a bash action - matches WCGW Python's _`execute_bash()` function
 async fn execute_bash_action(
     bash_state: &mut BashState,
     action: &BashCommandAction,
@@ -370,19 +366,16 @@ async fn execute_bash_action(
         BashCommandAction::SendAscii { bg_command_id, .. } => {
             if let Some(id) = bg_command_id {
                 let manager = BG_SHELL_MANAGER.lock()
-                    .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg manager: {}", e)))?;
+                    .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}")))?;
 
-                match manager.get_shell(id) {
-                    Some(shell) => {
-                        is_bg = true;
-                        bg_id = Some(id.clone());
-                        Some(shell)
-                    }
-                    None => {
-                        // Error message matches WCGW Python
-                        let error = format!("No shell found running with command id {}.\n{}", id, manager.get_running_info());
-                        return Err(WinxError::CommandExecutionError(error));
-                    }
+                if let Some(shell) = manager.get_shell(id) {
+                    is_bg = true;
+                    bg_id = Some(id.clone());
+                    Some(shell)
+                } else {
+                    // Error message matches WCGW Python
+                    let error = format!("No shell found running with command id {}.\n{}", id, manager.get_running_info());
+                    return Err(WinxError::CommandExecutionError(error));
                 }
             } else {
                 None
@@ -410,7 +403,7 @@ async fn execute_bash_action(
     }
 }
 
-/// Execute a command - matches WCGW Python's Command handling in _execute_bash
+/// Execute a command - matches WCGW Python's Command handling in _`execute_bash`
 async fn execute_command(
     bash_state: &mut BashState,
     command: &str,
@@ -439,7 +432,7 @@ async fn execute_command(
     // Check if a command is already running - matches WCGW Python state check
     {
         let bash_guard = bash_state.interactive_bash.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?;
 
         if let Some(ref bash) = *bash_guard {
             if let CommandState::Running { .. } = bash.command_state {
@@ -450,11 +443,11 @@ async fn execute_command(
 
     // Initialize bash if needed
     if bash_state.interactive_bash.lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?
+        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?
         .is_none()
     {
         bash_state.init_interactive_bash()
-            .map_err(|e| WinxError::CommandExecutionError(format!("Failed to init bash: {}", e)))?;
+            .map_err(|e| WinxError::CommandExecutionError(format!("Failed to init bash: {e}")))?;
     }
 
     // Clear prompt before sending - matches WCGW Python clear_to_run
@@ -463,7 +456,7 @@ async fn execute_command(
     // Send command in chunks of 64 characters - matches WCGW Python exactly
     {
         let mut bash_guard = bash_state.interactive_bash.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?;
 
         let bash = bash_guard.as_mut()
             .ok_or(WinxError::BashStateNotInitialized)?;
@@ -472,7 +465,7 @@ async fn execute_command(
         for chunk in command.as_bytes().chunks(COMMAND_CHUNK_SIZE) {
             if let Some(mut stdin) = bash.process.stdin.take() {
                 stdin.write_all(chunk)
-                    .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write chunk: {}", e)))?;
+                    .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write chunk: {e}")))?;
                 bash.process.stdin = Some(stdin);
             }
         }
@@ -480,9 +473,9 @@ async fn execute_command(
         // Send linesep to execute - matches WCGW Python bash_state.send(bash_state.linesep, ...)
         if let Some(mut stdin) = bash.process.stdin.take() {
             stdin.write_all(b"\n")
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write newline: {}", e)))?;
+                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write newline: {e}")))?;
             stdin.flush()
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {}", e)))?;
+                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {e}")))?;
             bash.process.stdin = Some(stdin);
         }
 
@@ -516,11 +509,11 @@ async fn wait_for_output(
     // Read initial output
     let mut output = {
         let mut bash_guard = bash_state.interactive_bash.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?;
 
         if let Some(bash) = bash_guard.as_mut() {
             let (out, done) = bash.read_output(0.5)
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to read output: {}", e)))?;
+                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to read output: {e}")))?;
             complete = done;
             out
         } else {
@@ -546,11 +539,11 @@ async fn wait_for_output(
 
             let (new_output, done) = {
                 let mut bash_guard = bash_state.interactive_bash.lock()
-                    .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+                    .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?;
 
                 if let Some(bash) = bash_guard.as_mut() {
                     bash.read_output(0.5)
-                        .map_err(|e| WinxError::CommandExecutionError(format!("Failed to read output: {}", e)))?
+                        .map_err(|e| WinxError::CommandExecutionError(format!("Failed to read output: {e}")))?
                 } else {
                     (String::new(), true)
                 }
@@ -564,10 +557,10 @@ async fn wait_for_output(
 
             // Check if output changed - matches WCGW Python patience logic
             let new_incremental = wcgw_incremental_text(&new_output, &last_pending_output);
-            if new_incremental != last_incremental {
-                patience = OUTPUT_WAIT_PATIENCE; // Reset patience on new output
-            } else {
+            if new_incremental == last_incremental {
                 patience -= 1;
+            } else {
+                patience = OUTPUT_WAIT_PATIENCE; // Reset patience on new output
             }
             last_incremental = new_incremental;
 
@@ -592,18 +585,18 @@ async fn wait_for_output(
     };
 
     // Calculate running duration for status
-    let running_for = if !complete {
-        Some(format!("{} seconds", (start.elapsed().as_secs() + timeout_s as u64)))
-    } else {
+    let running_for = if complete {
         None
+    } else {
+        Some(format!("{} seconds", (start.elapsed().as_secs() + timeout_s as u64)))
     };
 
     // Add status - matches WCGW Python get_status
     let status = get_status(bash_state, is_bg, bg_id, !complete, running_for.as_deref());
-    Ok(format!("{}{}", rendered, status))
+    Ok(format!("{rendered}{status}"))
 }
 
-/// Execute a status check - matches WCGW Python's StatusCheck handling
+/// Execute a status check - matches WCGW Python's `StatusCheck` handling
 async fn execute_status_check(
     bash_state: &mut BashState,
     _bg_shell: Option<Arc<Mutex<Option<InteractiveBash>>>>,
@@ -616,7 +609,7 @@ async fn execute_status_check(
     // Check if there's a running command - matches WCGW Python state check
     let is_running = {
         let guard = bash_state.interactive_bash.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?;
         if let Some(ref bash) = *guard {
             matches!(bash.command_state, CommandState::Running { .. })
         } else {
@@ -627,7 +620,7 @@ async fn execute_status_check(
     // If no command running and not background, return error - matches WCGW Python
     if !is_running && !is_bg {
         let manager = BG_SHELL_MANAGER.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg manager: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}")))?;
         let error = format!("No running command to check status of.\n{}", manager.get_running_info());
         return Err(WinxError::CommandExecutionError(error));
     }
@@ -636,7 +629,7 @@ async fn execute_status_check(
     wait_for_output(bash_state, timeout_s, is_bg, bg_id, true).await
 }
 
-/// Execute send_text - matches WCGW Python's SendText handling
+/// Execute `send_text` - matches WCGW Python's `SendText` handling
 async fn execute_send_text(
     bash_state: &mut BashState,
     text: &str,
@@ -658,7 +651,7 @@ async fn execute_send_text(
     // Send text in chunks of 128 characters - matches WCGW Python exactly
     {
         let mut guard = shell_arc.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock shell: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock shell: {e}")))?;
 
         let bash = guard.as_mut()
             .ok_or(WinxError::BashStateNotInitialized)?;
@@ -667,7 +660,7 @@ async fn execute_send_text(
         for chunk in text.as_bytes().chunks(TEXT_CHUNK_SIZE) {
             if let Some(mut stdin) = bash.process.stdin.take() {
                 stdin.write_all(chunk)
-                    .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write text chunk: {}", e)))?;
+                    .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write text chunk: {e}")))?;
                 bash.process.stdin = Some(stdin);
             }
         }
@@ -675,9 +668,9 @@ async fn execute_send_text(
         // Send linesep - matches WCGW Python bash_state.send(bash_state.linesep, ...)
         if let Some(mut stdin) = bash.process.stdin.take() {
             stdin.write_all(b"\n")
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write newline: {}", e)))?;
+                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write newline: {e}")))?;
             stdin.flush()
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {}", e)))?;
+                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {e}")))?;
             bash.process.stdin = Some(stdin);
         }
     }
@@ -686,7 +679,7 @@ async fn execute_send_text(
     wait_for_output(bash_state, timeout_s, is_bg, bg_id, false).await
 }
 
-/// Execute send_specials - matches WCGW Python's SendSpecials handling exactly
+/// Execute `send_specials` - matches WCGW Python's `SendSpecials` handling exactly
 async fn execute_send_specials(
     bash_state: &mut BashState,
     keys: &[SpecialKey],
@@ -707,7 +700,7 @@ async fn execute_send_specials(
 
     {
         let mut guard = shell_arc.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock shell: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock shell: {e}")))?;
 
         let bash = guard.as_mut()
             .ok_or(WinxError::BashStateNotInitialized)?;
@@ -738,14 +731,18 @@ async fn execute_send_specials(
                 SpecialKey::CtrlC => {
                     // matches WCGW Python: bash_state.sendintr()
                     bash.send_interrupt()
-                        .map_err(|e| WinxError::CommandExecutionError(format!("Failed to send interrupt: {}", e)))?;
+                        .map_err(|e| WinxError::CommandExecutionError(format!("Failed to send interrupt: {e}")))?;
                     is_interrupt = true;
                 }
                 SpecialKey::CtrlD => {
                     // matches WCGW Python: bash_state.sendintr() - same as Ctrl+C in WCGW
                     bash.send_interrupt()
-                        .map_err(|e| WinxError::CommandExecutionError(format!("Failed to send Ctrl+D: {}", e)))?;
+                        .map_err(|e| WinxError::CommandExecutionError(format!("Failed to send Ctrl+D: {e}")))?;
                     is_interrupt = true;
+                }
+                SpecialKey::CtrlZ => {
+                    // Ctrl+Z = SIGTSTP (suspend) - ASCII 0x1a
+                    send_bytes_to_bash(bash, b"\x1a")?;
                 }
             }
         }
@@ -766,9 +763,9 @@ async fn execute_send_specials(
 fn send_bytes_to_bash(bash: &mut InteractiveBash, bytes: &[u8]) -> Result<()> {
     if let Some(mut stdin) = bash.process.stdin.take() {
         stdin.write_all(bytes)
-            .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write bytes: {}", e)))?;
+            .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write bytes: {e}")))?;
         stdin.flush()
-            .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {}", e)))?;
+            .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {e}")))?;
         bash.process.stdin = Some(stdin);
         Ok(())
     } else {
@@ -776,7 +773,7 @@ fn send_bytes_to_bash(bash: &mut InteractiveBash, bytes: &[u8]) -> Result<()> {
     }
 }
 
-/// Execute send_ascii - matches WCGW Python's SendAscii handling
+/// Execute `send_ascii` - matches WCGW Python's `SendAscii` handling
 async fn execute_send_ascii(
     bash_state: &mut BashState,
     ascii_codes: &[u8],
@@ -797,7 +794,7 @@ async fn execute_send_ascii(
 
     {
         let mut guard = shell_arc.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock shell: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock shell: {e}")))?;
 
         let bash = guard.as_mut()
             .ok_or(WinxError::BashStateNotInitialized)?;
@@ -807,9 +804,9 @@ async fn execute_send_ascii(
             // matches WCGW Python: bash_state.send(chr(ascii_char), ...)
             if let Some(mut stdin) = bash.process.stdin.take() {
                 stdin.write_all(&[code])
-                    .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write ASCII code: {}", e)))?;
+                    .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write ASCII code: {e}")))?;
                 stdin.flush()
-                    .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {}", e)))?;
+                    .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {e}")))?;
                 bash.process.stdin = Some(stdin);
             }
 
@@ -831,7 +828,7 @@ async fn execute_send_ascii(
     Ok(output)
 }
 
-/// Execute command in background - matches WCGW Python's is_background handling
+/// Execute command in background - matches WCGW Python's `is_background` handling
 async fn execute_in_background(
     bash_state: &mut BashState,
     command: &str,
@@ -844,14 +841,14 @@ async fn execute_in_background(
 
     let bg_id = {
         let mut manager = BG_SHELL_MANAGER.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg manager: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}")))?;
         manager.start_new_shell(&bash_state.cwd, restricted_mode)?
     };
 
     // Get the shell
     let shell_arc = {
         let manager = BG_SHELL_MANAGER.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg manager: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}")))?;
         manager.get_shell(&bg_id)
             .ok_or_else(|| WinxError::CommandExecutionError("Failed to get background shell".to_string()))?
     };
@@ -859,7 +856,7 @@ async fn execute_in_background(
     // Send command in chunks - same as regular command
     {
         let mut guard = shell_arc.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg shell: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg shell: {e}")))?;
 
         let bash = guard.as_mut()
             .ok_or(WinxError::BashStateNotInitialized)?;
@@ -867,16 +864,16 @@ async fn execute_in_background(
         for chunk in command.as_bytes().chunks(COMMAND_CHUNK_SIZE) {
             if let Some(mut stdin) = bash.process.stdin.take() {
                 stdin.write_all(chunk)
-                    .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write chunk: {}", e)))?;
+                    .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write chunk: {e}")))?;
                 bash.process.stdin = Some(stdin);
             }
         }
 
         if let Some(mut stdin) = bash.process.stdin.take() {
             stdin.write_all(b"\n")
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write newline: {}", e)))?;
+                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write newline: {e}")))?;
             stdin.flush()
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {}", e)))?;
+                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {e}")))?;
             bash.process.stdin = Some(stdin);
         }
 
@@ -892,11 +889,11 @@ async fn execute_in_background(
 
     let (output, complete) = {
         let mut guard = shell_arc.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg shell: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg shell: {e}")))?;
 
         if let Some(bash) = guard.as_mut() {
             bash.read_output(0.5)
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to read output: {}", e)))?
+                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to read output: {e}")))?
         } else {
             (String::new(), true)
         }
@@ -916,11 +913,11 @@ async fn execute_in_background(
     // Cleanup if complete - matches WCGW Python
     if complete {
         let mut manager = BG_SHELL_MANAGER.lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg manager: {}", e)))?;
+            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}")))?;
         manager.remove_shell(&bg_id);
     }
 
-    Ok(format!("{}{}", rendered, status))
+    Ok(format!("{rendered}{status}"))
 }
 
 // ==================== Legacy Screen-based Functions (kept for backward compatibility) ====================
@@ -946,7 +943,7 @@ async fn execute_simple_command(command: &str, cwd: &Path, _timeout: Option<f32>
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    let raw_result = format!("{}{}", stdout, stderr);
+    let raw_result = format!("{stdout}{stderr}");
     let mut result = raw_result.clone();
     if !raw_result.is_empty() {
         let rendered_lines = render_terminal_output(&raw_result);
@@ -968,14 +965,11 @@ async fn execute_simple_command(command: &str, cwd: &Path, _timeout: Option<f32>
         format!("Command failed with status: {}", output.status)
     };
 
-    let current_dir = std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "Unknown".to_string());
+    let current_dir = std::env::current_dir().map_or_else(|_| "Unknown".to_string(), |p| p.to_string_lossy().into_owned());
 
     debug!("Command executed in {:.2?}", elapsed);
     Ok(format!(
-        "{}\n\n---\n\nstatus = {}\ncwd = {}\n",
-        result, exit_status, current_dir
+        "{result}\n\n---\n\nstatus = {exit_status}\ncwd = {current_dir}\n"
     ))
 }
 
@@ -1005,7 +999,7 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
     let screen_cmd = format!(
         "screen -dmS {} bash -c '{} ; ec=$? ; echo \"Command completed with exit code: $ec\" ; sleep 1 ; exit $ec'",
         screen_name,
-        command.replace("'", "'\\''")
+        command.replace('\'', "'\\''")
     );
 
     let screen_start = Command::new("sh")
@@ -1019,8 +1013,7 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
         let stderr = String::from_utf8_lossy(&screen_start.stderr).to_string();
         error!("Failed to start screen session: {}", stderr);
         return Err(WinxError::CommandExecutionError(format!(
-            "Failed to start screen session: {}",
-            stderr
+            "Failed to start screen session: {stderr}"
         )));
     }
 
@@ -1033,22 +1026,19 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
 
     let screen_list = String::from_utf8_lossy(&screen_check.stdout).to_string();
 
-    let current_dir = std::env::current_dir()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|_| "Unknown".to_string());
+    let current_dir = std::env::current_dir().map_or_else(|_| "Unknown".to_string(), |p| p.to_string_lossy().into_owned());
 
     Ok(format!(
-        "Started command in background screen session '{}'.\n\
+        "Started command in background screen session '{screen_name}'.\n\
         Use status_check to get output.\n\n\
-        Screen sessions:\n{}\n\
+        Screen sessions:\n{screen_list}\n\
         ---\n\n\
         status = running in background\n\
-        cwd = {}\n",
-        screen_name, screen_list, current_dir
+        cwd = {current_dir}\n"
     ))
 }
 
-/// Converts a SpecialKey to its screen stuff input representation (legacy)
+/// Converts a `SpecialKey` to its screen stuff input representation (legacy)
 #[allow(dead_code)]
 fn special_key_to_screen_input(key: &SpecialKey) -> String {
     match key {
@@ -1059,5 +1049,6 @@ fn special_key_to_screen_input(key: &SpecialKey) -> String {
         SpecialKey::KeyRight => String::from("\x1b[C"),
         SpecialKey::CtrlC => String::from("\x03"),
         SpecialKey::CtrlD => String::from("\x04"),
+        SpecialKey::CtrlZ => String::from("\x1a"),
     }
 }

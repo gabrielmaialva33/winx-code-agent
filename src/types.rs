@@ -17,7 +17,7 @@ pub enum InitializeType {
     /// User requested to change the mode
     ///
     /// This should be used when the user asks to switch between modes
-    /// (e.g., from "wcgw" to "architect" or "code_writer").
+    /// (e.g., from "wcgw" to "architect" or "`code_writer`").
     UserAskedModeChange,
 
     /// Reset the shell environment due to issues
@@ -66,8 +66,7 @@ impl<'de> Deserialize<'de> for ModeName {
             "architect" => Ok(ModeName::Architect),
             "code_writer" | "code_write" | "code-writer" => Ok(ModeName::CodeWriter),
             _ => Err(serde::de::Error::custom(format!(
-                "Unknown mode name: {}",
-                s
+                "Unknown mode name: {s}"
             ))),
         }
     }
@@ -102,7 +101,7 @@ impl CodeWriterConfig {
                     if std::path::Path::new(glob).is_absolute() {
                         glob.clone()
                     } else {
-                        format!("{}/{}", workspace_root, glob)
+                        format!("{workspace_root}/{glob}")
                     }
                 })
                 .collect();
@@ -193,7 +192,7 @@ pub struct Initialize {
 
     /// ID of a task to resume
     ///
-    /// If provided during a first_call, the task with this ID will be resumed.
+    /// If provided during a `first_call`, the task with this ID will be resumed.
     /// This allows continuing a conversation from a previous session.
     #[serde(default = "String::new")]
     #[serde(deserialize_with = "deserialize_string_or_null")]
@@ -209,15 +208,15 @@ pub struct Initialize {
 
     /// ID of the thread session
     ///
-    /// If not provided for a first_call, a new ID will be generated.
+    /// If not provided for a `first_call`, a new ID will be generated.
     /// This ID must be included in all subsequent tool calls.
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_string_or_null")]
     pub thread_id: String,
 
-    /// Configuration for code_writer mode
+    /// Configuration for `code_writer` mode
     ///
-    /// Only used when mode_name is "code_writer".
+    /// Only used when `mode_name` is "`code_writer`".
     /// Specifies allowed commands and file globs for writing/editing.
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_code_writer_config")]
@@ -283,12 +282,12 @@ where
     }
 }
 
-/// Default mode_name for Initialize
+/// Default `mode_name` for Initialize
 fn default_mode_name() -> ModeName {
     ModeName::Wcgw
 }
 
-/// Default init_type for Initialize
+/// Default `init_type` for Initialize
 fn default_init_type() -> InitializeType {
     InitializeType::FirstCall
 }
@@ -313,19 +312,27 @@ impl JsonSchema for Modes {
 }
 
 /// Special key types for shell interaction
+/// Matches wcgw Python's Specials enum exactly
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "kebab-case")]
 pub enum SpecialKey {
     Enter,
+    #[serde(rename = "Key-up")]
     KeyUp,
+    #[serde(rename = "Key-down")]
     KeyDown,
+    #[serde(rename = "Key-left")]
     KeyLeft,
+    #[serde(rename = "Key-right")]
     KeyRight,
+    #[serde(rename = "Ctrl-c")]
     CtrlC,
+    #[serde(rename = "Ctrl-d")]
     CtrlD,
+    #[serde(rename = "Ctrl-z")]
+    CtrlZ,
 }
 
-/// Parameters for the ReadFiles tool
+/// Parameters for the `ReadFiles` tool
 ///
 /// This struct represents the parameters needed to read one or more files.
 /// Line ranges can be specified in the path itself (e.g., "file.rs:10-20").
@@ -366,13 +373,12 @@ impl<'de> Deserialize<'de> for ReadFiles {
                 ));
             }
             return Err(serde::de::Error::custom(format!(
-                "Expected object, got {}",
-                input
+                "Expected object, got {input}"
             )));
         }
 
         let helper: ReadFilesHelper = serde_json::from_value(input.clone())
-            .map_err(|e| serde::de::Error::custom(format!("Failed to parse ReadFiles: {}", e)))?;
+            .map_err(|e| serde::de::Error::custom(format!("Failed to parse ReadFiles: {e}")))?;
 
         let file_paths = match helper.file_paths {
             Some(paths) if !paths.is_empty() => paths,
@@ -409,7 +415,7 @@ fn parse_line_range_from_path(path: &str) -> (Option<usize>, Option<usize>) {
         let range_part = &path[colon_pos + 1..];
 
         // Check if it looks like a line range (not a Windows drive letter)
-        if range_part.chars().next().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false) {
+        if range_part.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-') {
             if let Some(dash_pos) = range_part.find('-') {
                 // Format: start-end or start- or -end
                 let start_str = &range_part[..dash_pos];
@@ -428,11 +434,10 @@ fn parse_line_range_from_path(path: &str) -> (Option<usize>, Option<usize>) {
                 };
 
                 return (start, end);
-            } else {
-                // Single line number
-                if let Ok(line) = range_part.parse::<usize>() {
-                    return (Some(line), Some(line));
-                }
+            }
+            // Single line number
+            if let Ok(line) = range_part.parse::<usize>() {
+                return (Some(line), Some(line));
             }
         }
     }
@@ -450,7 +455,7 @@ impl ReadFiles {
         let path = &self.file_paths[index];
         if let Some(colon_pos) = path.rfind(':') {
             let range_part = &path[colon_pos + 1..];
-            if range_part.chars().next().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false) {
+            if range_part.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-') {
                 return path[..colon_pos].to_string();
             }
         }
@@ -458,12 +463,12 @@ impl ReadFiles {
     }
 }
 
-/// Default true value for status_check
+/// Default true value for `status_check`
 fn default_true() -> bool {
     true
 }
 
-/// Types of actions that can be performed with the BashCommand tool
+/// Types of actions that can be performed with the `BashCommand` tool
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BashCommandAction {
@@ -500,7 +505,7 @@ pub enum BashCommandAction {
     },
 }
 
-/// Parameters for the BashCommand tool
+/// Parameters for the `BashCommand` tool
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BashCommand {
     /// The action to perform (command, status check, etc.)
@@ -566,7 +571,7 @@ impl<'de> Deserialize<'de> for BashCommand {
                                 .replace('\t', "\\t"); // Replace tabs with escaped versions
 
                             // Attempt to fix unquoted field values (e.g., convert {field: value} to {"field": "value"})
-                            let re_sanitized = if !s.contains("\"") && s.contains(":") {
+                            let re_sanitized = if !s.contains('"') && s.contains(':') {
                                 // Very likely unquoted keys/values
                                 tracing::debug!("Attempting to fix unquoted JSON keys/values");
                                 re_sanitized
@@ -608,12 +613,11 @@ tracing::error!(
 let err_str = e.to_string();
 if err_str.contains("unexpected token") || err_str.contains("Unexpected token") {
     return serde::de::Error::custom(format!(
-        "JSON syntax error: {}. Please check your JSON structure. Each field name should be in quotes, and string values should be in quotes.",
-        e
+        "JSON syntax error: {e}. Please check your JSON structure. Each field name should be in quotes, and string values should be in quotes."
     ));
 }
 
-serde::de::Error::custom(format!("Invalid action_json: {}. Please ensure your JSON is properly formatted.", e))
+serde::de::Error::custom(format!("Invalid action_json: {e}. Please ensure your JSON is properly formatted."))
         })?;
 
         // Return the properly constructed BashCommand
@@ -650,7 +654,7 @@ pub struct WriteIfEmptyMode {
     pub allowed_globs: AllowedGlobs,
 }
 
-/// Parameters for the FileWriteOrEdit tool
+/// Parameters for the `FileWriteOrEdit` tool
 ///
 /// This struct represents the parameters needed to write or edit a file
 /// with optional search/replace blocks for partial edits.
@@ -669,8 +673,8 @@ pub struct FileWriteOrEdit {
 
     /// Content for the file or search/replace blocks
     ///
-    /// If percentage_to_change > 50%, this is the entire file content.
-    /// If percentage_to_change <= 50%, this contains search/replace blocks
+    /// If `percentage_to_change` > 50%, this is the entire file content.
+    /// If `percentage_to_change` <= 50%, this contains search/replace blocks
     /// in the format:
     /// ```text
     /// <<<<<<< SEARCH
@@ -685,7 +689,7 @@ pub struct FileWriteOrEdit {
     pub thread_id: String,
 }
 
-/// Parameters for the ContextSave tool
+/// Parameters for the `ContextSave` tool
 ///
 /// This struct represents the parameters needed to save context information
 /// about a task, including file contents from specified globs.
@@ -716,7 +720,7 @@ pub struct ContextSave {
     pub relevant_file_globs: Vec<String>,
 }
 
-/// Parameters for the ReadImage tool
+/// Parameters for the `ReadImage` tool
 ///
 /// This struct represents the parameters needed to read an image file.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

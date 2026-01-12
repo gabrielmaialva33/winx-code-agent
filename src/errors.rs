@@ -189,20 +189,20 @@ pub enum WinxError {
     AIError(String),
 }
 
-/// Type alias for Result with WinxError
+/// Type alias for Result with `WinxError`
 pub type Result<T> = std::result::Result<T, WinxError>;
 
-/// Conversion from anyhow::Error to WinxError
+/// Conversion from `anyhow::Error` to `WinxError`
 impl From<anyhow::Error> for WinxError {
     fn from(error: anyhow::Error) -> Self {
-        WinxError::CommandExecutionError(format!("{}", error))
+        WinxError::CommandExecutionError(format!("{error}"))
     }
 }
 
-/// Extension trait to convert anyhow errors to WinxError
+/// Extension trait to convert anyhow errors to `WinxError`
 #[allow(dead_code)]
 pub trait AnyhowErrorExt {
-    /// Convert the error to a WinxError
+    /// Convert the error to a `WinxError`
     fn to_winx_error(self, default_message: &str) -> WinxError;
 }
 
@@ -219,9 +219,9 @@ impl AnyhowErrorExt for anyhow::Error {
 
         // Classify based on error content
         if root_cause.contains("command not found") {
-            WinxError::CommandExecutionError(format!("Command not found: {}", self))
+            WinxError::CommandExecutionError(format!("Command not found: {self}"))
         } else if root_cause.contains("permission denied") {
-            WinxError::CommandExecutionError(format!("Permission denied: {}", self))
+            WinxError::CommandExecutionError(format!("Permission denied: {self}"))
         } else if err_string.contains("bash state") {
             WinxError::BashStateLockError(err_string)
         } else if err_string.contains("workspace") || err_string.contains("directory") {
@@ -237,7 +237,7 @@ impl AnyhowErrorExt for anyhow::Error {
         } else if err_string.contains("serialize") {
             WinxError::SerializationError(err_string)
         } else {
-            WinxError::ShellInitializationError(format!("{}: {}", default_message, err_string))
+            WinxError::ShellInitializationError(format!("{default_message}: {err_string}"))
         }
     }
 }
@@ -250,28 +250,28 @@ pub fn with_suggestion(error: WinxError, suggestion: &str) -> WinxError {
             suggestion: suggestion.to_string(),
         },
         WinxError::DeserializationError(msg) => WinxError::RecoverableSuggestionError {
-            message: format!("Failed to parse input: {}", msg),
+            message: format!("Failed to parse input: {msg}"),
             suggestion: suggestion.to_string(),
         },
         WinxError::NullValueError { field } => WinxError::RecoverableSuggestionError {
-            message: format!("Null or undefined value found in field: {}", field),
+            message: format!("Null or undefined value found in field: {field}"),
             suggestion: suggestion.to_string(),
         },
         WinxError::ParameterValidationError { field, message } => {
             WinxError::RecoverableSuggestionError {
-                message: format!("Invalid parameter {}: {}", field, message),
+                message: format!("Invalid parameter {field}: {message}"),
                 suggestion: suggestion.to_string(),
             }
         }
         WinxError::MissingParameterError { field, message } => {
             WinxError::RecoverableSuggestionError {
-                message: format!("Missing required parameter {}: {}", field, message),
+                message: format!("Missing required parameter {field}: {message}"),
                 suggestion: suggestion.to_string(),
             }
         }
         // For other error types, just add the suggestion but maintain the original error type
         _ => WinxError::RecoverableSuggestionError {
-            message: format!("{}", error),
+            message: format!("{error}"),
             suggestion: suggestion.to_string(),
         },
     }
@@ -414,7 +414,7 @@ impl ErrorRecovery {
     }
 }
 
-/// Enable cloning for WinxError
+/// Enable cloning for `WinxError`
 impl Clone for WinxError {
     fn clone(&self) -> Self {
         match self {
