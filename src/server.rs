@@ -2,7 +2,7 @@
 //! Core WCGW tools only - no AI integration
 
 use rmcp::{
-    model::{ServerInfo, Implementation, ProtocolVersion, ServerCapabilities, PaginatedRequestParam, ListToolsResult, Tool, ListResourcesResult, Annotated, RawResource, ReadResourceRequestParam, ReadResourceResult, ResourceContents, ListPromptsResult, GetPromptRequestParam, GetPromptResult, CallToolRequestParam, CallToolResult, ConstString, Content},
+    model::{ServerInfo, Implementation, ProtocolVersion, ServerCapabilities, PaginatedRequestParam, ListToolsResult, Tool, ToolAnnotations, ListResourcesResult, Annotated, RawResource, ReadResourceRequestParam, ReadResourceResult, ResourceContents, ListPromptsResult, GetPromptRequestParam, GetPromptResult, CallToolRequestParam, CallToolResult, Content},
     service::{RequestContext, RoleServer},
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
@@ -159,7 +159,7 @@ impl ServerHandler for WinxService {
                     ),
                     input_schema: schema_to_input_schema::<Initialize>(),
                     output_schema: None,
-                    annotations: None,
+                    annotations: Some(ToolAnnotations::new().read_only(true).open_world(false)),
                     title: None,
                     icons: None,
                     meta: None,
@@ -182,7 +182,7 @@ impl ServerHandler for WinxService {
                     ),
                     input_schema: schema_to_input_schema::<BashCommand>(),
                     output_schema: None,
-                    annotations: None,
+                    annotations: Some(ToolAnnotations::new().destructive(true).open_world(true)),
                     title: None,
                     icons: None,
                     meta: None,
@@ -197,7 +197,7 @@ impl ServerHandler for WinxService {
                     ),
                     input_schema: schema_to_input_schema::<ReadFiles>(),
                     output_schema: None,
-                    annotations: None,
+                    annotations: Some(ToolAnnotations::new().read_only(true).open_world(false)),
                     title: None,
                     icons: None,
                     meta: None,
@@ -220,7 +220,7 @@ impl ServerHandler for WinxService {
                     ),
                     input_schema: schema_to_input_schema::<FileWriteOrEdit>(),
                     output_schema: None,
-                    annotations: None,
+                    annotations: Some(ToolAnnotations::new().destructive(true).open_world(false)),
                     title: None,
                     icons: None,
                     meta: None,
@@ -234,7 +234,7 @@ impl ServerHandler for WinxService {
                     ),
                     input_schema: schema_to_input_schema::<ContextSave>(),
                     output_schema: None,
-                    annotations: None,
+                    annotations: Some(ToolAnnotations::new().destructive(false).open_world(false)),
                     title: None,
                     icons: None,
                     meta: None,
@@ -244,7 +244,7 @@ impl ServerHandler for WinxService {
                     description: Some("Read an image from the shell.".into()),
                     input_schema: schema_to_input_schema::<ReadImage>(),
                     output_schema: None,
-                    annotations: None,
+                    annotations: Some(ToolAnnotations::new().read_only(true).open_world(false)),
                     title: None,
                     icons: None,
                     meta: None,
@@ -409,40 +409,22 @@ impl ServerHandler for WinxService {
 
 impl WinxService {
     async fn handle_initialize(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
-        let shell = args
-            .and_then(|v| {
-                if let Value::Object(map) = v {
-                    map.get("shell")
-                        .and_then(|v| v.as_str())
-                        .map(std::string::ToString::to_string)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "bash".to_string());
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
 
-        let mut bash_state_guard = self.bash_state.lock().map_err(|e| {
-            McpError::internal_error(format!("Failed to acquire lock: {e}"), None)
-        })?;
-        if bash_state_guard.is_some() {
-            return Ok(CallToolResult::success(vec![Content::text(
-                "Shell environment is already initialized".to_string(),
-            )]));
-        }
+        // Parse Initialize from args - using wcgw field names
+        let initialize: crate::types::Initialize = serde_json::from_value(args.clone())
+            .map_err(|e| McpError::invalid_request(format!("Invalid Initialize parameters: {e}"), None))?;
 
-        let mut state = crate::state::BashState::new();
-        match state.init_interactive_bash() {
-            Ok(()) => {
-                *bash_state_guard = Some(state);
-                info!("Shell environment initialized with {}", shell);
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Shell environment initialized with {shell}"
-                ))]))
+        // Call the real implementation
+        match crate::tools::initialize::handle_tool_call(&self.bash_state, initialize).await {
+            Ok(result) => {
+                info!("Initialize succeeded");
+                Ok(CallToolResult::success(vec![Content::text(result)]))
             }
             Err(e) => {
-                warn!("Failed to initialize shell: {}", e);
+                warn!("Initialize failed: {}", e);
                 Err(McpError::internal_error(
-                    format!("Failed to initialize shell: {e}"),
+                    format!("Initialize failed: {e}"),
                     None,
                 ))
             }
@@ -541,39 +523,52 @@ impl WinxService {
         args: Option<Value>,
     ) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::invalid_request("Missing path", None))?;
-        let content = args
-            .get("content")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::invalid_request("Missing content", None))?;
-        let create = args
-            .get("create_if_missing")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
 
-        if !create && !tokio::fs::try_exists(path).await.unwrap_or(false) {
-            return Err(McpError::invalid_request(
-                format!("File does not exist: {path}"),
-                None,
-            ));
-        }
+        // Parse FileWriteOrEdit from args - using correct wcgw field names
+        let file_path = args
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_request("Missing file_path", None))?
+            .to_string();
 
-        match tokio::fs::write(path, content).await {
-            Ok(()) => {
-                info!("File written successfully: {}", path);
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "File written successfully: {} ({} bytes)",
-                    path,
-                    content.len()
-                ))]))
+        let percentage_to_change = args
+            .get("percentage_to_change")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100) as u32;
+
+        let text_or_search_replace_blocks = args
+            .get("text_or_search_replace_blocks")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| McpError::invalid_request("Missing text_or_search_replace_blocks", None))?
+            .to_string();
+
+        let thread_id = args
+            .get("thread_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        // Create FileWriteOrEdit struct
+        let file_write_or_edit = crate::types::FileWriteOrEdit {
+            file_path: file_path.clone(),
+            percentage_to_change,
+            text_or_search_replace_blocks,
+            thread_id,
+        };
+
+        // Call the real implementation
+        match crate::tools::file_write_or_edit::handle_tool_call(
+            &self.bash_state,
+            file_write_or_edit,
+        ).await {
+            Ok(result) => {
+                info!("FileWriteOrEdit succeeded: {}", file_path);
+                Ok(CallToolResult::success(vec![Content::text(result)]))
             }
             Err(e) => {
-                warn!("Failed to write file {}: {}", path, e);
+                warn!("FileWriteOrEdit failed for {}: {}", file_path, e);
                 Err(McpError::internal_error(
-                    format!("Failed to write file {path}: {e}"),
+                    format!("FileWriteOrEdit failed: {e}"),
                     None,
                 ))
             }
