@@ -18,7 +18,8 @@ use crate::state::bash_state::{BashState, FileWhitelistData};
 use crate::types::FileWriteOrEdit;
 use crate::utils::fuzzy_match::{FuzzyMatch, FuzzyMatcher};
 use crate::utils::path::expand_user;
-// Already importing utils module indirectly through usages in the code
+use crate::utils::syntax_checker::{check_syntax, format_syntax_error_context};
+use crate::utils::tolerance::{apply_with_individual_fallback, ApplyError, SearchReplaceBlock};
 
 // Regex patterns for search/replace blocks
 // Create these with caching to improve performance
@@ -1127,54 +1128,93 @@ fn parse_search_replace_blocks(
     Ok(blocks)
 }
 
-/// Apply search/replace blocks to content
+/// Apply search/replace blocks to content using WCGW-style tolerance matching
 ///
-/// This function applies the search/replace blocks to the original content.
+/// This function applies the search/replace blocks to the original content using
+/// a 5-level tolerance system:
+/// 1. rstrip - Remove trailing whitespace (SILENT)
+/// 2. lstrip - Remove leading indentation (WARNING, score 10x)
+/// 3. remove_leading_linenums - Remove line numbers (WARNING, score 5x)
+/// 4. normalize_unicode - Unicode to ASCII (WARNING, score 5x)
+/// 5. all_whitespace - Remove ALL whitespace (WARNING, score 50x)
 ///
 /// # Arguments
 ///
 /// * `blocks` - Vector of (search, replace) tuples
 /// * `original_content` - The original content to modify
-/// * `fuzzy_threshold` - Optional threshold for fuzzy matching (0.0-1.0)
-/// * `max_suggestions` - Optional maximum number of suggestions to provide
-/// * `auto_apply_fuzzy` - Optional flag to automatically apply high-confidence fuzzy matches
+/// * `_fuzzy_threshold` - (Deprecated) Previously used for fuzzy matching
+/// * `_max_suggestions` - (Deprecated) Previously used for fuzzy matching
+/// * `_auto_apply_fuzzy` - (Deprecated) Previously used for fuzzy matching
 ///
 /// # Returns
 ///
-/// The modified content
+/// The modified content or an error with detailed diagnostics
 fn apply_search_replace_blocks(
     blocks: Vec<(String, String)>,
     original_content: String,
-    fuzzy_threshold: Option<f64>,
-    max_suggestions: Option<usize>,
-    auto_apply_fuzzy: Option<bool>,
+    _fuzzy_threshold: Option<f64>,
+    _max_suggestions: Option<usize>,
+    _auto_apply_fuzzy: Option<bool>,
 ) -> Result<String> {
-    // Create a helper with optional custom fuzzy matching parameters
-    let helper = if let (Some(threshold), Some(max_sugg), Some(auto_apply)) =
-        (fuzzy_threshold, max_suggestions, auto_apply_fuzzy)
-    {
-        SearchReplaceHelper::new_with_fuzzy_options(
-            original_content,
-            blocks,
-            threshold,
-            max_sugg,
-            auto_apply,
-        )
-    } else if let (Some(threshold), Some(max_sugg)) = (fuzzy_threshold, max_suggestions) {
-        SearchReplaceHelper::new_with_fuzzy_options(
-            original_content,
-            blocks,
-            threshold,
-            max_sugg,
-            false,
-        )
-    } else {
-        SearchReplaceHelper::new(original_content, blocks)
-    };
+    // Convert to SearchReplaceBlock format for the tolerance system
+    let tolerance_blocks: Vec<SearchReplaceBlock> = blocks
+        .into_iter()
+        .map(|(search, replace)| SearchReplaceBlock {
+            search: search.lines().map(|s| s.to_string()).collect(),
+            replace: replace.lines().map(|s| s.to_string()).collect(),
+        })
+        .collect();
 
-    // The helper does the actual work and provides better error messages
-    helper.apply()
-    // We don't need to log here as the error is already logged at the call site
+    // Use the new tolerance-based matching with individual fallback
+    match apply_with_individual_fallback(&original_content, tolerance_blocks) {
+        Ok(result) => {
+            // Log warnings if any were generated
+            for warning in &result.warnings {
+                warn!("Tolerance warning: {}", warning);
+            }
+
+            if result.total_score > 0.0 {
+                debug!(
+                    "Search/replace completed with tolerance score: {:.1}",
+                    result.total_score
+                );
+            }
+
+            Ok(result.content)
+        }
+        Err(apply_error) => {
+            // Convert ApplyError to WinxError with detailed context
+            let error_msg = format_apply_error(&apply_error);
+            Err(WinxError::SearchBlockNotFound(error_msg))
+        }
+    }
+}
+
+/// Format an ApplyError into a user-friendly error message
+fn format_apply_error(error: &ApplyError) -> String {
+    let mut msg = error.message.clone();
+
+    if let Some(ref block) = error.failed_block {
+        msg.push_str(&format!("\n\nFailed search block:\n```\n{}\n```", block));
+    }
+
+    if let Some(ref ctx) = error.context {
+        msg.push_str(&format!(
+            "\n\nRelevant context from file:\n```\n{}\n```",
+            ctx
+        ));
+    }
+
+    msg.push_str("\n\n---\nLast edit failed, no changes are applied.");
+    msg.push_str("\nRecommendations:");
+    msg.push_str("\n- Check that your search block matches the file content exactly");
+    msg.push_str("\n- Add more context lines before and after to make the match unique");
+    msg.push_str("\n- Re-read the file if it may have changed since last read");
+    msg.push_str(
+        "\n- If the file has been modified externally, preserve those changes in your replace block",
+    );
+
+    msg
 }
 
 /// Write content to a file with optimized buffering
@@ -1405,7 +1445,7 @@ pub async fn handle_tool_call(
     info!("FileWriteOrEdit tool called with: {:?}", file_write_or_edit);
 
     // Extract data we need from the bash state before awaiting
-    let (chat_id, cwd, file_path);
+    let (thread_id, cwd, file_path);
 
     // Lock bash state to extract data
     {
@@ -1423,18 +1463,18 @@ pub async fn handle_tool_call(
         };
 
         // Extract needed data
-        chat_id = bash_state.current_chat_id.clone();
+        thread_id = bash_state.current_thread_id.clone();
         cwd = bash_state.cwd.clone();
 
-        // Verify chat ID matches
-        if file_write_or_edit.chat_id != chat_id {
+        // Verify thread ID matches
+        if file_write_or_edit.thread_id != thread_id {
             warn!(
-                "Chat ID mismatch: expected {}, got {}",
-                chat_id, file_write_or_edit.chat_id
+                "Thread ID mismatch: expected {}, got {}",
+                thread_id, file_write_or_edit.thread_id
             );
-            return Err(WinxError::ChatIdMismatch(format!(
-                "Error: No saved bash state found for chat ID \"{}\". Please initialize first with this ID.",
-                file_write_or_edit.chat_id
+            return Err(WinxError::ThreadIdMismatch(format!(
+                "Error: No saved bash state found for thread ID \"{}\". Please initialize first with this ID.",
+                file_write_or_edit.thread_id
             )));
         }
 
@@ -1471,7 +1511,7 @@ pub async fn handle_tool_call(
     }
 
     // Process based on content type (full content or search/replace blocks)
-    let content = &file_write_or_edit.file_content_or_search_replace_blocks;
+    let content = &file_write_or_edit.text_or_search_replace_blocks;
 
     // Use error predictor to check for potential issues
     let operation = if Path::new(&file_path).exists() {
@@ -1540,10 +1580,10 @@ pub async fn handle_tool_call(
     // Determine if this is an edit or a full file write
     let is_edit_operation = is_edit(content, file_write_or_edit.percentage_to_change);
 
-    // Setup for advanced fuzzy matching
-    let fuzzy_threshold = file_write_or_edit.fuzzy_threshold.unwrap_or(0.7);
-    let max_suggestions = file_write_or_edit.max_suggestions.unwrap_or(3);
-    let auto_apply_fuzzy = file_write_or_edit.auto_apply_fuzzy.unwrap_or(false);
+    // Setup for advanced fuzzy matching (using defaults)
+    let fuzzy_threshold = 0.7;
+    let max_suggestions = 3;
+    let auto_apply_fuzzy = false;
 
     if is_edit_operation {
         // This is a search/replace edit operation
@@ -1646,8 +1686,8 @@ pub async fn handle_tool_call(
             ));
         }
 
-        // Generate diff if requested
-        let diff_info = if file_write_or_edit.show_diff.unwrap_or(false) {
+        // Generate diff (disabled by default)
+        let diff_info = if false {
             match detect_file_changes(&original_content, &new_content) {
                 Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
                 None => "".to_string(),
@@ -1738,9 +1778,12 @@ pub async fn handle_tool_call(
             }
         });
 
+        // Perform syntax check after edit (matches wcgw Python behavior)
+        let syntax_warning = perform_syntax_check(file_path_obj, &new_content);
+
         Ok(format!(
-            "Successfully edited file {}{}",
-            file_path, diff_info
+            "Successfully edited file {}{}{}",
+            file_path, diff_info, syntax_warning
         ))
     } else {
         // This is a full file write operation
@@ -1763,16 +1806,22 @@ pub async fn handle_tool_call(
             ));
         }
 
-        // Generate diff if requested and file exists
-        let diff_info =
-            if file_write_or_edit.show_diff.unwrap_or(false) && original_content.is_some() {
-                match detect_file_changes(original_content.as_ref().unwrap(), content) {
+        // Generate diff (disabled by default - enable by changing the cfg condition)
+        #[allow(clippy::overly_complex_bool_expr)]
+        let diff_info = if let Some(ref orig) = original_content {
+            // Diff generation is currently disabled for performance
+            // To enable, change the condition below to true
+            if false {
+                match detect_file_changes(orig, content) {
                     Some(diff) => format!("\n\nChanges made:\n```diff\n{}\n```", diff),
-                    None => "".to_string(),
+                    None => String::new(),
                 }
             } else {
-                "".to_string()
-            };
+                String::new()
+            }
+        } else {
+            String::new()
+        };
 
         // Write the content to the file
         if let Err(e) = write_to_file(file_path_obj, content) {
@@ -1833,11 +1882,59 @@ pub async fn handle_tool_call(
             }
         });
 
+        // Perform syntax check after write (matches wcgw Python behavior)
+        let syntax_warning = perform_syntax_check(file_path_obj, content);
+
         Ok(format!(
-            "Successfully wrote file {}{}",
-            file_path, diff_info
+            "Successfully wrote file {}{}{}",
+            file_path, diff_info, syntax_warning
         ))
     }
+}
+
+/// Perform syntax check on file content and return warning string if errors found
+///
+/// This matches wcgw Python's post-edit syntax validation behavior
+fn perform_syntax_check(file_path: &Path, content: &str) -> String {
+    // Get file extension
+    let extension = file_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
+
+    // Skip if no extension or empty content
+    if extension.is_empty() || content.is_empty() {
+        return String::new();
+    }
+
+    // Perform syntax check
+    let result = check_syntax(extension, content);
+
+    // If not checked or no errors, return empty
+    if !result.was_checked || !result.has_errors() {
+        return String::new();
+    }
+
+    // Get filename for display
+    let filename = file_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown");
+
+    // Format the warning (matches wcgw Python output format)
+    let context = format_syntax_error_context(&result.errors, content, filename);
+
+    // Special handling for TypeScript files (tagged template literals false positives)
+    let ts_note = if matches!(extension.to_lowercase().as_str(), "tsx" | "ts") {
+        "\nNote: Ignore if 'tagged template literals' are used, they may raise false positive errors."
+    } else {
+        ""
+    };
+
+    format!(
+        "\n\nWarning: Syntax errors detected, please re-read the file and fix if there are any errors.\nSyntax errors:\n{}\n{}{}",
+        result.description, context, ts_note
+    )
 }
 
 // Helper trait to add lstrip_matches

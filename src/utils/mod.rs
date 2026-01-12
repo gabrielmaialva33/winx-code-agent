@@ -3,6 +3,7 @@
 //! This module contains various utility functions and types used throughout
 //! the application, such as file and path handling, repository analysis, etc.
 
+pub mod alignment;
 pub mod command_safety;
 pub mod error_predictor;
 pub mod file_cache;
@@ -17,6 +18,8 @@ pub mod pattern_analyzer;
 pub mod repo;
 pub mod repo_context;
 pub mod resource_allocator;
+pub mod syntax_checker;
+pub mod tolerance;
 
 use crate::types::Initialize;
 use serde_json::Value;

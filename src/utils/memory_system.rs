@@ -156,7 +156,7 @@ impl MemorySystem {
             let state_data = serde_json::json!({
                 "cwd": bash_state.cwd.to_string_lossy().to_string(),
                 "workspace_root": bash_state.workspace_root.to_string_lossy().to_string(),
-                "current_chat_id": bash_state.current_chat_id,
+                "current_thread_id": bash_state.current_thread_id,
                 "mode": format!("{:?}", bash_state.mode),
                 "initialized": bash_state.initialized,
             });

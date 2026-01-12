@@ -840,7 +840,7 @@ impl SharedErrorPredictor {
             WinxError::ArgumentParseError(_) => "argument_parse",
             WinxError::FileAccessError { .. } => "file_access",
             WinxError::CommandNotAllowed(_) => "command_not_allowed",
-            WinxError::ChatIdMismatch(_) => "chat_id_mismatch",
+            WinxError::ThreadIdMismatch(_) => "thread_id_mismatch",
             WinxError::DeserializationError(_) => "deserialization",
             WinxError::SerializationError(_) => "serialization",
             WinxError::SearchReplaceSyntaxError(_) => "search_replace_syntax",

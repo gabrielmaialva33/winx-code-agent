@@ -37,8 +37,8 @@ pub enum WinxError {
     CommandNotAllowed(String),
 
     /// Error when chat IDs don't match
-    #[error("Chat ID mismatch: {0}")]
-    ChatIdMismatch(String),
+    #[error("Thread ID mismatch: {0}")]
+    ThreadIdMismatch(String),
 
     /// Error when deserializing data
     #[error("Deserialization error: {0}")]
@@ -424,7 +424,7 @@ impl Clone for WinxError {
             Self::BashStateNotInitialized => Self::BashStateNotInitialized,
             Self::CommandExecutionError(msg) => Self::CommandExecutionError(msg.clone()),
             Self::CommandNotAllowed(msg) => Self::CommandNotAllowed(msg.clone()),
-            Self::ChatIdMismatch(msg) => Self::ChatIdMismatch(msg.clone()),
+            Self::ThreadIdMismatch(msg) => Self::ThreadIdMismatch(msg.clone()),
             Self::ArgumentParseError(msg) => Self::ArgumentParseError(msg.clone()),
             Self::FileAccessError { path, message } => Self::FileAccessError {
                 path: path.clone(),

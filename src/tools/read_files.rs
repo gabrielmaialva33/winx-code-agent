@@ -24,6 +24,10 @@ use crate::utils::resource_allocator::{
     get_global_allocator, request_file_allocation, AllocationGuard,
 };
 
+/// Default token limits for file reading (matches wcgw Python behavior)
+const DEFAULT_CODING_MAX_TOKENS: usize = 24000;
+const DEFAULT_NONCODING_MAX_TOKENS: usize = 8000;
+
 /// Type alias for file reading result
 ///
 /// Contains:
@@ -547,32 +551,8 @@ pub async fn handle_tool_call(
     let mut file_params = Vec::with_capacity(validated_read_files.file_paths.len());
     let show_line_numbers = validated_read_files.show_line_numbers();
 
-    // Use intelligent token allocation based on file types
+    // Token economy - select appropriate limits based on file type (matches wcgw Python behavior)
     let file_extension_analyzer = FileExtensionAnalyzer::new();
-    let max_tokens_per_file = validated_read_files.max_tokens;
-
-    // If we have a token limit, allocate intelligently across files
-    let token_allocations = if let Some(total_tokens) = max_tokens_per_file {
-        let file_names: Vec<String> = validated_read_files
-            .file_paths
-            .iter()
-            .map(|path| {
-                // Extract just the filename for analysis
-                Path::new(path)
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or(path)
-                    .to_string()
-            })
-            .collect();
-
-        file_extension_analyzer
-            .allocate_token_budget(&file_names, total_tokens)
-            .into_iter()
-            .collect::<HashMap<String, usize>>()
-    } else {
-        HashMap::new()
-    };
 
     // Prepare file parameters
     for (i, file_path) in validated_read_files.file_paths.iter().enumerate() {
@@ -630,17 +610,13 @@ pub async fn handle_tool_call(
             }
         }
 
-        // Get allocated tokens for this file
-        let file_name = Path::new(&clean_path)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or(&clean_path)
-            .to_string();
-
-        let allocated_tokens = token_allocations
-            .get(&file_name)
-            .copied()
-            .or(max_tokens_per_file); // Fallback to global limit if no allocation
+        // Get allocated tokens for this file based on file type (token economy)
+        // Source code files get higher token limits than non-source files
+        let allocated_tokens = file_extension_analyzer.select_max_tokens(
+            &clean_path,
+            Some(DEFAULT_CODING_MAX_TOKENS),
+            Some(DEFAULT_NONCODING_MAX_TOKENS),
+        );
 
         // Store file params for parallel processing
         file_params.push((
@@ -723,7 +699,6 @@ pub async fn handle_tool_call(
     // Process results
     let mut message = String::new();
     let mut file_ranges_dict: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
-    let mut remaining_tokens = max_tokens_per_file;
     let mut should_stop = false;
     let mut had_errors = false;
 
@@ -735,15 +710,7 @@ pub async fn handle_tool_call(
         let file_path = &file_info.original_path;
 
         match file_info.result {
-            Ok((content, file_truncated, tokens_used, canon_path, line_range)) => {
-                // Update tokens used (if limiting)
-                if let Some(max_tokens) = remaining_tokens {
-                    if tokens_used >= max_tokens {
-                        remaining_tokens = Some(0);
-                    } else {
-                        remaining_tokens = Some(max_tokens - tokens_used);
-                    }
-                }
+            Ok((content, file_truncated, _tokens_used, canon_path, line_range)) => {
 
                 // Add to file ranges dictionary
                 if let Some(ranges) = file_ranges_dict.get_mut(&canon_path) {
@@ -769,8 +736,8 @@ pub async fn handle_tool_call(
                     file_path, range_formatted, content
                 ));
 
-                // Check if we need to stop due to truncation or token limit
-                if file_truncated || remaining_tokens == Some(0) {
+                // Check if we need to stop due to truncation (file exceeded its token limit)
+                if file_truncated {
                     should_stop = true;
 
                     // Mention files we're not reading if any remain

@@ -1,7 +1,8 @@
 use anyhow::{anyhow, Context as AnyhowContext, Result};
 use glob;
+use lazy_static::lazy_static;
 use rand::Rng;
-use regex;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -13,6 +14,10 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, info, warn};
 
+use crate::state::persistence::{
+    delete_bash_state as delete_state_file, load_bash_state as load_state_file,
+    save_bash_state as save_state_file, BashStateSnapshot,
+};
 use crate::state::terminal::MAX_OUTPUT_SIZE as TERMINAL_MAX_OUTPUT_SIZE;
 use crate::state::terminal::{
     incremental_text, render_terminal_output, TerminalEmulator, TerminalOutputDiff,
@@ -369,10 +374,36 @@ impl TerminalState {
     }
 }
 
-/// Default bash prompt to use
-const DEFAULT_BASH_PROMPT: &str = "winx$ ";
-/// Bash prompt statement to set up the environment
-const BASH_PROMPT_STATEMENT: &str = "export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND= PS1='winx$ '";
+/// Dynamic bash prompt regex pattern - matches WCGW Python PROMPT_CONST exactly
+/// Format: ◉ /path/to/dir──➤
+const WCGW_PROMPT_PATTERN: &str = r"◉ ([^\n]*)──➤";
+
+/// PROMPT_COMMAND that displays dynamic prompt with cwd - matches WCGW Python exactly
+/// Uses printf with special formatting to show current directory
+const WCGW_PROMPT_COMMAND: &str = r#"printf '◉ '"$(pwd)"'──➤ \r\e[2K'"#;
+
+/// Bash prompt statement to set up the dynamic prompt - matches WCGW Python PROMPT_STATEMENT setup
+const BASH_PROMPT_STATEMENT: &str = r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ $(pwd)──➤ \r\e[2K"'"#;
+
+/// Fallback static prompt for detection (used when dynamic prompt fails)
+const FALLBACK_PROMPT: &str = "winx$ ";
+
+lazy_static! {
+    /// Compiled regex for WCGW-style dynamic prompt detection
+    /// Matches: ◉ /path/to/dir──➤
+    static ref PROMPT_REGEX: Regex = Regex::new(WCGW_PROMPT_PATTERN).expect("Invalid prompt regex");
+}
+
+/// Check if text contains the WCGW-style prompt - matches WCGW Python prompt detection
+fn contains_wcgw_prompt(text: &str) -> bool {
+    PROMPT_REGEX.is_match(text)
+}
+
+/// Extract the current working directory from the prompt - matches WCGW Python prompt parsing
+fn extract_cwd_from_prompt(text: &str) -> Option<String> {
+    PROMPT_REGEX.captures(text).map(|caps| caps[1].to_string())
+}
+
 /// Maximum output size in bytes to prevent excessive memory usage
 const MAX_OUTPUT_SIZE: usize = 1_000_000;
 /// Maximum timeout for a command in seconds
@@ -407,7 +438,7 @@ pub enum CommandState {
 pub struct BashState {
     pub cwd: PathBuf,
     pub workspace_root: PathBuf,
-    pub current_chat_id: String,
+    pub current_thread_id: String,
     pub mode: Modes,
     pub bash_command_mode: BashCommandMode,
     pub file_edit_mode: FileEditMode,
@@ -454,20 +485,23 @@ pub struct InteractiveBash {
 }
 
 impl InteractiveBash {
-    /// Create a new interactive bash process
+    /// Create a new interactive bash process - matches WCGW Python pexpect.spawn behavior
     pub fn new(initial_dir: &Path, restricted_mode: bool) -> Result<Self> {
         let mut cmd = Command::new("bash");
         if restricted_mode {
             cmd.arg("-r");
         }
 
-        // Set up environment
+        // Set up environment - matches WCGW Python spawn_bash env setup
         let cmd_env = cmd
-            .env("PS1", DEFAULT_BASH_PROMPT)
             .env("PAGER", "cat")
             .env("GIT_PAGER", "cat")
-            .env("PROMPT_COMMAND", "")
+            // WCGW-style dynamic PROMPT_COMMAND that shows ◉ /path──➤
+            .env("PROMPT_COMMAND", WCGW_PROMPT_COMMAND)
             .env("TERM", "xterm-256color")
+            // Set COLUMNS/ROWS for proper terminal emulation - matches WCGW Python
+            .env("COLUMNS", "200")
+            .env("ROWS", "50")
             .current_dir(initial_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -476,15 +510,16 @@ impl InteractiveBash {
         // Spawn the process
         let mut process = cmd_env.spawn().context("Failed to spawn bash process")?;
 
-        // Set up the prompt
+        // Set up the dynamic prompt - matches WCGW Python PROMPT_STATEMENT
         let mut stdin = process
             .stdin
             .take()
             .ok_or_else(|| anyhow!("Failed to get stdin for bash process"))?;
 
-        // Write the prompt statement to ensure consistent behavior
+        // Write the prompt statement to ensure consistent behavior - matches WCGW Python
         writeln!(stdin, "{}", BASH_PROMPT_STATEMENT)
             .context("Failed to write prompt statement to bash process")?;
+        stdin.flush().context("Failed to flush prompt statement")?;
 
         // Return the stdin to the process
         process.stdin = Some(stdin);
@@ -608,12 +643,15 @@ impl InteractiveBash {
                         self.output_chunks.push(chunk.clone());
                         new_data = true;
 
-                        // Check if we've received the prompt, indicating command completion
-                        if chunk.ends_with(DEFAULT_BASH_PROMPT)
-                            || full_output.ends_with(DEFAULT_BASH_PROMPT)
+                        // Check if we've received the WCGW-style prompt, indicating command completion
+                        // Uses regex to match ◉ /path──➤ format - matches WCGW Python PROMPT_CONST
+                        if contains_wcgw_prompt(&chunk)
+                            || contains_wcgw_prompt(&full_output)
+                            || chunk.ends_with(FALLBACK_PROMPT)
+                            || full_output.ends_with(FALLBACK_PROMPT)
                         {
                             complete = true;
-                            debug!("Command completed, prompt found in stdout");
+                            debug!("Command completed, WCGW prompt found in stdout");
                             break;
                         }
 
@@ -679,10 +717,11 @@ impl InteractiveBash {
                 std::thread::sleep(Duration::from_millis(10));
             }
 
-            // Check for prompt in entire output if we didn't find it in the last chunk
-            if !complete && full_output.contains(DEFAULT_BASH_PROMPT) {
+            // Check for WCGW prompt in entire output if we didn't find it in the last chunk
+            // Uses regex for dynamic ◉ /path──➤ format - matches WCGW Python
+            if !complete && (contains_wcgw_prompt(&full_output) || full_output.contains(FALLBACK_PROMPT)) {
                 complete = true;
-                debug!("Command completed, prompt found in accumulated output");
+                debug!("Command completed, WCGW prompt found in accumulated output");
                 break;
             }
 
@@ -940,7 +979,7 @@ impl BashState {
         Self {
             cwd: cwd.clone(),
             workspace_root: cwd,
-            current_chat_id: generate_chat_id(),
+            current_thread_id: generate_thread_id(),
             mode: Modes::Wcgw,
             bash_command_mode,
             file_edit_mode,
@@ -1028,13 +1067,20 @@ impl BashState {
             bash.send_command("pwd")?;
             let (output, _) = bash.read_output(0.5)?;
 
-            // Extract pwd result from output
+            // Extract pwd result from output - filter out prompt lines
+            // First, try to extract cwd from WCGW-style prompt if present
+            if let Some(cwd_from_prompt) = extract_cwd_from_prompt(&output) {
+                return Ok(cwd_from_prompt);
+            }
+
+            // Fall back to parsing output lines
             let lines: Vec<&str> = output.lines().collect();
             for line in lines {
                 let trimmed = line.trim();
                 if !trimmed.is_empty()
                     && !trimmed.starts_with("pwd")
-                    && !trimmed.contains(DEFAULT_BASH_PROMPT)
+                    && !contains_wcgw_prompt(trimmed)
+                    && !trimmed.contains(FALLBACK_PROMPT)
                 {
                     return Ok(trimmed.to_string());
                 }
@@ -1297,7 +1343,7 @@ impl BashState {
                 }
 
                 // Log progress
-                if elapsed > 5.0 && (elapsed as usize) % 5 == 0 {
+                if elapsed > 5.0 && (elapsed as usize).is_multiple_of(5) {
                     debug!(
                         "Still waiting for command completion - elapsed: {:.2?}s",
                         elapsed
@@ -1700,6 +1746,134 @@ impl BashState {
             ),
         }
     }
+
+    // ==================== State Persistence Methods ====================
+
+    /// Save the current bash state to disk
+    ///
+    /// State is saved to `~/.local/share/wcgw/bash_state/{thread_id}_bash_state.json`
+    /// Compatible with WCGW Python implementation.
+    pub fn save_state_to_disk(&self) -> Result<()> {
+        let snapshot = BashStateSnapshot::from_state(
+            &self.cwd.to_string_lossy(),
+            &self.workspace_root.to_string_lossy(),
+            &self.mode,
+            &self.bash_command_mode,
+            &self.file_edit_mode,
+            &self.write_if_empty_mode,
+            &self.whitelist_for_overwrite,
+            &self.current_thread_id,
+        );
+
+        save_state_file(&self.current_thread_id, &snapshot)?;
+        debug!(
+            "Saved bash state to disk for thread_id '{}'",
+            self.current_thread_id
+        );
+        Ok(())
+    }
+
+    /// Load bash state from disk for the given thread_id
+    ///
+    /// If state exists, it will be loaded into this BashState instance.
+    /// Returns true if state was successfully loaded, false if no state exists.
+    pub fn load_state_from_disk(&mut self, thread_id: &str) -> Result<bool> {
+        match load_state_file(thread_id)? {
+            Some(snapshot) => {
+                let (
+                    cwd,
+                    workspace_root,
+                    mode,
+                    bash_command_mode,
+                    file_edit_mode,
+                    write_if_empty_mode,
+                    whitelist,
+                    loaded_thread_id,
+                ) = snapshot.to_state_components();
+
+                // Update state fields
+                self.cwd = PathBuf::from(&cwd);
+                self.workspace_root = PathBuf::from(&workspace_root);
+                self.mode = mode;
+                self.bash_command_mode = bash_command_mode;
+                self.file_edit_mode = file_edit_mode;
+                self.write_if_empty_mode = write_if_empty_mode;
+                self.whitelist_for_overwrite = whitelist;
+                self.current_thread_id = loaded_thread_id;
+                self.initialized = true;
+
+                // Re-initialize bash with new settings if needed
+                let restricted_mode = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
+                if let Ok(mut bash_guard) = self.interactive_bash.lock() {
+                    if let Some(bash) = bash_guard.as_mut() {
+                        // Ensure the bash process is in the right directory
+                        if let Err(e) = bash.ensure_alive(&self.cwd, restricted_mode) {
+                            warn!("Failed to ensure bash alive after loading state: {}", e);
+                        }
+                        // Change to loaded cwd
+                        if let Err(e) = bash.send_command(&format!("cd \"{}\"", cwd)) {
+                            warn!("Failed to change directory after loading state: {}", e);
+                        }
+                        let _ = bash.read_output(0.5);
+                    }
+                }
+
+                info!(
+                    "Loaded bash state from disk for thread_id '{}' (cwd: {})",
+                    thread_id, cwd
+                );
+                Ok(true)
+            }
+            None => {
+                debug!("No saved state found for thread_id '{}'", thread_id);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Delete the saved state for this thread_id from disk
+    pub fn delete_state_from_disk(&self) -> Result<()> {
+        delete_state_file(&self.current_thread_id)?;
+        info!(
+            "Deleted bash state from disk for thread_id '{}'",
+            self.current_thread_id
+        );
+        Ok(())
+    }
+
+    /// Check if a saved state exists for the given thread_id
+    pub fn has_saved_state(thread_id: &str) -> Result<bool> {
+        Ok(load_state_file(thread_id)?.is_some())
+    }
+
+    /// Create a new BashState and load state from disk if available
+    ///
+    /// If thread_id is provided and state exists on disk, it will be loaded.
+    /// Otherwise, a new state will be created.
+    pub fn new_with_thread_id(thread_id: Option<&str>) -> Self {
+        let mut state = Self::new();
+
+        if let Some(tid) = thread_id {
+            if !tid.is_empty() {
+                match state.load_state_from_disk(tid) {
+                    Ok(true) => {
+                        info!("Created BashState with loaded state for thread_id '{}'", tid);
+                    }
+                    Ok(false) => {
+                        // No saved state, just use the provided thread_id
+                        state.current_thread_id = tid.to_string();
+                        debug!("Created new BashState with thread_id '{}' (no saved state)", tid);
+                    }
+                    Err(e) => {
+                        warn!("Failed to load state for thread_id '{}': {}", tid, e);
+                        state.current_thread_id = tid.to_string();
+                    }
+                }
+            }
+        }
+
+        state
+    }
 }
 
 /// Generates a SHA256 hash of the provided data
@@ -1711,7 +1885,7 @@ fn sha256_hash(data: &[u8]) -> String {
 }
 
 /// Generates a random 4-digit chat ID with 'i' prefix
-pub fn generate_chat_id() -> String {
+pub fn generate_thread_id() -> String {
     let mut rng = rand::rng();
     format!("i{}", rng.random_range(1000..10000))
 }

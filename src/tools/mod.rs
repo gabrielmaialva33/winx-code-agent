@@ -6,14 +6,11 @@
 //! The `WinxService` struct is the main entry point for all tool calls.
 
 pub mod bash_command;
-pub mod code_analyzer;
-pub mod command_suggestions;
 pub mod context_save;
 pub mod file_write_or_edit;
-pub mod multi_file_editor;
+pub mod initialize;
 pub mod read_files;
 pub mod read_image;
-pub mod winx_chat;
 
 use std::sync::{Arc, Mutex};
 use tracing::info;
@@ -94,5 +91,5 @@ impl WinxService {
 }
 
 // NOTE: Individual tool implementations are temporarily commented out
-// while we migrate to the new rmcp 0.5.0 pattern in server.rs
+// while we migrate to the new rmcp 0.12.0 pattern in server.rs
 // The tools will be re-implemented using the #[tool] macro pattern

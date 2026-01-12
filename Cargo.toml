@@ -1,62 +1,109 @@
 [package]
 name = "winx-code-agent"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
-description = "Shell and coding agent for Claude Desktop"
+rust-version = "1.75"
+description = "High-performance Rust implementation of WCGW for LLM code agents"
 authors = ["Gabriel Maia <gabrielmaialva33@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/gabrielmaialva33/winx-code-agent"
+keywords = ["mcp", "llm", "code-agent", "shell", "wcgw"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
-# Original MCP SDK - rmcp 0.5.0
-rmcp = { version = "0.5.0", features = ["transport-io", "server"] }
-schemars = "1.0.4"
+# MCP SDK - Official Rust SDK for Model Context Protocol
+rmcp = { version = "0.12", features = ["transport-io", "server"] }
 
-# Async runtime
-tokio = { version = "1.44", features = ["full"] }
+# Schema generation for MCP tools
+schemars = "1.2"
+
+# Async runtime - Tokio is the standard
+tokio = { version = "1.49", features = ["full"] }
 async-trait = "0.1"
 
-# Serialization
+# Serialization - Serde ecosystem
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
-# Error handling
-anyhow = "1.0"
+# Error handling - thiserror for library, anyhow for binary
 thiserror = "2.0"
+anyhow = "1.0"
 
-# Logging and tracing
+# Logging and observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # File and system operations
 home = "0.5"
+directories = "5.0"
 sha2 = "0.10"
 base64 = "0.22"
 glob = "0.3"
 regex = "1.11"
 mime_guess = "2.0"
 memmap2 = "0.9"
-tempfile = "3.20"
+tempfile = "3.14"
 chrono = { version = "0.4", features = ["serde"] }
 
 # Performance and concurrency
 rayon = "1.10"
-bytes = "1.10"
+bytes = "1.9"
 lazy_static = "1.5"
 libc = "0.2"
 
-# Terminal and text processing
+# Terminal emulation and text processing
 vte = "0.15"
 
 # Random number generation
 rand = "0.9"
 
-# NLP processing
-tokenizers = "0.21.4"
-
-# HTTP client for NVIDIA API integration
-reqwest = { version = "0.12", features = ["json", "stream"] }
-uuid = { version = "1.0", features = ["v4"] }
+# CLI (optional, for standalone mode)
+clap = { version = "4.5", features = ["derive"], optional = true }
 
 [dev-dependencies]
-tempfile = "3.8.1"
+tempfile = "3.14"
 tokio-test = "0.4"
-criterion = { version = "0.7.0", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+rstest = "0.23"
+assert_cmd = "2.0"
+predicates = "3.1"
+
+[features]
+default = []
+cli = ["clap"]
+
+# Clippy lints for quality
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+# Allow some pedantic lints that are too strict
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+
+[lints.rust]
+# Note: unsafe_code is allowed in specific modules (mmap.rs, bash_state.rs) for I/O operations
+# unsafe_code = "deny"  # Re-enable when refactoring complete
+missing_docs = "warn"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.test]
+opt-level = 0
+debug = true

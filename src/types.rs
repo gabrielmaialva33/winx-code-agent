@@ -207,13 +207,13 @@ pub struct Initialize {
     #[serde(default = "default_mode_name")]
     pub mode_name: ModeName,
 
-    /// ID of the chat session
+    /// ID of the thread session
     ///
     /// If not provided for a first_call, a new ID will be generated.
     /// This ID must be included in all subsequent tool calls.
     #[serde(default)]
     #[serde(deserialize_with = "deserialize_string_or_null")]
-    pub chat_id: String,
+    pub thread_id: String,
 
     /// Configuration for code_writer mode
     ///
@@ -327,65 +327,42 @@ pub enum SpecialKey {
 
 /// Parameters for the ReadFiles tool
 ///
-/// This struct represents the parameters needed to read one or more files,
-/// optionally with line numbers and line range filtering.
+/// This struct represents the parameters needed to read one or more files.
+/// Line ranges can be specified in the path itself (e.g., "file.rs:10-20").
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct ReadFiles {
-    /// List of file paths to read
-    ///
-    /// These can be absolute paths or paths relative to the current working directory.
-    /// They can also include line range specifications for filtering.
+    /// List of file paths to read.
+    /// Supports line range syntax: "file.rs:10-20" for lines 10-20,
+    /// "file.rs:10-" for line 10 onwards, "file.rs:-20" for first 20 lines.
     pub file_paths: Vec<String>,
 
-    /// Optional reason to show line numbers
-    ///
-    /// If provided and non-empty, line numbers will be shown in the output.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub show_line_numbers_reason: Option<String>,
-
-    /// Optional maximum number of tokens to include
-    ///
-    /// If provided, the output will be truncated to fit within this limit.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<usize>,
-
-    /// Optional start line numbers for each file
-    ///
-    /// Vector of optional start line numbers corresponding to each file path.
-    /// If provided, only lines from this number (1-indexed) will be included.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    // Internal fields - not part of MCP schema (parsed from file_paths)
+    #[serde(skip)]
+    #[schemars(skip)]
     pub start_line_nums: Vec<Option<usize>>,
 
-    /// Optional end line numbers for each file
-    ///
-    /// Vector of optional end line numbers corresponding to each file path.
-    /// If provided, only lines up to and including this number will be included.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip)]
+    #[schemars(skip)]
     pub end_line_nums: Vec<Option<usize>>,
 }
 
-// Custom deserializer for ReadFiles to ensure file_paths is provided and handle null values
+// Custom deserializer for ReadFiles - parses line ranges from file paths like wcgw Python
 impl<'de> Deserialize<'de> for ReadFiles {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        // We use Value to handle various forms of input including null/undefined values
+        #[derive(Deserialize)]
+        struct ReadFilesHelper {
+            file_paths: Option<Vec<String>>,
+        }
+
         let input = serde_json::Value::deserialize(deserializer)?;
 
-        // Detailed logging to help debug deserialization issues
-        tracing::debug!("Deserializing ReadFiles from: {}", input);
-
-        // Check if we have a valid object
         if !input.is_object() {
-            // Special error for null/undefined
             if input.is_null() {
                 return Err(serde::de::Error::custom(
-                    "Cannot convert null to ReadFiles object. Please provide a valid object with file_paths field."
+                    "Cannot convert null to ReadFiles object.",
                 ));
             }
             return Err(serde::de::Error::custom(format!(
@@ -394,194 +371,133 @@ impl<'de> Deserialize<'de> for ReadFiles {
             )));
         }
 
-        // This struct mirrors ReadFiles but allows using serde defaults
-        #[derive(Deserialize)]
-        struct ReadFilesHelper {
-            file_paths: Option<Vec<String>>,
+        let helper: ReadFilesHelper = serde_json::from_value(input.clone())
+            .map_err(|e| serde::de::Error::custom(format!("Failed to parse ReadFiles: {}", e)))?;
 
-            #[serde(default)]
-            show_line_numbers_reason: Option<String>,
-
-            #[serde(default)]
-            max_tokens: Option<usize>,
-
-            #[serde(default)]
-            start_line_nums: Vec<Option<usize>>,
-
-            #[serde(default)]
-            end_line_nums: Vec<Option<usize>>,
-        }
-
-        // Try to convert our validated input to the helper struct
-        let helper: ReadFilesHelper = match serde_json::from_value(input.clone()) {
-            Ok(h) => h,
-            Err(e) => {
-                // Provide detailed error message for common issues
-                if e.to_string().contains("null") || e.to_string().contains("undefined") {
-                    return Err(serde::de::Error::custom(
-                        "Cannot convert null or undefined value in ReadFiles. Please check the file_paths field."
-                    ));
-                }
-                return Err(serde::de::Error::custom(format!(
-                    "Failed to parse ReadFiles parameters: {} - Input was: {}",
-                    e, input
-                )));
+        let file_paths = match helper.file_paths {
+            Some(paths) if !paths.is_empty() => paths,
+            Some(_) => {
+                return Err(serde::de::Error::custom("file_paths must not be empty."))
+            }
+            None => {
+                return Err(serde::de::Error::custom("file_paths is required."))
             }
         };
 
-        // Validate that file_paths is provided and non-empty
-        let file_paths =
-            match helper.file_paths {
-                Some(paths) if !paths.is_empty() => {
-                    // Check for null/empty values in the paths array
-                    let has_empty = paths.iter().any(|p| p.trim().is_empty());
-                    if has_empty {
-                        return Err(serde::de::Error::custom(
-                            "file_paths array contains empty strings. Each path must be non-empty.",
-                        ));
-                    }
-                    paths
-                }
-                Some(_) => return Err(serde::de::Error::custom(
-                    "file_paths must not be empty. Please provide at least one file path to read.",
-                )),
-                None => {
-                    return Err(serde::de::Error::custom(
-                        "file_paths is required. Please provide a list of file paths to read.",
-                    ))
-                }
-            };
+        // Parse line ranges from file paths (like wcgw Python's model_post_init)
+        let mut start_line_nums = Vec::with_capacity(file_paths.len());
+        let mut end_line_nums = Vec::with_capacity(file_paths.len());
 
-        // Return the properly constructed ReadFiles
+        for path in &file_paths {
+            let (start, end) = parse_line_range_from_path(path);
+            start_line_nums.push(start);
+            end_line_nums.push(end);
+        }
+
         Ok(ReadFiles {
             file_paths,
-            show_line_numbers_reason: helper.show_line_numbers_reason,
-            max_tokens: helper.max_tokens,
-            start_line_nums: helper.start_line_nums,
-            end_line_nums: helper.end_line_nums,
+            start_line_nums,
+            end_line_nums,
         })
     }
 }
 
-impl ReadFiles {
-    /// Checks if line numbers should be shown
-    ///
-    /// Line numbers are shown if show_line_numbers_reason is Some and non-empty
-    pub fn show_line_numbers(&self) -> bool {
-        self.show_line_numbers_reason
-            .as_ref()
-            .map(|reason| !reason.is_empty())
-            .unwrap_or(false)
-    }
+/// Parse line range from a file path (e.g., "file.rs:10-20")
+fn parse_line_range_from_path(path: &str) -> (Option<usize>, Option<usize>) {
+    // Find the last colon that's followed by digits or a dash
+    if let Some(colon_pos) = path.rfind(':') {
+        let range_part = &path[colon_pos + 1..];
 
-    /// Parses file paths for line ranges
-    ///
-    /// This method extracts line range specifications from file paths and updates
-    /// the start_line_nums and end_line_nums vectors accordingly.
-    ///
-    /// File paths can include line range specifications like:
-    /// - file.py:10      (specific line)
-    /// - file.py:10-20   (line range)
-    /// - file.py:10-     (from line 10 to end)
-    /// - file.py:-20     (from start to line 20)
-    #[allow(dead_code)]
-    pub fn parse_line_ranges(&mut self) {
-        // Initialize vectors if they're empty
-        if self.start_line_nums.is_empty() {
-            self.start_line_nums = vec![None; self.file_paths.len()];
-        }
-        if self.end_line_nums.is_empty() {
-            self.end_line_nums = vec![None; self.file_paths.len()];
-        }
+        // Check if it looks like a line range (not a Windows drive letter)
+        if range_part.chars().next().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false) {
+            if let Some(dash_pos) = range_part.find('-') {
+                // Format: start-end or start- or -end
+                let start_str = &range_part[..dash_pos];
+                let end_str = &range_part[dash_pos + 1..];
 
-        // Create new file_paths list without line ranges
-        let mut clean_file_paths = Vec::new();
+                let start = if start_str.is_empty() {
+                    None
+                } else {
+                    start_str.parse().ok()
+                };
 
-        for (i, file_path) in self.file_paths.iter().enumerate() {
-            let mut start_line_num = None;
-            let mut end_line_num = None;
-            let mut path_part = file_path.clone();
+                let end = if end_str.is_empty() {
+                    None
+                } else {
+                    end_str.parse().ok()
+                };
 
-            // Check if the path ends with a line range pattern
-            if file_path.contains(':') {
-                let parts: Vec<&str> = file_path.rsplitn(2, ':').collect();
-                if parts.len() == 2 {
-                    let potential_path = parts[1];
-                    let line_spec = parts[0];
-
-                    // Check if it's a valid line range format
-                    if let Ok(line_num) = line_spec.parse::<usize>() {
-                        // Format: file.py:10
-                        start_line_num = Some(line_num);
-                        end_line_num = Some(line_num);
-                        path_part = potential_path.to_string();
-                    } else if line_spec.contains('-') {
-                        // Could be file.py:10-20, file.py:10-, or file.py:-20
-                        let line_parts: Vec<&str> = line_spec.split('-').collect();
-
-                        if line_parts[0].is_empty() && !line_parts[1].is_empty() {
-                            // Format: file.py:-20
-                            if let Ok(end) = line_parts[1].parse::<usize>() {
-                                end_line_num = Some(end);
-                                path_part = potential_path.to_string();
-                            }
-                        } else if !line_parts[0].is_empty() {
-                            // Format: file.py:10-20 or file.py:10-
-                            if let Ok(start) = line_parts[0].parse::<usize>() {
-                                start_line_num = Some(start);
-
-                                if !line_parts[1].is_empty() {
-                                    // file.py:10-20
-                                    if let Ok(end) = line_parts[1].parse::<usize>() {
-                                        end_line_num = Some(end);
-                                    }
-                                }
-                                path_part = potential_path.to_string();
-                            }
-                        }
-                    }
+                return (start, end);
+            } else {
+                // Single line number
+                if let Ok(line) = range_part.parse::<usize>() {
+                    return (Some(line), Some(line));
                 }
             }
-
-            // Update start and end line numbers
-            if i < self.start_line_nums.len() {
-                self.start_line_nums[i] = start_line_num;
-            } else {
-                self.start_line_nums.push(start_line_num);
-            }
-
-            if i < self.end_line_nums.len() {
-                self.end_line_nums[i] = end_line_num;
-            } else {
-                self.end_line_nums.push(end_line_num);
-            }
-
-            clean_file_paths.push(path_part);
         }
-
-        // Update file_paths with clean paths
-        self.file_paths = clean_file_paths;
     }
+    (None, None)
+}
+
+impl ReadFiles {
+    /// Line numbers are always shown (like wcgw Python)
+    pub fn show_line_numbers(&self) -> bool {
+        true
+    }
+
+    /// Get the clean file path without line range suffix
+    pub fn get_clean_path(&self, index: usize) -> String {
+        let path = &self.file_paths[index];
+        if let Some(colon_pos) = path.rfind(':') {
+            let range_part = &path[colon_pos + 1..];
+            if range_part.chars().next().map(|c| c.is_ascii_digit() || c == '-').unwrap_or(false) {
+                return path[..colon_pos].to_string();
+            }
+        }
+        path.clone()
+    }
+}
+
+/// Default true value for status_check
+fn default_true() -> bool {
+    true
 }
 
 /// Types of actions that can be performed with the BashCommand tool
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(untagged)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum BashCommandAction {
     /// Execute a shell command
-    Command { command: String },
+    Command {
+        command: String,
+        #[serde(default)]
+        is_background: bool,
+    },
 
     /// Check the status of a running command
-    StatusCheck { status_check: bool },
+    StatusCheck {
+        #[serde(default = "default_true")]
+        status_check: bool,
+        bg_command_id: Option<String>,
+    },
 
     /// Send text to a running command
-    SendText { send_text: String },
+    SendText {
+        send_text: String,
+        bg_command_id: Option<String>,
+    },
 
     /// Send special keys to a running command
-    SendSpecials { send_specials: Vec<SpecialKey> },
+    SendSpecials {
+        send_specials: Vec<SpecialKey>,
+        bg_command_id: Option<String>,
+    },
 
     /// Send ASCII characters to a running command
-    SendAscii { send_ascii: Vec<u8> },
+    SendAscii {
+        send_ascii: Vec<u8>,
+        bg_command_id: Option<String>,
+    },
 }
 
 /// Parameters for the BashCommand tool
@@ -595,9 +511,9 @@ pub struct BashCommand {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_for_seconds: Option<f32>,
 
-    /// The chat ID for this session
+    /// The thread ID for this session
     #[serde(default)]
-    pub chat_id: String,
+    pub thread_id: String,
 }
 
 // Custom deserialization for BashCommand to handle string-encoded action_json
@@ -614,7 +530,7 @@ impl<'de> Deserialize<'de> for BashCommand {
             wait_for_seconds: Option<f32>,
             #[serde(default)]
             #[serde(deserialize_with = "deserialize_string_or_null")]
-            chat_id: String,
+            thread_id: String,
         }
 
         // Deserialize to the helper struct first
@@ -704,7 +620,7 @@ serde::de::Error::custom(format!("Invalid action_json: {}. Please ensure your JS
         Ok(BashCommand {
             action_json: action,
             wait_for_seconds: helper.wait_for_seconds,
-            chat_id: helper.chat_id,
+            thread_id: helper.thread_id,
         })
     }
 }
@@ -763,26 +679,10 @@ pub struct FileWriteOrEdit {
     /// new content to replace with
     /// >>>>>>> REPLACE
     /// ```
-    pub file_content_or_search_replace_blocks: String,
+    pub text_or_search_replace_blocks: String,
 
-    /// The chat ID for this session
-    pub chat_id: String,
-
-    /// Fuzzy match threshold (0.0-1.0) - higher requires more similarity
-    #[serde(default)]
-    pub fuzzy_threshold: Option<f64>,
-
-    /// Maximum number of fuzzy match suggestions to provide
-    #[serde(default)]
-    pub max_suggestions: Option<usize>,
-
-    /// Whether to automatically apply fuzzy fixes when confidence is high
-    #[serde(default)]
-    pub auto_apply_fuzzy: Option<bool>,
-
-    /// Whether to show diff output for the changes
-    #[serde(default)]
-    pub show_diff: Option<bool>,
+    /// The thread ID for this session
+    pub thread_id: String,
 }
 
 /// Parameters for the ContextSave tool
@@ -827,112 +727,3 @@ pub struct ReadImage {
     pub file_path: String,
 }
 
-/// Parameters for the CommandSuggestions tool
-///
-/// This struct represents the parameters needed to get command suggestions
-/// based on context and partial input.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CommandSuggestions {
-    /// Partial command to get suggestions for (can be empty)
-    ///
-    /// This is the partial command that the user has already typed. Suggestions
-    /// will be filtered to match this prefix. If empty, all relevant suggestions
-    /// will be returned based on context.
-    #[serde(default)]
-    pub partial_command: String,
-
-    /// Optional directory context
-    ///
-    /// If provided, suggestions will be tailored to commands commonly used
-    /// in this directory.
-    #[serde(default)]
-    pub current_dir: Option<String>,
-
-    /// Optional previous command
-    ///
-    /// If provided, suggestions will include commands that commonly follow
-    /// the specified command.
-    #[serde(default)]
-    pub last_command: Option<String>,
-
-    /// Maximum number of suggestions to return
-    ///
-    /// Limits the number of suggestions returned. Default is 5.
-    #[serde(default = "default_max_suggestions")]
-    pub max_suggestions: usize,
-
-    /// Whether to include command explanations
-    ///
-    /// If true, each suggestion will include a brief explanation.
-    #[serde(default)]
-    pub include_explanations: bool,
-}
-
-/// Default value for max_suggestions
-fn default_max_suggestions() -> usize {
-    5
-}
-
-/// Parameters for the CodeAnalyzer tool
-///
-/// This struct represents the parameters needed to analyze a code file
-/// for issues, suggestions, and complexity metrics.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct CodeAnalysis {
-    /// Path to the file to analyze
-    ///
-    /// This can be an absolute path or a path relative to the current working directory.
-    pub file_path: String,
-
-    /// Programming language to use for analysis (optional)
-    ///
-    /// If not provided, the language will be detected automatically from the file extension.
-    #[serde(default)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub language: Option<String>,
-
-    /// Depth of analysis to perform
-    ///
-    /// Valid values: "quick", "normal", "deep"
-    /// Default is "normal" if not specified.
-    #[serde(default = "default_analysis_depth")]
-    pub analysis_depth: String,
-
-    /// Whether to include complexity metrics in the analysis
-    ///
-    /// If true, complexity metrics like cyclomatic complexity will be calculated.
-    #[serde(default)]
-    pub include_complexity: bool,
-
-    /// Whether to include improvement suggestions
-    ///
-    /// If true, the analysis will include suggestions for improving the code.
-    #[serde(default = "default_true")]
-    pub include_suggestions: bool,
-
-    /// Whether to show code snippets for issues
-    ///
-    /// If true, the analysis will include code snippets for each issue.
-    #[serde(default)]
-    pub show_code_snippets: bool,
-
-    /// Whether to analyze imports and dependencies
-    ///
-    /// If true, the analysis will include information about imports and dependencies.
-    #[serde(default)]
-    pub analyze_dependencies: bool,
-
-    /// The chat ID for this session
-    #[serde(default)]
-    pub chat_id: String,
-}
-
-/// Default analysis depth
-fn default_analysis_depth() -> String {
-    "normal".to_string()
-}
-
-/// Default true value
-fn default_true() -> bool {
-    true
-}

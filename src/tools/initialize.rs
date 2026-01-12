@@ -2,20 +2,27 @@
 //!
 //! This module provides the implementation for the Initialize tool, which is used
 //! to set up the shell environment with the specified workspace path and configuration.
+//!
+//! This implementation aims for 1:1 parity with wcgw Python's initialize() function
+//! in wcgw/src/wcgw/client/tools.py
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, instrument, warn};
 
 use crate::errors::{Result, WinxError};
-use crate::state::bash_state::{generate_chat_id, BashState};
+use crate::state::bash_state::{generate_thread_id, BashState};
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Initialize,
     InitializeType, ModeName, Modes, WriteIfEmptyMode,
 };
+use crate::utils::alignment::{
+    check_ripgrep_available, load_task_context, read_global_alignment_file, read_initial_files,
+    read_workspace_alignment_file,
+};
 use crate::utils::mode_prompts::get_mode_prompt;
 use crate::utils::path::{ensure_directory_exists, expand_user};
-use crate::utils::repo::{get_git_info, get_repo_context};
+use crate::utils::repo::get_repo_context;
 use crate::utils::repo_context::RepoContextAnalyzer;
 
 /// Converts ModeName to the internal Modes enum
@@ -146,7 +153,7 @@ pub async fn handle_tool_call(
     );
 
     info!("  workspace_path: {}", initialize.any_workspace_path);
-    info!("  chat_id: {}", initialize.chat_id);
+    info!("  thread_id: {}", initialize.thread_id);
     info!("  code_writer_config: {:?}", initialize.code_writer_config);
     info!(
         "  initial_files_to_read: {:?}",
@@ -166,16 +173,41 @@ pub async fn handle_tool_call(
     let workspace_path = PathBuf::from(&workspace_path_str);
     debug!("Expanded workspace path to: {:?}", workspace_path);
 
-    // Create chat_id if not provided
-    let chat_id =
-        if initialize.chat_id.is_empty() && initialize.init_type == InitializeType::FirstCall {
-            let new_chat_id = generate_chat_id();
-            info!("Generated new chat_id: {}", new_chat_id);
-            new_chat_id
+    // Create thread_id if not provided
+    let thread_id =
+        if initialize.thread_id.is_empty() && initialize.init_type == InitializeType::FirstCall {
+            let new_thread_id = generate_thread_id();
+            info!("Generated new thread_id: {}", new_thread_id);
+            new_thread_id
         } else {
-            debug!("Using provided chat_id: {}", initialize.chat_id);
-            initialize.chat_id.clone()
+            debug!("Using provided thread_id: {}", initialize.thread_id);
+            initialize.thread_id.clone()
         };
+
+    // Try to load existing state from disk if thread_id is provided
+    let existing_state_loaded = if !thread_id.is_empty()
+        && initialize.init_type == InitializeType::FirstCall
+    {
+        match BashState::has_saved_state(&thread_id) {
+            Ok(true) => {
+                info!(
+                    "Found existing saved state for thread_id '{}', will attempt to load",
+                    thread_id
+                );
+                true
+            }
+            Ok(false) => {
+                debug!("No existing saved state for thread_id '{}'", thread_id);
+                false
+            }
+            Err(e) => {
+                warn!("Error checking for saved state: {}", e);
+                false
+            }
+        }
+    } else {
+        false
+    };
 
     // Handle workspace path with appropriate validation and error handling
     let mut folder_to_start = workspace_path.clone();
@@ -306,13 +338,42 @@ pub async fn handle_tool_call(
         InitializeType::FirstCall => {
             info!("Handling FirstCall initialization type");
 
-            let mut new_bash_state = BashState::new();
-            new_bash_state.current_chat_id = chat_id.clone();
-            new_bash_state.mode = mode;
-            new_bash_state.bash_command_mode = bash_command_mode;
-            new_bash_state.file_edit_mode = file_edit_mode;
-            new_bash_state.write_if_empty_mode = write_if_empty_mode;
-            new_bash_state.initialized = true;
+            // Try to load existing state from disk if available
+            let mut new_bash_state = if existing_state_loaded {
+                let loaded_state = BashState::new_with_thread_id(Some(&thread_id));
+                if loaded_state.initialized {
+                    info!(
+                        "Successfully loaded bash state from disk for thread_id '{}'",
+                        thread_id
+                    );
+                    response.push_str(&format!(
+                        "Resumed existing session with thread_id: {}\n",
+                        thread_id
+                    ));
+                    loaded_state
+                } else {
+                    // Failed to load, create new
+                    warn!("Failed to load state from disk, creating new state");
+                    let mut state = BashState::new();
+                    state.current_thread_id = thread_id.clone();
+                    state.mode = mode;
+                    state.bash_command_mode = bash_command_mode.clone();
+                    state.file_edit_mode = file_edit_mode.clone();
+                    state.write_if_empty_mode = write_if_empty_mode.clone();
+                    state.initialized = true;
+                    state
+                }
+            } else {
+                // No existing state, create new
+                let mut state = BashState::new();
+                state.current_thread_id = thread_id.clone();
+                state.mode = mode;
+                state.bash_command_mode = bash_command_mode.clone();
+                state.file_edit_mode = file_edit_mode.clone();
+                state.write_if_empty_mode = write_if_empty_mode.clone();
+                state.initialized = true;
+                state
+            };
 
             if folder_to_start.exists() {
                 debug!("Setting working directory to: {:?}", folder_to_start);
@@ -405,12 +466,20 @@ pub async fn handle_tool_call(
             );
             response.push_str(&mode_prompt);
 
-            info!("Initializing new BashState with chat_id: {}", chat_id);
+            info!("Initializing new BashState with thread_id: {}", thread_id);
+
+            // Save state to disk for persistence
+            if let Err(e) = new_bash_state.save_state_to_disk() {
+                warn!("Failed to save initial bash state to disk: {}", e);
+            } else {
+                debug!("Saved initial bash state to disk");
+            }
+
             *bash_state_guard = Some(new_bash_state);
 
             response.push_str(&format!(
-                "Initialized new shell with chat_id: {}\n",
-                chat_id
+                "Initialized new shell with thread_id: {}\n",
+                thread_id
             ));
         }
         InitializeType::UserAskedModeChange => {
@@ -423,6 +492,11 @@ pub async fn handle_tool_call(
                 bash_state.bash_command_mode = bash_command_mode;
                 bash_state.file_edit_mode = file_edit_mode;
                 bash_state.write_if_empty_mode = write_if_empty_mode;
+
+                // Save state to disk after mode change
+                if let Err(e) = bash_state.save_state_to_disk() {
+                    warn!("Failed to save bash state after mode change: {}", e);
+                }
 
                 response.push_str(&format!("Changed mode to: {:?}\n", mode));
             } else {
@@ -440,6 +514,11 @@ pub async fn handle_tool_call(
                 bash_state.bash_command_mode = bash_command_mode;
                 bash_state.file_edit_mode = file_edit_mode;
                 bash_state.write_if_empty_mode = write_if_empty_mode;
+
+                // Save state to disk after reset
+                if let Err(e) = bash_state.save_state_to_disk() {
+                    warn!("Failed to save bash state after reset: {}", e);
+                }
 
                 response.push_str("Reset shell\n");
             } else {
@@ -472,6 +551,11 @@ pub async fn handle_tool_call(
                             ))
                         })?;
 
+                    // Save state to disk after workspace change
+                    if let Err(e) = bash_state.save_state_to_disk() {
+                        warn!("Failed to save bash state after workspace change: {}", e);
+                    }
+
                     response.push_str(&format!("Changed workspace to: {:?}\n", folder_to_start));
                 } else {
                     warn!("Workspace path does not exist: {:?}", folder_to_start);
@@ -487,27 +571,7 @@ pub async fn handle_tool_call(
         }
     }
 
-    // Handle initial files to read
-    if !initialize.initial_files_to_read.is_empty() {
-        info!(
-            "Processing {} initial files to read",
-            initialize.initial_files_to_read.len()
-        );
-
-        response.push_str("\nInitial files to read:\n");
-        for file in &initialize.initial_files_to_read {
-            // Validate each file path
-            let expanded_path = expand_user(file);
-            if !expanded_path.is_empty() {
-                response.push_str(&format!("- {}\n", file));
-            } else {
-                warn!("Empty file path in initial_files_to_read");
-                response.push_str(&format!("- Warning: Invalid file path: {}\n", file));
-            }
-        }
-    }
-
-    // Handle task resumption
+    // Handle task resumption (matches wcgw Python behavior)
     if !initialize.task_id_to_resume.is_empty() {
         info!(
             "Task resumption requested for ID: {}",
@@ -515,17 +579,69 @@ pub async fn handle_tool_call(
         );
 
         if initialize.init_type == InitializeType::FirstCall {
-            response.push_str(&format!(
-                "\nAttempting to resume task: {}\n",
-                initialize.task_id_to_resume
-            ));
-            // In actual implementation, load task state here
-            // TODO: Implement task resumption logic
+            match load_task_context(&initialize.task_id_to_resume) {
+                Some((_project_root, task_memory, _bash_state)) => {
+                    response.push_str(&format!(
+                        "\n---\n# Retrieved task\n{}\n---\n",
+                        task_memory
+                    ));
+                }
+                None => {
+                    response.push_str(&format!(
+                        "\nError: Unable to load task with ID \"{}\"\n",
+                        initialize.task_id_to_resume
+                    ));
+                }
+            }
         } else {
             warn!("Task resumption not allowed for non-FirstCall initialization");
             response.push_str(
                 "\nWarning: task can only be resumed in a new conversation. No task loaded.\n",
             );
+        }
+    }
+
+    // Add alignment context (WCGW-style CLAUDE.md/AGENTS.md reading)
+    let mut alignment_context = String::new();
+
+    // Check ripgrep availability
+    if check_ripgrep_available() {
+        alignment_context.push_str(
+            "---\n# Available commands\n\n- Use ripgrep `rg` command instead of `grep` because it's much much faster.\n\n---\n\n",
+        );
+    }
+
+    // Read global alignment file (~/.wcgw/CLAUDE.md or AGENTS.md)
+    if let Some(global_content) = read_global_alignment_file() {
+        alignment_context.push_str(&format!(
+            "---\n# Important guidelines from the user\n```\n{}\n```\n---\n\n",
+            global_content
+        ));
+    }
+
+    // Read workspace alignment file
+    if folder_to_start.exists() {
+        if let Some((fname, ws_content)) = read_workspace_alignment_file(&folder_to_start) {
+            alignment_context.push_str(&format!(
+                "---\n# {} - user shared project guidelines to follow\n```\n{}\n```\n---\n\n",
+                fname, ws_content
+            ));
+        }
+    }
+
+    if !alignment_context.is_empty() {
+        response.push_str(&alignment_context);
+    }
+
+    // Read initial files and include content (WCGW-style)
+    if !initialize.initial_files_to_read.is_empty() {
+        let (files_content, _file_ranges) =
+            read_initial_files(&initialize.initial_files_to_read, &folder_to_start);
+        if !files_content.is_empty() {
+            response.push_str(&format!(
+                "---\n# Requested files\nHere are the contents of the requested files:\n{}\n---\n",
+                files_content
+            ));
         }
     }
 
@@ -540,19 +656,6 @@ pub async fn handle_tool_call(
                 warn!("Failed to generate repository context: {}", e);
                 String::new()
             }
-        }
-    } else {
-        String::new()
-    };
-
-    // Try to get Git info if available
-    let git_info = if folder_to_start.exists() {
-        match get_git_info(&folder_to_start) {
-            Some(info) => {
-                debug!("Successfully retrieved Git information");
-                format!("\n{}\n", info)
-            }
-            None => String::new(),
         }
     } else {
         String::new()
@@ -585,21 +688,16 @@ pub async fn handle_tool_call(
     response.push_str(&current_state);
     response.push_str(&repo_context);
 
-    // Add git info if available
-    if !git_info.is_empty() {
-        response.push_str(&git_info);
-    }
-
-    // Add chat ID instruction
+    // Add thread ID instruction
     if let Some(ref bash_state) = *bash_state_guard {
         info!(
-            "Final response will use chat_id: {}",
-            bash_state.current_chat_id
+            "Final response will use thread_id: {}",
+            bash_state.current_thread_id
         );
 
         response.push_str(&format!(
-            "\nUse chat_id={} for all winx tool calls which take that.\n",
-            bash_state.current_chat_id
+            "\nUse thread_id={} for all winx tool calls which take that.\n",
+            bash_state.current_thread_id
         ));
     }
 

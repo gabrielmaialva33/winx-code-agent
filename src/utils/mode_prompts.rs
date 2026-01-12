@@ -210,6 +210,49 @@ pub fn generate_mode_instructions(
     instructions
 }
 
+/// Knowledge transfer prompt for wcgw mode
+/// Exact copy from wcgw Python: WCGW_KT
+pub const WCGW_KT: &str = "Use ContextSave tool to do a knowledge transfer of the task in hand.\n\
+Write detailed description in order to do a KT.\n\
+Save all information necessary for a person to understand the task and the problems.\n\n\
+Format the description field using Markdown with the following sections.\n\
+- # Objective section containing project and task objective.\n\
+- # All user instructions section should be provided containing all instructions user shared in the conversation.\n\
+- # Current status of the task should be provided containing only what is already achieved, not what is remaining.\n\
+- # Pending issues with snippets section containing snippets of pending errors, traceback, file snippets, commands, etc. But no comments or solutions.\n\
+- Be very verbose in the all issues with snippets section providing as much error context as possible.\n\
+- # Build and development instructions section containing instructions to build or run project or run tests, or envrionment related information. Only include what is known. Leave empty if unknown.\n\
+- Any other relevant sections following the above.\n\
+- After the tool completes succesfully, tell me the task id and the file path the tool generated (important!)\n\
+- This tool marks end of your conversation, do not run any further tools after calling this.\n\n\
+Provide all relevant file paths in order to understand and solve the the task. Err towards providing more file paths than fewer.\n\n\
+(Note to self: this conversation can then be resumed later asking Resume wcgw task <generated id> which should call Initialize tool)\n";
+
+/// Knowledge transfer prompt for architect mode
+/// Exact copy from wcgw Python: ARCHITECT_KT
+pub const ARCHITECT_KT: &str = "Use ContextSave tool to do a knowledge transfer of the task in hand.\n\
+Write detailed description in order to do a KT.\n\
+Save all information necessary for a person to understand the task and the problems.\n\n\
+Format the description field using Markdown with the following sections.\n\
+- # Objective section containing project and task objective.\n\
+- # All user instructions section should be provided containing all instructions user shared in the conversation.\n\
+- # Designed plan should be provided containing the designed plan as discussed.\n\
+- Any other relevant sections following the above.\n\
+- After the tool completes succesfully, tell me the task id and the file path the tool generated (important!)\n\
+- This tool marks end of your conversation, do not run any further tools after calling this.\n\n\
+Provide all relevant file paths in order to understand and solve the the task. Err towards providing more file paths than fewer.\n\n\
+(Note to self: this conversation can then be resumed later asking Resume wcgw task <generated id> which should call Initialize tool)\n";
+
+/// Get the appropriate knowledge transfer prompt for a mode
+/// Matches wcgw Python: get_kt_prompt()
+pub fn get_kt_prompt(mode: &Modes) -> &'static str {
+    match mode {
+        Modes::Wcgw => WCGW_KT,
+        Modes::Architect => ARCHITECT_KT,
+        Modes::CodeWriter => WCGW_KT,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -248,5 +291,24 @@ mod tests {
 
         assert!(wcgw_prompt.contains("bash execution"));
         assert!(architect_prompt.contains("architect\" mode"));
+    }
+
+    #[test]
+    fn test_kt_prompts() {
+        assert!(WCGW_KT.contains("ContextSave"));
+        assert!(WCGW_KT.contains("Pending issues"));
+        assert!(ARCHITECT_KT.contains("Designed plan"));
+        assert!(ARCHITECT_KT.contains("ContextSave"));
+    }
+
+    #[test]
+    fn test_get_kt_prompt() {
+        let wcgw_kt = get_kt_prompt(&Modes::Wcgw);
+        let architect_kt = get_kt_prompt(&Modes::Architect);
+        let code_writer_kt = get_kt_prompt(&Modes::CodeWriter);
+
+        assert!(wcgw_kt.contains("Pending issues"));
+        assert!(architect_kt.contains("Designed plan"));
+        assert!(code_writer_kt.contains("Pending issues")); // Uses WCGW_KT
     }
 }

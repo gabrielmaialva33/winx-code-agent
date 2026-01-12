@@ -1598,7 +1598,7 @@ pub fn render_terminal_output(text: &str) -> Vec<String> {
     }
 
     // Periodically clean up expired cache entries
-    if rand::random::<u32>() % 100 == 0 {
+    if rand::random::<u32>().is_multiple_of(100) {
         TERMINAL_CACHE.cleanup();
     }
 
