@@ -321,7 +321,38 @@ If you need help or have any questions about Winx, feel free to reach out via th
 
 ## 📝 Changelog
 
-### v0.1.5 (Latest) - Multi-Provider AI Integration
+### v0.2.1 (Latest) - WCGW 1:1 Parity & Stability
+
+**🎯 Full WCGW Python Parity:**
+- **SpecialKey Serialization**: Fixed to match Python exactly (`Key-up`, `Ctrl-c`, `Ctrl-z`)
+- **Ctrl+Z Support**: Added SIGTSTP (suspend) signal support
+- **Field Names**: Fixed `file_paths` to match wcgw Python API exactly
+- **105 Tests**: 90 unit tests + 15 integration tests all passing
+
+**🛡️ Stability Improvements:**
+- Removed all critical `.unwrap()` calls that could cause panics
+- Converted Mutex lock unwraps to safe error handling with `.expect()` or `.map_err()`
+- Fixed `panic!()` in ANSI code handling with proper error propagation
+- Refactored `is_some()` + `unwrap()` anti-patterns to idiomatic `if let Some()`
+
+**🔧 Code Quality:**
+- Added integration test suite (`tests/integration_tests.rs`)
+- Improved error messages for better debugging
+- Professional-grade error handling throughout
+
+---
+
+### v0.2.0 - Core WCGW Port
+
+**🚀 Major Rewrite:**
+- Complete port of wcgw Python core tools to Rust
+- 6 MCP tools: Initialize, BashCommand, ReadFiles, ReadImage, FileWriteOrEdit, ContextSave
+- 3 operation modes: wcgw (full), architect (read-only), code_writer (restricted)
+- SEARCH/REPLACE block format with 5 tolerance levels
+
+---
+
+### v0.1.5 - Multi-Provider AI Integration
 
 **🚀 Major Features:**
 - **Multi-Provider AI System**: Primary DashScope, fallback to NVIDIA, then Gemini
