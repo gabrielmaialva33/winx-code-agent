@@ -38,29 +38,45 @@ Winx is a **Rust** reimplementation of [WCGW](https://github.com/rusiaaman/wcgw)
 
 ## 📖 Overview
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Claude / LLM                            │
-└─────────────────────┬───────────────────────────────────────┘
-                      │ MCP Protocol (JSON-RPC 2.0)
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Winx Agent (Rust)                         │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ BashCommand │  │  ReadFiles  │  │  FileWriteOrEdit    │  │
-│  │   (PTY)     │  │   (mmap)    │  │  (search/replace)   │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────┐  │
-│  │ Initialize  │  │ ContextSave │  │     ReadImage       │  │
-│  │  (modes)    │  │  (resume)   │  │     (base64)        │  │
-│  └─────────────┘  └─────────────┘  └─────────────────────┘  │
-└─────────────────────────────────────────────────────────────┘
-                      │
-                      ▼
-┌─────────────────────────────────────────────────────────────┐
-│                   Operating System                          │
-│         Shell (bash/zsh) │ Filesystem │ Processes           │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph LLM["🤖 Claude / LLM"]
+        direction LR
+        claude[Claude Desktop]
+    end
+
+    subgraph MCP["📡 MCP Protocol"]
+        direction LR
+        jsonrpc["JSON-RPC 2.0 over stdio"]
+    end
+
+    subgraph Winx["🦀 Winx Agent"]
+        direction TB
+        subgraph Tools["MCP Tools"]
+            bash["⚡ BashCommand<br/>(PTY)"]
+            read["📄 ReadFiles<br/>(mmap)"]
+            write["✏️ FileWriteOrEdit<br/>(search/replace)"]
+            init["🚀 Initialize<br/>(modes)"]
+            ctx["💾 ContextSave<br/>(resume)"]
+            img["🖼️ ReadImage<br/>(base64)"]
+        end
+    end
+
+    subgraph OS["💻 Operating System"]
+        direction LR
+        shell["Shell<br/>bash/zsh"]
+        fs["Filesystem"]
+        proc["Processes"]
+    end
+
+    LLM -->|"230x faster handshake"| MCP
+    MCP --> Winx
+    Winx --> OS
+
+    style LLM fill:#4a5568,stroke:#a0aec0,color:#fff
+    style Winx fill:#2d3748,stroke:#ed8936,color:#fff
+    style OS fill:#1a202c,stroke:#4a5568,color:#fff
+    style MCP fill:#553c9a,stroke:#9f7aea,color:#fff
 ```
 
 ---
@@ -192,6 +208,47 @@ Read images and return as base64.
 ---
 
 ## 🏗️ Architecture
+
+```mermaid
+graph LR
+    subgraph Server["🖥️ MCP Server"]
+        main["main.rs"]
+        server["server.rs<br/>(rmcp)"]
+    end
+
+    subgraph Tools["🔧 Tools Layer"]
+        bash["BashCommand"]
+        files["ReadFiles"]
+        write["FileWriteOrEdit"]
+        init["Initialize"]
+        ctx["ContextSave"]
+        img["ReadImage"]
+    end
+
+    subgraph State["📦 State Management"]
+        bstate["BashState<br/>(Mutex)"]
+        term["Terminal<br/>(PTY)"]
+    end
+
+    subgraph Utils["⚙️ Utilities"]
+        cache["FileCache"]
+        mmap["mmap"]
+        path["PathUtils"]
+    end
+
+    main --> server
+    server --> Tools
+    Tools --> State
+    Tools --> Utils
+    State --> term
+
+    style Server fill:#2d3748,stroke:#ed8936,color:#fff
+    style Tools fill:#553c9a,stroke:#9f7aea,color:#fff
+    style State fill:#2c5282,stroke:#63b3ed,color:#fff
+    style Utils fill:#285e61,stroke:#4fd1c5,color:#fff
+```
+
+### Project Structure
 
 ```
 src/
