@@ -50,7 +50,7 @@ flowchart TB
         jsonrpc["JSON-RPC 2.0 over stdio"]
     end
 
-    subgraph Winx["🦀 Winx Agent"]
+    subgraph Winx["✨ Ｗｉｎｘ Ａｇｅｎｔ ✨"]
         direction TB
         subgraph Tools["MCP Tools"]
             bash["⚡ BashCommand<br/>(PTY)"]
