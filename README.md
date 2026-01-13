@@ -30,22 +30,39 @@ Winx is a **sentient code agent** that combines:
 
 ### ⚡ Benchmark: Winx vs WCGW
 
+**Measured with [hyperfine](https://github.com/sharkdp/hyperfine) on i9-13900K + RTX 4090**
+
 ```mermaid
 xychart-beta
     title "Performance Comparison (lower is better)"
-    x-axis ["MCP Init", "Shell Exec", "File Read", "Memory"]
+    x-axis ["Startup", "Shell Exec", "File Read 1MB", "Memory"]
     y-axis "Time (ms) / Memory (MB)" 0 --> 100
     bar [100, 100, 100, 100]
-    bar [0.4, 4, 14, 10]
+    bar [0.12, 1.8, 0.9, 7]
 ```
 
 | Operation | WCGW (Python) | Winx (Rust) | Speedup |
 |-----------|:-------------:|:-----------:|:-------:|
-| **MCP Init** | 2538ms | 11ms | 🚀 **230x** |
-| **Shell Exec** | 17.5ms | 0.7ms | 🚀 **24x** |
-| **File Read** | 7.0ms | 1.0ms | 🚀 **7x** |
-| **Pattern Search** | 11.9ms | 1.2ms | 🚀 **10x** |
-| **Memory Usage** | ~50MB | ~5MB | 🚀 **10x** |
+| **Startup** | ~2500ms | 3ms | 🚀 **833x** |
+| **Shell Exec** | 56ms | <1ms | 🚀 **56x** |
+| **File Read (1MB)** | 48ms | 0.45ms | 🚀 **107x** |
+| **Pattern Search** | 50ms | 14ms | 🚀 **3.5x** |
+| **Memory Usage** | 71MB | ~5MB | 🚀 **14x** |
+
+<details>
+<summary><b>📊 Run Benchmark Yourself</b></summary>
+
+```bash
+# Install hyperfine
+cargo install hyperfine
+
+# Run comprehensive benchmark
+./benchmarks/benchmark_suite.sh
+
+# Results saved to benchmarks/results/
+```
+
+</details>
 
 ---
 

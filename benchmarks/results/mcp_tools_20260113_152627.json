@@ -1,0 +1,78 @@
+{
+  "timestamp": "20260113_152627",
+  "warmup": 2,
+  "measured": 10,
+  "results": [
+    {
+      "tool": "BashCommand",
+      "scenario": "echo (simple)",
+      "wcgw_median_ms": 5.848617998708505,
+      "winx_median_ms": 0,
+      "speedup": 0
+    },
+    {
+      "tool": "BashCommand",
+      "scenario": "ls -la (list)",
+      "wcgw_median_ms": 6.3787244998820825,
+      "winx_median_ms": 0,
+      "speedup": 0
+    },
+    {
+      "tool": "BashCommand",
+      "scenario": "pipeline (complex)",
+      "wcgw_median_ms": 6.188944498717319,
+      "winx_median_ms": 0,
+      "speedup": 0
+    },
+    {
+      "tool": "BashCommand",
+      "scenario": "multi-command",
+      "wcgw_median_ms": 6.234378997760359,
+      "winx_median_ms": 0,
+      "speedup": 0
+    },
+    {
+      "tool": "ReadFiles",
+      "scenario": "small (100B)",
+      "wcgw_median_ms": 2.5701490012579598,
+      "winx_median_ms": 0,
+      "speedup": 0
+    },
+    {
+      "tool": "ReadFiles",
+      "scenario": "medium (10KB)",
+      "wcgw_median_ms": 6.822330999057158,
+      "winx_median_ms": 0,
+      "speedup": 0
+    },
+    {
+      "tool": "ReadFiles",
+      "scenario": "large (1MB)",
+      "wcgw_median_ms": 183.27892400156998,
+      "winx_median_ms": 0,
+      "speedup": 0
+    },
+    {
+      "tool": "ReadFiles",
+      "scenario": "multiple files",
+      "wcgw_median_ms": 7.311687499168329,
+      "winx_median_ms": 0,
+      "speedup": 0
+    },
+    {
+      "tool": "FileWriteOrEdit",
+      "scenario": "write new file",
+      "wcgw_median_ms": 1.969904998986749,
+      "winx_median_ms": 0,
+      "speedup": 0
+    },
+    {
+      "tool": "FileWriteOrEdit",
+      "scenario": "SEARCH/REPLACE",
+      "wcgw_median_ms": 1.9268029991508229,
+      "winx_median_ms": 0,
+      "speedup": 0
+    }
+  ],
+  "overall_speedup": 0
+}
