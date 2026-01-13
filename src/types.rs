@@ -585,13 +585,15 @@ impl<'de> Deserialize<'de> for BashCommand {
                                     // Log the specific parsing error for debugging
                                     tracing::error!("Secondary JSON parse error: {}", err);
                                     // Last resort fallback - assume it's a command string
-                                    serde_json::json!({"command": s})
+                                    // MUST include "type": "command" for serde tagged enum
+                                    serde_json::json!({"type": "command", "command": s})
                                 }
                             }
                         } else {
                             // Assume it's a simple command string
+                            // MUST include "type": "command" for serde tagged enum
                             tracing::info!("Treating as simple command: {}", s);
-                            serde_json::json!({"command": s})
+                            serde_json::json!({"type": "command", "command": s})
                         }
                     }
                 }

@@ -437,45 +437,30 @@ impl WinxService {
         }
     }
 
-    /// Handle bash command execution with proper async locking.
+    /// Handle bash command execution using the correct WCGW-compatible schema.
     ///
-    /// Uses `tokio::sync::Mutex` to hold the lock through the entire async operation,
-    /// preventing race conditions when multiple requests execute concurrently.
+    /// Uses the BashCommand struct with action_json field for full WCGW parity.
     async fn handle_bash_command(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let command = args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::invalid_request("Missing command", None))?;
-        let timeout_seconds = args
-            .get("timeout_seconds")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(30) as f32;
 
-        // FIXED: Hold the async lock through the entire operation
-        // This prevents race conditions between concurrent requests
-        let mut bash_state_guard = self.bash_state.lock().await;
+        // Parse BashCommand from args - using WCGW-compatible schema with action_json
+        let bash_command: crate::types::BashCommand = serde_json::from_value(args.clone())
+            .map_err(|e| McpError::invalid_request(format!("Invalid BashCommand parameters: {e}"), None))?;
 
-        let bash_state = bash_state_guard.as_mut().ok_or_else(|| {
-            McpError::invalid_request("Shell not initialized. Call initialize first.", None)
-        })?;
-
-        // Execute command while holding the lock - state changes are atomic
-        match bash_state.execute_interactive(command, timeout_seconds).await {
+        // Call the real WCGW-compatible implementation
+        match crate::tools::bash_command::handle_tool_call(&self.bash_state, bash_command).await {
             Ok(output) => {
-                let working_dir = bash_state.cwd.display().to_string();
-                let content = format!("Working directory: {working_dir}\n\n{output}");
-                Ok(CallToolResult::success(vec![Content::text(content)]))
+                info!("BashCommand succeeded");
+                Ok(CallToolResult::success(vec![Content::text(output)]))
             }
             Err(e) => {
-                warn!("Command execution failed: {}", e);
+                warn!("BashCommand failed: {}", e);
                 Err(McpError::internal_error(
-                    format!("Command execution failed: {e}"),
+                    format!("BashCommand failed: {e}"),
                     None,
                 ))
             }
         }
-        // Lock is automatically released here when bash_state_guard goes out of scope
     }
 
     async fn handle_read_files(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
