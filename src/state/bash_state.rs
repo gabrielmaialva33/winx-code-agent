@@ -485,9 +485,77 @@ pub struct InteractiveBash {
     pub output_truncated: bool,
     /// Output chunks for incremental updates
     pub output_chunks: Vec<String>,
+    /// Initial directory for the shell (needed for reinit)
+    initial_dir: PathBuf,
+    /// Whether restricted mode is enabled (needed for reinit)
+    restricted_mode: bool,
 }
 
 impl InteractiveBash {
+    /// Check if the bash process is still alive
+    pub fn is_alive(&mut self) -> bool {
+        // try_wait returns Ok(None) if process is still running
+        // Returns Ok(Some(status)) if process has exited
+        // Returns Err if checking status failed
+        matches!(self.process.try_wait(), Ok(None))
+    }
+
+    /// Reinitialize the bash process after it has died
+    /// This is called automatically when the process is detected as dead
+    /// Uses the stored initial_dir and restricted_mode from when the shell was created
+    pub fn reinit(&mut self) -> Result<()> {
+        info!("Reinitializing bash process after death in {}", self.initial_dir.display());
+
+        let mut cmd = Command::new("bash");
+        if self.restricted_mode {
+            cmd.arg("-r");
+        }
+
+        let cmd_env = cmd
+            .env("PAGER", "cat")
+            .env("GIT_PAGER", "cat")
+            .env("PROMPT_COMMAND", WCGW_PROMPT_COMMAND)
+            .env("TERM", "xterm-256color")
+            .env("COLUMNS", "200")
+            .env("ROWS", "50")
+            .current_dir(&self.initial_dir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut process = cmd_env.spawn().context("Failed to respawn bash process")?;
+
+        let mut stdin = process
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("Failed to get stdin for respawned bash process"))?;
+
+        writeln!(stdin, "{BASH_PROMPT_STATEMENT}")
+            .context("Failed to write prompt statement to respawned bash")?;
+        stdin.flush().context("Failed to flush prompt statement")?;
+
+        process.stdin = Some(stdin);
+
+        // Replace the old process
+        self.process = process;
+        self.command_state = CommandState::Idle;
+        self.output_truncated = false;
+        self.output_chunks.clear();
+
+        info!("Bash process reinitialized successfully");
+        Ok(())
+    }
+
+    /// Ensure the bash process is alive, reinitializing if necessary
+    /// Returns Ok(()) if process is alive or was successfully reinitialized
+    pub fn ensure_alive(&mut self) -> Result<()> {
+        if !self.is_alive() {
+            warn!("Bash process died, reinitializing...");
+            self.reinit()?;
+        }
+        Ok(())
+    }
+
     /// Create a new interactive bash process - matches WCGW Python pexpect.spawn behavior
     pub fn new(initial_dir: &Path, restricted_mode: bool) -> Result<Self> {
         let mut cmd = Command::new("bash");
@@ -537,12 +605,17 @@ impl InteractiveBash {
             max_output_size: MAX_OUTPUT_SIZE,
             output_truncated: false,
             output_chunks: Vec::new(),
+            initial_dir: initial_dir.to_path_buf(),
+            restricted_mode,
         })
     }
 
     /// Send a command to the bash process
     pub fn send_command(&mut self, command: &str) -> Result<()> {
         debug!("Sending command to bash: {}", command);
+
+        // Ensure bash is alive, reinitialize if it died (e.g., after Ctrl-c)
+        self.ensure_alive()?;
 
         let mut stdin = self
             .process
@@ -932,37 +1005,14 @@ impl InteractiveBash {
         }
     }
 
-    /// Check if the process is still alive
-    pub fn is_alive(&mut self) -> bool {
-        match self.process.try_wait() {
-            Ok(None) => true,     // Still running
-            Ok(Some(_)) => false, // Exited
-            Err(_) => false,      // Error checking status
-        }
-    }
-
     /// Get the current command state
     #[allow(dead_code)]
     pub fn command_state(&self) -> &CommandState {
         &self.command_state
     }
 
-    /// Restart the bash process if it died
-    pub fn ensure_alive(&mut self, initial_dir: &Path, restricted_mode: bool) -> Result<()> {
-        if !self.is_alive() {
-            debug!("Bash process is dead, restarting");
-
-            // Create a new process
-            let new_bash = Self::new(initial_dir, restricted_mode)?;
-
-            // Replace the current process
-            *self = new_bash;
-
-            debug!("Bash process restarted successfully");
-        }
-
-        Ok(())
-    }
+    // NOTE: is_alive and ensure_alive are now defined at line ~496/~551
+    // and use stored initial_dir/restricted_mode for reinit
 }
 
 impl Default for BashState {
@@ -1296,9 +1346,8 @@ impl BashState {
                 None => return Err(anyhow!("Interactive bash is None after initialization")),
             };
 
-            // Ensure bash process is alive
-            let restricted_mode = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
-            if let Err(e) = bash.ensure_alive(&self.cwd, restricted_mode) {
+            // Ensure bash process is alive (reinit if needed)
+            if let Err(e) = bash.ensure_alive() {
                 return Err(anyhow!("Failed to ensure bash process is alive: {e}"));
             }
 
@@ -1941,11 +1990,10 @@ impl BashState {
             self.initialized = true;
 
             // Re-initialize bash with new settings if needed
-            let restricted_mode = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
             if let Ok(mut bash_guard) = self.interactive_bash.lock() {
                 if let Some(bash) = bash_guard.as_mut() {
                     // Ensure the bash process is in the right directory
-                    if let Err(e) = bash.ensure_alive(&self.cwd, restricted_mode) {
+                    if let Err(e) = bash.ensure_alive() {
                         warn!("Failed to ensure bash alive after loading state: {}", e);
                     }
                     // Change to loaded cwd
