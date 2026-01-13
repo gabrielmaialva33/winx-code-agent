@@ -44,9 +44,7 @@ pub fn test_json_parsing(json_str: &str) -> Result<(), String> {
             eprintln!("  task_id_to_resume: {}", init.task_id_to_resume);
             Ok(())
         }
-        Err(e) => Err(format!(
-            "Failed to parse JSON into Initialize struct: {e}"
-        )),
+        Err(e) => Err(format!("Failed to parse JSON into Initialize struct: {e}")),
     }
 }
 

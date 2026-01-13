@@ -176,16 +176,11 @@ impl SearchReplaceHelper {
             }
 
             // If we reach here, the search block wasn't found
-            debug!(
-                "Block {} not found by exact match, trying fuzzy matching",
-                i + 1
-            );
+            debug!("Block {} not found by exact match, trying fuzzy matching", i + 1);
 
             // Collect debugging information
-            self.debug_info.push(format!(
-                "Block {} not found in content, trying fuzzy match",
-                i + 1
-            ));
+            self.debug_info
+                .push(format!("Block {} not found in content, trying fuzzy match", i + 1));
 
             // Try fuzzy matching if enabled
             if self.use_fuzzy_matching {
@@ -202,7 +197,8 @@ impl SearchReplaceHelper {
                         ));
 
                         // If confidence is high enough and auto-apply is enabled, perform the replacement
-                        if best_match.similarity >= self.fuzzy_threshold && self.auto_apply_fuzzy_fixes
+                        if best_match.similarity >= self.fuzzy_threshold
+                            && self.auto_apply_fuzzy_fixes
                         {
                             self.debug_info.push(format!(
                                 "Auto-applying fuzzy fix for block {} (similarity: {:.2})",
@@ -339,11 +335,8 @@ impl SearchReplaceHelper {
 
         for (i, m) in matches.iter().take(self.max_suggestions).enumerate() {
             let confidence_percent = (m.similarity * 100.0).round() as i32;
-            let snippet = if m.text.len() > 100 {
-                format!("{}...", &m.text[..100])
-            } else {
-                m.text.clone()
-            };
+            let snippet =
+                if m.text.len() > 100 { format!("{}...", &m.text[..100]) } else { m.text.clone() };
 
             suggestions.push_str(&format!(
                 "Match {} ({}% confidence, type: {:?}):\n```\n{}\n```\n\n",
@@ -410,9 +403,7 @@ impl SearchReplaceHelper {
                         "Found {total} matching lines in your search block (showing {shown}):\n{matches_display}"
                     )
                 } else {
-                    format!(
-                        "Found {total} matching lines in your search block:\n{matches_display}"
-                    )
+                    format!("Found {total} matching lines in your search block:\n{matches_display}")
                 };
 
                 suggestions.push(message);
@@ -449,11 +440,8 @@ impl SearchReplaceHelper {
 
         // Return aggregated suggestions
         if !suggestions.is_empty() {
-            let filtered_suggestions = suggestions
-                .into_iter()
-                .take(self.max_suggestions)
-                .collect::<Vec<_>>()
-                .join("\n\n");
+            let filtered_suggestions =
+                suggestions.into_iter().take(self.max_suggestions).collect::<Vec<_>>().join("\n\n");
 
             return Some(format!("Suggestions:\n{filtered_suggestions}"));
         }
@@ -623,9 +611,7 @@ impl MatchAnalysis {
         } else if self.exact_matches.is_empty() && !self.fuzzy_matches.is_empty() {
             // No exact matches but fuzzy matches available
             let best_fuzzy = self.fuzzy_matches.iter().max_by(|a, b| {
-                a.similarity
-                    .partial_cmp(&b.similarity)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                a.similarity.partial_cmp(&b.similarity).unwrap_or(std::cmp::Ordering::Equal)
             });
 
             if let Some(best) = best_fuzzy {
@@ -646,10 +632,7 @@ impl MatchAnalysis {
         if self.exact_matches.len() > 1 {
             // Multiple exact matches
             let mut suggestions = vec![
-                format!(
-                    "The search block appears {} times in the file:",
-                    self.exact_matches.len()
-                ),
+                format!("The search block appears {} times in the file:", self.exact_matches.len()),
                 String::new(),
             ];
 
@@ -663,31 +646,17 @@ impl MatchAnalysis {
                 if !location.context_before.is_empty() {
                     suggestions.push(format!(
                         "  Context before: {}",
-                        location
-                            .context_before
-                            .lines()
-                            .take(2)
-                            .collect::<Vec<_>>()
-                            .join(" / ")
+                        location.context_before.lines().take(2).collect::<Vec<_>>().join(" / ")
                     ));
                 }
                 suggestions.push(format!(
                     "  Match: {}",
-                    self.search_block
-                        .lines()
-                        .take(2)
-                        .collect::<Vec<_>>()
-                        .join(" / ")
+                    self.search_block.lines().take(2).collect::<Vec<_>>().join(" / ")
                 ));
                 if !location.context_after.is_empty() {
                     suggestions.push(format!(
                         "  Context after: {}",
-                        location
-                            .context_after
-                            .lines()
-                            .take(2)
-                            .collect::<Vec<_>>()
-                            .join(" / ")
+                        location.context_after.lines().take(2).collect::<Vec<_>>().join(" / ")
                     ));
                 }
                 suggestions.push(String::new());
@@ -770,9 +739,8 @@ impl MultiMatchResolver {
         let conflicting_count = self.analyses.iter().filter(|a| a.has_conflicts()).count();
 
         if conflicting_count > 0 {
-            suggestions.push(format!(
-                "{conflicting_count} search block(s) have matching conflicts"
-            ));
+            suggestions
+                .push(format!("{conflicting_count} search block(s) have matching conflicts"));
             suggestions.push(String::new());
             suggestions.push("Resolution strategies:".to_string());
             suggestions
@@ -830,20 +798,13 @@ impl SearchReplaceSyntaxError {
         block_type: Option<String>,
         suggestions: Vec<String>,
     ) -> Self {
-        Self {
-            message: message.into(),
-            line_number,
-            block_type,
-            suggestions,
-        }
+        Self { message: message.into(), line_number, block_type, suggestions }
     }
 
     /// Format the error message with all context
     fn format_message(&self) -> String {
-        let mut msg = format!(
-            "Got syntax error while parsing search replace blocks:\n{}",
-            self.message
-        );
+        let mut msg =
+            format!("Got syntax error while parsing search replace blocks:\n{}", self.message);
 
         if let Some(line) = self.line_number {
             msg.push_str(&format!("\nLine {line}"));
@@ -896,10 +857,7 @@ impl From<SearchReplaceSyntaxError> for WinxError {
 ///
 /// True if the content contains search/replace blocks, false if it's full content
 fn is_edit(content: &str, percentage: u32) -> bool {
-    let lines: Vec<&str> = content
-        .lstrip_matches(char::is_whitespace)
-        .lines()
-        .collect();
+    let lines: Vec<&str> = content.lstrip_matches(char::is_whitespace).lines().collect();
 
     if lines.is_empty() {
         return false;
@@ -1171,10 +1129,7 @@ fn apply_search_replace_blocks(
             }
 
             if result.total_score > 0.0 {
-                debug!(
-                    "Search/replace completed with tolerance score: {:.1}",
-                    result.total_score
-                );
+                debug!("Search/replace completed with tolerance score: {:.1}", result.total_score);
             }
 
             Ok(result.content)
@@ -1196,9 +1151,7 @@ fn format_apply_error(error: &ApplyError) -> String {
     }
 
     if let Some(ref ctx) = error.context {
-        msg.push_str(&format!(
-            "\n\nRelevant context from file:\n```\n{ctx}\n```"
-        ));
+        msg.push_str(&format!("\n\nRelevant context from file:\n```\n{ctx}\n```"));
     }
 
     msg.push_str("\n\n---\nLast edit failed, no changes are applied.");
@@ -1247,15 +1200,11 @@ fn write_to_file(path: &Path, content: &str) -> Result<()> {
     if content_bytes.len() > CHUNK_SIZE * 10 {
         // For very large content, write in chunks
         for chunk in content_bytes.chunks(CHUNK_SIZE) {
-            writer
-                .write_all(chunk)
-                .context("Failed to write chunk to file")?;
+            writer.write_all(chunk).context("Failed to write chunk to file")?;
         }
     } else {
         // For smaller content, write all at once
-        writer
-            .write_all(content_bytes)
-            .context("Failed to write to file")?;
+        writer.write_all(content_bytes).context("Failed to write to file")?;
     }
 
     // Ensure data is flushed to disk
@@ -1446,7 +1395,9 @@ pub async fn handle_tool_call(
         let bash_state_guard = bash_state_arc.lock().await;
 
         // Ensure bash state is initialized
-        let bash_state = if let Some(state) = &*bash_state_guard { state } else {
+        let bash_state = if let Some(state) = &*bash_state_guard {
+            state
+        } else {
             error!("BashState not initialized");
             return Err(WinxError::BashStateNotInitialized);
         };
@@ -1503,11 +1454,7 @@ pub async fn handle_tool_call(
     let content = &file_write_or_edit.text_or_search_replace_blocks;
 
     // Use error predictor to check for potential issues
-    let operation = if Path::new(&file_path).exists() {
-        "edit"
-    } else {
-        "write"
-    };
+    let operation = if Path::new(&file_path).exists() { "edit" } else { "write" };
     let mut potential_errors = Vec::new();
 
     // Get a mutex guard for the BashState
@@ -1519,10 +1466,7 @@ pub async fn handle_tool_call(
             bash_state.validate_file_access(Path::new(&file_path))?;
         }
         // Predict potential errors for this file operation
-        match bash_state
-            .error_predictor
-            .predict_file_errors(&file_path, operation)
-        {
+        match bash_state.error_predictor.predict_file_errors(&file_path, operation) {
             Ok(predictions) => {
                 // Filter predictions with high confidence
                 for prediction in predictions {
@@ -1543,11 +1487,8 @@ pub async fn handle_tool_call(
     drop(bash_state_guard);
 
     // Get the original content if file exists (for diff and incremental updates)
-    let original_content = if Path::new(&file_path).exists() {
-        fs::read_to_string(&file_path).ok()
-    } else {
-        None
-    };
+    let original_content =
+        if Path::new(&file_path).exists() { fs::read_to_string(&file_path).ok() } else { None };
 
     // Add warnings for predicted errors
     let mut warnings = String::new();
@@ -1592,9 +1533,7 @@ pub async fn handle_tool_call(
                 tracing::error!("Failed to get file metadata: {}", e);
                 return Err(WinxError::FileAccessError {
                     path: file_path_obj.to_path_buf(),
-                    message: format!(
-                        "Failed to get file metadata: {e}. Check file permissions."
-                    ),
+                    message: format!("Failed to get file metadata: {e}. Check file permissions."),
                 });
             }
         };
@@ -1654,10 +1593,7 @@ pub async fn handle_tool_call(
                 if let Ok(()) =
                     crate::utils::file_cache::FileCache::global().record_file_edit(file_path_obj)
                 {
-                    debug!(
-                        "Recorded failed edit in file cache for {}",
-                        file_path_obj.display()
-                    );
+                    debug!("Recorded failed edit in file cache for {}", file_path_obj.display());
                 }
 
                 return Err(e);
@@ -1683,11 +1619,7 @@ pub async fn handle_tool_call(
 
         // Write the new content to the file
         if let Err(e) = write_to_file(file_path_obj, &new_content) {
-            error!(
-                "Failed to write edited content to file {}: {}",
-                file_path_obj.display(),
-                e
-            );
+            error!("Failed to write edited content to file {}: {}", file_path_obj.display(), e);
 
             // Record the error for future prediction
             let bash_state_guard = bash_state_arc.blocking_lock();
@@ -1719,10 +1651,7 @@ pub async fn handle_tool_call(
         if let Ok(()) =
             crate::utils::file_cache::FileCache::global().record_file_edit(file_path_obj)
         {
-            debug!(
-                "Recorded successful edit in file cache for {}",
-                file_path_obj.display()
-            );
+            debug!("Recorded successful edit in file cache for {}", file_path_obj.display());
         }
 
         // Count lines for tracking
@@ -1739,8 +1668,7 @@ pub async fn handle_tool_call(
                 let line_range = (1, total_lines);
 
                 // Update or create whitelist entry
-                if let Some(whitelist_data) =
-                    bash_state.whitelist_for_overwrite.get_mut(&file_path)
+                if let Some(whitelist_data) = bash_state.whitelist_for_overwrite.get_mut(&file_path)
                 {
                     whitelist_data.file_hash = file_hash;
                     whitelist_data.total_lines = total_lines;
@@ -1757,9 +1685,7 @@ pub async fn handle_tool_call(
         // Perform syntax check after edit (matches wcgw Python behavior)
         let syntax_warning = perform_syntax_check(file_path_obj, &new_content);
 
-        Ok(format!(
-            "Successfully edited file {file_path}{diff_info}{syntax_warning}"
-        ))
+        Ok(format!("Successfully edited file {file_path}{diff_info}{syntax_warning}"))
     } else {
         // This is a full file write operation
         debug!("Processing as full file write operation");
@@ -1768,11 +1694,8 @@ pub async fn handle_tool_call(
         let file_path_obj = Path::new(&file_path);
 
         // Check if content has changed (for existing files)
-        let content_unchanged = if let Some(orig) = &original_content {
-            orig == content
-        } else {
-            false
-        };
+        let content_unchanged =
+            if let Some(orig) = &original_content { orig == content } else { false };
 
         if content_unchanged {
             return Ok(format!(
@@ -1799,11 +1722,7 @@ pub async fn handle_tool_call(
 
         // Write the content to the file
         if let Err(e) = write_to_file(file_path_obj, content) {
-            error!(
-                "Failed to write content to file {}: {}",
-                file_path_obj.display(),
-                e
-            );
+            error!("Failed to write content to file {}: {}", file_path_obj.display(), e);
             return Err(WinxError::FileWriteError {
                 path: file_path_obj.to_path_buf(),
                 message: format!("Failed to write file: {e}"),
@@ -1814,10 +1733,7 @@ pub async fn handle_tool_call(
         if let Ok(()) =
             crate::utils::file_cache::FileCache::global().record_file_write(file_path_obj)
         {
-            debug!(
-                "Recorded file write in file cache for {}",
-                file_path_obj.display()
-            );
+            debug!("Recorded file write in file cache for {}", file_path_obj.display());
         }
 
         // Count lines for tracking
@@ -1834,8 +1750,7 @@ pub async fn handle_tool_call(
                 let line_range = (1, total_lines);
 
                 // Update or create whitelist entry
-                if let Some(whitelist_data) =
-                    bash_state.whitelist_for_overwrite.get_mut(&file_path)
+                if let Some(whitelist_data) = bash_state.whitelist_for_overwrite.get_mut(&file_path)
                 {
                     whitelist_data.file_hash = file_hash;
                     whitelist_data.total_lines = total_lines;
@@ -1852,9 +1767,7 @@ pub async fn handle_tool_call(
         // Perform syntax check after write (matches wcgw Python behavior)
         let syntax_warning = perform_syntax_check(file_path_obj, content);
 
-        Ok(format!(
-            "Successfully wrote file {file_path}{diff_info}{syntax_warning}"
-        ))
+        Ok(format!("Successfully wrote file {file_path}{diff_info}{syntax_warning}"))
     }
 }
 
@@ -1863,10 +1776,7 @@ pub async fn handle_tool_call(
 /// This matches wcgw Python's post-edit syntax validation behavior
 fn perform_syntax_check(file_path: &Path, content: &str) -> String {
     // Get file extension
-    let extension = file_path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let extension = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     // Skip if no extension or empty content
     if extension.is_empty() || content.is_empty() {
@@ -1882,10 +1792,7 @@ fn perform_syntax_check(file_path: &Path, content: &str) -> String {
     }
 
     // Get filename for display
-    let filename = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
+    let filename = file_path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
 
     // Format the warning (matches wcgw Python output format)
     let context = format_syntax_error_context(&result.errors, content, filename);

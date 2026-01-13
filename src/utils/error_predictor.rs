@@ -118,10 +118,7 @@ impl ErrorPredictor {
         file_path: Option<&str>,
         directory: Option<&str>,
     ) {
-        debug!(
-            "Recording error for pattern recognition: {} - {}",
-            error_type, message
-        );
+        debug!("Recording error for pattern recognition: {} - {}", error_type, message);
 
         // Perform cleanup if needed
         if self.last_cleanup.elapsed() > Duration::from_secs(3600) {
@@ -151,32 +148,20 @@ impl ErrorPredictor {
 
         // Update specific mappings
         if let Some(file) = file_path {
-            self.file_errors
-                .entry(file.to_string())
-                .or_default()
-                .push(message.to_string());
+            self.file_errors.entry(file.to_string()).or_default().push(message.to_string());
         }
 
         if let Some(cmd) = command {
             let base_cmd = cmd.split_whitespace().next().unwrap_or(cmd);
-            self.command_errors
-                .entry(base_cmd.to_string())
-                .or_default()
-                .push(message.to_string());
+            self.command_errors.entry(base_cmd.to_string()).or_default().push(message.to_string());
         }
 
         if let Some(dir) = directory {
-            self.directory_errors
-                .entry(dir.to_string())
-                .or_default()
-                .push(message.to_string());
+            self.directory_errors.entry(dir.to_string()).or_default().push(message.to_string());
         }
 
         // Log updated patterns
-        debug!(
-            "Updated error patterns, now have {} patterns",
-            self.error_patterns.len()
-        );
+        debug!("Updated error patterns, now have {} patterns", self.error_patterns.len());
     }
 
     /// Update error patterns based on the latest error
@@ -771,8 +756,7 @@ impl ErrorPredictor {
         }
 
         // Remove old patterns
-        self.error_patterns
-            .retain(|pattern| now.duration_since(pattern.last_seen) <= max_age);
+        self.error_patterns.retain(|pattern| now.duration_since(pattern.last_seen) <= max_age);
 
         self.last_cleanup = now;
 
@@ -799,9 +783,7 @@ impl Default for SharedErrorPredictor {
 impl SharedErrorPredictor {
     /// Create a new shared error predictor
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(ErrorPredictor::new())),
-        }
+        Self { inner: Arc::new(Mutex::new(ErrorPredictor::new())) }
     }
 
     /// Record an error for future pattern recognition
@@ -879,13 +861,7 @@ impl SharedErrorPredictor {
             _ => None,
         };
 
-        self.record_error(
-            error_type,
-            &message,
-            command,
-            file_path.as_deref(),
-            directory,
-        )
+        self.record_error(error_type, &message, command, file_path.as_deref(), directory)
     }
 
     /// Predict potential errors for a command

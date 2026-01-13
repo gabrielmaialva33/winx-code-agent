@@ -118,18 +118,12 @@ impl CommandSafety {
     pub fn new() -> Self {
         let interactive_commands = INTERACTIVE_COMMANDS.iter().map(|s| (*s).to_string()).collect();
 
-        let long_running_commands = LONG_RUNNING_COMMANDS
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let long_running_commands =
+            LONG_RUNNING_COMMANDS.iter().map(|s| (*s).to_string()).collect();
 
         let background_commands = BACKGROUND_COMMANDS.iter().map(|s| (*s).to_string()).collect();
 
-        Self {
-            interactive_commands,
-            long_running_commands,
-            background_commands,
-        }
+        Self { interactive_commands, long_running_commands, background_commands }
     }
 
     /// Check if a command is potentially interactive
@@ -230,16 +224,12 @@ impl CommandSafety {
         }
 
         if self.is_long_running(command) {
-            warnings.push(format!(
-                "Command '{command}' may take a long time to complete"
-            ));
+            warnings.push(format!("Command '{command}' may take a long time to complete"));
             warnings.push("Consider using status_check to monitor progress".to_string());
         }
 
         if self.is_background_command(command) {
-            warnings.push(format!(
-                "Command '{command}' may spawn background processes"
-            ));
+            warnings.push(format!("Command '{command}' may spawn background processes"));
             warnings.push("Use explicit process management if needed".to_string());
         }
 
@@ -385,10 +375,7 @@ mod tests {
         assert_eq!(safety.get_timeout("cargo build"), Duration::from_secs(300));
 
         // Background should get 1 minute
-        assert_eq!(
-            safety.get_timeout("nohup process &"),
-            Duration::from_secs(60)
-        );
+        assert_eq!(safety.get_timeout("nohup process &"), Duration::from_secs(60));
 
         // Default should get 30 seconds
         assert_eq!(safety.get_timeout("ls"), Duration::from_secs(30));

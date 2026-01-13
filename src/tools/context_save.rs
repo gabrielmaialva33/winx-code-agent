@@ -31,9 +31,7 @@ pub async fn handle_tool_call(
     // Ensure bash state is initialized
     let bash_state_guard = bash_state.lock().await;
 
-    let bash_state = bash_state_guard
-        .as_ref()
-        .ok_or(WinxError::BashStateNotInitialized)?;
+    let bash_state = bash_state_guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
 
     // Process the ContextSave request
     let result = save_context(bash_state, args)?;
@@ -110,9 +108,7 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
         }
 
         if !found_files {
-            warnings.push(format!(
-                "Warning: No files found for the glob: {glob_pattern}"
-            ));
+            warnings.push(format!("Warning: No files found for the glob: {glob_pattern}"));
         }
     }
 
@@ -149,9 +145,7 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
 
     // Validate the task ID
     if context.id.is_empty() {
-        return Err(WinxError::ArgumentParseError(
-            "Task ID cannot be empty".to_string(),
-        ));
+        return Err(WinxError::ArgumentParseError("Task ID cannot be empty".to_string()));
     }
 
     // Read the content of the relevant files
@@ -248,10 +242,7 @@ fn format_memory(context: &ContextSave, relevant_files_data: &str) -> String {
 
     // Add project root path if provided
     if !context.project_root_path.is_empty() {
-        memory_data.push_str(&format!(
-            "Project root path: {}\n\n",
-            context.project_root_path
-        ));
+        memory_data.push_str(&format!("Project root path: {}\n\n", context.project_root_path));
     }
 
     // Add the description
@@ -259,10 +250,8 @@ fn format_memory(context: &ContextSave, relevant_files_data: &str) -> String {
     memory_data.push_str("\n\n");
 
     // Add the relevant file globs
-    memory_data.push_str(&format!(
-        "Relevant file globs: {}\n\n",
-        context.relevant_file_globs.join(", ")
-    ));
+    memory_data
+        .push_str(&format!("Relevant file globs: {}\n\n", context.relevant_file_globs.join(", ")));
 
     // Add the content of the relevant files
     memory_data.push_str("File contents:\n\n");
@@ -400,10 +389,8 @@ fn try_open_file(file_path: &str) -> Result<()> {
             if let Ok(status) = status {
                 if status.success() {
                     // Found an available command, use it
-                    let _ = std::process::Command::new(cmd)
-                        .arg(file_path)
-                        .spawn()
-                        .map_err(|e| {
+                    let _ =
+                        std::process::Command::new(cmd).arg(file_path).spawn().map_err(|e| {
                             WinxError::CommandExecutionError(format!(
                                 "Failed to spawn open command: {e}"
                             ))
@@ -420,12 +407,9 @@ fn try_open_file(file_path: &str) -> Result<()> {
     };
 
     // Try to open the file
-    let _ = std::process::Command::new(cmd)
-        .arg(file_path)
-        .spawn()
-        .map_err(|e| {
-            WinxError::CommandExecutionError(format!("Failed to spawn open command: {e}"))
-        })?;
+    let _ = std::process::Command::new(cmd).arg(file_path).spawn().map_err(|e| {
+        WinxError::CommandExecutionError(format!("Failed to spawn open command: {e}"))
+    })?;
 
     // We don't actually need to wait for the command to complete
     // Just let it run in the background
@@ -445,11 +429,10 @@ fn save_to_temp_file(memory_data: String, context: &ContextSave) -> Result<Strin
         message: format!("Failed to create temporary file: {e}"),
     })?;
 
-    file.write_all(memory_data.as_bytes())
-        .map_err(|e| WinxError::FileAccessError {
-            path: temp_file_path.clone(),
-            message: format!("Failed to write to temporary file: {e}"),
-        })?;
+    file.write_all(memory_data.as_bytes()).map_err(|e| WinxError::FileAccessError {
+        path: temp_file_path.clone(),
+        message: format!("Failed to write to temporary file: {e}"),
+    })?;
 
     let path_str = temp_file_path.to_string_lossy().to_string();
 
@@ -470,11 +453,7 @@ fn sanitize_filename(input: &str) -> String {
     // Limit length to avoid issues
     if result.len() > 50 {
         use rand::Rng;
-        result = format!(
-            "{}-{}",
-            &result[0..45],
-            rand::rng().random_range(1000..9999)
-        );
+        result = format!("{}-{}", &result[0..45], rand::rng().random_range(1000..9999));
     }
 
     result

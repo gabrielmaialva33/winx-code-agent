@@ -3,15 +3,13 @@
 //! These tests verify the tool handlers work correctly in realistic scenarios.
 
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 
 use winx_code_agent::errors::Result;
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::tools::WinxService;
-use winx_code_agent::types::{
-    Initialize, InitializeType, ModeName, ReadFiles,
-};
+use winx_code_agent::types::{Initialize, InitializeType, ModeName, ReadFiles};
 
 // ==================== WinxService Tests ====================
 
@@ -45,7 +43,8 @@ async fn test_initialize_first_call_wcgw_mode() -> Result<()> {
         task_id_to_resume: String::new(),
     };
 
-    let response = winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+    let response =
+        winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     // Verify response contains expected content
     assert!(response.contains("Initialized"));
@@ -77,7 +76,8 @@ async fn test_initialize_architect_mode() -> Result<()> {
         task_id_to_resume: String::new(),
     };
 
-    let response = winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+    let response =
+        winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     assert!(response.contains("Initialized"));
 
@@ -106,7 +106,8 @@ async fn test_initialize_with_file_path() -> Result<()> {
         task_id_to_resume: String::new(),
     };
 
-    let response = winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+    let response =
+        winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     // When path is a file, should use parent directory
     assert!(response.contains("parent directory") || response.contains("Initialized"));
@@ -148,7 +149,8 @@ async fn test_initialize_mode_change() -> Result<()> {
         task_id_to_resume: String::new(),
     };
 
-    let response = winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, mode_change).await?;
+    let response =
+        winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, mode_change).await?;
     assert!(response.contains("Changed mode"));
 
     Ok(())
@@ -182,7 +184,8 @@ async fn test_read_files_single_file() -> Result<()> {
         end_line_nums: vec![None],
     };
 
-    let response = winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
+    let response =
+        winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
 
     assert!(response.contains("fn main()"));
     assert!(response.contains("println!"));
@@ -213,15 +216,13 @@ async fn test_read_files_multiple_files() -> Result<()> {
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     let read = ReadFiles {
-        file_paths: vec![
-            file1.to_string_lossy().to_string(),
-            file2.to_string_lossy().to_string(),
-        ],
+        file_paths: vec![file1.to_string_lossy().to_string(), file2.to_string_lossy().to_string()],
         start_line_nums: vec![None, None],
         end_line_nums: vec![None, None],
     };
 
-    let response = winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
+    let response =
+        winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
 
     assert!(response.contains("Content of file 1"));
     assert!(response.contains("Content of file 2"));
@@ -256,7 +257,8 @@ async fn test_read_files_with_line_range() -> Result<()> {
         end_line_nums: vec![Some(4)],
     };
 
-    let response = winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
+    let response =
+        winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
 
     assert!(response.contains("Line 2"));
     assert!(response.contains("Line 3"));
@@ -288,7 +290,8 @@ async fn test_read_files_nonexistent() -> Result<()> {
         end_line_nums: vec![None],
     };
 
-    let response = winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
+    let response =
+        winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
 
     // Should contain some indication of failure - could be error message or empty result
     // Different error formats: "Error", "not found", "No such file", "does not exist", "failed"
@@ -357,7 +360,8 @@ async fn test_code_writer_mode() -> Result<()> {
         task_id_to_resume: String::new(),
     };
 
-    let response = winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+    let response =
+        winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     assert!(response.contains("CodeWriter") || response.contains("Initialized"));
 
@@ -389,7 +393,8 @@ async fn test_initialize_with_initial_files() -> Result<()> {
         task_id_to_resume: String::new(),
     };
 
-    let response = winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+    let response =
+        winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     // Response should include content from initial file
     assert!(response.contains("Initial file content") || response.contains("Requested files"));
@@ -404,12 +409,12 @@ async fn test_context_save_basic() -> Result<()> {
     use winx_code_agent::types::ContextSave;
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    
+
     // Create a test file to be included via glob
     let test_file = temp_dir.path().join("src/main.rs");
     std::fs::create_dir_all(test_file.parent().unwrap()).expect("Failed to create src dir");
     std::fs::write(&test_file, "fn main() { println!(\"Hello\"); }").expect("Failed to write file");
-    
+
     // Initialize bash state first
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
     let init = Initialize {
@@ -422,25 +427,29 @@ async fn test_context_save_basic() -> Result<()> {
         task_id_to_resume: String::new(),
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
-    
+
     // Generate unique ID for test
-    let unique_id = format!("test-context-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis());
-    
+    let unique_id = format!(
+        "test-context-{}",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+    );
+
     let context_save = ContextSave {
         id: unique_id.clone(),
         project_root_path: temp_dir.path().to_string_lossy().to_string(),
         description: "Test context save for integration tests".to_string(),
         relevant_file_globs: vec!["src/*.rs".to_string()],
     };
-    
-    let response = winx_code_agent::tools::context_save::handle_tool_call(&bash_state_arc, context_save).await?;
-    
+
+    let response =
+        winx_code_agent::tools::context_save::handle_tool_call(&bash_state_arc, context_save)
+            .await?;
+
     // Response should contain the path where context was saved
-    assert!(response.contains(&unique_id) || response.contains(".txt") || response.contains("saved"));
-    
+    assert!(
+        response.contains(&unique_id) || response.contains(".txt") || response.contains("saved")
+    );
+
     Ok(())
 }
 
@@ -449,7 +458,7 @@ async fn test_context_save_empty_globs() -> Result<()> {
     use winx_code_agent::types::ContextSave;
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    
+
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
     let init = Initialize {
@@ -462,24 +471,26 @@ async fn test_context_save_empty_globs() -> Result<()> {
         task_id_to_resume: String::new(),
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
-    
-    let unique_id = format!("test-empty-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis());
-    
+
+    let unique_id = format!(
+        "test-empty-{}",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+    );
+
     let context_save = ContextSave {
         id: unique_id,
         project_root_path: temp_dir.path().to_string_lossy().to_string(),
         description: "Test with empty globs".to_string(),
         relevant_file_globs: vec![],
     };
-    
-    let response = winx_code_agent::tools::context_save::handle_tool_call(&bash_state_arc, context_save).await?;
-    
+
+    let response =
+        winx_code_agent::tools::context_save::handle_tool_call(&bash_state_arc, context_save)
+            .await?;
+
     // Should still succeed even with no globs
     assert!(response.contains(".txt") || response.contains("saved"));
-    
+
     Ok(())
 }
 
@@ -488,7 +499,7 @@ async fn test_context_save_no_matching_files() -> Result<()> {
     use winx_code_agent::types::ContextSave;
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    
+
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
     let init = Initialize {
@@ -501,25 +512,31 @@ async fn test_context_save_no_matching_files() -> Result<()> {
         task_id_to_resume: String::new(),
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
-    
-    let unique_id = format!("test-nomatch-{}", std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_millis());
-    
+
+    let unique_id = format!(
+        "test-nomatch-{}",
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+    );
+
     let context_save = ContextSave {
         id: unique_id,
         project_root_path: temp_dir.path().to_string_lossy().to_string(),
         description: "Test with non-matching glob".to_string(),
         relevant_file_globs: vec!["*.nonexistent".to_string()],
     };
-    
-    let response = winx_code_agent::tools::context_save::handle_tool_call(&bash_state_arc, context_save).await?;
-    
+
+    let response =
+        winx_code_agent::tools::context_save::handle_tool_call(&bash_state_arc, context_save)
+            .await?;
+
     // Should warn about no files found but still save
     let response_lower = response.to_lowercase();
-    assert!(response_lower.contains("no files") || response_lower.contains("warning") || response.contains(".txt"));
-    
+    assert!(
+        response_lower.contains("no files")
+            || response_lower.contains("warning")
+            || response.contains(".txt")
+    );
+
     Ok(())
 }
 
@@ -530,7 +547,7 @@ async fn test_read_image_png() -> Result<()> {
     use winx_code_agent::types::ReadImage;
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    
+
     // Create a minimal valid PNG file (1x1 red pixel)
     // PNG header + IHDR + IDAT + IEND chunks
     let png_data: Vec<u8> = vec![
@@ -544,16 +561,17 @@ async fn test_read_image_png() -> Result<()> {
         0x90, 0x77, 0x53, 0xDE, // CRC
         0x00, 0x00, 0x00, 0x0C, // IDAT length
         0x49, 0x44, 0x41, 0x54, // IDAT
-        0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x01, 0x01, 0x01, 0x00, // compressed data
+        0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x01, 0x01, 0x01,
+        0x00, // compressed data
         0x18, 0xDD, 0x8D, 0xB5, // CRC
         0x00, 0x00, 0x00, 0x00, // IEND length
         0x49, 0x45, 0x4E, 0x44, // IEND
         0xAE, 0x42, 0x60, 0x82, // CRC
     ];
-    
+
     let image_path = temp_dir.path().join("test.png");
     std::fs::write(&image_path, &png_data).expect("Failed to write PNG");
-    
+
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
     let init = Initialize {
@@ -566,24 +584,23 @@ async fn test_read_image_png() -> Result<()> {
         task_id_to_resume: String::new(),
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
-    
-    let read_image = ReadImage {
-        file_path: image_path.to_string_lossy().to_string(),
-    };
-    
-    let (mime_type, base64_data) = winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await?;
-    
+
+    let read_image = ReadImage { file_path: image_path.to_string_lossy().to_string() };
+
+    let (mime_type, base64_data) =
+        winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await?;
+
     // Verify MIME type
     assert_eq!(mime_type, "image/png");
-    
+
     // Verify base64 data is not empty
     assert!(!base64_data.is_empty());
-    
+
     // Decode and verify it matches original
     use base64::{engine::general_purpose, Engine};
     let decoded = general_purpose::STANDARD.decode(&base64_data).expect("Failed to decode base64");
     assert_eq!(decoded, png_data);
-    
+
     Ok(())
 }
 
@@ -592,7 +609,7 @@ async fn test_read_image_jpeg() -> Result<()> {
     use winx_code_agent::types::ReadImage;
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    
+
     // Create a minimal valid JPEG file
     // SOI + APP0 + DQT + SOF0 + DHT + SOS + EOI
     let jpeg_data: Vec<u8> = vec![
@@ -606,10 +623,10 @@ async fn test_read_image_jpeg() -> Result<()> {
         0x00, 0x00, // thumbnail
         0xFF, 0xD9, // EOI
     ];
-    
+
     let image_path = temp_dir.path().join("test.jpg");
     std::fs::write(&image_path, &jpeg_data).expect("Failed to write JPEG");
-    
+
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
     let init = Initialize {
@@ -622,16 +639,15 @@ async fn test_read_image_jpeg() -> Result<()> {
         task_id_to_resume: String::new(),
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
-    
-    let read_image = ReadImage {
-        file_path: image_path.to_string_lossy().to_string(),
-    };
-    
-    let (mime_type, _base64_data) = winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await?;
-    
+
+    let read_image = ReadImage { file_path: image_path.to_string_lossy().to_string() };
+
+    let (mime_type, _base64_data) =
+        winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await?;
+
     // Verify MIME type
     assert_eq!(mime_type, "image/jpeg");
-    
+
     Ok(())
 }
 
@@ -640,7 +656,7 @@ async fn test_read_image_nonexistent() -> Result<()> {
     use winx_code_agent::types::ReadImage;
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    
+
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
     let init = Initialize {
@@ -653,16 +669,17 @@ async fn test_read_image_nonexistent() -> Result<()> {
         task_id_to_resume: String::new(),
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
-    
+
     let read_image = ReadImage {
         file_path: temp_dir.path().join("nonexistent.png").to_string_lossy().to_string(),
     };
-    
-    let result = winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await;
-    
+
+    let result =
+        winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await;
+
     // Should return an error for non-existent file
     assert!(result.is_err());
-    
+
     Ok(())
 }
 
@@ -671,11 +688,11 @@ async fn test_read_image_non_image_file() -> Result<()> {
     use winx_code_agent::types::ReadImage;
 
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
-    
+
     // Create a text file (not an image)
     let text_path = temp_dir.path().join("test.txt");
     std::fs::write(&text_path, "This is not an image").expect("Failed to write text file");
-    
+
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
     let init = Initialize {
@@ -688,20 +705,23 @@ async fn test_read_image_non_image_file() -> Result<()> {
         task_id_to_resume: String::new(),
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
-    
-    let read_image = ReadImage {
-        file_path: text_path.to_string_lossy().to_string(),
-    };
-    
+
+    let read_image = ReadImage { file_path: text_path.to_string_lossy().to_string() };
+
     // ReadImage should still work (returns base64 of any file with guessed MIME type)
     // It falls back to image/jpeg for unknown types per the implementation
-    let result = winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await;
-    
+    let result =
+        winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await;
+
     // The function should succeed but with fallback MIME type
     match result {
         Ok((mime_type, base64_data)) => {
             // It uses fallback for unknown extensions
-            assert!(mime_type == "image/jpeg" || mime_type == "text/plain" || mime_type.starts_with("text/"));
+            assert!(
+                mime_type == "image/jpeg"
+                    || mime_type == "text/plain"
+                    || mime_type.starts_with("text/")
+            );
             assert!(!base64_data.is_empty());
         }
         Err(_) => {
@@ -709,6 +729,6 @@ async fn test_read_image_non_image_file() -> Result<()> {
             // This is also acceptable behavior
         }
     }
-    
+
     Ok(())
 }

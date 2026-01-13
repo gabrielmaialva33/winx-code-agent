@@ -1,17 +1,8 @@
 edition = "2021"
 max_width = 100
 use_small_heuristics = "Max"
-imports_granularity = "Crate"
-group_imports = "StdExternalCrate"
 reorder_imports = true
 reorder_modules = true
 remove_nested_parens = true
 use_field_init_shorthand = true
 use_try_shorthand = true
-format_code_in_doc_comments = true
-format_macro_matchers = true
-format_strings = true
-wrap_comments = true
-comment_width = 100
-normalize_comments = true
-normalize_doc_attributes = true

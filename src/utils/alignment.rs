@@ -12,11 +12,7 @@ use crate::utils::path::expand_user;
 /// Check if ripgrep (rg) is available in the system
 /// Matches wcgw Python: subprocess.run(["which", "rg"], ...)
 pub fn check_ripgrep_available() -> bool {
-    Command::new("which")
-        .arg("rg")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false)
+    Command::new("which").arg("rg").output().map(|output| output.status.success()).unwrap_or(false)
 }
 
 /// Read alignment file content (CLAUDE.md or AGENTS.md)
@@ -98,11 +94,7 @@ pub fn read_initial_files(
                 file_ranges.push((abs_path.to_string_lossy().to_string(), (1, total_lines)));
             }
             Err(e) => {
-                content.push_str(&format!(
-                    "{}: Error reading file: {}\n",
-                    abs_path.display(),
-                    e
-                ));
+                content.push_str(&format!("{}: Error reading file: {}\n", abs_path.display(), e));
             }
         }
     }
@@ -139,7 +131,8 @@ pub fn load_task_context(task_id: &str) -> Option<(PathBuf, String, Option<Strin
             let path_str = line.trim_start_matches("# PROJECT ROOT = ").trim();
             // Handle shell-quoted paths
             shell_unquote(path_str)
-        }).map_or_else(|| PathBuf::from("."), PathBuf::from);
+        })
+        .map_or_else(|| PathBuf::from("."), PathBuf::from);
 
     // Try to read bash state
     let bash_state = fs::read_to_string(&state_file).ok();

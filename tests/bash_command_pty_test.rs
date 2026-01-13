@@ -5,17 +5,15 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tempfile::TempDir;
 
 use winx_code_agent::errors::Result;
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::state::pty::PtyShell;
 use winx_code_agent::tools;
-use winx_code_agent::types::{
-    Initialize, InitializeType, ModeName,
-};
+use winx_code_agent::types::{Initialize, InitializeType, ModeName};
 
 /// Helper to initialize bash state
 async fn setup_bash_state(thread_id: &str) -> (Arc<Mutex<Option<BashState>>>, TempDir) {
@@ -48,8 +46,7 @@ async fn test_pty_shell_direct_echo() -> Result<()> {
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
 
     // Create PTY shell directly
-    let mut shell = PtyShell::new(temp_dir.path(), false)
-        .expect("Failed to create PTY shell");
+    let mut shell = PtyShell::new(temp_dir.path(), false).expect("Failed to create PTY shell");
 
     println!("[TEST] Sending echo command...");
     shell.send_command("echo 'hello from pty'").expect("Failed to send command");
@@ -188,14 +185,14 @@ async fn test_pty_shell_file_operations() -> Result<()> {
 
     // Create file
     println!("[TEST] Creating file...");
-    shell.send_command(&format!("echo 'file content' > {}", file_path.display()))
+    shell
+        .send_command(&format!("echo 'file content' > {}", file_path.display()))
         .expect("Failed to send command");
     let (_, _) = shell.read_output(3.0).expect("Failed to read output");
 
     // Read file
     println!("[TEST] Reading file...");
-    shell.send_command(&format!("cat {}", file_path.display()))
-        .expect("Failed to send command");
+    shell.send_command(&format!("cat {}", file_path.display())).expect("Failed to send command");
     let (output, _) = shell.read_output(3.0).expect("Failed to read output");
 
     println!("[TEST] Output:\n{}", output);
@@ -203,7 +200,8 @@ async fn test_pty_shell_file_operations() -> Result<()> {
 
     // Delete file
     println!("[TEST] Deleting file...");
-    shell.send_command(&format!("rm {} && echo 'deleted'", file_path.display()))
+    shell
+        .send_command(&format!("rm {} && echo 'deleted'", file_path.display()))
         .expect("Failed to send command");
     let (output2, _) = shell.read_output(3.0).expect("Failed to read output");
 
@@ -261,7 +259,12 @@ async fn test_full_pty_workflow() -> Result<()> {
     // 5. File operations
     println!("\n--- Step 5: File operations ---");
     let file_path = temp_dir.path().join("test.txt");
-    shell.send_command(&format!("echo 'content' > {} && cat {}", file_path.display(), file_path.display()))
+    shell
+        .send_command(&format!(
+            "echo 'content' > {} && cat {}",
+            file_path.display(),
+            file_path.display()
+        ))
         .expect("send");
     let (r5, _) = shell.read_output(5.0).expect("read");
     println!("Result:\n{}", r5);

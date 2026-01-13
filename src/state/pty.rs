@@ -86,17 +86,11 @@ impl PtyShell {
         let pty_system = native_pty_system();
 
         // Configure terminal size
-        let size = PtySize {
-            rows: DEFAULT_ROWS,
-            cols: DEFAULT_COLS,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
+        let size =
+            PtySize { rows: DEFAULT_ROWS, cols: DEFAULT_COLS, pixel_width: 0, pixel_height: 0 };
 
         // Open the PTY pair (master + slave)
-        let pair = pty_system
-            .openpty(size)
-            .context("Failed to open PTY pair")?;
+        let pair = pty_system.openpty(size).context("Failed to open PTY pair")?;
 
         // Build the command
         let mut cmd = CommandBuilder::new("bash");
@@ -113,27 +107,15 @@ impl PtyShell {
         cmd.env("ROWS", DEFAULT_ROWS.to_string());
         // WCGW-style prompt for command completion detection
         // Note: removed \r\e[2K which was erasing the prompt before it could be detected
-        cmd.env(
-            "PROMPT_COMMAND",
-            r#"printf '◉ '"$(pwd)"'──➤ '"#,
-        );
+        cmd.env("PROMPT_COMMAND", r#"printf '◉ '"$(pwd)"'──➤ '"#);
         cmd.cwd(initial_dir);
 
         // Spawn bash in the PTY slave
-        let _child = pair
-            .slave
-            .spawn_command(cmd)
-            .context("Failed to spawn bash in PTY")?;
+        let _child = pair.slave.spawn_command(cmd).context("Failed to spawn bash in PTY")?;
 
         // Get reader and writer from master
-        let mut reader = pair
-            .master
-            .try_clone_reader()
-            .context("Failed to clone PTY reader")?;
-        let writer = pair
-            .master
-            .take_writer()
-            .context("Failed to take PTY writer")?;
+        let mut reader = pair.master.try_clone_reader().context("Failed to clone PTY reader")?;
+        let writer = pair.master.take_writer().context("Failed to take PTY writer")?;
 
         // Create channel for output from reader thread
         let (output_tx, output_rx) = mpsc::channel::<String>();
@@ -204,9 +186,7 @@ impl PtyShell {
     fn write_command(&mut self, command: &str) -> Result<()> {
         // Commands in PTY need \r\n for proper terminal behavior
         let cmd_with_newline = format!("{command}\n");
-        self.writer
-            .write_all(cmd_with_newline.as_bytes())
-            .context("Failed to write to PTY")?;
+        self.writer.write_all(cmd_with_newline.as_bytes()).context("Failed to write to PTY")?;
         self.writer.flush().context("Failed to flush PTY")?;
         Ok(())
     }
@@ -277,7 +257,8 @@ impl PtyShell {
 
                     // Check for WCGW prompt indicating command completion
                     if prompt_detected_at.is_none()
-                        && (self.check_prompt_complete(&chunk) || self.check_prompt_complete(&self.output_buffer))
+                        && (self.check_prompt_complete(&chunk)
+                            || self.check_prompt_complete(&self.output_buffer))
                     {
                         prompt_detected_at = Some(Instant::now());
                         debug!("Prompt detected, draining remaining output...");
@@ -308,7 +289,8 @@ impl PtyShell {
                             debug!("Command completed - prompt detected and drained");
                             break;
                         }
-                    } else if no_data_count > 10 && self.check_prompt_complete(&self.output_buffer) {
+                    } else if no_data_count > 10 && self.check_prompt_complete(&self.output_buffer)
+                    {
                         // Prompt detected during empty reads
                         prompt_detected_at = Some(Instant::now());
                         debug!("Prompt detected after wait, draining...");
@@ -370,9 +352,7 @@ impl PtyShell {
     /// Send text directly to the PTY (for interactive input)
     pub fn send_text(&mut self, text: &str) -> Result<()> {
         debug!("PTY sending text: {:?}", text);
-        self.writer
-            .write_all(text.as_bytes())
-            .context("Failed to send text")?;
+        self.writer.write_all(text.as_bytes()).context("Failed to send text")?;
         self.writer.flush()?;
         Ok(())
     }
@@ -411,16 +391,9 @@ impl PtyShell {
     pub fn resize(&mut self, cols: u16, rows: u16) -> Result<()> {
         debug!("PTY resizing to {}x{}", cols, rows);
 
-        let new_size = PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
+        let new_size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
 
-        self.master
-            .resize(new_size)
-            .context("Failed to resize PTY")?;
+        self.master.resize(new_size).context("Failed to resize PTY")?;
 
         self.size = new_size;
         Ok(())
@@ -482,11 +455,7 @@ mod tests {
         let (output, _complete) = shell.read_output(2.0).unwrap();
 
         // Verify the echo marker appears (proves command executed)
-        assert!(
-            output.contains("pwd_done"),
-            "Output should contain 'pwd_done': {}",
-            output
-        );
+        assert!(output.contains("pwd_done"), "Output should contain 'pwd_done': {}", output);
     }
 
     #[test]

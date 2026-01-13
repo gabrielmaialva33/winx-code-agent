@@ -53,10 +53,7 @@ impl MemorySystem {
         let app_dir = Self::get_app_dir_xdg();
         let memory_dir = app_dir.join("memory");
 
-        Self {
-            app_dir,
-            memory_dir,
-        }
+        Self { app_dir, memory_dir }
     }
 
     /// Get the XDG-compliant application data directory
@@ -101,11 +98,8 @@ impl MemorySystem {
 
         // Add relevant file patterns
         memory_data.push_str("\n\n# Relevant file paths\n");
-        let quoted_globs: Vec<String> = task_memory
-            .relevant_file_globs
-            .iter()
-            .map(|glob| shell_quote(glob))
-            .collect();
+        let quoted_globs: Vec<String> =
+            task_memory.relevant_file_globs.iter().map(|glob| shell_quote(glob)).collect();
         memory_data.push_str(&quoted_globs.join(", "));
 
         // Add relevant files content
@@ -164,9 +158,8 @@ impl MemorySystem {
             let state_json = serde_json::to_string_pretty(&state_data)
                 .context("Failed to serialize bash state")?;
 
-            fs::write(&state_file_path, state_json).with_context(|| {
-                format!("Failed to write bash state file: {state_file_path:?}")
-            })?;
+            fs::write(&state_file_path, state_json)
+                .with_context(|| format!("Failed to write bash state file: {state_file_path:?}"))?;
 
             debug!("Saved bash state to: {:?}", state_file_path);
         }
@@ -192,9 +185,7 @@ impl MemorySystem {
         let memory_file_path = self.memory_dir.join(format!("{task_id}.txt"));
 
         if !memory_file_path.exists() {
-            return Err(anyhow::anyhow!(
-                "Memory file not found for task: {task_id}"
-            ));
+            return Err(anyhow::anyhow!("Memory file not found for task: {task_id}"));
         }
 
         info!("Loading memory for task: {}", task_id);
@@ -402,10 +393,7 @@ mod tests {
         let app_dir = temp_dir.path().join("winx-test");
         let memory_dir = app_dir.join("memory");
 
-        let memory_system = MemorySystem {
-            app_dir,
-            memory_dir,
-        };
+        let memory_system = MemorySystem { app_dir, memory_dir };
 
         (memory_system, temp_dir)
     }
@@ -439,27 +427,18 @@ mod tests {
     fn test_shell_quoting() {
         assert_eq!(shell_quote("simple"), "simple");
         assert_eq!(shell_quote("path with spaces"), "\"path with spaces\"");
-        assert_eq!(
-            shell_quote("path\"with\"quotes"),
-            "\"path\\\"with\\\"quotes\""
-        );
+        assert_eq!(shell_quote("path\"with\"quotes"), "\"path\\\"with\\\"quotes\"");
     }
 
     #[test]
     fn test_shell_unquoting() {
         assert_eq!(shell_unquote("simple"), Some("simple".to_string()));
-        assert_eq!(
-            shell_unquote("\"quoted path\""),
-            Some("quoted path".to_string())
-        );
+        assert_eq!(shell_unquote("\"quoted path\""), Some("quoted path".to_string()));
         assert_eq!(
             shell_unquote("\"path\\\"with\\\"quotes\""),
             Some("path\"with\"quotes".to_string())
         );
-        assert_eq!(
-            shell_unquote("'single quoted'"),
-            Some("single quoted".to_string())
-        );
+        assert_eq!(shell_unquote("'single quoted'"), Some("single quoted".to_string()));
     }
 
     #[test]
@@ -479,9 +458,7 @@ mod tests {
         let relevant_files = "Test file content";
 
         // Save memory
-        let saved_path = memory_system
-            .save_memory(&context_save, relevant_files, None)
-            .unwrap();
+        let saved_path = memory_system.save_memory(&context_save, relevant_files, None).unwrap();
         assert!(saved_path.exists());
 
         // Load memory

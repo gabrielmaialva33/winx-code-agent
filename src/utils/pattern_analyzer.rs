@@ -72,17 +72,13 @@ impl PatternAnalyzer {
         let normalized = self.normalize_command(command);
 
         // Update command history
-        self.command_history
-            .push_back((normalized.clone(), Instant::now()));
+        self.command_history.push_back((normalized.clone(), Instant::now()));
         if self.command_history.len() > MAX_HISTORY_SIZE {
             self.command_history.pop_front();
         }
 
         // Update frequency map
-        *self
-            .command_frequency
-            .entry(normalized.clone())
-            .or_insert(0) += 1;
+        *self.command_frequency.entry(normalized.clone()).or_insert(0) += 1;
 
         // Update sequence patterns if there's a previous command
         if let Some((prev_cmd, _)) = self.command_history.iter().rev().nth(1) {
@@ -91,10 +87,7 @@ impl PatternAnalyzer {
         }
 
         // Update directory context
-        let dir_commands = self
-            .directory_context
-            .entry(current_dir.to_string())
-            .or_default();
+        let dir_commands = self.directory_context.entry(current_dir.to_string()).or_default();
 
         // Only add if it's not already in the list
         if !dir_commands.contains(&normalized) {
@@ -252,18 +245,12 @@ impl PatternAnalyzer {
 
     /// Extract keywords from a string
     fn extract_keywords(&self, text: &str) -> Vec<String> {
-        text.split_whitespace()
-            .filter(|word| word.len() > 3)
-            .map(str::to_lowercase)
-            .collect()
+        text.split_whitespace().filter(|word| word.len() > 3).map(str::to_lowercase).collect()
     }
 
     /// Get command history
     pub fn get_history(&self) -> Vec<String> {
-        self.command_history
-            .iter()
-            .map(|(cmd, _)| cmd.clone())
-            .collect()
+        self.command_history.iter().map(|(cmd, _)| cmd.clone()).collect()
     }
 
     /// Clear the pattern analyzer history and patterns
@@ -304,9 +291,7 @@ impl Default for SharedPatternAnalyzer {
 impl SharedPatternAnalyzer {
     /// Create a new shared pattern analyzer
     pub fn new() -> Self {
-        Self {
-            inner: Arc::new(tokio::sync::Mutex::new(PatternAnalyzer::new())),
-        }
+        Self { inner: Arc::new(tokio::sync::Mutex::new(PatternAnalyzer::new())) }
     }
 
     /// Record a command in the shared analyzer

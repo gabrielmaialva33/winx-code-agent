@@ -12,11 +12,8 @@ use crate::utils::path_analyzer;
 /// Gets a simple directory structure representation for the workspace path
 pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error> {
     // Ensure path is absolute and exists
-    let abs_path = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()?.join(path)
-    };
+    let abs_path =
+        if path.is_absolute() { path.to_path_buf() } else { std::env::current_dir()?.join(path) };
 
     if !abs_path.exists() {
         return Err(std::io::Error::new(
@@ -50,10 +47,8 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
         }
 
         // Skip hidden directories and common large directories
-        let dir_name = dir_path
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let dir_name =
+            dir_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
 
         if dir_name.starts_with('.') && dir_name != "." && depth > 0 {
             continue;
@@ -117,9 +112,7 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
                 // Add subdirectories to the queue
                 if depth < max_depth {
                     dirs.sort_by(|a, b| {
-                        a.file_name()
-                            .unwrap_or_default()
-                            .cmp(b.file_name().unwrap_or_default())
+                        a.file_name().unwrap_or_default().cmp(b.file_name().unwrap_or_default())
                     });
 
                     for dir in dirs {
@@ -128,11 +121,7 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
                 }
             }
             Err(_) => {
-                writeln!(
-                    output,
-                    "{}    <error reading directory>",
-                    "  ".repeat(indent)
-                )?;
+                writeln!(output, "{}    <error reading directory>", "  ".repeat(indent))?;
             }
         }
     }
@@ -149,11 +138,7 @@ pub fn get_repo_context(path: &Path) -> Result<(String, PathBuf), std::io::Error
 pub fn get_git_info(path: &Path) -> Option<String> {
     // Helper function to run a Git command
     fn run_git_command(dir: &Path, args: &[&str]) -> Option<String> {
-        let output = std::process::Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .output()
-            .ok()?;
+        let output = std::process::Command::new("git").current_dir(dir).args(args).output().ok()?;
 
         if output.status.success() {
             Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
@@ -236,10 +221,7 @@ impl WorkspaceStats {
 
     /// Record a file access
     pub fn record_file_access(&mut self, file_path: &str) {
-        let count = self
-            .file_access_counts
-            .entry(file_path.to_string())
-            .or_insert(0);
+        let count = self.file_access_counts.entry(file_path.to_string()).or_insert(0);
         *count += 1;
 
         self.recently_viewed_files.insert(file_path.to_string());
@@ -247,12 +229,7 @@ impl WorkspaceStats {
         // Limit the size of recently viewed files
         if self.recently_viewed_files.len() > 50 {
             // Remove the oldest entries - in this simplified version we just clear half
-            let to_keep: Vec<_> = self
-                .recently_viewed_files
-                .iter()
-                .take(25)
-                .cloned()
-                .collect();
+            let to_keep: Vec<_> = self.recently_viewed_files.iter().take(25).cloned().collect();
 
             self.recently_viewed_files.clear();
             for item in to_keep {
@@ -263,10 +240,7 @@ impl WorkspaceStats {
 
     /// Record a file edit
     pub fn record_file_edit(&mut self, file_path: &str) {
-        let count = self
-            .file_edit_counts
-            .entry(file_path.to_string())
-            .or_insert(0);
+        let count = self.file_edit_counts.entry(file_path.to_string()).or_insert(0);
         *count += 1;
 
         self.recently_edited_files.insert(file_path.to_string());
@@ -274,12 +248,7 @@ impl WorkspaceStats {
         // Limit the size of recently edited files
         if self.recently_edited_files.len() > 30 {
             // Remove the oldest entries - in this simplified version we just clear half
-            let to_keep: Vec<_> = self
-                .recently_edited_files
-                .iter()
-                .take(15)
-                .cloned()
-                .collect();
+            let to_keep: Vec<_> = self.recently_edited_files.iter().take(15).cloned().collect();
 
             self.recently_edited_files.clear();
             for item in to_keep {
@@ -290,8 +259,7 @@ impl WorkspaceStats {
 
     /// Update file modification time
     pub fn update_file_modified_time(&mut self, file_path: &str, modified_time: SystemTime) {
-        self.file_modified_times
-            .insert(file_path.to_string(), modified_time);
+        self.file_modified_times.insert(file_path.to_string(), modified_time);
     }
 
     /// Refresh workspace stats by scanning the filesystem
@@ -346,11 +314,7 @@ impl WorkspaceStats {
         let mut files: Vec<(String, usize)> = activity_scores.into_iter().collect();
         files.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by score in descending order
 
-        files
-            .into_iter()
-            .take(limit)
-            .map(|(file, _)| file)
-            .collect()
+        files.into_iter().take(limit).map(|(file, _)| file).collect()
     }
 
     /// Get recently modified files within a specific timeframe
@@ -373,11 +337,7 @@ impl WorkspaceStats {
         // Sort by modification time (most recent first)
         recent_files.sort_by(|a, b| b.1.cmp(&a.1));
 
-        recent_files
-            .into_iter()
-            .take(limit)
-            .map(|(file, _)| file)
-            .collect()
+        recent_files.into_iter().take(limit).map(|(file, _)| file).collect()
     }
 }
 
@@ -417,20 +377,11 @@ fn collect_files_par(
             files.push(path);
         } else if path.is_dir() {
             // Skip common directories to ignore
-            let dir_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
+            let dir_name =
+                path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
 
-            if [
-                "node_modules",
-                "target",
-                "venv",
-                "dist",
-                ".git",
-                "__pycache__",
-            ]
-            .contains(&dir_name.as_str())
+            if ["node_modules", "target", "venv", "dist", ".git", "__pycache__"]
+                .contains(&dir_name.as_str())
             {
                 continue;
             }
@@ -441,11 +392,7 @@ fn collect_files_par(
 
     // If we have many subdirectories, process them in parallel
     if dirs.len() > 10 {
-        debug!(
-            "Using parallel processing for {} subdirectories in {}",
-            dirs.len(),
-            dir.display()
-        );
+        debug!("Using parallel processing for {} subdirectories in {}", dirs.len(), dir.display());
 
         let exclude_patterns_owned = exclude_patterns
             .map(|patterns| patterns.iter().map(|&s| s.to_owned()).collect::<Vec<_>>());
@@ -454,9 +401,9 @@ fn collect_files_par(
         let subdir_files: Vec<PathBuf> = dirs
             .into_par_iter()
             .flat_map(|subdir| {
-                let exclude_patterns_refs = exclude_patterns_owned
-                    .as_ref()
-                    .map(|patterns| patterns.iter().map(std::string::String::as_str).collect::<Vec<_>>());
+                let exclude_patterns_refs = exclude_patterns_owned.as_ref().map(|patterns| {
+                    patterns.iter().map(std::string::String::as_str).collect::<Vec<_>>()
+                });
 
                 collect_files_par(&subdir, exclude_patterns_refs.as_deref()).unwrap_or_default()
             })
@@ -591,10 +538,7 @@ pub fn get_relevant_files(
 
     // Convert PathBufs to relative path Strings in parallel for large repositories
     let file_paths: Vec<String> = if files.len() > 1000 {
-        debug!(
-            "Using parallel processing for path conversion: {} files",
-            files.len()
-        );
+        debug!("Using parallel processing for path conversion: {} files", files.len());
         files
             .par_iter()
             .filter_map(|path| {
@@ -619,11 +563,7 @@ pub fn get_relevant_files(
 
     // Log information for large repositories
     if file_paths.len() > 1000 {
-        info!(
-            "Analyzing {} files in workspace: {}",
-            file_paths.len(),
-            workspace_path.display()
-        );
+        info!("Analyzing {} files in workspace: {}", file_paths.len(), workspace_path.display());
     }
 
     // If workspace stats are available, use them to enhance path scoring
@@ -651,11 +591,8 @@ pub fn get_relevant_files(
             // Create custom extension weights (optional - using defaults)
             let scored_paths = path_scorer.calculate_path_probabilities_batch(&file_paths);
 
-            let relevant_paths: Vec<String> = scored_paths
-                .into_iter()
-                .take(limit)
-                .map(|(_, path)| path)
-                .collect();
+            let relevant_paths: Vec<String> =
+                scored_paths.into_iter().take(limit).map(|(_, path)| path).collect();
 
             return Ok(relevant_paths);
         }
@@ -666,11 +603,8 @@ pub fn get_relevant_files(
         // The calculate_path_probabilities_batch already uses parallel processing internally
         let scored_paths = path_scorer.calculate_path_probabilities_batch(&file_paths);
 
-        let relevant_paths: Vec<String> = scored_paths
-            .into_iter()
-            .take(limit)
-            .map(|(_, path)| path)
-            .collect();
+        let relevant_paths: Vec<String> =
+            scored_paths.into_iter().take(limit).map(|(_, path)| path).collect();
 
         return Ok(relevant_paths);
     }
@@ -801,10 +735,7 @@ fn calculate_file_type_stats(workspace_path: &Path) -> std::io::Result<HashMap<S
 
     // Process files based on count
     if files.len() > 1000 {
-        debug!(
-            "Using parallel processing for file type analysis: {} files",
-            files.len()
-        );
+        debug!("Using parallel processing for file type analysis: {} files", files.len());
 
         // Process in parallel using rayon's fold/reduce pattern for lock-free parallelism
         let file_types = files
@@ -813,8 +744,10 @@ fn calculate_file_type_stats(workspace_path: &Path) -> std::io::Result<HashMap<S
                 HashMap::new, // Create a HashMap for each thread
                 |mut thread_map, path| {
                     // Process each file in the thread's chunk
-                    let extension = path
-                        .extension().map_or_else(|| "no_extension".to_string(), |ext| ext.to_string_lossy().to_string());
+                    let extension = path.extension().map_or_else(
+                        || "no_extension".to_string(),
+                        |ext| ext.to_string_lossy().to_string(),
+                    );
 
                     *thread_map.entry(extension).or_insert(0) += 1;
                     thread_map
@@ -837,8 +770,10 @@ fn calculate_file_type_stats(workspace_path: &Path) -> std::io::Result<HashMap<S
         let mut file_types = HashMap::new();
 
         for path in files {
-            let extension = path
-                .extension().map_or_else(|| "no_extension".to_string(), |ext| ext.to_string_lossy().to_string());
+            let extension = path.extension().map_or_else(
+                || "no_extension".to_string(),
+                |ext| ext.to_string_lossy().to_string(),
+            );
 
             *file_types.entry(extension).or_insert(0) += 1;
         }

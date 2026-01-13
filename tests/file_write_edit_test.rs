@@ -225,15 +225,9 @@ def greet(name: str, formal: bool = False) -> str:
     // Verify the edit was applied
     let final_content = std::fs::read_to_string(&file_path).expect("Failed to read edited file");
 
-    assert!(
-        final_content.contains("formal: bool = False"),
-        "Type hint not added"
-    );
+    assert!(final_content.contains("formal: bool = False"), "Type hint not added");
     assert!(final_content.contains("Good day"), "New code not present");
-    assert!(
-        final_content.contains("if formal:"),
-        "Conditional not added"
-    );
+    assert!(final_content.contains("if formal:"), "Conditional not added");
 
     println!("TEST 2 PASSED: SEARCH/REPLACE edit successful");
     Ok(())
@@ -273,10 +267,7 @@ Modified content here.
         Ok(response) => {
             // In wcgw mode with full permissions, it might work
             // But there should be some indication about whitelist
-            println!(
-                "INFO: Edit allowed in wcgw mode (full permissions). Response: {}",
-                response
-            );
+            println!("INFO: Edit allowed in wcgw mode (full permissions). Response: {}", response);
 
             // Verify the file was modified if it succeeded
             let content = std::fs::read_to_string(&file_path).expect("Failed to read file");
@@ -345,10 +336,7 @@ Modified line one.
     );
 
     let content = std::fs::read_to_string(&file_path).expect("Failed to read file");
-    assert!(
-        content.contains("Modified line one"),
-        "Edit was not applied"
-    );
+    assert!(content.contains("Modified line one"), "Edit was not applied");
 
     println!("TEST PASSED: Edit worked after reading file (whitelist populated)");
     Ok(())
@@ -463,26 +451,14 @@ if __name__ == "__main__":
 
     // Check for all expected changes
     let checks = [
-        (
-            final_content.contains("a: int, b: int) -> int"),
-            "Type hints added to add()",
-        ),
-        (
-            final_content.contains("Subtract second number"),
-            "Docstring updated in subtract()",
-        ),
+        (final_content.contains("a: int, b: int) -> int"), "Type hints added to add()"),
+        (final_content.contains("Subtract second number"), "Docstring updated in subtract()"),
         (
             final_content.contains("Multiply two numbers together"),
             "Docstring updated in multiply()",
         ),
-        (
-            final_content.contains("def divide"),
-            "New divide() method added",
-        ),
-        (
-            final_content.contains("Cannot divide by zero"),
-            "Divide error handling present",
-        ),
+        (final_content.contains("def divide"), "New divide() method added"),
+        (final_content.contains("Cannot divide by zero"), "Divide error handling present"),
     ];
 
     let mut all_passed = true;
@@ -495,11 +471,7 @@ if __name__ == "__main__":
         }
     }
 
-    assert!(
-        all_passed,
-        "Not all edits were applied.\nFinal content:\n{}",
-        final_content
-    );
+    assert!(all_passed, "Not all edits were applied.\nFinal content:\n{}", final_content);
 
     println!("TEST 4 PASSED: All multiple SEARCH/REPLACE blocks applied correctly");
     Ok(())
@@ -554,10 +526,7 @@ Replacement text
             .await;
 
     // Should fail because search block was not found
-    assert!(
-        result.is_err(),
-        "Expected error for non-existent search block"
-    );
+    assert!(result.is_err(), "Expected error for non-existent search block");
 
     let error_msg = result.unwrap_err().to_string().to_lowercase();
     assert!(
@@ -623,18 +592,9 @@ Remove this line
 
     // Verify line was removed
     let final_content = std::fs::read_to_string(&file_path).expect("Failed to read file");
-    assert!(
-        !final_content.contains("Remove this line"),
-        "Line was not removed"
-    );
-    assert!(
-        final_content.contains("Keep this line"),
-        "Other content was incorrectly removed"
-    );
-    assert!(
-        final_content.contains("Keep this too"),
-        "Other content was incorrectly removed"
-    );
+    assert!(!final_content.contains("Remove this line"), "Line was not removed");
+    assert!(final_content.contains("Keep this line"), "Other content was incorrectly removed");
+    assert!(final_content.contains("Keep this too"), "Other content was incorrectly removed");
 
     println!("TEST PASSED: Empty replacement (line deletion) works");
     Ok(())
@@ -690,14 +650,8 @@ async fn test_overwrite_existing_file_full_content() -> Result<()> {
 
     // Verify new content
     let final_content = std::fs::read_to_string(&file_path).expect("Failed to read file");
-    assert!(
-        !final_content.contains("Original"),
-        "Old content still present"
-    );
-    assert_eq!(
-        final_content, new_content,
-        "Content does not match new content"
-    );
+    assert!(!final_content.contains("Original"), "Old content still present");
+    assert_eq!(final_content, new_content, "Content does not match new content");
 
     println!("TEST PASSED: File overwrite with percentage > 50 works");
     Ok(())

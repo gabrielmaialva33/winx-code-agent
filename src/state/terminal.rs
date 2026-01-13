@@ -230,8 +230,7 @@ impl Screen {
     fn ensure_line(&mut self, line_idx: usize) {
         // Add new lines if needed
         while self.lines.len() <= line_idx {
-            self.lines
-                .push_back(vec![ScreenCell::default(); self.columns]);
+            self.lines.push_back(vec![ScreenCell::default(); self.columns]);
         }
 
         // Limit the number of lines to prevent memory growth
@@ -386,8 +385,7 @@ impl Screen {
     /// Clear the screen
     pub fn clear(&mut self) {
         self.lines.clear();
-        self.lines
-            .push_back(vec![ScreenCell::default(); self.columns]);
+        self.lines.push_back(vec![ScreenCell::default(); self.columns]);
         self.cursor_position = (0, 0);
         self.last_modified = Instant::now();
     }
@@ -447,10 +445,8 @@ impl Screen {
             let end_lines = max_size - beginning_lines - 1; // -1 for truncation marker
 
             // Save important parts
-            let beginning: VecDeque<Vec<ScreenCell>> = self
-                .lines
-                .drain(0..beginning_lines.min(self.lines.len()))
-                .collect();
+            let beginning: VecDeque<Vec<ScreenCell>> =
+                self.lines.drain(0..beginning_lines.min(self.lines.len())).collect();
 
             let end_start_index = self.lines.len().saturating_sub(end_lines);
             let end: VecDeque<Vec<ScreenCell>> = self.lines.drain(end_start_index..).collect();
@@ -899,10 +895,8 @@ impl TerminalPerformer {
         }
 
         // Convert the params to strings for easier handling
-        let param_strings: Vec<String> = params
-            .iter()
-            .map(|p| String::from_utf8_lossy(p).to_string())
-            .collect();
+        let param_strings: Vec<String> =
+            params.iter().map(|p| String::from_utf8_lossy(p).to_string()).collect();
 
         if param_strings.is_empty() {
             return;
@@ -914,17 +908,11 @@ impl TerminalPerformer {
             // Format: OSC 8 ; params ; URI ST
 
             // Get hyperlink parameters and URL
-            let params = if param_strings.len() > 1 {
-                param_strings[1].clone()
-            } else {
-                String::new()
-            };
+            let params =
+                if param_strings.len() > 1 { param_strings[1].clone() } else { String::new() };
 
-            let url = if param_strings.len() > 2 {
-                param_strings[2].clone()
-            } else {
-                String::new()
-            };
+            let url =
+                if param_strings.len() > 2 { param_strings[2].clone() } else { String::new() };
 
             // Parse parameters (id=value format)
             let mut hyperlink_id = None;
@@ -1037,11 +1025,8 @@ impl Perform for TerminalPerformer {
             match c {
                 'A' => {
                     // Cursor Up
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
+                    let n =
+                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
                     let current_row = screen.cursor_row();
                     let new_row = current_row.saturating_sub(n);
                     let current_col = screen.cursor_col();
@@ -1049,33 +1034,24 @@ impl Perform for TerminalPerformer {
                 }
                 'B' => {
                     // Cursor Down
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
+                    let n =
+                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
                     let current_row = screen.cursor_row();
                     let current_col = screen.cursor_col();
                     screen.move_cursor(current_row + n, current_col);
                 }
                 'C' => {
                     // Cursor Forward
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
+                    let n =
+                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
                     let current_row = screen.cursor_row();
                     let current_col = screen.cursor_col();
                     screen.move_cursor(current_row, current_col + n);
                 }
                 'D' => {
                     // Cursor Back
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
+                    let n =
+                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
                     let current_row = screen.cursor_row();
                     let current_col = screen.cursor_col();
                     let new_col = current_col.saturating_sub(n);
@@ -1083,16 +1059,10 @@ impl Perform for TerminalPerformer {
                 }
                 'H' | 'f' => {
                     // Cursor Position
-                    let row = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
-                    let col = params
-                        .iter()
-                        .nth(1)
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
+                    let row =
+                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
+                    let col =
+                        params.iter().nth(1).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
                     // Convert 1-based to 0-based
                     let row = row.saturating_sub(1);
                     let col = col.saturating_sub(1);
@@ -1100,11 +1070,7 @@ impl Perform for TerminalPerformer {
                 }
                 'J' => {
                     // Erase in Display
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(0);
+                    let n = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
                     match n {
                         0 => {
                             // Clear from cursor to end of screen
@@ -1150,11 +1116,7 @@ impl Perform for TerminalPerformer {
                 }
                 'K' => {
                     // Erase in Line
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(0);
+                    let n = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
                     match n {
                         0 => screen.clear_line_forward(),
                         1 => {
@@ -1174,11 +1136,8 @@ impl Perform for TerminalPerformer {
                 }
                 'S' => {
                     // Scroll up
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
+                    let n =
+                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
 
                     for _ in 0..n {
                         screen.scroll_up();
@@ -1186,19 +1145,14 @@ impl Perform for TerminalPerformer {
                 }
                 'T' => {
                     // Scroll down
-                    let n = params
-                        .iter()
-                        .next()
-                        .and_then(|p| p.first().copied())
-                        .unwrap_or(1) as usize;
+                    let n =
+                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
 
                     // Implement scroll down by adding empty lines at the top
                     let columns = screen.columns; // Copy the columns value
 
                     for _ in 0..n {
-                        screen
-                            .lines
-                            .push_front(vec![ScreenCell::default(); columns]);
+                        screen.lines.push_front(vec![ScreenCell::default(); columns]);
                         if screen.lines.len() > screen.max_lines {
                             screen.lines.pop_back();
                         }
@@ -1255,9 +1209,7 @@ pub struct TerminalEmulator {
 // Custom debug implementation to avoid issues with Parser
 impl std::fmt::Debug for TerminalEmulator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TerminalEmulator")
-            .field("performer", &self.performer)
-            .finish()
+        f.debug_struct("TerminalEmulator").field("performer", &self.performer).finish()
     }
 }
 
@@ -1360,11 +1312,7 @@ struct TerminalCache {
 impl TerminalCache {
     /// Create a new terminal cache
     fn new(max_entries: usize, ttl: u64) -> Self {
-        Self {
-            entries: Arc::new(RwLock::new(HashMap::new())),
-            max_entries,
-            ttl,
-        }
+        Self { entries: Arc::new(RwLock::new(HashMap::new())), max_entries, ttl }
     }
 
     /// Get a cached value if available and not expired
@@ -1396,11 +1344,8 @@ impl TerminalCache {
                     entries_vec.sort_by_key(|(_, (_, timestamp))| *timestamp);
 
                     let to_remove = entries_vec.len() - self.max_entries;
-                    let keys_to_remove: Vec<String> = entries_vec
-                        .iter()
-                        .take(to_remove)
-                        .map(|(k, _)| (*k).clone())
-                        .collect();
+                    let keys_to_remove: Vec<String> =
+                        entries_vec.iter().take(to_remove).map(|(k, _)| (*k).clone()).collect();
 
                     for key in keys_to_remove {
                         entries.remove(&key);
@@ -1443,20 +1388,12 @@ impl Default for TerminalOutputDiff {
 impl TerminalOutputDiff {
     /// Create a new terminal output diff detector
     pub fn new() -> Self {
-        Self {
-            previous_output: Vec::new(),
-            output_hash: String::new(),
-            max_lines: 1000,
-        }
+        Self { previous_output: Vec::new(), output_hash: String::new(), max_lines: 1000 }
     }
 
     /// Create a new terminal output diff detector with specified maximum lines
     pub fn new_with_max_lines(max_lines: usize) -> Self {
-        Self {
-            previous_output: Vec::new(),
-            output_hash: String::new(),
-            max_lines,
-        }
+        Self { previous_output: Vec::new(), output_hash: String::new(), max_lines }
     }
 
     /// Detect changes between previous and new output
@@ -1660,9 +1597,8 @@ pub fn incremental_text(text: &str, last_pending_output: &str) -> String {
         let start_offset = text.len() - MAX_OUTPUT_SIZE;
 
         // Find the start of a line to avoid cutting in the middle
-        let adjusted_offset = text[start_offset..]
-            .find('\n')
-            .map_or(start_offset, |pos| start_offset + pos + 1);
+        let adjusted_offset =
+            text[start_offset..].find('\n').map_or(start_offset, |pos| start_offset + pos + 1);
 
         &text[adjusted_offset..]
     } else {
@@ -1752,11 +1688,7 @@ mod tests {
     #[test]
     fn test_incremental_output() {
         let old = vec!["Line 1".to_string(), "Line 2".to_string()];
-        let new = vec![
-            "Line 1".to_string(),
-            "Line 2".to_string(),
-            "Line 3".to_string(),
-        ];
+        let new = vec!["Line 1".to_string(), "Line 2".to_string(), "Line 3".to_string()];
 
         let mut diff_detector = TerminalOutputDiff::new();
         diff_detector.previous_output = old;
@@ -1819,17 +1751,11 @@ mod tests {
         let cache = TerminalCache::new(10, 60);
 
         // Insert a value
-        cache.insert(
-            "test".to_string(),
-            vec!["line1".to_string(), "line2".to_string()],
-        );
+        cache.insert("test".to_string(), vec!["line1".to_string(), "line2".to_string()]);
 
         // Should be able to retrieve it
         let retrieved = cache.get("test");
-        assert_eq!(
-            retrieved,
-            Some(vec!["line1".to_string(), "line2".to_string()])
-        );
+        assert_eq!(retrieved, Some(vec!["line1".to_string(), "line2".to_string()]));
 
         // Unknown key should return None
         let not_found = cache.get("unknown");

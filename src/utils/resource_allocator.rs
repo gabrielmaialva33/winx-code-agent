@@ -192,10 +192,8 @@ impl ResourceAllocator {
 
         // Try to acquire resources
         if self.can_allocate(allocation.allocated_memory).await {
-            self.allocate_resources(&request.file_path, allocation.allocated_memory)
-                .await;
-            self.cache_allocation(&request.file_path, allocation.clone())
-                .await;
+            self.allocate_resources(&request.file_path, allocation.allocated_memory).await;
+            self.cache_allocation(&request.file_path, allocation.clone()).await;
             Ok(allocation)
         } else {
             // Add to pending queue if resources not available
@@ -311,11 +309,7 @@ impl ResourceAllocator {
         let mut cache = self.cache.lock().expect("allocator lock poisoned");
         cache.insert(
             file_path.to_path_buf(),
-            CacheEntry {
-                allocation,
-                created_at: Instant::now(),
-                access_count: 1,
-            },
+            CacheEntry { allocation, created_at: Instant::now(), access_count: 1 },
         );
 
         // Cleanup old entries if cache is getting large
@@ -335,10 +329,8 @@ impl ResourceAllocator {
         let mut queue = self.pending_queue.lock().expect("allocator lock poisoned");
 
         // Insert in priority order
-        let insert_pos = queue
-            .iter()
-            .position(|req| req.priority < request.priority)
-            .unwrap_or(queue.len());
+        let insert_pos =
+            queue.iter().position(|req| req.priority < request.priority).unwrap_or(queue.len());
 
         queue.insert(insert_pos, request);
 
@@ -481,10 +473,7 @@ impl AllocationGuard {
         let allocator = get_global_allocator();
         let permit = allocator.acquire_read_permit().await;
 
-        Self {
-            file_path,
-            _permit: permit,
-        }
+        Self { file_path, _permit: permit }
     }
 }
 

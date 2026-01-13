@@ -52,9 +52,7 @@ impl GitAnalyzer {
     /// Create a new git analyzer for the given path
     pub fn new(path: &Path) -> Option<Self> {
         let git_path = Self::find_git_root(path)?;
-        Some(Self {
-            repo_path: git_path,
-        })
+        Some(Self { repo_path: git_path })
     }
 
     /// Find the git root directory
@@ -186,11 +184,8 @@ impl RepoTraverser {
                 };
 
                 let name = entry.file_name().to_string_lossy().to_string();
-                let rel_path = if prefix.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{prefix}/{name}")
-                };
+                let rel_path =
+                    if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
 
                 // Check if ignored
                 if self.is_path_ignored(&rel_path) {
@@ -229,10 +224,7 @@ impl RepoTraverser {
         // Check against our ignore patterns
         for pattern in &self.ignored_patterns {
             if pattern.contains('*') {
-                if glob::Pattern::new(pattern)
-                    .map(|p| p.matches(path))
-                    .unwrap_or(false)
-                {
+                if glob::Pattern::new(pattern).map(|p| p.matches(path)).unwrap_or(false) {
                     return true;
                 }
             } else if path.contains(pattern) {
@@ -261,10 +253,7 @@ impl RepoTraverser {
         }
 
         // Special files
-        let filename = Path::new(path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("");
+        let filename = Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("");
 
         score += match filename.to_lowercase().as_str() {
             "cargo.toml" | "package.json" | "pyproject.toml" => 15.0,
@@ -299,9 +288,7 @@ impl RepoTraverser {
                 let stats = FileStats {
                     path: file_path.clone(),
                     size: metadata.len(),
-                    last_modified: metadata
-                        .modified()
-                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+                    last_modified: metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
                     importance_score: 0.0, // Will be calculated later
                     file_type: Path::new(file_path)
                         .extension()
@@ -389,10 +376,7 @@ impl RepoContextAnalyzer {
 
         summary.push_str(&format!(
             "# Project: {}\n\n",
-            workspace_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("Unknown")
+            workspace_path.file_name().and_then(|n| n.to_str()).unwrap_or("Unknown")
         ));
 
         // File type distribution
@@ -417,10 +401,7 @@ impl RepoContextAnalyzer {
         if files.iter().any(|f| f.ends_with("package.json")) {
             summary.push_str("- Node.js project (package.json found)\n");
         }
-        if files
-            .iter()
-            .any(|f| f.ends_with("pyproject.toml") || f.ends_with("requirements.txt"))
-        {
+        if files.iter().any(|f| f.ends_with("pyproject.toml") || f.ends_with("requirements.txt")) {
             summary.push_str("- Python project\n");
         }
 

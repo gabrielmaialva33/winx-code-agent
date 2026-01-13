@@ -156,9 +156,7 @@ impl MatchResult {
 
     /// Check if this match used the line numbers tolerance
     pub fn used_line_nums(&self) -> bool {
-        self.tolerances_hit
-            .iter()
-            .any(|t| t.error_name == REMOVE_LINE_NUMS_WARNING && t.count > 0)
+        self.tolerances_hit.iter().any(|t| t.error_name == REMOVE_LINE_NUMS_WARNING && t.count > 0)
     }
 }
 
@@ -287,7 +285,11 @@ fn find_contiguous_matches(search_line_positions: &[HashSet<usize>]) -> Vec<(usi
 }
 
 /// Find exact matches in content
-pub fn match_exact(content_lines: &[&str], content_offset: usize, search_lines: &[&str]) -> Vec<(usize, usize)> {
+pub fn match_exact(
+    content_lines: &[&str],
+    content_offset: usize,
+    search_lines: &[&str],
+) -> Vec<(usize, usize)> {
     let n_search = search_lines.len();
     let n_content = content_lines.len();
 
@@ -364,10 +366,7 @@ pub fn match_tiered(
                 tolerances_hit: vec![],
                 score: 0.0,
                 warnings: HashSet::new(),
-                matched_lines: content_lines[start..end]
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect(),
+                matched_lines: content_lines[start..end].iter().map(|s| (*s).to_string()).collect(),
                 removed_indentation: None,
             },
             tier: 0,
@@ -406,11 +405,7 @@ pub fn match_tiered(
     let content_processed: Vec<Vec<String>> = tolerances
         .iter()
         .map(|tol| {
-            content_lines
-                .iter()
-                .skip(content_offset)
-                .map(|line| (tol.line_process)(line))
-                .collect()
+            content_lines.iter().skip(content_offset).map(|line| (tol.line_process)(line)).collect()
         })
         .collect();
 
@@ -419,10 +414,8 @@ pub fn match_tiered(
         let tier = tier_idx + 1; // Tier 1-5 (0 was exact)
 
         // Process search lines with this tolerance
-        let search_processed: Vec<String> = search_lines
-            .iter()
-            .map(|line| (tolerance.line_process)(line))
-            .collect();
+        let search_processed: Vec<String> =
+            search_lines.iter().map(|line| (tolerance.line_process)(line)).collect();
 
         // Build position map for this tier
         let mut content_positions: HashMap<&str, HashSet<usize>> = HashMap::new();
@@ -436,12 +429,7 @@ pub fn match_tiered(
         // Get positions for each search line
         let search_line_positions: Vec<HashSet<usize>> = search_processed
             .iter()
-            .map(|line| {
-                content_positions
-                    .get(line.as_str())
-                    .cloned()
-                    .unwrap_or_default()
-            })
+            .map(|line| content_positions.get(line.as_str()).cloned().unwrap_or_default())
             .collect();
 
         // Find contiguous matches at this tier
@@ -452,10 +440,8 @@ pub fn match_tiered(
             let (start, end) = matched_slices[0];
             debug!("Tiered match: early exit at Tier {} ({})", tier, tolerance.error_name);
 
-            let matched_lines: Vec<String> = content_lines[start..end]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect();
+            let matched_lines: Vec<String> =
+                content_lines[start..end].iter().map(|s| (*s).to_string()).collect();
 
             // Check for removed indentation
             let removed_indentation = if tolerance.error_name == REMOVE_INDENTATION_WARNING {
@@ -469,7 +455,8 @@ pub fn match_tiered(
             };
 
             let mut warnings = HashSet::new();
-            if tolerance.severity == ToleranceSeverity::Warning && !tolerance.error_name.is_empty() {
+            if tolerance.severity == ToleranceSeverity::Warning && !tolerance.error_name.is_empty()
+            {
                 warnings.insert(tolerance.error_name.to_string());
             }
 
@@ -501,12 +488,11 @@ pub fn match_tiered(
             return matched_slices
                 .into_iter()
                 .map(|(start, end)| {
-                    let matched_lines: Vec<String> = content_lines[start..end]
-                        .iter()
-                        .map(|s| (*s).to_string())
-                        .collect();
+                    let matched_lines: Vec<String> =
+                        content_lines[start..end].iter().map(|s| (*s).to_string()).collect();
 
-                    let removed_indentation = if tolerance.error_name == REMOVE_INDENTATION_WARNING {
+                    let removed_indentation = if tolerance.error_name == REMOVE_INDENTATION_WARNING
+                    {
                         matched_lines
                             .iter()
                             .filter(|l| !l.trim().is_empty())
@@ -569,21 +555,13 @@ pub fn match_with_tolerance(
     // Build initial position map from exact matches
     let mut content_positions: HashMap<String, HashSet<usize>> = HashMap::new();
     for (i, line) in content_lines.iter().enumerate().skip(content_offset) {
-        content_positions
-            .entry((*line).to_string())
-            .or_default()
-            .insert(i);
+        content_positions.entry((*line).to_string()).or_default().insert(i);
     }
 
     // Start with exact match positions
     let mut search_line_positions: Vec<HashSet<usize>> = search_lines
         .iter()
-        .map(|line| {
-            content_positions
-                .get(*line)
-                .cloned()
-                .unwrap_or_default()
-        })
+        .map(|line| content_positions.get(*line).cloned().unwrap_or_default())
         .collect();
 
     // Track which tolerance was used for each content line in each search position
@@ -596,10 +574,7 @@ pub fn match_with_tolerance(
         let mut content_positions_tol: HashMap<String, HashSet<usize>> = HashMap::new();
         for (i, line) in content_lines.iter().enumerate().skip(content_offset) {
             let processed = (tolerance.line_process)(line);
-            content_positions_tol
-                .entry(processed)
-                .or_default()
-                .insert(i);
+            content_positions_tol.entry(processed).or_default().insert(i);
         }
 
         // Find new matches for each search line
@@ -626,11 +601,8 @@ pub fn match_with_tolerance(
     // Build results with tolerance hit information
     let mut results = Vec::new();
     for (start, end) in matched_slices {
-        let mut tolerances_hit: Vec<ToleranceHit> = tolerances
-            .iter()
-            .enumerate()
-            .map(|(i, t)| ToleranceHit::new(t, i))
-            .collect();
+        let mut tolerances_hit: Vec<ToleranceHit> =
+            tolerances.iter().enumerate().map(|(i, t)| ToleranceHit::new(t, i)).collect();
 
         let mut tolerance_indices_used = Vec::new();
 
@@ -658,31 +630,27 @@ pub fn match_with_tolerance(
             .collect();
 
         // Get matched lines
-        let matched_lines: Vec<String> = content_lines[start..end]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect();
+        let matched_lines: Vec<String> =
+            content_lines[start..end].iter().map(|s| (*s).to_string()).collect();
 
         // Check for removed indentation
-        let removed_indentation = if active_tolerances
-            .iter()
-            .any(|t| t.error_name == REMOVE_INDENTATION_WARNING)
-        {
-            // Get the most common indentation from matched lines
-            let indents: Vec<String> = matched_lines
-                .iter()
-                .filter(|l| !l.trim().is_empty())
-                .map(|l| get_removed_indentation(l))
-                .collect();
+        let removed_indentation =
+            if active_tolerances.iter().any(|t| t.error_name == REMOVE_INDENTATION_WARNING) {
+                // Get the most common indentation from matched lines
+                let indents: Vec<String> = matched_lines
+                    .iter()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| get_removed_indentation(l))
+                    .collect();
 
-            if indents.is_empty() {
-                None
+                if indents.is_empty() {
+                    None
+                } else {
+                    Some(indents[0].clone())
+                }
             } else {
-                Some(indents[0].clone())
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         results.push((
             MatchResult {
@@ -720,11 +688,8 @@ pub fn match_with_tolerance_empty_lines(
     }
 
     // Filter empty lines from search
-    let search_filtered: Vec<&str> = search_lines
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .copied()
-        .collect();
+    let search_filtered: Vec<&str> =
+        search_lines.iter().filter(|l| !l.trim().is_empty()).copied().collect();
 
     if search_filtered.is_empty() {
         return vec![];
@@ -741,10 +706,8 @@ pub fn match_with_tolerance_empty_lines(
 
             result.matched_slice = (*orig_start, orig_end);
             result.line_range = (*orig_start + 1, orig_end);
-            result.matched_lines = content_lines[*orig_start..orig_end]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect();
+            result.matched_lines =
+                content_lines[*orig_start..orig_end].iter().map(|s| (*s).to_string()).collect();
 
             Some((result, indices))
         })
@@ -777,17 +740,11 @@ pub fn fix_indentation(
     }
 
     // Get indentation for non-empty lines
-    let matched_indents: Vec<String> = matched_lines
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| get_indent(l))
-        .collect();
+    let matched_indents: Vec<String> =
+        matched_lines.iter().filter(|l| !l.trim().is_empty()).map(|l| get_indent(l)).collect();
 
-    let searched_indents: Vec<String> = searched_lines
-        .iter()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| get_indent(l))
-        .collect();
+    let searched_indents: Vec<String> =
+        searched_lines.iter().filter(|l| !l.trim().is_empty()).map(|l| get_indent(l)).collect();
 
     if matched_indents.len() != searched_indents.len() {
         return replace_lines;
@@ -821,8 +778,7 @@ pub fn fix_indentation(
             } else {
                 // Remove indentation
                 let diff_usize = diff as usize;
-                if line.len() >= diff_usize && line[..diff_usize].chars().all(char::is_whitespace)
-                {
+                if line.len() >= diff_usize && line[..diff_usize].chars().all(char::is_whitespace) {
                     line[diff_usize..].to_string()
                 } else {
                     line
@@ -834,10 +790,7 @@ pub fn fix_indentation(
 
 /// Fix line numbers in replace block
 pub fn fix_line_nums(replace_lines: Vec<String>) -> Vec<String> {
-    replace_lines
-        .into_iter()
-        .map(|line| remove_leading_linenums(&line))
-        .collect()
+    replace_lines.into_iter().map(|line| remove_leading_linenums(&line)).collect()
 }
 
 /// Remove leading/trailing empty lines from a list of lines
@@ -908,14 +861,16 @@ pub fn apply_search_replace_with_tolerance(
     blocks: Vec<SearchReplaceBlock>,
 ) -> Result<ApplyResult, ApplyError> {
     let tolerances = default_tolerances();
-    let mut content_lines: Vec<String> = content.lines().map(std::string::ToString::to_string).collect();
+    let mut content_lines: Vec<String> =
+        content.lines().map(std::string::ToString::to_string).collect();
     let mut all_warnings = HashSet::new();
     let mut total_score = 0.0;
     let mut offset: i64 = 0;
 
     for (block_idx, block) in blocks.iter().enumerate() {
         let search_refs: Vec<&str> = block.search.iter().map(std::string::String::as_str).collect();
-        let content_refs: Vec<&str> = content_lines.iter().map(std::string::String::as_str).collect();
+        let content_refs: Vec<&str> =
+            content_lines.iter().map(std::string::String::as_str).collect();
 
         trace!(
             "Processing block {}/{}: {} search lines",
@@ -1042,11 +997,7 @@ pub fn apply_search_replace_with_tolerance(
         content_lines = [before, final_replace, after].concat();
     }
 
-    Ok(ApplyResult {
-        content: content_lines.join("\n"),
-        warnings: all_warnings,
-        total_score,
-    })
+    Ok(ApplyResult { content: content_lines.join("\n"), warnings: all_warnings, total_score })
 }
 
 /// Find the closest matching context for error messages
@@ -1060,8 +1011,7 @@ fn find_closest_context(content_lines: &[&str], search_lines: &[&str]) -> String
 
         for (i, content_line) in content_lines.iter().enumerate() {
             if content_line.contains(search_stripped)
-                || (content_line.trim().len() > 10
-                    && search_stripped.contains(content_line.trim()))
+                || (content_line.trim().len() > 10 && search_stripped.contains(content_line.trim()))
             {
                 // Found a partial match, get context
                 let start = i.saturating_sub(5);
@@ -1073,10 +1023,7 @@ fn find_closest_context(content_lines: &[&str], search_lines: &[&str]) -> String
 
     // No match found, return beginning of file
     let end = 20.min(content_lines.len());
-    format!(
-        "(Beginning of file)\n{}",
-        content_lines[..end].join("\n")
-    )
+    format!("(Beginning of file)\n{}", content_lines[..end].join("\n"))
 }
 
 /// Try applying blocks individually as fallback
@@ -1089,10 +1036,7 @@ pub fn apply_with_individual_fallback(
         Ok(result) => Ok(result),
         Err(e) if blocks.len() > 1 => {
             // Try one at a time
-            warn!(
-                "Multi-block apply failed, trying individual blocks: {}",
-                e.message
-            );
+            warn!("Multi-block apply failed, trying individual blocks: {}", e.message);
 
             let mut current_content = content.to_string();
             let mut all_warnings = HashSet::new();
@@ -1119,11 +1063,7 @@ pub fn apply_with_individual_fallback(
                 }
             }
 
-            Ok(ApplyResult {
-                content: current_content,
-                warnings: all_warnings,
-                total_score,
-            })
+            Ok(ApplyResult { content: current_content, warnings: all_warnings, total_score })
         }
         Err(e) => Err(e),
     }

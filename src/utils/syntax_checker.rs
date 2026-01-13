@@ -21,29 +21,17 @@ pub struct SyntaxCheckOutput {
 impl SyntaxCheckOutput {
     /// Create a new empty output (no errors)
     pub fn ok() -> Self {
-        Self {
-            description: String::new(),
-            errors: Vec::new(),
-            was_checked: true,
-        }
+        Self { description: String::new(), errors: Vec::new(), was_checked: true }
     }
 
     /// Create output indicating syntax checking is not available
     pub fn not_available() -> Self {
-        Self {
-            description: String::new(),
-            errors: Vec::new(),
-            was_checked: false,
-        }
+        Self { description: String::new(), errors: Vec::new(), was_checked: false }
     }
 
     /// Create output with errors
     pub fn with_errors(description: String, errors: Vec<(usize, usize)>) -> Self {
-        Self {
-            description,
-            errors,
-            was_checked: true,
-        }
+        Self { description, errors, was_checked: true }
     }
 
     /// Check if there are any syntax errors
@@ -56,10 +44,8 @@ impl SyntaxCheckOutput {
 /// These are the extensions for which we can provide at least basic validation
 const CHECKABLE_EXTENSIONS: &[&str] = &[
     // JSON - can validate structure
-    "json",
-    // TOML - can validate structure
-    "toml",
-    // YAML - can validate structure
+    "json", // TOML - can validate structure
+    "toml", // YAML - can validate structure
     "yaml", "yml",
 ];
 
@@ -91,17 +77,11 @@ pub fn check_syntax(extension: &str, content: &str) -> SyntaxCheckOutput {
 
 /// Check syntax of a file by path
 pub fn check_file_syntax(path: &Path) -> SyntaxCheckOutput {
-    let extension = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match std::fs::read_to_string(path) {
         Ok(content) => check_syntax(extension, &content),
-        Err(e) => SyntaxCheckOutput::with_errors(
-            format!("Failed to read file: {e}"),
-            Vec::new(),
-        ),
+        Err(e) => SyntaxCheckOutput::with_errors(format!("Failed to read file: {e}"), Vec::new()),
     }
 }
 
@@ -139,10 +119,7 @@ fn check_toml_syntax(content: &str) -> SyntaxCheckOutput {
         // Check for unclosed brackets in table headers
         if trimmed.starts_with('[') && !trimmed.ends_with(']') {
             errors.push((line_num + 1, 1));
-            error_messages.push(format!(
-                "Line {}: Unclosed bracket in table header",
-                line_num + 1
-            ));
+            error_messages.push(format!("Line {}: Unclosed bracket in table header", line_num + 1));
         }
 
         // Check for key-value pairs without equals sign
@@ -171,20 +148,16 @@ fn check_yaml_syntax(content: &str) -> SyntaxCheckOutput {
         // Check for tabs (YAML doesn't allow tabs for indentation)
         if line.starts_with('\t') {
             errors.push((line_num + 1, 1));
-            error_messages.push(format!(
-                "Line {}: YAML does not allow tabs for indentation",
-                line_num + 1
-            ));
+            error_messages
+                .push(format!("Line {}: YAML does not allow tabs for indentation", line_num + 1));
         }
 
         // Check for mixing spaces and tabs
         let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
         if indent.contains('\t') && indent.contains(' ') {
             errors.push((line_num + 1, 1));
-            error_messages.push(format!(
-                "Line {}: Mixed tabs and spaces in indentation",
-                line_num + 1
-            ));
+            error_messages
+                .push(format!("Line {}: Mixed tabs and spaces in indentation", line_num + 1));
         }
     }
 
@@ -221,12 +194,8 @@ pub fn format_syntax_error_context(
     let start_line = min_line.saturating_sub(10);
     let end_line = (max_line + 5).min(lines.len());
 
-    let context_lines: Vec<&str> = lines
-        .iter()
-        .skip(start_line)
-        .take(end_line - start_line)
-        .copied()
-        .collect();
+    let context_lines: Vec<&str> =
+        lines.iter().skip(start_line).take(end_line - start_line).copied().collect();
 
     let context = context_lines.join("\n");
 

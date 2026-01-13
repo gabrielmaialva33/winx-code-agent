@@ -494,10 +494,7 @@ pub fn parse_ansi_sequences(text: &str) -> Vec<(usize, String)> {
             Regex::new(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])").unwrap();
     }
 
-    ANSI_REGEX
-        .find_iter(text)
-        .map(|m| (m.start(), m.as_str().to_string()))
-        .collect()
+    ANSI_REGEX.find_iter(text).map(|m| (m.start(), m.as_str().to_string())).collect()
 }
 
 /// Color name to ANSI code mapping
@@ -711,11 +708,8 @@ fn extract_color_from_seq(seq: &str) -> String {
         if parts.len() >= 5 {
             let r = parts[2];
             let g = parts[3];
-            let b = if let Some(stripped) = parts[4].strip_suffix('m') {
-                stripped
-            } else {
-                parts[4]
-            };
+            let b =
+                if let Some(stripped) = parts[4].strip_suffix('m') { stripped } else { parts[4] };
             return format!("rgb({r},{g},{b})");
         }
     }
@@ -737,11 +731,7 @@ mod tests {
         assert_eq!(color256.fg_code(), "\x1B[38;5;128m");
         assert_eq!(color256.bg_code(), "\x1B[48;5;128m");
 
-        let true_color = TermColor::TrueColor {
-            r: 255,
-            g: 128,
-            b: 64,
-        };
+        let true_color = TermColor::TrueColor { r: 255, g: 128, b: 64 };
         assert_eq!(true_color.fg_code(), "\x1B[38;2;255;128;64m");
         assert_eq!(true_color.bg_code(), "\x1B[48;2;255;128;64m");
     }

@@ -2,7 +2,13 @@
 //! Core WCGW tools only - no AI integration
 
 use rmcp::{
-    model::{ServerInfo, Implementation, ProtocolVersion, ServerCapabilities, PaginatedRequestParam, ListToolsResult, Tool, ToolAnnotations, ListResourcesResult, Annotated, RawResource, ReadResourceRequestParam, ReadResourceResult, ResourceContents, ListPromptsResult, GetPromptRequestParam, GetPromptResult, CallToolRequestParam, CallToolResult, Content},
+    model::{
+        Annotated, CallToolRequestParam, CallToolResult, Content, GetPromptRequestParam,
+        GetPromptResult, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
+        PaginatedRequestParam, ProtocolVersion, RawResource, ReadResourceRequestParam,
+        ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo, Tool,
+        ToolAnnotations,
+    },
     service::{RequestContext, RoleServer},
     transport::stdio,
     ErrorData as McpError, ServerHandler, ServiceExt,
@@ -94,11 +100,7 @@ impl WinxService {
 
             for entry in entries {
                 let name = entry.file_name().to_string_lossy().to_string();
-                let is_dir = entry
-                    .file_type()
-                    .await
-                    .map(|ft| ft.is_dir())
-                    .unwrap_or(false);
+                let is_dir = entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false);
                 if is_dir {
                     structure.push_str(&format!("- {name}/\n"));
                 } else {
@@ -137,7 +139,8 @@ impl ServerHandler for WinxService {
                 .build(),
             instructions: Some(
                 "Winx is a high-performance Rust implementation of WCGW for code agents. \
-                Provides shell execution, file management, and context saving capabilities.".into(),
+                Provides shell execution, file management, and context saving capabilities."
+                    .into(),
             ),
         }
     }
@@ -370,11 +373,7 @@ impl ServerHandler for WinxService {
         _param: Option<PaginatedRequestParam>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
-        Ok(ListPromptsResult {
-            prompts: vec![],
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListPromptsResult { prompts: vec![], next_cursor: None, meta: None })
     }
 
     async fn get_prompt(
@@ -382,10 +381,7 @@ impl ServerHandler for WinxService {
         param: GetPromptRequestParam,
         _context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResult, McpError> {
-        Err(McpError::invalid_request(
-            format!("Unknown prompt: {}", param.name),
-            None,
-        ))
+        Err(McpError::invalid_request(format!("Unknown prompt: {}", param.name), None))
     }
 
     async fn call_tool(
@@ -418,8 +414,10 @@ impl WinxService {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
 
         // Parse Initialize from args - using wcgw field names
-        let initialize: crate::types::Initialize = serde_json::from_value(args.clone())
-            .map_err(|e| McpError::invalid_request(format!("Invalid Initialize parameters: {e}"), None))?;
+        let initialize: crate::types::Initialize =
+            serde_json::from_value(args.clone()).map_err(|e| {
+                McpError::invalid_request(format!("Invalid Initialize parameters: {e}"), None)
+            })?;
 
         // Call the real implementation
         match crate::tools::initialize::handle_tool_call(&self.bash_state, initialize).await {
@@ -429,10 +427,7 @@ impl WinxService {
             }
             Err(e) => {
                 warn!("Initialize failed: {}", e);
-                Err(McpError::internal_error(
-                    format!("Initialize failed: {e}"),
-                    None,
-                ))
+                Err(McpError::internal_error(format!("Initialize failed: {e}"), None))
             }
         }
     }
@@ -445,7 +440,9 @@ impl WinxService {
 
         // Parse BashCommand from args - using WCGW-compatible schema with action_json
         let bash_command: crate::types::BashCommand = serde_json::from_value(args.clone())
-            .map_err(|e| McpError::invalid_request(format!("Invalid BashCommand parameters: {e}"), None))?;
+            .map_err(|e| {
+                McpError::invalid_request(format!("Invalid BashCommand parameters: {e}"), None)
+            })?;
 
         // Call the real WCGW-compatible implementation
         match crate::tools::bash_command::handle_tool_call(&self.bash_state, bash_command).await {
@@ -455,10 +452,7 @@ impl WinxService {
             }
             Err(e) => {
                 warn!("BashCommand failed: {}", e);
-                Err(McpError::internal_error(
-                    format!("BashCommand failed: {e}"),
-                    None,
-                ))
+                Err(McpError::internal_error(format!("BashCommand failed: {e}"), None))
             }
         }
     }
@@ -467,8 +461,10 @@ impl WinxService {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
 
         // Parse ReadFiles from args - uses custom deserializer that handles line ranges
-        let read_files: crate::types::ReadFiles = serde_json::from_value(args.clone())
-            .map_err(|e| McpError::invalid_request(format!("Invalid ReadFiles parameters: {e}"), None))?;
+        let read_files: crate::types::ReadFiles =
+            serde_json::from_value(args.clone()).map_err(|e| {
+                McpError::invalid_request(format!("Invalid ReadFiles parameters: {e}"), None)
+            })?;
 
         // Call the real implementation with full functionality:
         // - Line range support (:1-100)
@@ -483,10 +479,7 @@ impl WinxService {
             }
             Err(e) => {
                 warn!("ReadFiles failed: {}", e);
-                Err(McpError::internal_error(
-                    format!("ReadFiles failed: {e}"),
-                    None,
-                ))
+                Err(McpError::internal_error(format!("ReadFiles failed: {e}"), None))
             }
         }
     }
@@ -504,22 +497,18 @@ impl WinxService {
             .ok_or_else(|| McpError::invalid_request("Missing file_path", None))?
             .to_string();
 
-        let percentage_to_change = args
-            .get("percentage_to_change")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(100) as u32;
+        let percentage_to_change =
+            args.get("percentage_to_change").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
 
         let text_or_search_replace_blocks = args
             .get("text_or_search_replace_blocks")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| McpError::invalid_request("Missing text_or_search_replace_blocks", None))?
+            .ok_or_else(|| {
+                McpError::invalid_request("Missing text_or_search_replace_blocks", None)
+            })?
             .to_string();
 
-        let thread_id = args
-            .get("thread_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let thread_id = args.get("thread_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
         // Create FileWriteOrEdit struct
         let file_write_or_edit = crate::types::FileWriteOrEdit {
@@ -533,17 +522,16 @@ impl WinxService {
         match crate::tools::file_write_or_edit::handle_tool_call(
             &self.bash_state,
             file_write_or_edit,
-        ).await {
+        )
+        .await
+        {
             Ok(result) => {
                 info!("FileWriteOrEdit succeeded: {}", file_path);
                 Ok(CallToolResult::success(vec![Content::text(result)]))
             }
             Err(e) => {
                 warn!("FileWriteOrEdit failed for {}: {}", file_path, e);
-                Err(McpError::internal_error(
-                    format!("FileWriteOrEdit failed: {e}"),
-                    None,
-                ))
+                Err(McpError::internal_error(format!("FileWriteOrEdit failed: {e}"), None))
             }
         }
     }
@@ -592,10 +580,7 @@ impl WinxService {
             }
             Err(e) => {
                 warn!("Failed to save context: {}", e);
-                Err(McpError::internal_error(
-                    format!("Failed to save context: {e}"),
-                    None,
-                ))
+                Err(McpError::internal_error(format!("Failed to save context: {e}"), None))
             }
         }
     }
@@ -608,9 +593,7 @@ impl WinxService {
             .and_then(|v| v.as_str())
             .ok_or_else(|| McpError::invalid_request("Missing file_path", None))?;
 
-        let read_image = ReadImage {
-            file_path: file_path.to_string(),
-        };
+        let read_image = ReadImage { file_path: file_path.to_string() };
 
         match crate::tools::read_image::handle_tool_call(&self.bash_state, read_image).await {
             Ok((mime_type, base64_data)) => {
@@ -622,10 +605,7 @@ impl WinxService {
             }
             Err(e) => {
                 warn!("Failed to read image {}: {}", file_path, e);
-                Err(McpError::internal_error(
-                    format!("Failed to read image: {e}"),
-                    None,
-                ))
+                Err(McpError::internal_error(format!("Failed to read image: {e}"), None))
             }
         }
     }

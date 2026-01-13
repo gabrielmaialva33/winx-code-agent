@@ -84,13 +84,7 @@ impl FuzzyMatch {
         end_pos: usize,
         match_type: MatchType,
     ) -> Self {
-        Self {
-            text,
-            similarity,
-            start_pos,
-            end_pos,
-            match_type,
-        }
+        Self { text, similarity, start_pos, end_pos, match_type }
     }
 
     /// Create a new exact match result
@@ -143,9 +137,9 @@ impl Default for FuzzyMatcherConfig {
             use_line_matching: true,
             use_levenshtein: false, // Disabled - use normalized instead
             use_normalized_levenshtein: true, // NEW: strsim normalized Levenshtein
-            use_jaro_winkler: true,           // NEW: strsim Jaro-Winkler
-            use_sorensen_dice: true,          // NEW: strsim Sørensen-Dice
-            use_ngram: true,                  // NEW: n-gram matching
+            use_jaro_winkler: true, // NEW: strsim Jaro-Winkler
+            use_sorensen_dice: true, // NEW: strsim Sørensen-Dice
+            use_ngram: true,        // NEW: n-gram matching
             use_longest_common_substring: true,
             levenshtein_threshold: DEFAULT_LEVENSHTEIN_THRESHOLD,
             max_matches: 5,
@@ -174,10 +168,7 @@ impl Default for NGramMatcher {
 impl NGramMatcher {
     /// Create a new n-gram matcher with specified size
     pub fn new(ngram_size: usize) -> Self {
-        Self {
-            ngram_size: ngram_size.max(2),
-            cache: HashMap::new(),
-        }
+        Self { ngram_size: ngram_size.max(2), cache: HashMap::new() }
     }
 
     /// Generate character n-grams from text
@@ -193,10 +184,8 @@ impl NGramMatcher {
             return result;
         }
 
-        let ngrams: Vec<String> = chars
-            .windows(self.ngram_size)
-            .map(|w| w.iter().collect())
-            .collect();
+        let ngrams: Vec<String> =
+            chars.windows(self.ngram_size).map(|w| w.iter().collect()).collect();
 
         self.cache.insert(text.to_string(), ngrams.clone());
         ngrams
@@ -209,10 +198,7 @@ impl NGramMatcher {
             return vec![text.to_string()];
         }
 
-        words
-            .windows(self.ngram_size)
-            .map(|w| w.join(" "))
-            .collect()
+        words.windows(self.ngram_size).map(|w| w.join(" ")).collect()
     }
 
     /// Calculate Jaccard similarity between two sets of n-grams
@@ -318,21 +304,13 @@ impl FuzzyMatcher {
     pub fn new() -> Self {
         let config = FuzzyMatcherConfig::default();
         let ngram_size = config.ngram_size;
-        Self {
-            config,
-            token_cache: HashMap::new(),
-            ngram_matcher: NGramMatcher::new(ngram_size),
-        }
+        Self { config, token_cache: HashMap::new(), ngram_matcher: NGramMatcher::new(ngram_size) }
     }
 
     /// Create a new fuzzy matcher with custom configuration
     pub fn with_config(config: FuzzyMatcherConfig) -> Self {
         let ngram_size = config.ngram_size;
-        Self {
-            config,
-            token_cache: HashMap::new(),
-            ngram_matcher: NGramMatcher::new(ngram_size),
-        }
+        Self { config, token_cache: HashMap::new(), ngram_matcher: NGramMatcher::new(ngram_size) }
     }
 
     /// Set the case sensitivity
@@ -393,11 +371,7 @@ impl FuzzyMatcher {
 
         // Try exact match first (fastest)
         if let Some(pos) = text.find(pattern) {
-            return vec![FuzzyMatch::exact(
-                pattern.to_string(),
-                pos,
-                pos + pattern.len(),
-            )];
+            return vec![FuzzyMatch::exact(pattern.to_string(), pos, pos + pattern.len())];
         }
 
         let mut all_matches: Vec<FuzzyMatch> = Vec::new();
@@ -434,9 +408,7 @@ impl FuzzyMatcher {
 
         // Sort by similarity (highest first) and deduplicate overlapping matches
         all_matches.sort_by(|a, b| {
-            b.similarity
-                .partial_cmp(&a.similarity)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Deduplicate overlapping matches, keeping highest similarity
@@ -555,9 +527,7 @@ impl FuzzyMatcher {
 
         // Keep only best non-overlapping matches
         matches.sort_by(|a, b| {
-            b.similarity
-                .partial_cmp(&a.similarity)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal)
         });
 
         matches
@@ -828,11 +798,8 @@ impl FuzzyMatcher {
         // For smaller texts, just compare directly
         let distance = levenshtein_distance(pattern, text);
         let max_distance = max(pattern.len(), text.len());
-        let similarity = if max_distance > 0 {
-            1.0 - (distance as f64 / max_distance as f64)
-        } else {
-            0.0
-        };
+        let similarity =
+            if max_distance > 0 { 1.0 - (distance as f64 / max_distance as f64) } else { 0.0 };
 
         if similarity >= self.config.levenshtein_threshold {
             vec![FuzzyMatch::new(
@@ -1041,9 +1008,8 @@ impl FuzzyMatcher {
 
             let mut start_pos = 0;
             while start_pos + window_size <= pattern_chars.len() {
-                let window: String = pattern_chars[start_pos..start_pos + window_size]
-                    .iter()
-                    .collect();
+                let window: String =
+                    pattern_chars[start_pos..start_pos + window_size].iter().collect();
                 windows.push((start_pos, window));
                 start_pos += stride;
             }

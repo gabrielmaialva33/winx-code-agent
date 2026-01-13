@@ -79,25 +79,16 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
     let image_b64 = general_purpose::STANDARD.encode(&image_bytes);
 
     // Guess the MIME type from the file extension
-    let mime_type = MimeGuess::from_path(&path)
-        .first_raw()
-        .unwrap_or("application/octet-stream")
-        .to_string();
+    let mime_type =
+        MimeGuess::from_path(&path).first_raw().unwrap_or("application/octet-stream").to_string();
 
     // Verify the MIME type is a supported image type
     if SUPPORTED_MIME_TYPES.contains(&mime_type.as_str()) {
         Ok((mime_type, image_b64))
     } else {
-        debug!(
-            "Detected MIME type '{}' is not in the supported list",
-            mime_type
-        );
+        debug!("Detected MIME type '{}' is not in the supported list", mime_type);
         // Fall back to a best effort based on common extensions
-        let extension = path
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("")
-            .to_lowercase();
+        let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_lowercase();
 
         let mime_type = match extension.as_str() {
             "jpg" | "jpeg" => "image/jpeg",
@@ -145,7 +136,9 @@ pub async fn handle_tool_call(
         let bash_state_guard = bash_state_arc.lock().await;
 
         // Ensure bash state is initialized
-        let bash_state = if let Some(state) = &*bash_state_guard { state } else {
+        let bash_state = if let Some(state) = &*bash_state_guard {
+            state
+        } else {
             error!("BashState not initialized");
             return Err(WinxError::BashStateNotInitialized);
         };

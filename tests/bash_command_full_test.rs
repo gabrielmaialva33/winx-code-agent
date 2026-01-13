@@ -6,9 +6,9 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use tempfile::TempDir;
 use tokio::sync::Mutex;
 use tokio::time::sleep;
-use tempfile::TempDir;
 
 use winx_code_agent::errors::Result;
 use winx_code_agent::state::bash_state::BashState;
@@ -63,11 +63,7 @@ async fn test_01_simple_command_echo() -> Result<()> {
     println!("[TEST 1] Response:\n{}", response);
 
     // Verify the output contains "test"
-    assert!(
-        response.contains("test"),
-        "Response should contain 'test': {}",
-        response
-    );
+    assert!(response.contains("test"), "Response should contain 'test': {}", response);
 
     // Verify status information is present
     assert!(
@@ -136,10 +132,7 @@ async fn test_03_status_check() -> Result<()> {
     // Now do a status check - this should return an error since no command is running
     // after the previous one completed
     let status_cmd = BashCommand {
-        action_json: BashCommandAction::StatusCheck {
-            status_check: true,
-            bg_command_id: None,
-        },
+        action_json: BashCommandAction::StatusCheck { status_check: true, bg_command_id: None },
         wait_for_seconds: Some(2.0),
         thread_id: "i2238-status".to_string(),
     };
@@ -210,7 +203,9 @@ async fn test_04_send_text() -> Result<()> {
             println!("[TEST 4] Send text response:\n{}", response);
             // Cat should echo back what we sent
             assert!(
-                response.contains("hello") || response.contains("send_text") || response.contains("status"),
+                response.contains("hello")
+                    || response.contains("send_text")
+                    || response.contains("status"),
                 "Response should contain sent text or status"
             );
         }
@@ -277,7 +272,8 @@ async fn test_05_send_specials_ctrl_c() -> Result<()> {
         thread_id: "i2238-ctrlc".to_string(),
     };
 
-    let interrupt_response = tools::bash_command::handle_tool_call(&bash_state_arc, ctrl_c_cmd).await?;
+    let interrupt_response =
+        tools::bash_command::handle_tool_call(&bash_state_arc, ctrl_c_cmd).await?;
     println!("[TEST 5] Ctrl+C response:\n{}", interrupt_response);
 
     // After Ctrl+C, the command should be interrupted
@@ -355,11 +351,7 @@ async fn test_07_multiple_commands_sequence() -> Result<()> {
     println!("[TEST 7] Command 2 (read file):\n{}", response2);
 
     // Verify content was written and read back
-    assert!(
-        response2.contains("content"),
-        "Should read back 'content': {}",
-        response2
-    );
+    assert!(response2.contains("content"), "Should read back 'content': {}", response2);
 
     // Command 3: Remove the file
     let cmd3 = BashCommand {
@@ -374,11 +366,7 @@ async fn test_07_multiple_commands_sequence() -> Result<()> {
     let response3 = tools::bash_command::handle_tool_call(&bash_state_arc, cmd3).await?;
     println!("[TEST 7] Command 3 (delete file):\n{}", response3);
 
-    assert!(
-        response3.contains("deleted"),
-        "Should confirm deletion: {}",
-        response3
-    );
+    assert!(response3.contains("deleted"), "Should confirm deletion: {}", response3);
 
     println!("[TEST 7] PASSED\n");
     Ok(())
@@ -483,10 +471,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
     // Status check
     sleep(Duration::from_millis(500)).await;
     let status_cmd = BashCommand {
-        action_json: BashCommandAction::StatusCheck {
-            status_check: true,
-            bg_command_id: None,
-        },
+        action_json: BashCommandAction::StatusCheck { status_check: true, bg_command_id: None },
         wait_for_seconds: Some(2.0),
         thread_id: "i2238".to_string(),
     };
@@ -550,7 +535,11 @@ async fn test_full_workflow_i2238() -> Result<()> {
     let file_path = temp_dir.path().join("test.txt");
     let file_cmd = BashCommand {
         action_json: BashCommandAction::Command {
-            command: format!("echo 'file content' > {} && cat {}", file_path.display(), file_path.display()),
+            command: format!(
+                "echo 'file content' > {} && cat {}",
+                file_path.display(),
+                file_path.display()
+            ),
             is_background: false,
         },
         wait_for_seconds: Some(5.0),

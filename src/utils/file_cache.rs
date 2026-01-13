@@ -329,11 +329,7 @@ impl FileCacheEntry {
     /// Check if a specific line has been read
     #[allow(dead_code)]
     fn is_line_read(&self, line: usize) -> bool {
-        self.fully_read
-            || self
-                .read_ranges
-                .iter()
-                .any(|&(start, end)| line >= start && line <= end)
+        self.fully_read || self.read_ranges.iter().any(|&(start, end)| line >= start && line <= end)
     }
 
     /// Get the percentage of the file that has been read
@@ -571,10 +567,7 @@ impl FileCache {
 
         if let Ok(mut ws_guard) = self.workspace_stats.write() {
             *ws_guard = Some(stats);
-            info!(
-                "Initialized workspace statistics for {}",
-                workspace_path.display()
-            );
+            info!("Initialized workspace statistics for {}", workspace_path.display());
         } else {
             warn!("Failed to acquire write lock for workspace stats");
         }
@@ -1039,13 +1032,7 @@ impl FileCache {
         // Read the file outside any locks to minimize contention
         let content = match fs::read(path) {
             Ok(data) => data,
-            Err(e) => {
-                return Err(anyhow::anyhow!(
-                    "Failed to read file {}: {}",
-                    path.display(),
-                    e
-                ))
-            }
+            Err(e) => return Err(anyhow::anyhow!("Failed to read file {}: {}", path.display(), e)),
         };
 
         // Get metadata for the file (for size and modification time)
@@ -1183,9 +1170,7 @@ impl FileCache {
             }
 
             // Timed out waiting for lock
-            Err(anyhow::anyhow!(
-                "Timed out waiting for write lock during cache update"
-            ))
+            Err(anyhow::anyhow!("Timed out waiting for write lock during cache update"))
         });
 
         // Update memory usage counter
@@ -1566,10 +1551,8 @@ impl FileCache {
 
         if let Ok(entries) = self.entries.read() {
             // Collect all entries with their stats
-            let mut file_stats: Vec<_> = entries
-                .iter()
-                .map(|(path, entry)| (path.clone(), entry.stats.clone()))
-                .collect();
+            let mut file_stats: Vec<_> =
+                entries.iter().map(|(path, entry)| (path.clone(), entry.stats.clone())).collect();
 
             // Sort by importance score (highest first)
             file_stats.sort_by(|a, b| {

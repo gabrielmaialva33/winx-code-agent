@@ -18,6 +18,7 @@ use crate::state::persistence::{
     delete_bash_state as delete_state_file, load_bash_state as load_state_file,
     save_bash_state as save_state_file, BashStateSnapshot,
 };
+use crate::state::pty::PtyShell;
 use crate::state::terminal::MAX_OUTPUT_SIZE as TERMINAL_MAX_OUTPUT_SIZE;
 use crate::state::terminal::{
     incremental_text, render_terminal_output, TerminalEmulator, TerminalOutputDiff,
@@ -26,7 +27,6 @@ use crate::state::terminal::{
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
 };
-use crate::state::pty::PtyShell;
 use crate::utils::error_predictor::SharedErrorPredictor;
 use crate::utils::pattern_analyzer::SharedPatternAnalyzer;
 
@@ -386,7 +386,8 @@ const WCGW_PROMPT_COMMAND: &str = r#"printf '◉ '"$(pwd)"'──➤ '"#;
 
 /// Bash prompt statement to set up the dynamic prompt - matches WCGW Python `PROMPT_STATEMENT` setup
 /// Note: removed \r\e[2K which was erasing the prompt before it could be detected
-const BASH_PROMPT_STATEMENT: &str = r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ $(pwd)──➤ '"'"#;
+const BASH_PROMPT_STATEMENT: &str =
+    r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ $(pwd)──➤ '"'"#;
 
 /// Fallback static prompt for detection (used when dynamic prompt fails)
 const FALLBACK_PROMPT: &str = "winx$ ";
@@ -429,10 +430,7 @@ pub enum CommandState {
     /// No command is running
     Idle,
     /// A command is running
-    Running {
-        start_time: std::time::SystemTime,
-        command: String,
-    },
+    Running { start_time: std::time::SystemTime, command: String },
 }
 
 /// The `BashState` struct holds the state of a bash session, including
@@ -584,10 +582,8 @@ impl InteractiveBash {
         let mut process = cmd_env.spawn().context("Failed to spawn bash process")?;
 
         // Set up the dynamic prompt - matches WCGW Python PROMPT_STATEMENT
-        let mut stdin = process
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("Failed to get stdin for bash process"))?;
+        let mut stdin =
+            process.stdin.take().ok_or_else(|| anyhow!("Failed to get stdin for bash process"))?;
 
         // Write the prompt statement to ensure consistent behavior - matches WCGW Python
         writeln!(stdin, "{BASH_PROMPT_STATEMENT}")
@@ -803,7 +799,9 @@ impl InteractiveBash {
 
             // Check for WCGW prompt in entire output if we didn't find it in the last chunk
             // Uses regex for dynamic ◉ /path──➤ format - matches WCGW Python
-            if !complete && (contains_wcgw_prompt(&full_output) || full_output.contains(FALLBACK_PROMPT)) {
+            if !complete
+                && (contains_wcgw_prompt(&full_output) || full_output.contains(FALLBACK_PROMPT))
+            {
                 complete = true;
                 debug!("Command completed, WCGW prompt found in accumulated output");
                 break;
@@ -950,10 +948,8 @@ impl InteractiveBash {
                                 }
 
                                 // Keep command state as running
-                                if let CommandState::Running {
-                                    start_time,
-                                    command,
-                                } = &self.command_state
+                                if let CommandState::Running { start_time, command } =
+                                    &self.command_state
                                 {
                                     self.command_state = CommandState::Running {
                                         start_time: *start_time,
@@ -1031,12 +1027,9 @@ impl BashState {
             bash_mode: BashMode::NormalMode,
             allowed_commands: AllowedCommands::All("all".to_string()),
         };
-        let file_edit_mode = FileEditMode {
-            allowed_globs: AllowedGlobs::All("all".to_string()),
-        };
-        let write_if_empty_mode = WriteIfEmptyMode {
-            allowed_globs: AllowedGlobs::All("all".to_string()),
-        };
+        let file_edit_mode = FileEditMode { allowed_globs: AllowedGlobs::All("all".to_string()) };
+        let write_if_empty_mode =
+            WriteIfEmptyMode { allowed_globs: AllowedGlobs::All("all".to_string()) };
 
         Self {
             cwd: cwd.clone(),
@@ -1060,10 +1053,7 @@ impl BashState {
     pub fn init_interactive_bash(&mut self) -> Result<()> {
         let restricted_mode = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
 
-        debug!(
-            "Initializing interactive bash (restricted: {})",
-            restricted_mode
-        );
+        debug!("Initializing interactive bash (restricted: {})", restricted_mode);
 
         // Create a new interactive bash process
         let bash = InteractiveBash::new(&self.cwd, restricted_mode)?;
@@ -1088,20 +1078,14 @@ impl BashState {
     pub fn init_pty_shell(&mut self) -> Result<()> {
         let restricted_mode = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
 
-        info!(
-            "Initializing PTY shell (restricted: {}) in {}",
-            restricted_mode,
-            self.cwd.display()
-        );
+        info!("Initializing PTY shell (restricted: {}) in {}", restricted_mode, self.cwd.display());
 
         // Create a new PTY shell
         let shell = PtyShell::new(&self.cwd, restricted_mode)?;
 
         // Update the state
-        let mut guard = self
-            .pty_shell
-            .lock()
-            .map_err(|e| anyhow!("Failed to lock PTY shell mutex: {e}"))?;
+        let mut guard =
+            self.pty_shell.lock().map_err(|e| anyhow!("Failed to lock PTY shell mutex: {e}"))?;
 
         *guard = Some(shell);
 
@@ -1112,10 +1096,7 @@ impl BashState {
 
     /// Check if PTY shell is available
     pub fn has_pty_shell(&self) -> bool {
-        self.pty_shell
-            .lock()
-            .map(|guard| guard.is_some())
-            .unwrap_or(false)
+        self.pty_shell.lock().map(|guard| guard.is_some()).unwrap_or(false)
     }
 
     /// Updates the current working directory
@@ -1135,9 +1116,7 @@ impl BashState {
 
             Ok(())
         } else {
-            Err(anyhow!(
-                "Path does not exist or is not a directory: {path:?}"
-            ))
+            Err(anyhow!("Path does not exist or is not a directory: {path:?}"))
         }
     }
 
@@ -1147,9 +1126,7 @@ impl BashState {
             self.workspace_root = path.to_path_buf();
             Ok(())
         } else {
-            Err(anyhow!(
-                "Path does not exist or is not a directory: {path:?}"
-            ))
+            Err(anyhow!("Path does not exist or is not a directory: {path:?}"))
         }
     }
 
@@ -1256,13 +1233,9 @@ impl BashState {
             need_init = bash_guard.is_none();
             command_running_info = match bash_guard.as_ref() {
                 Some(bash) => match &bash.command_state {
-                    CommandState::Running {
-                        start_time,
-                        command: ref running_command,
-                    } => {
-                        let elapsed = start_time
-                            .elapsed()
-                            .unwrap_or_else(|_| Duration::from_secs(0));
+                    CommandState::Running { start_time, command: ref running_command } => {
+                        let elapsed =
+                            start_time.elapsed().unwrap_or_else(|_| Duration::from_secs(0));
                         Some((running_command.clone(), elapsed))
                     }
                     CommandState::Idle => None,
@@ -1275,16 +1248,14 @@ impl BashState {
         if let Some((running_command, elapsed)) = command_running_info {
             // Check if this is a status check request
             if command.trim().is_empty() || command == "status_check" {
-                debug!(
-                    "Status check requested for running command: {}",
-                    running_command
-                );
+                debug!("Status check requested for running command: {}", running_command);
 
                 // Get current output (needs lock, but doesn't await)
                 let (output, complete) = {
-                    let mut bash_guard = self.interactive_bash.lock().map_err(|e| {
-                        anyhow!("Failed to lock bash state for status check: {e}")
-                    })?;
+                    let mut bash_guard = self
+                        .interactive_bash
+                        .lock()
+                        .map_err(|e| anyhow!("Failed to lock bash state for status check: {e}"))?;
 
                     if let Some(bash) = bash_guard.as_mut() {
                         bash.read_output(0.2)?
@@ -1403,14 +1374,16 @@ impl BashState {
                         }
                     };
 
-                    if let Some(bash) = bash_guard.as_mut() { match bash.read_output(0.1) {
-                        Ok(res) => res,
-                        Err(e) => {
-                            warn!("Error reading output during polling: {}", e);
-                            patience -= 1;
-                            continue;
+                    if let Some(bash) = bash_guard.as_mut() {
+                        match bash.read_output(0.1) {
+                            Ok(res) => res,
+                            Err(e) => {
+                                warn!("Error reading output during polling: {}", e);
+                                patience -= 1;
+                                continue;
+                            }
                         }
-                    } } else {
+                    } else {
                         warn!("Bash disappeared during polling");
                         break;
                     }
@@ -1434,10 +1407,7 @@ impl BashState {
 
                 // Log progress
                 if elapsed > 5.0 && (elapsed as usize).is_multiple_of(5) {
-                    debug!(
-                        "Still waiting for command completion - elapsed: {:.2?}s",
-                        elapsed
-                    );
+                    debug!("Still waiting for command completion - elapsed: {:.2?}s", elapsed);
                 }
             }
         }
@@ -1453,16 +1423,11 @@ impl BashState {
             };
 
         // Add status information
-        let status = if complete {
-            "process exited"
-        } else {
-            "still running"
-        };
+        let status = if complete { "process exited" } else { "still running" };
 
         // Get current working directory (it might have changed if cd was used)
-        let current_cwd = self
-            .update_cwd_from_bash()
-            .unwrap_or_else(|_| self.cwd.display().to_string());
+        let current_cwd =
+            self.update_cwd_from_bash().unwrap_or_else(|_| self.cwd.display().to_string());
 
         // Check for background jobs
         let bg_jobs = self.check_background_jobs().unwrap_or_default();
@@ -1482,27 +1447,18 @@ impl BashState {
         // Check if output is very large and might need truncation
         if result.len() > TERMINAL_MAX_OUTPUT_SIZE {
             // Apply smart truncation to avoid excessive memory usage
-            self.terminal_state
-                .smart_truncate(self.terminal_state.max_buffer_lines);
-            debug!(
-                "Applied smart truncation for large output ({} bytes)",
-                result.len()
-            );
+            self.terminal_state.smart_truncate(self.terminal_state.max_buffer_lines);
+            debug!("Applied smart truncation for large output ({} bytes)", result.len());
         }
 
         // Assemble final result
-        let final_result = format!(
-            "{rendered_output}\n\n---\n\n{status_line}\ncwd = {current_cwd}\n"
-        );
+        let final_result =
+            format!("{rendered_output}\n\n---\n\n{status_line}\ncwd = {current_cwd}\n");
 
         // Record command in pattern analyzer for future suggestions
         if !command.trim().is_empty() && command != "status_check" {
             // Don't record status checks or empty commands
-            if let Err(e) = self
-                .pattern_analyzer
-                .record_command(command, &current_cwd)
-                .await
-            {
+            if let Err(e) = self.pattern_analyzer.record_command(command, &current_cwd).await {
                 warn!("Failed to record command in pattern analyzer: {}", e);
             }
         }
@@ -1521,8 +1477,8 @@ impl BashState {
 
         // Initialize PTY if needed
         let need_init = {
-            let guard = self.pty_shell.lock()
-                .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+            let guard =
+                self.pty_shell.lock().map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
             guard.is_none()
         };
 
@@ -1532,11 +1488,11 @@ impl BashState {
         }
 
         // Execute the command
-        let mut guard = self.pty_shell.lock()
-            .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+        let mut guard =
+            self.pty_shell.lock().map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
 
-        let shell = guard.as_mut()
-            .ok_or_else(|| anyhow!("PTY shell is None after initialization"))?;
+        let shell =
+            guard.as_mut().ok_or_else(|| anyhow!("PTY shell is None after initialization"))?;
 
         // Send the command
         shell.send_command(command)?;
@@ -1567,8 +1523,8 @@ impl BashState {
 
     /// Send interrupt (Ctrl+C) to the PTY shell
     pub fn send_pty_interrupt(&mut self) -> Result<()> {
-        let mut guard = self.pty_shell.lock()
-            .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+        let mut guard =
+            self.pty_shell.lock().map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
 
         if let Some(shell) = guard.as_mut() {
             shell.send_interrupt()
@@ -1579,8 +1535,8 @@ impl BashState {
 
     /// Send text directly to the PTY shell (for interactive input)
     pub fn send_pty_text(&mut self, text: &str) -> Result<()> {
-        let mut guard = self.pty_shell.lock()
-            .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+        let mut guard =
+            self.pty_shell.lock().map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
 
         if let Some(shell) = guard.as_mut() {
             shell.send_text(text)
@@ -1591,8 +1547,8 @@ impl BashState {
 
     /// Send a special key to the PTY shell
     pub fn send_pty_special_key(&mut self, key: &str) -> Result<()> {
-        let mut guard = self.pty_shell.lock()
-            .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+        let mut guard =
+            self.pty_shell.lock().map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
 
         if let Some(shell) = guard.as_mut() {
             shell.send_special_key(key)
@@ -1603,8 +1559,8 @@ impl BashState {
 
     /// Resize the PTY terminal
     pub fn resize_pty(&mut self, cols: u16, rows: u16) -> Result<()> {
-        let mut guard = self.pty_shell.lock()
-            .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+        let mut guard =
+            self.pty_shell.lock().map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
 
         if let Some(shell) = guard.as_mut() {
             shell.resize(cols, rows)
@@ -1633,21 +1589,13 @@ impl BashState {
                 };
 
             // Add status information
-            let status = if complete {
-                "process exited"
-            } else {
-                "still running"
-            };
+            let status = if complete { "process exited" } else { "still running" };
 
             // Check if output is very large and might need truncation
             if output.len() > TERMINAL_MAX_OUTPUT_SIZE {
                 // Apply smart truncation to avoid excessive memory usage
-                self.terminal_state
-                    .smart_truncate(self.terminal_state.max_buffer_lines);
-                debug!(
-                    "Applied smart truncation for large output ({} bytes)",
-                    output.len()
-                );
+                self.terminal_state.smart_truncate(self.terminal_state.max_buffer_lines);
+                debug!("Applied smart truncation for large output ({} bytes)", output.len());
             }
 
             // Assemble final result
@@ -1681,9 +1629,9 @@ impl BashState {
                 // Code writer mode: check against allowed commands
                 match &self.bash_command_mode.allowed_commands {
                     AllowedCommands::All(_) => true,
-                    AllowedCommands::List(commands) => commands
-                        .iter()
-                        .any(|allowed| self.command_matches(command, allowed)),
+                    AllowedCommands::List(commands) => {
+                        commands.iter().any(|allowed| self.command_matches(command, allowed))
+                    }
                 }
             }
         }
@@ -1698,9 +1646,9 @@ impl BashState {
                 // Code writer mode: check against allowed globs
                 match &self.file_edit_mode.allowed_globs {
                     AllowedGlobs::All(_) => true,
-                    AllowedGlobs::List(globs) => globs
-                        .iter()
-                        .any(|glob| self.path_matches_glob(file_path, glob)),
+                    AllowedGlobs::List(globs) => {
+                        globs.iter().any(|glob| self.path_matches_glob(file_path, glob))
+                    }
                 }
             }
         }
@@ -1715,9 +1663,9 @@ impl BashState {
                 // Code writer mode: check against allowed globs
                 match &self.write_if_empty_mode.allowed_globs {
                     AllowedGlobs::All(_) => true,
-                    AllowedGlobs::List(globs) => globs
-                        .iter()
-                        .any(|glob| self.path_matches_glob(file_path, glob)),
+                    AllowedGlobs::List(globs) => {
+                        globs.iter().any(|glob| self.path_matches_glob(file_path, glob))
+                    }
                 }
             }
         }
@@ -1780,10 +1728,7 @@ impl BashState {
         ];
 
         // Check for exact matches first
-        if readonly_commands
-            .iter()
-            .any(|&readonly_cmd| cmd.starts_with(readonly_cmd))
-        {
+        if readonly_commands.iter().any(|&readonly_cmd| cmd.starts_with(readonly_cmd)) {
             return true;
         }
 
@@ -1822,9 +1767,7 @@ impl BashState {
             "rustc",
         ];
 
-        !dangerous_patterns
-            .iter()
-            .any(|&dangerous| cmd.contains(dangerous))
+        !dangerous_patterns.iter().any(|&dangerous| cmd.contains(dangerous))
     }
 
     /// Check if a command matches an allowed command pattern
@@ -1955,10 +1898,7 @@ impl BashState {
         );
 
         save_state_file(&self.current_thread_id, &snapshot)?;
-        debug!(
-            "Saved bash state to disk for thread_id '{}'",
-            self.current_thread_id
-        );
+        debug!("Saved bash state to disk for thread_id '{}'", self.current_thread_id);
         Ok(())
     }
 
@@ -2005,10 +1945,7 @@ impl BashState {
                 }
             }
 
-            info!(
-                "Loaded bash state from disk for thread_id '{}' (cwd: {})",
-                thread_id, cwd
-            );
+            info!("Loaded bash state from disk for thread_id '{}' (cwd: {})", thread_id, cwd);
             Ok(true)
         } else {
             debug!("No saved state found for thread_id '{}'", thread_id);
@@ -2019,10 +1956,7 @@ impl BashState {
     /// Delete the saved state for this `thread_id` from disk
     pub fn delete_state_from_disk(&self) -> Result<()> {
         delete_state_file(&self.current_thread_id)?;
-        info!(
-            "Deleted bash state from disk for thread_id '{}'",
-            self.current_thread_id
-        );
+        info!("Deleted bash state from disk for thread_id '{}'", self.current_thread_id);
         Ok(())
     }
 

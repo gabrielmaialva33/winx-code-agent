@@ -10,7 +10,9 @@ use std::fs;
 use std::path::PathBuf;
 use tracing::{debug, info, warn};
 
-use crate::types::{AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode};
+use crate::types::{
+    AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
+};
 
 use super::bash_state::FileWhitelistData;
 
@@ -87,19 +89,18 @@ pub struct FileWhitelistDataSnapshot {
 /// Get the XDG data directory for storing bash state
 /// Returns `~/.local/share/wcgw/bash_state/`
 pub fn get_state_dir() -> Result<PathBuf> {
-    let data_dir = std::env::var("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let home = home::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-            home.join(".local/share")
-        });
+    let data_dir = std::env::var("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|_| {
+        let home = home::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+        home.join(".local/share")
+    });
 
     let bash_state_dir = data_dir.join("wcgw").join("bash_state");
 
     // Create directory if it doesn't exist
     if !bash_state_dir.exists() {
-        fs::create_dir_all(&bash_state_dir)
-            .with_context(|| format!("Failed to create bash state directory: {bash_state_dir:?}"))?;
+        fs::create_dir_all(&bash_state_dir).with_context(|| {
+            format!("Failed to create bash state directory: {bash_state_dir:?}")
+        })?;
         debug!("Created bash state directory: {:?}", bash_state_dir);
     }
 
@@ -244,11 +245,7 @@ impl BashStateSnapshot {
             workspace_root: workspace_root.to_string(),
             chat_id: thread_id.to_string(),
             // Only store cwd if different from workspace_root (for backward compatibility)
-            cwd: if cwd == workspace_root {
-                String::new()
-            } else {
-                cwd.to_string()
-            },
+            cwd: if cwd == workspace_root { String::new() } else { cwd.to_string() },
         }
     }
 
@@ -256,14 +253,14 @@ impl BashStateSnapshot {
     pub fn to_state_components(
         &self,
     ) -> (
-        String,                                    // cwd
-        String,                                    // workspace_root
-        Modes,                                     // mode
-        BashCommandMode,                           // bash_command_mode
-        FileEditMode,                              // file_edit_mode
-        WriteIfEmptyMode,                          // write_if_empty_mode
-        HashMap<String, FileWhitelistData>,        // whitelist
-        String,                                    // thread_id
+        String,                             // cwd
+        String,                             // workspace_root
+        Modes,                              // mode
+        BashCommandMode,                    // bash_command_mode
+        FileEditMode,                       // file_edit_mode
+        WriteIfEmptyMode,                   // write_if_empty_mode
+        HashMap<String, FileWhitelistData>, // whitelist
+        String,                             // thread_id
     ) {
         let mode = match self.mode.as_str() {
             "wcgw" => Modes::Wcgw,
@@ -279,11 +276,7 @@ impl BashStateSnapshot {
             .collect();
 
         // Use cwd if present, otherwise fall back to workspace_root
-        let cwd = if self.cwd.is_empty() {
-            self.workspace_root.clone()
-        } else {
-            self.cwd.clone()
-        };
+        let cwd = if self.cwd.is_empty() { self.workspace_root.clone() } else { self.cwd.clone() };
 
         (
             cwd,
@@ -454,12 +447,9 @@ mod tests {
             bash_mode: BashMode::NormalMode,
             allowed_commands: AllowedCommands::All("all".to_string()),
         };
-        let file_edit_mode = FileEditMode {
-            allowed_globs: AllowedGlobs::All("all".to_string()),
-        };
-        let write_if_empty_mode = WriteIfEmptyMode {
-            allowed_globs: AllowedGlobs::All("all".to_string()),
-        };
+        let file_edit_mode = FileEditMode { allowed_globs: AllowedGlobs::All("all".to_string()) };
+        let write_if_empty_mode =
+            WriteIfEmptyMode { allowed_globs: AllowedGlobs::All("all".to_string()) };
         let whitelist = HashMap::new();
         let thread_id = "i5678";
 

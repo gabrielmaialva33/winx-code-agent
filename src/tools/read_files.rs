@@ -87,11 +87,7 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
     use std::fs::File;
     use std::io::{BufReader, Read};
 
-    debug!(
-        "Streaming file {} with chunk size {}",
-        path.display(),
-        chunk_size
-    );
+    debug!("Streaming file {} with chunk size {}", path.display(), chunk_size);
 
     let file = File::open(path).map_err(|e| WinxError::FileAccessError {
         path: path.to_path_buf(),
@@ -103,12 +99,10 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
     let mut buffer = vec![0; chunk_size];
 
     loop {
-        let bytes_read = reader
-            .read(&mut buffer)
-            .map_err(|e| WinxError::FileAccessError {
-                path: path.to_path_buf(),
-                message: format!("Failed to read chunk from file: {e}"),
-            })?;
+        let bytes_read = reader.read(&mut buffer).map_err(|e| WinxError::FileAccessError {
+            path: path.to_path_buf(),
+            message: format!("Failed to read chunk from file: {e}"),
+        })?;
 
         if bytes_read == 0 {
             break; // End of file
@@ -129,11 +123,7 @@ async fn read_file_with_streaming(path: &Path, chunk_size: usize) -> Result<Stri
         tokio::task::yield_now().await;
     }
 
-    info!(
-        "Successfully streamed {} bytes from {}",
-        content.len(),
-        path.display()
-    );
+    info!("Successfully streamed {} bytes from {}", content.len(), path.display());
     Ok(content)
 }
 
@@ -337,10 +327,7 @@ async fn read_file(
     let filtered_lines = &lines[start_idx..end_idx];
 
     // Pre-calculate the approximate size needed for the result
-    let approx_size = filtered_lines
-        .iter()
-        .map(|line| line.len() + 1)
-        .sum::<usize>();
+    let approx_size = filtered_lines.iter().map(|line| line.len() + 1).sum::<usize>();
     let mut result_content = String::with_capacity(approx_size);
 
     // Create content string with or without line numbers
@@ -417,13 +404,7 @@ async fn read_file(
         total_lines
     );
 
-    Ok((
-        result_content,
-        truncated,
-        tokens_count,
-        canon_path,
-        (effective_start, effective_end),
-    ))
+    Ok((result_content, truncated, tokens_count, canon_path, (effective_start, effective_end)))
 }
 
 /// Validate `ReadFiles` parameters and provide defaults for missing values
@@ -461,18 +442,14 @@ fn validate_read_files(read_files: ReadFiles) -> Result<ReadFiles> {
         && validated.start_line_nums.len() < validated.file_paths.len()
     {
         // Extend start_line_nums with None values
-        validated
-            .start_line_nums
-            .resize(validated.file_paths.len(), None);
+        validated.start_line_nums.resize(validated.file_paths.len(), None);
     }
 
     if !validated.end_line_nums.is_empty()
         && validated.end_line_nums.len() < validated.file_paths.len()
     {
         // Extend end_line_nums with None values
-        validated
-            .end_line_nums
-            .resize(validated.file_paths.len(), None);
+        validated.end_line_nums.resize(validated.file_paths.len(), None);
     }
 
     // Initialize start_line_nums and end_line_nums if they're empty
@@ -528,7 +505,9 @@ pub async fn handle_tool_call(
         let bash_state_guard = bash_state_arc.lock().await;
 
         // Ensure bash state is initialized
-        let bash_state = if let Some(state) = &*bash_state_guard { state } else {
+        let bash_state = if let Some(state) = &*bash_state_guard {
+            state
+        } else {
             error!("BashState not initialized");
             return Err(ErrorRecovery::suggest(
                 WinxError::BashStateNotInitialized,
@@ -551,16 +530,9 @@ pub async fn handle_tool_call(
     // Prepare file parameters
     for (i, file_path) in validated_read_files.file_paths.iter().enumerate() {
         // Parse path for line ranges
-        let mut start_line_num = validated_read_files
-            .start_line_nums
-            .get(i)
-            .copied()
-            .unwrap_or(None);
-        let mut end_line_num = validated_read_files
-            .end_line_nums
-            .get(i)
-            .copied()
-            .unwrap_or(None);
+        let mut start_line_num =
+            validated_read_files.start_line_nums.get(i).copied().unwrap_or(None);
+        let mut end_line_num = validated_read_files.end_line_nums.get(i).copied().unwrap_or(None);
         let mut clean_path = file_path.clone();
 
         // Extract line range from path if present
@@ -643,48 +615,35 @@ pub async fn handle_tool_call(
     for chunk in cloned_params.chunks(chunk_size.max(1)) {
         let chunk_tasks = chunk
             .iter()
-            .map(
-                |(clean_path, original_path, start_line_num, end_line_num, allocated_tokens)| {
-                    let clean_path = clean_path.clone();
-                    let original_path = original_path.clone();
-                    let cwd = cwd.clone();
-                    let start = *start_line_num;
-                    let end = *end_line_num;
-                    let file_tokens = *allocated_tokens;
+            .map(|(clean_path, original_path, start_line_num, end_line_num, allocated_tokens)| {
+                let clean_path = clean_path.clone();
+                let original_path = original_path.clone();
+                let cwd = cwd.clone();
+                let start = *start_line_num;
+                let end = *end_line_num;
+                let file_tokens = *allocated_tokens;
 
-                    tokio::spawn(async move {
-                        let result = read_file(
-                            &clean_path,
-                            file_tokens,
-                            &cwd,
-                            show_line_numbers,
-                            start,
-                            end,
-                        )
-                        .await;
+                tokio::spawn(async move {
+                    let result =
+                        read_file(&clean_path, file_tokens, &cwd, show_line_numbers, start, end)
+                            .await;
 
-                        // Track errors if read failed
-                        if result.is_err() {
-                            let allocator = get_global_allocator();
-                            allocator.mark_read_failure().await;
-                        }
+                    // Track errors if read failed
+                    if result.is_err() {
+                        let allocator = get_global_allocator();
+                        allocator.mark_read_failure().await;
+                    }
 
-                        FileReadInfo {
-                            original_path,
-                            result,
-                        }
-                    })
-                },
-            )
+                    FileReadInfo { original_path, result }
+                })
+            })
             .collect::<Vec<_>>();
 
         // Wait for this chunk to complete
         for task in chunk_tasks {
             file_read_tasks.push(task.await.unwrap_or_else(|e| FileReadInfo {
                 original_path: "unknown".to_string(),
-                result: Err(WinxError::CommandExecutionError(format!(
-                    "Task panicked: {e}"
-                ))),
+                result: Err(WinxError::CommandExecutionError(format!("Task panicked: {e}"))),
             }));
         }
     }
@@ -704,7 +663,6 @@ pub async fn handle_tool_call(
 
         match file_info.result {
             Ok((content, file_truncated, _tokens_used, canon_path, line_range)) => {
-
                 // Add to file ranges dictionary
                 if let Some(ranges) = file_ranges_dict.get_mut(&canon_path) {
                     ranges.push(line_range);
@@ -713,32 +671,19 @@ pub async fn handle_tool_call(
                 }
 
                 // Add content to message
-                let start_line_num = if i < cloned_params.len() {
-                    cloned_params[i].2
-                } else {
-                    None
-                };
-                let end_line_num = if i < cloned_params.len() {
-                    cloned_params[i].3
-                } else {
-                    None
-                };
+                let start_line_num =
+                    if i < cloned_params.len() { cloned_params[i].2 } else { None };
+                let end_line_num = if i < cloned_params.len() { cloned_params[i].3 } else { None };
                 let range_formatted = range_format(start_line_num, end_line_num);
-                message.push_str(&format!(
-                    "\n{file_path}{range_formatted}\n```\n{content}\n"
-                ));
+                message.push_str(&format!("\n{file_path}{range_formatted}\n```\n{content}\n"));
 
                 // Check if we need to stop due to truncation (file exceeded its token limit)
                 if file_truncated {
                     should_stop = true;
 
                     // Mention files we're not reading if any remain
-                    let remaining_files: Vec<String> = validated_read_files
-                        .file_paths
-                        .iter()
-                        .skip(i + 1)
-                        .cloned()
-                        .collect();
+                    let remaining_files: Vec<String> =
+                        validated_read_files.file_paths.iter().skip(i + 1).cloned().collect();
                     if !remaining_files.is_empty() {
                         message.push_str(&format!(
                             "\nNot reading the rest of the files: {} due to token limit, please call again",
@@ -758,10 +703,7 @@ pub async fn handle_tool_call(
                     WinxError::FileAccessError { path, message } => {
                         format!("Error accessing file: {} - {}", path.display(), message)
                     }
-                    WinxError::RecoverableSuggestionError {
-                        message,
-                        suggestion,
-                    } => {
+                    WinxError::RecoverableSuggestionError { message, suggestion } => {
                         format!("{message} - Suggestion: {suggestion}")
                     }
                     _ => format!("{e}"),
@@ -812,24 +754,20 @@ pub async fn handle_tool_call(
         if let Some(bash_state) = bash_state_guard.as_mut() {
             for (file_path, ranges) in file_ranges_dict {
                 // Get the hash from the cache
-                let file_hash = cache
-                    .get_cached_hash(Path::new(&file_path))
-                    .unwrap_or_else(|| {
-                        // If not in cache (shouldn't happen), calculate it
-                        match read_file_optimized(Path::new(&file_path), MAX_FILE_SIZE) {
-                            Ok(content) => {
-                                let mut hasher = Sha256::new();
-                                hasher.update(&content);
-                                format!("{:x}", hasher.finalize())
-                            }
-                            Err(_) => String::new(),
+                let file_hash = cache.get_cached_hash(Path::new(&file_path)).unwrap_or_else(|| {
+                    // If not in cache (shouldn't happen), calculate it
+                    match read_file_optimized(Path::new(&file_path), MAX_FILE_SIZE) {
+                        Ok(content) => {
+                            let mut hasher = Sha256::new();
+                            hasher.update(&content);
+                            format!("{:x}", hasher.finalize())
                         }
-                    });
+                        Err(_) => String::new(),
+                    }
+                });
 
                 // Add or update the whitelist entry
-                if let Some(existing) =
-                    bash_state.whitelist_for_overwrite.get_mut(&file_path)
-                {
+                if let Some(existing) = bash_state.whitelist_for_overwrite.get_mut(&file_path) {
                     existing.file_hash = file_hash.clone();
 
                     // Get total lines from the cache

@@ -120,10 +120,8 @@ impl PathScorer {
         }
 
         // Bonus for important filenames
-        let filename = path_obj
-            .file_name()
-            .map(|f| f.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
+        let filename =
+            path_obj.file_name().map(|f| f.to_string_lossy().to_lowercase()).unwrap_or_default();
 
         if filename == "main.rs"
             || filename == "lib.rs"
@@ -169,11 +167,7 @@ impl PathScorer {
 
     /// Filter paths by minimum score threshold
     pub fn filter_by_threshold(&self, paths: &[String], threshold: f32) -> Vec<String> {
-        paths
-            .iter()
-            .filter(|p| self.calculate_path_probability(p) >= threshold)
-            .cloned()
-            .collect()
+        paths.iter().filter(|p| self.calculate_path_probability(p) >= threshold).cloned().collect()
     }
 
     /// Filter paths by relevance level
@@ -262,11 +256,8 @@ mod tests {
     #[test]
     fn test_batch_scoring() {
         let scorer = PathScorer::new();
-        let paths = vec![
-            "src/main.rs".to_string(),
-            "Cargo.lock".to_string(),
-            "README.md".to_string(),
-        ];
+        let paths =
+            vec!["src/main.rs".to_string(), "Cargo.lock".to_string(), "README.md".to_string()];
 
         let results = scorer.calculate_path_probabilities_batch(&paths);
         assert_eq!(results.len(), 3);

@@ -65,9 +65,7 @@ impl<'de> Deserialize<'de> for ModeName {
             "wcgw" => Ok(ModeName::Wcgw),
             "architect" => Ok(ModeName::Architect),
             "code_writer" | "code_write" | "code-writer" => Ok(ModeName::CodeWriter),
-            _ => Err(serde::de::Error::custom(format!(
-                "Unknown mode name: {s}"
-            ))),
+            _ => Err(serde::de::Error::custom(format!("Unknown mode name: {s}"))),
         }
     }
 }
@@ -368,13 +366,9 @@ impl<'de> Deserialize<'de> for ReadFiles {
 
         if !input.is_object() {
             if input.is_null() {
-                return Err(serde::de::Error::custom(
-                    "Cannot convert null to ReadFiles object.",
-                ));
+                return Err(serde::de::Error::custom("Cannot convert null to ReadFiles object."));
             }
-            return Err(serde::de::Error::custom(format!(
-                "Expected object, got {input}"
-            )));
+            return Err(serde::de::Error::custom(format!("Expected object, got {input}")));
         }
 
         let helper: ReadFilesHelper = serde_json::from_value(input.clone())
@@ -382,12 +376,8 @@ impl<'de> Deserialize<'de> for ReadFiles {
 
         let file_paths = match helper.file_paths {
             Some(paths) if !paths.is_empty() => paths,
-            Some(_) => {
-                return Err(serde::de::Error::custom("file_paths must not be empty."))
-            }
-            None => {
-                return Err(serde::de::Error::custom("file_paths is required."))
-            }
+            Some(_) => return Err(serde::de::Error::custom("file_paths must not be empty.")),
+            None => return Err(serde::de::Error::custom("file_paths is required.")),
         };
 
         // Parse line ranges from file paths (like wcgw Python's model_post_init)
@@ -400,11 +390,7 @@ impl<'de> Deserialize<'de> for ReadFiles {
             end_line_nums.push(end);
         }
 
-        Ok(ReadFiles {
-            file_paths,
-            start_line_nums,
-            end_line_nums,
-        })
+        Ok(ReadFiles { file_paths, start_line_nums, end_line_nums })
     }
 }
 
@@ -421,17 +407,9 @@ fn parse_line_range_from_path(path: &str) -> (Option<usize>, Option<usize>) {
                 let start_str = &range_part[..dash_pos];
                 let end_str = &range_part[dash_pos + 1..];
 
-                let start = if start_str.is_empty() {
-                    None
-                } else {
-                    start_str.parse().ok()
-                };
+                let start = if start_str.is_empty() { None } else { start_str.parse().ok() };
 
-                let end = if end_str.is_empty() {
-                    None
-                } else {
-                    end_str.parse().ok()
-                };
+                let end = if end_str.is_empty() { None } else { end_str.parse().ok() };
 
                 return (start, end);
             }
@@ -487,22 +465,13 @@ pub enum BashCommandAction {
     },
 
     /// Send text to a running command
-    SendText {
-        send_text: String,
-        bg_command_id: Option<String>,
-    },
+    SendText { send_text: String, bg_command_id: Option<String> },
 
     /// Send special keys to a running command
-    SendSpecials {
-        send_specials: Vec<SpecialKey>,
-        bg_command_id: Option<String>,
-    },
+    SendSpecials { send_specials: Vec<SpecialKey>, bg_command_id: Option<String> },
 
     /// Send ASCII characters to a running command
-    SendAscii {
-        send_ascii: Vec<u8>,
-        bg_command_id: Option<String>,
-    },
+    SendAscii { send_ascii: Vec<u8>, bg_command_id: Option<String> },
 }
 
 /// Parameters for the `BashCommand` tool
@@ -732,4 +701,3 @@ pub struct ReadImage {
     /// This can be an absolute path or a path relative to the current working directory.
     pub file_path: String,
 }
-

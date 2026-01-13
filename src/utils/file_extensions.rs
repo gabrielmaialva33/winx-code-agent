@@ -132,10 +132,7 @@ pub struct ContextLengthLimits {
 
 impl Default for ContextLengthLimits {
     fn default() -> Self {
-        Self {
-            source_code: 24000,
-            default: 8000,
-        }
+        Self { source_code: 24000, default: 8000 }
     }
 }
 
@@ -155,15 +152,10 @@ impl Default for FileExtensionAnalyzer {
 impl FileExtensionAnalyzer {
     /// Create a new file extension analyzer with default settings
     pub fn new() -> Self {
-        let source_extensions = SOURCE_CODE_EXTENSIONS
-            .iter()
-            .map(|ext| ext.to_lowercase())
-            .collect();
+        let source_extensions =
+            SOURCE_CODE_EXTENSIONS.iter().map(|ext| ext.to_lowercase()).collect();
 
-        Self {
-            source_extensions,
-            context_limits: ContextLengthLimits::default(),
-        }
+        Self { source_extensions, context_limits: ContextLengthLimits::default() }
     }
 
     /// Create a new analyzer with custom context limits
@@ -444,24 +436,12 @@ mod tests {
         let analyzer = FileExtensionAnalyzer::new();
 
         // Test with both limits set
-        assert_eq!(
-            analyzer.select_max_tokens("main.rs", Some(1000), Some(500)),
-            Some(1000)
-        );
-        assert_eq!(
-            analyzer.select_max_tokens("data.csv", Some(1000), Some(500)),
-            Some(500)
-        );
+        assert_eq!(analyzer.select_max_tokens("main.rs", Some(1000), Some(500)), Some(1000));
+        assert_eq!(analyzer.select_max_tokens("data.csv", Some(1000), Some(500)), Some(500));
 
         // Test with only one limit set
-        assert_eq!(
-            analyzer.select_max_tokens("main.rs", Some(1000), None),
-            Some(1000)
-        );
-        assert_eq!(
-            analyzer.select_max_tokens("data.csv", Some(1000), None),
-            None
-        );
+        assert_eq!(analyzer.select_max_tokens("main.rs", Some(1000), None), Some(1000));
+        assert_eq!(analyzer.select_max_tokens("data.csv", Some(1000), None), None);
 
         // Test with no limits
         assert_eq!(analyzer.select_max_tokens("main.rs", None, None), None);
@@ -473,14 +453,8 @@ mod tests {
 
         assert_eq!(analyzer.get_file_type_category("main.rs"), "Rust");
         assert_eq!(analyzer.get_file_type_category("script.py"), "Python");
-        assert_eq!(
-            analyzer.get_file_type_category("component.tsx"),
-            "JavaScript/TypeScript"
-        );
-        assert_eq!(
-            analyzer.get_file_type_category("config.json"),
-            "Configuration"
-        );
+        assert_eq!(analyzer.get_file_type_category("component.tsx"), "JavaScript/TypeScript");
+        assert_eq!(analyzer.get_file_type_category("config.json"), "Configuration");
         assert_eq!(analyzer.get_file_type_category("Dockerfile"), "Docker");
     }
 

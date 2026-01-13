@@ -72,12 +72,8 @@ fn mode_to_state(mode: &Modes) -> (BashCommandMode, FileEditMode, WriteIfEmptyMo
                     bash_mode: BashMode::NormalMode,
                     allowed_commands: AllowedCommands::All("all".to_string()),
                 },
-                FileEditMode {
-                    allowed_globs: AllowedGlobs::All("all".to_string()),
-                },
-                WriteIfEmptyMode {
-                    allowed_globs: AllowedGlobs::All("all".to_string()),
-                },
+                FileEditMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
+                WriteIfEmptyMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
             )
         }
         Modes::Architect => {
@@ -87,12 +83,8 @@ fn mode_to_state(mode: &Modes) -> (BashCommandMode, FileEditMode, WriteIfEmptyMo
                     bash_mode: BashMode::RestrictedMode,
                     allowed_commands: AllowedCommands::All("all".to_string()),
                 },
-                FileEditMode {
-                    allowed_globs: AllowedGlobs::List(vec![]),
-                },
-                WriteIfEmptyMode {
-                    allowed_globs: AllowedGlobs::List(vec![]),
-                },
+                FileEditMode { allowed_globs: AllowedGlobs::List(vec![]) },
+                WriteIfEmptyMode { allowed_globs: AllowedGlobs::List(vec![]) },
             )
         }
         Modes::CodeWriter => {
@@ -102,12 +94,8 @@ fn mode_to_state(mode: &Modes) -> (BashCommandMode, FileEditMode, WriteIfEmptyMo
                     bash_mode: BashMode::NormalMode,
                     allowed_commands: AllowedCommands::All("all".to_string()),
                 },
-                FileEditMode {
-                    allowed_globs: AllowedGlobs::All("all".to_string()),
-                },
-                WriteIfEmptyMode {
-                    allowed_globs: AllowedGlobs::All("all".to_string()),
-                },
+                FileEditMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
+                WriteIfEmptyMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
             )
         }
     }
@@ -148,18 +136,12 @@ pub async fn handle_tool_call(
         ModeName::Architect => "architect",
         ModeName::CodeWriter => "code_writer",
     };
-    info!(
-        "  mode_name: {} ({:?})",
-        mode_name_str, initialize.mode_name
-    );
+    info!("  mode_name: {} ({:?})", mode_name_str, initialize.mode_name);
 
     info!("  workspace_path: {}", initialize.any_workspace_path);
     info!("  thread_id: {}", initialize.thread_id);
     info!("  code_writer_config: {:?}", initialize.code_writer_config);
-    info!(
-        "  initial_files_to_read: {:?}",
-        initialize.initial_files_to_read
-    );
+    info!("  initial_files_to_read: {:?}", initialize.initial_files_to_read);
     info!("  task_id_to_resume: {}", initialize.task_id_to_resume);
 
     // Expand workspace path with proper error handling
@@ -186,29 +168,28 @@ pub async fn handle_tool_call(
         };
 
     // Try to load existing state from disk if thread_id is provided
-    let existing_state_loaded = if !thread_id.is_empty()
-        && initialize.init_type == InitializeType::FirstCall
-    {
-        match BashState::has_saved_state(&thread_id) {
-            Ok(true) => {
-                info!(
-                    "Found existing saved state for thread_id '{}', will attempt to load",
-                    thread_id
-                );
-                true
+    let existing_state_loaded =
+        if !thread_id.is_empty() && initialize.init_type == InitializeType::FirstCall {
+            match BashState::has_saved_state(&thread_id) {
+                Ok(true) => {
+                    info!(
+                        "Found existing saved state for thread_id '{}', will attempt to load",
+                        thread_id
+                    );
+                    true
+                }
+                Ok(false) => {
+                    debug!("No existing saved state for thread_id '{}'", thread_id);
+                    false
+                }
+                Err(e) => {
+                    warn!("Error checking for saved state: {}", e);
+                    false
+                }
             }
-            Ok(false) => {
-                debug!("No existing saved state for thread_id '{}'", thread_id);
-                false
-            }
-            Err(e) => {
-                warn!("Error checking for saved state: {}", e);
-                false
-            }
-        }
-    } else {
-        false
-    };
+        } else {
+            false
+        };
 
     // Handle workspace path with appropriate validation and error handling
     let mut folder_to_start = workspace_path.clone();
@@ -228,9 +209,7 @@ pub async fn handle_tool_call(
                 })?
                 .to_path_buf();
 
-            response.push_str(&format!(
-                "Using parent directory of file: {folder_to_start:?}\n"
-            ));
+            response.push_str(&format!("Using parent directory of file: {folder_to_start:?}\n"));
 
             // If no files to read were specified, add the original file
             if initialize.initial_files_to_read.is_empty() {
@@ -240,14 +219,9 @@ pub async fn handle_tool_call(
             }
         } else if workspace_path.is_dir() {
             info!("Using existing workspace directory: {:?}", folder_to_start);
-            response.push_str(&format!(
-                "Using workspace directory: {folder_to_start:?}\n"
-            ));
+            response.push_str(&format!("Using workspace directory: {folder_to_start:?}\n"));
         } else {
-            warn!(
-                "Workspace path exists but is neither file nor directory: {:?}",
-                workspace_path
-            );
+            warn!("Workspace path exists but is neither file nor directory: {:?}", workspace_path);
             return Err(WinxError::WorkspacePathError(format!(
                 "Path exists but is neither file nor directory: {workspace_path:?}. Please provide a valid file or directory path."
             )));
@@ -261,9 +235,8 @@ pub async fn handle_tool_call(
             // Create the directory if it doesn't exist
             match ensure_directory_exists(&workspace_path) {
                 Ok(()) => {
-                    response.push_str(&format!(
-                        "Created workspace directory: {workspace_path:?}\n"
-                    ));
+                    response
+                        .push_str(&format!("Created workspace directory: {workspace_path:?}\n"));
                 }
                 Err(err) => {
                     return Err(WinxError::WorkspacePathError(format!(
@@ -272,13 +245,9 @@ pub async fn handle_tool_call(
                 }
             }
         } else {
-            warn!(
-                "Non-absolute workspace path does not exist: {:?}",
-                workspace_path
-            );
-            response.push_str(&format!(
-                "Warning: Workspace path {workspace_path:?} does not exist\n"
-            ));
+            warn!("Non-absolute workspace path does not exist: {:?}", workspace_path);
+            response
+                .push_str(&format!("Warning: Workspace path {workspace_path:?} does not exist\n"));
         }
     }
 
@@ -306,13 +275,9 @@ pub async fn handle_tool_call(
                 allowed_commands: config_clone.allowed_commands.clone(),
             };
 
-            let edit_mode = FileEditMode {
-                allowed_globs: config_clone.allowed_globs.clone(),
-            };
+            let edit_mode = FileEditMode { allowed_globs: config_clone.allowed_globs.clone() };
 
-            let write_mode = WriteIfEmptyMode {
-                allowed_globs: config_clone.allowed_globs.clone(),
-            };
+            let write_mode = WriteIfEmptyMode { allowed_globs: config_clone.allowed_globs.clone() };
 
             response.push_str("Using custom CodeWriter configuration\n");
             (cmd_mode, edit_mode, write_mode)
@@ -336,10 +301,7 @@ pub async fn handle_tool_call(
             let mut new_bash_state = if existing_state_loaded {
                 let loaded_state = BashState::new_with_thread_id(Some(&thread_id));
                 if loaded_state.initialized {
-                    info!(
-                        "Successfully loaded bash state from disk for thread_id '{}'",
-                        thread_id
-                    );
+                    info!("Successfully loaded bash state from disk for thread_id '{}'", thread_id);
                     response.push_str(&format!(
                         "Resumed existing session with thread_id: {thread_id}\n"
                     ));
@@ -379,13 +341,9 @@ pub async fn handle_tool_call(
                 })?;
 
                 // Update workspace root with error handling
-                new_bash_state
-                    .update_workspace_root(&folder_to_start)
-                    .map_err(|e| {
-                        WinxError::WorkspacePathError(format!(
-                            "Failed to update workspace root: {e}"
-                        ))
-                    })?;
+                new_bash_state.update_workspace_root(&folder_to_start).map_err(|e| {
+                    WinxError::WorkspacePathError(format!("Failed to update workspace root: {e}"))
+                })?;
 
                 // Initialize the interactive bash session
                 info!("Initializing interactive bash session");
@@ -466,9 +424,7 @@ pub async fn handle_tool_call(
 
             *bash_state_guard = Some(new_bash_state);
 
-            response.push_str(&format!(
-                "Initialized new shell with thread_id: {thread_id}\n"
-            ));
+            response.push_str(&format!("Initialized new shell with thread_id: {thread_id}\n"));
         }
         InitializeType::UserAskedModeChange => {
             info!("Handling UserAskedModeChange initialization type");
@@ -508,9 +464,7 @@ pub async fn handle_tool_call(
                 info!("Reinitializing interactive bash for clean shell state");
                 if let Err(e) = bash_state.init_interactive_bash() {
                     warn!("Failed to reinitialize interactive bash: {}", e);
-                    response.push_str(&format!(
-                        "Warning: Failed to reinitialize shell: {e}\n"
-                    ));
+                    response.push_str(&format!("Warning: Failed to reinitialize shell: {e}\n"));
                 } else {
                     debug!("Interactive bash reinitialized successfully");
                 }
@@ -541,13 +495,11 @@ pub async fn handle_tool_call(
                     })?;
 
                     // Update workspace root with error handling
-                    bash_state
-                        .update_workspace_root(&folder_to_start)
-                        .map_err(|e| {
-                            WinxError::WorkspacePathError(format!(
-                                "Failed to update workspace root: {e}"
-                            ))
-                        })?;
+                    bash_state.update_workspace_root(&folder_to_start).map_err(|e| {
+                        WinxError::WorkspacePathError(format!(
+                            "Failed to update workspace root: {e}"
+                        ))
+                    })?;
 
                     // Save state to disk after workspace change
                     if let Err(e) = bash_state.save_state_to_disk() {
@@ -570,17 +522,12 @@ pub async fn handle_tool_call(
 
     // Handle task resumption (matches wcgw Python behavior)
     if !initialize.task_id_to_resume.is_empty() {
-        info!(
-            "Task resumption requested for ID: {}",
-            initialize.task_id_to_resume
-        );
+        info!("Task resumption requested for ID: {}", initialize.task_id_to_resume);
 
         if initialize.init_type == InitializeType::FirstCall {
             match load_task_context(&initialize.task_id_to_resume) {
                 Some((_project_root, task_memory, _bash_state)) => {
-                    response.push_str(&format!(
-                        "\n---\n# Retrieved task\n{task_memory}\n---\n"
-                    ));
+                    response.push_str(&format!("\n---\n# Retrieved task\n{task_memory}\n---\n"));
                 }
                 None => {
                     response.push_str(&format!(
@@ -657,9 +604,8 @@ pub async fn handle_tool_call(
     // Build and add environment information
     let current_state = if let Some(ref bash_state) = *bash_state_guard {
         // Get home directory with proper error handling
-        let home_dir = home::home_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|| {
+        let home_dir =
+            home::home_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|| {
                 warn!("Could not determine home directory");
                 "Unknown".to_string()
             });
@@ -683,10 +629,7 @@ pub async fn handle_tool_call(
 
     // Add thread ID instruction
     if let Some(ref bash_state) = *bash_state_guard {
-        info!(
-            "Final response will use thread_id: {}",
-            bash_state.current_thread_id
-        );
+        info!("Final response will use thread_id: {}", bash_state.current_thread_id);
 
         response.push_str(&format!(
             "\nUse thread_id={} for all winx tool calls which take that.\n",
