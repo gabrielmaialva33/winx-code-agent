@@ -32,6 +32,10 @@ pub enum WinxError {
     #[error("File access error for {path}: {message}")]
     FileAccessError { path: PathBuf, message: String },
 
+    /// Security error - path traversal or symlink escape attempt
+    #[error("Security violation: {message}")]
+    PathSecurityError { path: PathBuf, message: String },
+
     /// Error when a command is not allowed in the current mode
     #[error("Command not allowed: {0}")]
     CommandNotAllowed(String),
@@ -487,6 +491,9 @@ impl Clone for WinxError {
             Self::InvalidInput(msg) => Self::InvalidInput(msg.clone()),
             Self::FileError(msg) => Self::FileError(msg.clone()),
             Self::AIError(msg) => Self::AIError(msg.clone()),
+            Self::PathSecurityError { path, message } => {
+                Self::PathSecurityError { path: path.clone(), message: message.clone() }
+            }
         }
     }
 }

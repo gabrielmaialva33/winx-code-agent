@@ -20,7 +20,7 @@ use crate::types::ReadFiles;
 use crate::utils::file_cache::FileCache;
 use crate::utils::file_extensions::FileExtensionAnalyzer;
 use crate::utils::mmap::{read_file_optimized, read_file_to_string};
-use crate::utils::path::expand_user;
+use crate::utils::path::{expand_user, validate_path_in_workspace};
 use crate::utils::resource_allocator::{
     get_global_allocator, request_file_allocation, AllocationGuard,
 };
@@ -158,6 +158,7 @@ async fn read_file(
     file_path: &str,
     max_tokens: Option<usize>,
     cwd: &Path,
+    workspace_root: &Path,
     show_line_numbers: bool,
     start_line_num: Option<usize>,
     end_line_num: Option<usize>,
@@ -175,7 +176,7 @@ async fn read_file(
         cwd.join(&file_path)
     };
 
-    // Check if path exists
+    // Check if path exists before security validation
     if !path.exists() {
         let error = WinxError::FileAccessError {
             path: path.clone(),
@@ -191,6 +192,18 @@ async fn read_file(
             ),
         ));
     }
+
+    // SECURITY: Validate path is within workspace (prevents path traversal and symlink attacks)
+    let path = match validate_path_in_workspace(&path, workspace_root) {
+        Ok(canonical) => canonical,
+        Err(security_err) => {
+            warn!("Security violation attempt: {}", security_err);
+            return Err(WinxError::PathSecurityError {
+                path: path.clone(),
+                message: security_err.to_string(),
+            });
+        }
+    };
 
     // Ensure it's a file
     if !path.is_file() {
@@ -499,6 +512,7 @@ pub async fn handle_tool_call(
 
     // Extract data from the bash state before any async operations
     let cwd: PathBuf;
+    let workspace_root: PathBuf;
 
     // Lock bash state to extract data
     {
@@ -517,6 +531,7 @@ pub async fn handle_tool_call(
 
         // Extract needed data
         cwd = bash_state.cwd.clone();
+        workspace_root = bash_state.workspace_root.clone();
     }
 
     // Process file paths and line ranges
@@ -619,13 +634,14 @@ pub async fn handle_tool_call(
                 let clean_path = clean_path.clone();
                 let original_path = original_path.clone();
                 let cwd = cwd.clone();
+                let workspace = workspace_root.clone();
                 let start = *start_line_num;
                 let end = *end_line_num;
                 let file_tokens = *allocated_tokens;
 
                 tokio::spawn(async move {
                     let result =
-                        read_file(&clean_path, file_tokens, &cwd, show_line_numbers, start, end)
+                        read_file(&clean_path, file_tokens, &cwd, &workspace, show_line_numbers, start, end)
                             .await;
 
                     // Track errors if read failed

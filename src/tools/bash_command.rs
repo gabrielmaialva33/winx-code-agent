@@ -326,8 +326,11 @@ pub async fn handle_tool_call(
     }
 
     // Calculate effective timeout - matches WCGW Python
-    let timeout_s =
-        bash_command.wait_for_seconds.map_or(DEFAULT_TIMEOUT, f64::from).min(TIMEOUT_WHILE_OUTPUT);
+    // SECURITY: Ensure timeout is not negative to prevent unexpected behavior
+    let timeout_s = bash_command
+        .wait_for_seconds
+        .map_or(DEFAULT_TIMEOUT, |t| f64::from(t).max(0.0))
+        .min(TIMEOUT_WHILE_OUTPUT);
 
     // Execute the action based on type - matches WCGW Python's _execute_bash()
     let result = execute_bash_action(&mut bash_state, &bash_command.action_json, timeout_s).await;

@@ -17,7 +17,7 @@ use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, FileWhitelistData};
 use crate::types::FileWriteOrEdit;
 use crate::utils::fuzzy_match::{FuzzyMatch, FuzzyMatcher};
-use crate::utils::path::expand_user;
+use crate::utils::path::{expand_user, validate_path_in_workspace};
 use crate::utils::syntax_checker::{check_syntax, format_syntax_error_context};
 use crate::utils::tolerance::{apply_with_individual_fallback, ApplyError, SearchReplaceBlock};
 
@@ -1388,7 +1388,7 @@ pub async fn handle_tool_call(
     info!("FileWriteOrEdit tool called with: {:?}", file_write_or_edit);
 
     // Extract data we need from the bash state before awaiting
-    let (thread_id, cwd, file_path);
+    let (thread_id, cwd, workspace_root, file_path);
 
     // Lock bash state to extract data
     {
@@ -1405,6 +1405,7 @@ pub async fn handle_tool_call(
         // Extract needed data
         thread_id = bash_state.current_thread_id.clone();
         cwd = bash_state.cwd.clone();
+        workspace_root = bash_state.workspace_root.clone();
 
         // Verify thread ID matches
         if file_write_or_edit.thread_id != thread_id {
@@ -1422,12 +1423,36 @@ pub async fn handle_tool_call(
         let expanded_path = expand_user(&file_write_or_edit.file_path);
 
         // Ensure path is absolute
-        file_path = if Path::new(&expanded_path).is_absolute() {
-            expanded_path
+        let absolute_path = if Path::new(&expanded_path).is_absolute() {
+            PathBuf::from(&expanded_path)
         } else {
             // Use current working directory if path is relative
-            cwd.join(&expanded_path).to_string_lossy().into_owned()
+            cwd.join(&expanded_path)
         };
+
+        // SECURITY: Validate path is within workspace (prevents path traversal and symlink attacks)
+        // For new files, we check the parent directory instead
+        let path_to_validate = if absolute_path.exists() {
+            absolute_path.clone()
+        } else {
+            // For new files, validate the parent directory exists and is in workspace
+            absolute_path.parent().map(|p| p.to_path_buf()).unwrap_or(absolute_path.clone())
+        };
+
+        if path_to_validate.exists() {
+            match validate_path_in_workspace(&path_to_validate, &workspace_root) {
+                Ok(_) => {}
+                Err(security_err) => {
+                    warn!("Security violation attempt in file write: {}", security_err);
+                    return Err(WinxError::PathSecurityError {
+                        path: absolute_path.clone(),
+                        message: security_err.to_string(),
+                    });
+                }
+            }
+        }
+
+        file_path = absolute_path.to_string_lossy().into_owned();
 
         // Enhanced file operation validation using WCGW-style mode checking
         let path_for_validation = Path::new(&file_path);

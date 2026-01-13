@@ -851,6 +851,7 @@ impl SharedErrorPredictor {
             WinxError::InvalidInput(_) => "invalid_input",
             WinxError::FileError(_) => "file_error",
             WinxError::AIError(_) => "ai_error",
+            WinxError::PathSecurityError { .. } => "path_security",
         };
 
         let message = format!("{error}");
@@ -858,6 +859,7 @@ impl SharedErrorPredictor {
             WinxError::FileAccessError { path, .. } => Some(path.to_string_lossy().to_string()),
             WinxError::FileWriteError { path, .. } => Some(path.to_string_lossy().to_string()),
             WinxError::FileTooLarge { path, .. } => Some(path.to_string_lossy().to_string()),
+            WinxError::PathSecurityError { path, .. } => Some(path.to_string_lossy().to_string()),
             _ => None,
         };
 

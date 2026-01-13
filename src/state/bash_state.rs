@@ -914,25 +914,28 @@ impl InteractiveBash {
                                     debug!("Process still running, attempting to terminate with SIGTERM");
                                     // SAFETY: libc::kill sends a signal to a process.
                                     // - The pid is obtained from self.process.id() which returns the OS pid
-                                    // - We verify pid > 0 before sending to avoid invalid process IDs
+                                    // - We verify pid > 0 and fits in i32 before sending to avoid invalid process IDs
                                     // - SIGTERM is a safe signal that requests graceful termination
                                     // - The return value is ignored as we check process status after
                                     unsafe {
                                         let pid = self.process.id();
-                                        if pid > 0 {
-                                            let _ = libc::kill(pid as i32, libc::SIGTERM);
-                                            std::thread::sleep(Duration::from_millis(200));
+                                        // SECURITY: Use safe conversion to prevent wrap on systems with large PIDs
+                                        if let Ok(pid_i32) = i32::try_from(pid) {
+                                            if pid_i32 > 0 {
+                                                let _ = libc::kill(pid_i32, libc::SIGTERM);
+                                                std::thread::sleep(Duration::from_millis(200));
 
-                                            // Check if terminated
-                                            if let Ok(Some(_)) = self.process.try_wait() {
-                                                debug!("Process terminated with SIGTERM");
-                                                self.command_state = CommandState::Idle;
-                                            } else {
-                                                // Process is still running, may be ignoring signals
-                                                debug!("Process still running after SIGTERM");
-                                                self.last_output.push_str(
-                                                    "\n(Sent multiple interrupt signals, but process is still running. It may need to be killed manually)",
-                                                );
+                                                // Check if terminated
+                                                if let Ok(Some(_)) = self.process.try_wait() {
+                                                    debug!("Process terminated with SIGTERM");
+                                                    self.command_state = CommandState::Idle;
+                                                } else {
+                                                    // Process is still running, may be ignoring signals
+                                                    debug!("Process still running after SIGTERM");
+                                                    self.last_output.push_str(
+                                                        "\n(Sent multiple interrupt signals, but process is still running. It may need to be killed manually)",
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -1778,8 +1781,10 @@ impl BashState {
 
         // Simple glob-style matching
         if pattern.contains('*') {
-            let regex_pattern = pattern.replace('*', ".*");
-            if let Ok(regex) = regex::Regex::new(&regex_pattern) {
+            // SECURITY: Escape regex special characters before converting glob to regex
+            // This prevents regex injection attacks via malformed glob patterns
+            let escaped_pattern = regex::escape(pattern).replace(r"\*", ".*");
+            if let Ok(regex) = regex::Regex::new(&escaped_pattern) {
                 return regex.is_match(command);
             }
         }

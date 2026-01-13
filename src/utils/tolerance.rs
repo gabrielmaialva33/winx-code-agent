@@ -773,10 +773,13 @@ pub fn fix_indentation(
         .map(|line| {
             if diff < 0 {
                 // Add indentation
-                let add_indent = " ".repeat((-diff) as usize);
+                // SECURITY: Use saturating_abs to prevent overflow on i32::MIN
+                let indent_amount = diff.saturating_abs() as usize;
+                let add_indent = " ".repeat(indent_amount);
                 format!("{add_indent}{line}")
             } else {
                 // Remove indentation
+                // SECURITY: Safe conversion since diff >= 0
                 let diff_usize = diff as usize;
                 if line.len() >= diff_usize && line[..diff_usize].chars().all(char::is_whitespace) {
                     line[diff_usize..].to_string()
@@ -983,8 +986,15 @@ pub fn apply_search_replace_with_tolerance(
 
         // Apply the replacement with offset adjustment
         let (start, end) = match_result.matched_slice;
-        let adjusted_start = (start as i64 + offset) as usize;
-        let adjusted_end = (end as i64 + offset) as usize;
+        // SECURITY: Use saturating arithmetic to prevent underflow when offset is negative
+        let adjusted_start_i64 = start as i64 + offset;
+        let adjusted_end_i64 = end as i64 + offset;
+
+        // Ensure adjusted indices are valid (non-negative and within bounds)
+        let adjusted_start = adjusted_start_i64.max(0) as usize;
+        let adjusted_end = adjusted_end_i64.max(0) as usize;
+        let adjusted_end = adjusted_end.min(content_lines.len());
+        let adjusted_start = adjusted_start.min(adjusted_end);
 
         let before: Vec<String> = content_lines[..adjusted_start].to_vec();
         let after: Vec<String> = content_lines[adjusted_end..].to_vec();
