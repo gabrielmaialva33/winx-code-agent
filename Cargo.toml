@@ -35,7 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # File and system operations
 home = "0.5"
-directories = "5.0"
+directories = "6.0"
 sha2 = "0.10"
 base64 = "0.22"
 glob = "0.3"
@@ -67,7 +67,7 @@ clap = { version = "4.5", features = ["derive"], optional = true }
 [dev-dependencies]
 tempfile = "3.14"
 tokio-test = "0.4"
-criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 rstest = "0.23"
 assert_cmd = "2.0"
 predicates = "3.1"
