@@ -50,6 +50,7 @@ rayon = "1.10"
 
 # Advanced string matching algorithms
 strsim = "0.11"
+portable-pty = "0.8"
 bytes = "1.9"
 lazy_static = "1.5"
 libc = "0.2"
