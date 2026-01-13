@@ -26,6 +26,7 @@ use crate::state::terminal::{
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
 };
+use crate::state::pty::PtyShell;
 use crate::utils::error_predictor::SharedErrorPredictor;
 use crate::utils::pattern_analyzer::SharedPatternAnalyzer;
 
@@ -447,8 +448,10 @@ pub struct BashState {
     /// Terminal state for tracking command output
     #[allow(dead_code)]
     pub terminal_state: TerminalState,
-    /// Interactive bash process
+    /// Interactive bash process (legacy - being replaced by PTY)
     pub interactive_bash: Arc<Mutex<Option<InteractiveBash>>>,
+    /// Real PTY shell (preferred over interactive_bash)
+    pub pty_shell: Arc<Mutex<Option<PtyShell>>>,
     /// Pattern analyzer for intelligent command suggestions
     pub pattern_analyzer: SharedPatternAnalyzer,
     /// Error predictor for error prevention
@@ -992,6 +995,7 @@ impl BashState {
             whitelist_for_overwrite: HashMap::new(),
             terminal_state: TerminalState::new(),
             interactive_bash: Arc::new(Mutex::new(None)),
+            pty_shell: Arc::new(Mutex::new(None)),
             pattern_analyzer: SharedPatternAnalyzer::new(),
             error_predictor: SharedErrorPredictor::new(),
             initialized: false,
@@ -1021,6 +1025,43 @@ impl BashState {
         debug!("Interactive bash initialized successfully");
 
         Ok(())
+    }
+
+    /// Initialize the PTY shell (preferred over interactive_bash)
+    ///
+    /// This uses a real pseudo-terminal for better compatibility with
+    /// interactive programs like sudo, vim, less, etc.
+    pub fn init_pty_shell(&mut self) -> Result<()> {
+        let restricted_mode = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
+
+        info!(
+            "Initializing PTY shell (restricted: {}) in {}",
+            restricted_mode,
+            self.cwd.display()
+        );
+
+        // Create a new PTY shell
+        let shell = PtyShell::new(&self.cwd, restricted_mode)?;
+
+        // Update the state
+        let mut guard = self
+            .pty_shell
+            .lock()
+            .map_err(|e| anyhow!("Failed to lock PTY shell mutex: {e}"))?;
+
+        *guard = Some(shell);
+
+        info!("PTY shell initialized successfully");
+
+        Ok(())
+    }
+
+    /// Check if PTY shell is available
+    pub fn has_pty_shell(&self) -> bool {
+        self.pty_shell
+            .lock()
+            .map(|guard| guard.is_some())
+            .unwrap_or(false)
     }
 
     /// Updates the current working directory
@@ -1415,6 +1456,110 @@ impl BashState {
 
         Ok(final_result)
     }
+
+    /// Execute a command using the real PTY shell
+    ///
+    /// This is the preferred method for command execution as it uses a real
+    /// pseudo-terminal, enabling proper handling of interactive programs.
+    pub fn execute_pty(&mut self, command: &str, timeout_secs: f32) -> Result<String> {
+        let effective_timeout = if timeout_secs <= 0.0 { 10.0 } else { timeout_secs };
+
+        debug!("Executing PTY command with timeout {:.2?}s: {}", effective_timeout, command);
+
+        // Initialize PTY if needed
+        let need_init = {
+            let guard = self.pty_shell.lock()
+                .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+            guard.is_none()
+        };
+
+        if need_init {
+            info!("PTY shell not initialized, initializing now");
+            self.init_pty_shell()?;
+        }
+
+        // Execute the command
+        let mut guard = self.pty_shell.lock()
+            .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+
+        let shell = guard.as_mut()
+            .ok_or_else(|| anyhow!("PTY shell is None after initialization"))?;
+
+        // Send the command
+        shell.send_command(command)?;
+
+        // Read output with timeout
+        let (output, complete) = shell.read_output(effective_timeout)?;
+
+        // Process output through terminal emulation
+        let rendered_output = if output.len() > TERMINAL_MAX_OUTPUT_SIZE {
+            self.terminal_state.process_output(&output)
+        } else {
+            incremental_text(&output, "")
+        };
+
+        // Get status
+        let status = if complete { "process exited" } else { "still running" };
+
+        // Format result
+        let final_result = format!(
+            "{}\n\n---\n\nstatus = {}\ncwd = {}\n",
+            rendered_output,
+            status,
+            self.cwd.display()
+        );
+
+        Ok(final_result)
+    }
+
+    /// Send interrupt (Ctrl+C) to the PTY shell
+    pub fn send_pty_interrupt(&mut self) -> Result<()> {
+        let mut guard = self.pty_shell.lock()
+            .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+
+        if let Some(shell) = guard.as_mut() {
+            shell.send_interrupt()
+        } else {
+            Err(anyhow!("PTY shell not initialized"))
+        }
+    }
+
+    /// Send text directly to the PTY shell (for interactive input)
+    pub fn send_pty_text(&mut self, text: &str) -> Result<()> {
+        let mut guard = self.pty_shell.lock()
+            .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+
+        if let Some(shell) = guard.as_mut() {
+            shell.send_text(text)
+        } else {
+            Err(anyhow!("PTY shell not initialized"))
+        }
+    }
+
+    /// Send a special key to the PTY shell
+    pub fn send_pty_special_key(&mut self, key: &str) -> Result<()> {
+        let mut guard = self.pty_shell.lock()
+            .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+
+        if let Some(shell) = guard.as_mut() {
+            shell.send_special_key(key)
+        } else {
+            Err(anyhow!("PTY shell not initialized"))
+        }
+    }
+
+    /// Resize the PTY terminal
+    pub fn resize_pty(&mut self, cols: u16, rows: u16) -> Result<()> {
+        let mut guard = self.pty_shell.lock()
+            .map_err(|e| anyhow!("Failed to lock PTY mutex: {e}"))?;
+
+        if let Some(shell) = guard.as_mut() {
+            shell.resize(cols, rows)
+        } else {
+            Err(anyhow!("PTY shell not initialized"))
+        }
+    }
+
     pub async fn check_command_status(&mut self, timeout_secs: f32) -> Result<String> {
         let mut bash_guard = self
             .interactive_bash
