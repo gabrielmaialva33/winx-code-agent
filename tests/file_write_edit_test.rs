@@ -311,6 +311,9 @@ async fn test_whitelist_after_read() -> Result<()> {
 
     winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read_files).await?;
 
+    // Give time for async whitelist update
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
     // Now edit should work
     let search_replace = r#"<<<<<<< SEARCH
 Original line one.
