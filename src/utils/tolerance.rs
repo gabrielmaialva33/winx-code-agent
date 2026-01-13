@@ -3,6 +3,15 @@
 //! This module implements a 5-level tolerance system for matching search blocks
 //! in file content, inspired by the wcgw Python implementation.
 //!
+//! ## Optimization: Tiered Matching with Early Exit (v0.2.2)
+//!
+//! The matching algorithm uses a tiered approach with early exit:
+//! - **Tier 0**: Exact match (fastest, no tolerance)
+//! - **Tier 1-5**: Progressive tolerance application with early exit
+//!
+//! When a unique match is found at any tier, processing stops immediately.
+//! This dramatically reduces processing time for well-formatted code.
+//!
 //! Tolerance levels (applied in order):
 //! 1. `rstrip` - Remove trailing whitespace (SILENT)
 //! 2. `lstrip` - Remove leading indentation (WARNING, score 10x)
@@ -299,6 +308,248 @@ pub fn match_exact(content_lines: &[&str], content_offset: usize, search_lines: 
         .collect();
 
     find_contiguous_matches(&search_line_positions)
+}
+
+// ============================================================================
+// Tiered Matching with Early Exit (Optimized)
+// ============================================================================
+
+/// Result of tiered matching - includes which tier found the match
+#[derive(Debug, Clone)]
+pub struct TieredMatchResult {
+    /// The match result
+    pub result: MatchResult,
+    /// Which tier (0-5) found the match (0 = exact, 1-5 = tolerance levels)
+    pub tier: usize,
+    /// Whether early exit was triggered
+    pub early_exit: bool,
+}
+
+/// Tiered matching with early exit optimization
+///
+/// This is the PREFERRED matching function for performance.
+/// It applies tolerances progressively and exits as soon as a unique match is found.
+///
+/// # Algorithm
+/// 1. Try exact match first (Tier 0)
+/// 2. If no unique match, apply tolerance level 1 (rstrip)
+/// 3. If no unique match, apply tolerance level 2 (lstrip)
+/// 4. Continue until unique match found OR all tiers exhausted
+///
+/// # Early Exit Conditions
+/// - Exactly 1 match found at current tier → return immediately
+/// - 0 matches at all tiers → return empty
+/// - Multiple matches at final tier → return all (caller handles ambiguity)
+pub fn match_tiered(
+    content_lines: &[&str],
+    content_offset: usize,
+    search_lines: &[&str],
+) -> Vec<TieredMatchResult> {
+    let n_search = search_lines.len();
+    let n_content = content_lines.len();
+
+    if n_search == 0 || n_content == 0 || n_search > n_content - content_offset {
+        return vec![];
+    }
+
+    // Tier 0: Exact match (fastest path)
+    let exact_matches = match_exact(content_lines, content_offset, search_lines);
+    if exact_matches.len() == 1 {
+        let (start, end) = exact_matches[0];
+        debug!("Tiered match: early exit at Tier 0 (exact match)");
+        return vec![TieredMatchResult {
+            result: MatchResult {
+                matched_slice: (start, end),
+                line_range: (start + 1, end),
+                tolerances_hit: vec![],
+                score: 0.0,
+                warnings: HashSet::new(),
+                matched_lines: content_lines[start..end]
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                removed_indentation: None,
+            },
+            tier: 0,
+            early_exit: true,
+        }];
+    }
+
+    // If multiple exact matches, return all (ambiguous)
+    if exact_matches.len() > 1 {
+        debug!("Tiered match: {} exact matches (ambiguous)", exact_matches.len());
+        return exact_matches
+            .into_iter()
+            .map(|(start, end)| TieredMatchResult {
+                result: MatchResult {
+                    matched_slice: (start, end),
+                    line_range: (start + 1, end),
+                    tolerances_hit: vec![],
+                    score: 0.0,
+                    warnings: HashSet::new(),
+                    matched_lines: content_lines[start..end]
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect(),
+                    removed_indentation: None,
+                },
+                tier: 0,
+                early_exit: false,
+            })
+            .collect();
+    }
+
+    // Tier 1-5: Apply tolerances progressively with early exit
+    let tolerances = default_tolerances();
+
+    // Pre-process content lines once (avoid repeated allocations)
+    let content_processed: Vec<Vec<String>> = tolerances
+        .iter()
+        .map(|tol| {
+            content_lines
+                .iter()
+                .skip(content_offset)
+                .map(|line| (tol.line_process)(line))
+                .collect()
+        })
+        .collect();
+
+    // Try each tolerance tier
+    for (tier_idx, tolerance) in tolerances.iter().enumerate() {
+        let tier = tier_idx + 1; // Tier 1-5 (0 was exact)
+
+        // Process search lines with this tolerance
+        let search_processed: Vec<String> = search_lines
+            .iter()
+            .map(|line| (tolerance.line_process)(line))
+            .collect();
+
+        // Build position map for this tier
+        let mut content_positions: HashMap<&str, HashSet<usize>> = HashMap::new();
+        for (i, processed_line) in content_processed[tier_idx].iter().enumerate() {
+            content_positions
+                .entry(processed_line.as_str())
+                .or_default()
+                .insert(i + content_offset);
+        }
+
+        // Get positions for each search line
+        let search_line_positions: Vec<HashSet<usize>> = search_processed
+            .iter()
+            .map(|line| {
+                content_positions
+                    .get(line.as_str())
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect();
+
+        // Find contiguous matches at this tier
+        let matched_slices = find_contiguous_matches(&search_line_positions);
+
+        // Early exit: exactly 1 match found
+        if matched_slices.len() == 1 {
+            let (start, end) = matched_slices[0];
+            debug!("Tiered match: early exit at Tier {} ({})", tier, tolerance.error_name);
+
+            let matched_lines: Vec<String> = content_lines[start..end]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+
+            // Check for removed indentation
+            let removed_indentation = if tolerance.error_name == REMOVE_INDENTATION_WARNING {
+                matched_lines
+                    .iter()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| get_removed_indentation(l))
+                    .next()
+            } else {
+                None
+            };
+
+            let mut warnings = HashSet::new();
+            if tolerance.severity == ToleranceSeverity::Warning && !tolerance.error_name.is_empty() {
+                warnings.insert(tolerance.error_name.to_string());
+            }
+
+            return vec![TieredMatchResult {
+                result: MatchResult {
+                    matched_slice: (start, end),
+                    line_range: (start + 1, end),
+                    tolerances_hit: vec![ToleranceHit {
+                        tolerance_index: tier_idx,
+                        severity: tolerance.severity,
+                        score_multiplier: tolerance.score_multiplier,
+                        error_name: tolerance.error_name,
+                        count: n_search,
+                    }],
+                    score: tolerance.score_multiplier * n_search as f64,
+                    warnings,
+                    matched_lines,
+                    removed_indentation,
+                },
+                tier,
+                early_exit: true,
+            }];
+        }
+
+        // Multiple matches at this tier - continue to next tier for more specificity
+        // (unless this is the last tier)
+        if !matched_slices.is_empty() && tier == tolerances.len() {
+            trace!("Tiered match: {} matches at final tier {}", matched_slices.len(), tier);
+            return matched_slices
+                .into_iter()
+                .map(|(start, end)| {
+                    let matched_lines: Vec<String> = content_lines[start..end]
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect();
+
+                    let removed_indentation = if tolerance.error_name == REMOVE_INDENTATION_WARNING {
+                        matched_lines
+                            .iter()
+                            .filter(|l| !l.trim().is_empty())
+                            .map(|l| get_removed_indentation(l))
+                            .next()
+                    } else {
+                        None
+                    };
+
+                    let mut warnings = HashSet::new();
+                    if tolerance.severity == ToleranceSeverity::Warning
+                        && !tolerance.error_name.is_empty()
+                    {
+                        warnings.insert(tolerance.error_name.to_string());
+                    }
+
+                    TieredMatchResult {
+                        result: MatchResult {
+                            matched_slice: (start, end),
+                            line_range: (start + 1, end),
+                            tolerances_hit: vec![ToleranceHit {
+                                tolerance_index: tier_idx,
+                                severity: tolerance.severity,
+                                score_multiplier: tolerance.score_multiplier,
+                                error_name: tolerance.error_name,
+                                count: n_search,
+                            }],
+                            score: tolerance.score_multiplier * n_search as f64,
+                            warnings,
+                            matched_lines,
+                            removed_indentation,
+                        },
+                        tier,
+                        early_exit: false,
+                    }
+                })
+                .collect();
+        }
+    }
+
+    // No matches found at any tier
+    trace!("Tiered match: no matches found at any tier");
+    vec![]
 }
 
 /// Match with tolerances applied
@@ -1088,5 +1339,121 @@ mod tests {
         // The replacement should be indented to match the original
         assert!(result.content.contains("    fn new_test()"));
         assert!(result.content.contains("        new_code()"));
+    }
+
+    // ========================================================================
+    // Tiered Matching with Early Exit Tests
+    // ========================================================================
+
+    #[test]
+    fn test_tiered_exact_match_early_exit() {
+        // Exact match should return at Tier 0 with early_exit = true
+        let content = vec!["line1", "line2", "line3"];
+        let search = vec!["line1", "line2"];
+
+        let results = match_tiered(&content, 0, &search);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tier, 0); // Tier 0 = exact match
+        assert!(results[0].early_exit);
+        assert_eq!(results[0].result.matched_slice, (0, 2));
+        assert_eq!(results[0].result.score, 0.0); // No tolerance used
+    }
+
+    #[test]
+    fn test_tiered_rstrip_early_exit() {
+        // Content has trailing whitespace - should match at Tier 1 (rstrip)
+        let content = vec!["line1   ", "line2  "];
+        let search = vec!["line1", "line2"];
+
+        let results = match_tiered(&content, 0, &search);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tier, 1); // Tier 1 = rstrip
+        assert!(results[0].early_exit);
+        assert_eq!(results[0].result.score, 2.0); // 1.0 * 2 lines
+    }
+
+    #[test]
+    fn test_tiered_lstrip_early_exit() {
+        // Content has different indentation - should match at Tier 2 (lstrip)
+        let content = vec!["    fn foo() {", "        bar()", "    }"];
+        let search = vec!["fn foo() {", "    bar()", "}"];
+
+        let results = match_tiered(&content, 0, &search);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tier, 2); // Tier 2 = lstrip
+        assert!(results[0].early_exit);
+        assert!(results[0].result.warnings.contains(REMOVE_INDENTATION_WARNING));
+    }
+
+    #[test]
+    fn test_tiered_line_nums_early_exit() {
+        // Search has line numbers - should match at Tier 3
+        let content = vec!["fn main() {", "    println!(\"hello\");", "}"];
+        let search = vec!["1 fn main() {", "2     println!(\"hello\");", "3 }"];
+
+        let results = match_tiered(&content, 0, &search);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tier, 3); // Tier 3 = remove line nums
+        assert!(results[0].early_exit);
+        assert!(results[0].result.warnings.contains(REMOVE_LINE_NUMS_WARNING));
+    }
+
+    #[test]
+    fn test_tiered_unicode_early_exit() {
+        // Search has unicode quotes - should match at Tier 4
+        let content = vec!["let x = \"hello\";"];
+        let search = vec!["let x = \u{201C}hello\u{201D};"]; // Smart quotes
+
+        let results = match_tiered(&content, 0, &search);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tier, 4); // Tier 4 = normalize unicode
+        assert!(results[0].early_exit);
+        assert!(results[0].result.warnings.contains(NORMALIZE_CHARS_WARNING));
+    }
+
+    #[test]
+    fn test_tiered_multiple_exact_matches() {
+        // Multiple exact matches - should return all with early_exit = false
+        let content = vec!["x = 1", "y = 2", "x = 1"];
+        let search = vec!["x = 1"];
+
+        let results = match_tiered(&content, 0, &search);
+
+        assert_eq!(results.len(), 2); // Two matches
+        assert!(results.iter().all(|r| r.tier == 0)); // All at Tier 0
+        assert!(results.iter().all(|r| !r.early_exit)); // No early exit (ambiguous)
+    }
+
+    #[test]
+    fn test_tiered_no_match() {
+        // No match at any tier
+        let content = vec!["completely", "different", "content"];
+        let search = vec!["not", "found"];
+
+        let results = match_tiered(&content, 0, &search);
+
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_tiered_performance_exact_match() {
+        // Large content with exact match should return immediately
+        let mut content: Vec<&str> = (0..1000).map(|_| "filler line").collect();
+        content[500] = "target line 1";
+        content[501] = "target line 2";
+
+        let search = vec!["target line 1", "target line 2"];
+
+        let results = match_tiered(&content, 0, &search);
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].tier, 0); // Found at Tier 0
+        assert!(results[0].early_exit);
+        assert_eq!(results[0].result.matched_slice, (500, 502));
     }
 }
