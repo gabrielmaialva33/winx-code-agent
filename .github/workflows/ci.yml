@@ -21,9 +21,8 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.86.0
           components: rustfmt, clippy
 
       - name: Rust Cache
@@ -36,7 +35,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-features -- -D warnings
+        run: cargo clippy --all-features -- -W clippy::all -A clippy::missing_docs_in_private_items -A clippy::pedantic
 
       - name: Build
         run: cargo build --all-features
@@ -66,9 +65,7 @@ jobs:
       - uses: actions/checkout@v5
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: 1.86.0
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2

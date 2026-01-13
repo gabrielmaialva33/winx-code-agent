@@ -1498,12 +1498,12 @@ impl FileCache {
     }
 
     /// Record a file edit operation
+    /// This invalidates the cached hash to ensure it's recalculated on next read
     pub fn record_file_edit(&self, path: &Path) -> Result<()> {
-        // Update the cache entry
+        // Remove the cache entry to invalidate the hash
+        // The next read will recalculate it with the updated content
         if let Ok(mut entries) = self.entries.write() {
-            if let Some(entry) = entries.get_mut(path) {
-                entry.record_edit();
-            }
+            entries.remove(path);
         }
 
         // Update workspace stats
@@ -1513,12 +1513,12 @@ impl FileCache {
     }
 
     /// Record a file write operation
+    /// This invalidates the cached hash to ensure it's recalculated on next read
     pub fn record_file_write(&self, path: &Path) -> Result<()> {
-        // Update the cache entry
+        // Remove the cache entry to invalidate the hash
+        // The next read will recalculate it with the updated content
         if let Ok(mut entries) = self.entries.write() {
-            if let Some(entry) = entries.get_mut(path) {
-                entry.record_write();
-            }
+            entries.remove(path);
         }
 
         // Update workspace stats

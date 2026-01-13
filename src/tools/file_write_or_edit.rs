@@ -11,7 +11,6 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio::task;
 use tracing::{debug, error, info, instrument, trace, warn};
 
 use crate::errors::{Result, WinxError};
@@ -1729,35 +1728,31 @@ pub async fn handle_tool_call(
         // Count lines for tracking
         let total_lines = new_content.lines().count();
 
-        // Update whitelist data asynchronously
-        let file_path_clone = file_path.clone();
-        let bash_state_arc_clone = Arc::clone(bash_state_arc);
-        task::spawn_blocking(move || {
-            let mut bash_state_guard = bash_state_arc_clone.blocking_lock();
+        // Update whitelist data synchronously to prevent race conditions
+        {
+            let mut bash_state_guard = bash_state_arc.lock().await;
             if let Some(bash_state) = bash_state_guard.as_mut() {
-                // Calculate file hash
-                let file_content = fs::read(&file_path_clone).ok()?;
-                let file_hash = format!("{:x}", Sha256::digest(&file_content));
+                // Calculate file hash from the content we just wrote
+                let file_hash = format!("{:x}", Sha256::digest(new_content.as_bytes()));
 
                 // The line range represents the entire file (1 to total_lines)
                 let line_range = (1, total_lines);
 
                 // Update or create whitelist entry
                 if let Some(whitelist_data) =
-                    bash_state.whitelist_for_overwrite.get_mut(&file_path_clone)
+                    bash_state.whitelist_for_overwrite.get_mut(&file_path)
                 {
                     whitelist_data.file_hash = file_hash;
                     whitelist_data.total_lines = total_lines;
                     whitelist_data.add_range(line_range.0, line_range.1);
                 } else {
                     bash_state.whitelist_for_overwrite.insert(
-                        file_path_clone,
+                        file_path.clone(),
                         FileWhitelistData::new(file_hash, vec![line_range], total_lines),
                     );
                 }
             }
-            Some(())
-        });
+        }
 
         // Perform syntax check after edit (matches wcgw Python behavior)
         let syntax_warning = perform_syntax_check(file_path_obj, &new_content);
@@ -1828,35 +1823,31 @@ pub async fn handle_tool_call(
         // Count lines for tracking
         let total_lines = content.lines().count();
 
-        // Update whitelist data asynchronously
-        let file_path_clone = file_path.clone();
-        let bash_state_arc_clone = Arc::clone(bash_state_arc);
-        task::spawn_blocking(move || {
-            let mut bash_state_guard = bash_state_arc_clone.blocking_lock();
+        // Update whitelist data synchronously to prevent race conditions
+        {
+            let mut bash_state_guard = bash_state_arc.lock().await;
             if let Some(bash_state) = bash_state_guard.as_mut() {
-                // Calculate file hash
-                let file_content = fs::read(&file_path_clone).ok()?;
-                let file_hash = format!("{:x}", Sha256::digest(&file_content));
+                // Calculate file hash from the content we just wrote
+                let file_hash = format!("{:x}", Sha256::digest(content.as_bytes()));
 
                 // The line range represents the entire file (1 to total_lines)
                 let line_range = (1, total_lines);
 
                 // Update or create whitelist entry
                 if let Some(whitelist_data) =
-                    bash_state.whitelist_for_overwrite.get_mut(&file_path_clone)
+                    bash_state.whitelist_for_overwrite.get_mut(&file_path)
                 {
                     whitelist_data.file_hash = file_hash;
                     whitelist_data.total_lines = total_lines;
                     whitelist_data.add_range(line_range.0, line_range.1);
                 } else {
                     bash_state.whitelist_for_overwrite.insert(
-                        file_path_clone,
+                        file_path.clone(),
                         FileWhitelistData::new(file_hash, vec![line_range], total_lines),
                     );
                 }
             }
-            Some(())
-        });
+        }
 
         // Perform syntax check after write (matches wcgw Python behavior)
         let syntax_warning = perform_syntax_check(file_path_obj, content);

@@ -16,7 +16,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex; // Changed from std::sync::Mutex for async safety
 use tracing::info;
 
-use crate::errors::WinxError;
 use crate::state::bash_state::BashState;
 
 /// Type alias for shared bash state with async-safe mutex

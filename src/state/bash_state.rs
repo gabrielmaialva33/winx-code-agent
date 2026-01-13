@@ -1895,14 +1895,13 @@ impl BashState {
                 ));
             }
 
-            // Check if file has been modified since last read
-            if let Ok(current_content) = std::fs::read_to_string(file_path) {
-                let current_hash = sha256_hash(current_content.as_bytes());
-                let mut whitelist_data = whitelist_data.clone();
-                if whitelist_data.check_file_changed(&current_hash) {
-                    // Update the stored data
-                    self.whitelist_for_overwrite
-                        .insert(file_path_str.to_string(), whitelist_data);
+            // Check if file has been modified since last read by comparing file_hash
+            // (content_hash is optional and may not be set, but file_hash is always set)
+            if let Ok(current_content) = std::fs::read(file_path) {
+                let mut hasher = Sha256::new();
+                hasher.update(&current_content);
+                let current_hash = format!("{:x}", hasher.finalize());
+                if whitelist_data.file_hash != current_hash {
                     return Err(anyhow!(
                         "File {} has changed since last read. Please read the file again with ReadFiles before modifying.",
                         file_path.display()

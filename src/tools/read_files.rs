@@ -805,76 +805,69 @@ pub async fn handle_tool_call(
         }
     }
 
-    // Update whitelist data in bash state
-    tokio::task::spawn_blocking({
-        let bash_state_arc = Arc::clone(bash_state_arc);
-        let whitelist_data: HashMap<String, Vec<(usize, usize)>> = file_ranges_dict.clone();
-
-        move || {
-            let mut bash_state_guard = bash_state_arc.blocking_lock();
-            if let Some(bash_state) = bash_state_guard.as_mut() {
-                for (file_path, ranges) in whitelist_data {
-                    // The cache already has the file hash and metadata,
-                    // so we just need to ensure it's in the whitelist
-
-                    // Get the hash from the cache
-                    let file_hash = cache
-                        .get_cached_hash(Path::new(&file_path))
-                        .unwrap_or_else(|| {
-                            // If not in cache (shouldn't happen), calculate it
-                            match read_file_optimized(Path::new(&file_path), MAX_FILE_SIZE) {
-                                Ok(content) => {
-                                    let mut hasher = Sha256::new();
-                                    hasher.update(&content);
-                                    format!("{:x}", hasher.finalize())
-                                }
-                                Err(_) => String::new(),
+    // Update whitelist data in bash state synchronously to ensure consistency
+    // This prevents race conditions where the whitelist hash doesn't match the file
+    {
+        let mut bash_state_guard = bash_state_arc.lock().await;
+        if let Some(bash_state) = bash_state_guard.as_mut() {
+            for (file_path, ranges) in file_ranges_dict {
+                // Get the hash from the cache
+                let file_hash = cache
+                    .get_cached_hash(Path::new(&file_path))
+                    .unwrap_or_else(|| {
+                        // If not in cache (shouldn't happen), calculate it
+                        match read_file_optimized(Path::new(&file_path), MAX_FILE_SIZE) {
+                            Ok(content) => {
+                                let mut hasher = Sha256::new();
+                                hasher.update(&content);
+                                format!("{:x}", hasher.finalize())
                             }
-                        });
-
-                    // Add or update the whitelist entry
-                    if let Some(existing) =
-                        bash_state.whitelist_for_overwrite.get_mut(&file_path)
-                    {
-                        existing.file_hash = file_hash.clone();
-
-                        // Get total lines from the cache
-                        let total_lines = cache
-                            .get_unread_ranges(Path::new(&file_path))
-                            .iter()
-                            .map(|&(_, end)| end)
-                            .max()
-                            .unwrap_or(0);
-
-                        if total_lines > 0 {
-                            existing.total_lines = total_lines;
+                            Err(_) => String::new(),
                         }
+                    });
 
-                        for range in ranges {
-                            existing.add_range(range.0, range.1);
-                        }
-                    } else {
-                        // Create new entry
-                        let total_lines = cache
-                            .get_unread_ranges(Path::new(&file_path))
-                            .iter()
-                            .map(|&(_, end)| end)
-                            .max()
-                            .unwrap_or(ranges.iter().map(|&(_, end)| end).max().unwrap_or(0));
+                // Add or update the whitelist entry
+                if let Some(existing) =
+                    bash_state.whitelist_for_overwrite.get_mut(&file_path)
+                {
+                    existing.file_hash = file_hash.clone();
 
-                        bash_state.whitelist_for_overwrite.insert(
-                            file_path.clone(),
-                            crate::state::bash_state::FileWhitelistData::new(
-                                file_hash,
-                                ranges,
-                                total_lines,
-                            ),
-                        );
+                    // Get total lines from the cache
+                    let total_lines = cache
+                        .get_unread_ranges(Path::new(&file_path))
+                        .iter()
+                        .map(|&(_, end)| end)
+                        .max()
+                        .unwrap_or(0);
+
+                    if total_lines > 0 {
+                        existing.total_lines = total_lines;
                     }
+
+                    for range in ranges {
+                        existing.add_range(range.0, range.1);
+                    }
+                } else {
+                    // Create new entry
+                    let total_lines = cache
+                        .get_unread_ranges(Path::new(&file_path))
+                        .iter()
+                        .map(|&(_, end)| end)
+                        .max()
+                        .unwrap_or(ranges.iter().map(|&(_, end)| end).max().unwrap_or(0));
+
+                    bash_state.whitelist_for_overwrite.insert(
+                        file_path.clone(),
+                        crate::state::bash_state::FileWhitelistData::new(
+                            file_hash,
+                            ranges,
+                            total_lines,
+                        ),
+                    );
                 }
             }
         }
-    });
+    }
 
     Ok(message)
 }
