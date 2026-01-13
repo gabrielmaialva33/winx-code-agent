@@ -9,6 +9,7 @@ pub mod bash_command;
 pub mod context_save;
 pub mod file_write_or_edit;
 pub mod initialize;
+pub mod learning;
 pub mod read_files;
 pub mod read_image;
 

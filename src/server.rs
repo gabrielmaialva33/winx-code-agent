@@ -20,7 +20,14 @@ use tokio::sync::Mutex; // Changed from std::sync::Mutex for async safety
 use tracing::{info, warn};
 
 use crate::state::BashState;
-use crate::types::{BashCommand, ContextSave, FileWriteOrEdit, Initialize, ReadFiles, ReadImage};
+use crate::tools::learning::{
+    execute_detect_patterns, execute_get_automation_suggestions, execute_get_user_context,
+    execute_process_learning, execute_search_history, SharedLearningState,
+};
+use crate::types::{
+    BashCommand, ContextSave, DetectPatterns, FileWriteOrEdit, GetAutomationSuggestions,
+    GetUserContext, Initialize, ProcessLearning, ReadFiles, ReadImage, SearchHistory,
+};
 
 /// Type alias for the shared bash state - uses tokio::sync::Mutex for async safety
 pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
@@ -35,7 +42,7 @@ fn schema_to_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<Stri
     }
 }
 
-/// Winx service with shared bash state (core WCGW tools only)
+/// Winx service with shared bash state and learning capabilities
 ///
 /// Uses `tokio::sync::Mutex` for thread-safe async access to the shell state.
 /// This prevents race conditions when multiple requests access the shell concurrently.
@@ -43,6 +50,8 @@ fn schema_to_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<Stri
 pub struct WinxService {
     /// Shared state for the bash shell environment (async-safe)
     pub bash_state: SharedBashState,
+    /// Shared state for learning system (async-safe)
+    pub learning_state: SharedLearningState,
     /// Version information for the service
     pub version: String,
 }
@@ -59,6 +68,7 @@ impl WinxService {
         info!("Creating new WinxService instance");
         Self {
             bash_state: Arc::new(Mutex::new(None)),
+            learning_state: Arc::new(Mutex::new(None)),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
     }
@@ -258,6 +268,78 @@ impl ServerHandler for WinxService {
                     icons: None,
                     meta: None,
                 },
+                // Learning Tools
+                Tool {
+                    name: "SearchHistory".into(),
+                    description: Some(
+                        "Search through the user's Claude Code sessions using semantic similarity.\n\
+                        Use this to find past conversations related to a topic.\n\
+                        Returns relevant context from previous discussions.\n\
+                        Example: \"How did we handle authentication before?\"".into()
+                    ),
+                    input_schema: schema_to_input_schema::<SearchHistory>(),
+                    output_schema: None,
+                    annotations: Some(ToolAnnotations::new().read_only(true).open_world(false)),
+                    title: None,
+                    icons: None,
+                    meta: None,
+                },
+                Tool {
+                    name: "DetectPatterns".into(),
+                    description: Some(
+                        "Analyzes a user request and checks if it matches known patterns.\n\
+                        Use this to identify repetitive requests that could be automated.\n\
+                        Returns similar past requests and automation suggestions.".into()
+                    ),
+                    input_schema: schema_to_input_schema::<DetectPatterns>(),
+                    output_schema: None,
+                    annotations: Some(ToolAnnotations::new().read_only(true).open_world(false)),
+                    title: None,
+                    icons: None,
+                    meta: None,
+                },
+                Tool {
+                    name: "GetUserContext".into(),
+                    description: Some(
+                        "Retrieves the user's communication profile.\n\
+                        Includes vocabulary, preferences, correction patterns, and thinking style.\n\
+                        Use this to understand how the user communicates and prefers responses.".into()
+                    ),
+                    input_schema: schema_to_input_schema::<GetUserContext>(),
+                    output_schema: None,
+                    annotations: Some(ToolAnnotations::new().read_only(true).open_world(false)),
+                    title: None,
+                    icons: None,
+                    meta: None,
+                },
+                Tool {
+                    name: "GetAutomationSuggestions".into(),
+                    description: Some(
+                        "Returns a list of repetitive requests that could be automated into skills/commands.\n\
+                        Use this to suggest automations based on the user's patterns.\n\
+                        Each suggestion includes frequency, examples, and a suggested command name.".into()
+                    ),
+                    input_schema: schema_to_input_schema::<GetAutomationSuggestions>(),
+                    output_schema: None,
+                    annotations: Some(ToolAnnotations::new().read_only(true).open_world(false)),
+                    title: None,
+                    icons: None,
+                    meta: None,
+                },
+                Tool {
+                    name: "ProcessLearning".into(),
+                    description: Some(
+                        "Triggers processing of Claude Code sessions to extract learning patterns.\n\
+                        This is a long-running operation that analyzes all available sessions.\n\
+                        Call this to update the learning data after new sessions have accumulated.".into()
+                    ),
+                    input_schema: schema_to_input_schema::<ProcessLearning>(),
+                    output_schema: None,
+                    annotations: Some(ToolAnnotations::new().destructive(false).open_world(false)),
+                    title: None,
+                    icons: None,
+                    meta: None,
+                },
             ],
             next_cursor: None,
             meta: None,
@@ -397,6 +479,14 @@ impl ServerHandler for WinxService {
             "FileWriteOrEdit" => self.handle_file_write_or_edit(args_value.clone()).await?,
             "ContextSave" => self.handle_context_save(args_value.clone()).await?,
             "ReadImage" => self.handle_read_image(args_value.clone()).await?,
+            // Learning tools
+            "SearchHistory" => self.handle_search_history(args_value.clone()).await?,
+            "DetectPatterns" => self.handle_detect_patterns(args_value.clone()).await?,
+            "GetUserContext" => self.handle_get_user_context(args_value.clone()).await?,
+            "GetAutomationSuggestions" => {
+                self.handle_get_automation_suggestions(args_value.clone()).await?
+            }
+            "ProcessLearning" => self.handle_process_learning(args_value.clone()).await?,
             _ => {
                 return Err(McpError::invalid_request(
                     format!("Unknown tool: {}", param.name),
@@ -606,6 +696,123 @@ impl WinxService {
             Err(e) => {
                 warn!("Failed to read image {}: {}", file_path, e);
                 Err(McpError::internal_error(format!("Failed to read image: {e}"), None))
+            }
+        }
+    }
+
+    // ========================================================================
+    // Learning Tools Handlers
+    // ========================================================================
+
+    async fn handle_search_history(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+
+        let params: SearchHistory = serde_json::from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid SearchHistory parameters: {e}"), None)
+        })?;
+
+        match execute_search_history(params, &self.learning_state).await {
+            Ok(result) => {
+                let json_result = serde_json::to_string_pretty(&result).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(json_result)]))
+            }
+            Err(e) => {
+                warn!("SearchHistory failed: {}", e);
+                Err(McpError::internal_error(format!("SearchHistory failed: {e}"), None))
+            }
+        }
+    }
+
+    async fn handle_detect_patterns(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+
+        let params: DetectPatterns = serde_json::from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid DetectPatterns parameters: {e}"), None)
+        })?;
+
+        match execute_detect_patterns(params, &self.learning_state).await {
+            Ok(result) => {
+                let json_result = serde_json::to_string_pretty(&result).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(json_result)]))
+            }
+            Err(e) => {
+                warn!("DetectPatterns failed: {}", e);
+                Err(McpError::internal_error(format!("DetectPatterns failed: {e}"), None))
+            }
+        }
+    }
+
+    async fn handle_get_user_context(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+
+        let params: GetUserContext = serde_json::from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid GetUserContext parameters: {e}"), None)
+        })?;
+
+        match execute_get_user_context(params, &self.learning_state).await {
+            Ok(result) => {
+                let json_result = serde_json::to_string_pretty(&result).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(json_result)]))
+            }
+            Err(e) => {
+                warn!("GetUserContext failed: {}", e);
+                Err(McpError::internal_error(format!("GetUserContext failed: {e}"), None))
+            }
+        }
+    }
+
+    async fn handle_get_automation_suggestions(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+
+        let params: GetAutomationSuggestions = serde_json::from_value(args).map_err(|e| {
+            McpError::invalid_request(
+                format!("Invalid GetAutomationSuggestions parameters: {e}"),
+                None,
+            )
+        })?;
+
+        match execute_get_automation_suggestions(params, &self.learning_state).await {
+            Ok(result) => {
+                let json_result = serde_json::to_string_pretty(&result).unwrap_or_default();
+                Ok(CallToolResult::success(vec![Content::text(json_result)]))
+            }
+            Err(e) => {
+                warn!("GetAutomationSuggestions failed: {}", e);
+                Err(McpError::internal_error(
+                    format!("GetAutomationSuggestions failed: {e}"),
+                    None,
+                ))
+            }
+        }
+    }
+
+    async fn handle_process_learning(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+
+        let params: ProcessLearning = serde_json::from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid ProcessLearning parameters: {e}"), None)
+        })?;
+
+        info!("Processing learning from Claude Code sessions...");
+
+        match execute_process_learning(params, &self.learning_state).await {
+            Ok(result) => {
+                let json_result = serde_json::to_string_pretty(&result).unwrap_or_default();
+                info!("ProcessLearning succeeded");
+                Ok(CallToolResult::success(vec![Content::text(json_result)]))
+            }
+            Err(e) => {
+                warn!("ProcessLearning failed: {}", e);
+                Err(McpError::internal_error(format!("ProcessLearning failed: {e}"), None))
             }
         }
     }

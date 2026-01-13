@@ -6,21 +6,27 @@
 </table>
 
 <p align="center">
-  <strong>🦀 High-performance Rust implementation of WCGW for code agents 🦀</strong>
+  <strong>🦀 High-performance Rust code agent with LLM chat + MCP server 🦀</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat&logo=rust" alt="Language" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat" alt="License" />
-  <img src="https://img.shields.io/badge/tests-118%20passing-green?style=flat" alt="Tests" />
+  <img src="https://img.shields.io/badge/tests-186%20passing-green?style=flat" alt="Tests" />
   <img src="https://img.shields.io/badge/MCP-compatible-purple?style=flat" alt="MCP" />
+  <img src="https://img.shields.io/badge/GPU-RTX%204090-76B900?style=flat&logo=nvidia" alt="GPU" />
 </p>
 
 ---
 
-## 🚀 Why Winx?
+## 🚀 What is Winx?
 
-Winx is a **Rust** reimplementation of [WCGW](https://github.com/rusiaaman/wcgw) (Python), offering drastically superior performance for code operations in LLM agents.
+Winx is a **sentient code agent** that combines:
+
+- **MCP Server** - High-performance shell execution for Claude Code
+- **Interactive REPL** - aichat-style terminal chat with multiple LLMs
+- **Self-Awareness** - Knows who she is, her capabilities, and environment
+- **Learning System** - Semantic embeddings with jina-embeddings-v2-base-code
 
 ### ⚡ Benchmark: Winx vs WCGW
 
@@ -30,53 +36,106 @@ Winx is a **Rust** reimplementation of [WCGW](https://github.com/rusiaaman/wcgw)
 | Shell Exec | 17.5ms | 0.7ms | **24x** |
 | File Read | 7.0ms | 1.0ms | **7x** |
 | Pattern Search | 11.9ms | 1.2ms | **10x** |
-
-> **Real MCP Protocol:** 230x faster handshake
-> **Overall average:** 8.7x faster on typical operations
+| Memory Usage | ~50MB | ~5MB | **10x** |
 
 ---
 
-## 📖 Overview
+## 🎮 Three Modes of Operation
 
-```mermaid
-flowchart TB
-    subgraph LLM["🤖 Claude / LLM"]
-        direction LR
-        claude[Claude Desktop]
-    end
+```bash
+# 1. Interactive REPL (default) - aichat-style
+winx
 
-    subgraph MCP["📡 MCP Protocol"]
-        direction LR
-        jsonrpc["JSON-RPC 2.0 over stdio"]
-    end
+# 2. One-shot chat
+winx chat "explain this code"
 
-    subgraph Winx["✨ Ｗｉｎｘ Ａｇｅｎｔ ✨"]
-        direction TB
-        subgraph Tools["MCP Tools"]
-            bash["⚡ BashCommand<br/>(PTY)"]
-            read["📄 ReadFiles<br/>(mmap)"]
-            write["✏️ FileWriteOrEdit<br/>(search/replace)"]
-            init["🚀 Initialize<br/>(modes)"]
-            ctx["💾 ContextSave<br/>(resume)"]
-            img["🖼️ ReadImage<br/>(base64)"]
-        end
-    end
+# 3. MCP Server (for Claude Code)
+winx serve
+```
 
-    subgraph OS["💻 Operating System"]
-        direction LR
-        shell["Shell<br/>bash/zsh"]
-        fs["Filesystem"]
-        proc["Processes"]
-    end
+### Interactive REPL
 
-    LLM -->|"230x faster handshake"| MCP
-    MCP --> Winx
-    Winx --> OS
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  ✨ Winx v0.2.3 • qwen3-235b-instruct • RTX 4090 (23GB)        │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  › Como faço deploy do VIVA?                                   │
+│                                                                 │
+│  Winx: Para fazer deploy do VIVA, você pode usar:              │
+│        fly deploy --app viva-prod                               │
+│                                                                 │
+│  Comandos: /help /model /clear /copy Ctrl+O (editor)           │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-    style LLM fill:#4a5568,stroke:#a0aec0,color:#fff
-    style Winx fill:#2d3748,stroke:#ed8936,color:#fff
-    style OS fill:#1a202c,stroke:#4a5568,color:#fff
-    style MCP fill:#553c9a,stroke:#9f7aea,color:#fff
+**Features:**
+- Multi-line input (Shift+Enter)
+- Syntax highlighting
+- Command history
+- External editor (Ctrl+O)
+- Clipboard copy (/copy)
+- i18n (PT-BR + EN)
+
+---
+
+## 🧠 Agent Self-Awareness
+
+Winx knows:
+
+```rust
+WinxIdentity {
+    name: "Winx",
+    version: "0.2.3",
+    system: SystemInfo {
+        hostname: "GATO-PC",
+        os: "Windows 11 + WSL2",
+        cpu: "i9-13900K",
+        gpu: Some("RTX 4090"),
+        vram_gb: Some(24),
+        cuda: true,
+    },
+    capabilities: [MCP, Chat, Embeddings, CodeAnalysis],
+    detected_agents: [ClaudeCode, GeminiCLI],
+}
+```
+
+**On first run, Winx:**
+1. Detects your hardware (GPU, VRAM, CUDA)
+2. Finds other AI agents (Claude Code, Gemini CLI, Cline, Cursor)
+3. Scans current project (language, framework, git status)
+4. Generates personalized system prompt
+
+---
+
+## 🔮 Learning System
+
+Semantic search with real embeddings (not just keywords):
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  EMBEDDING ENGINE                                               │
+│  jina-embeddings-v2-base-code (768 dims)                       │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                 │
+│  Backends (auto-fallback):                                      │
+│  1. Candle (local GPU) ← RTX 4090                              │
+│  2. HTTP (text-embeddings-inference container)                  │
+│  3. Jaccard (fallback, always works)                           │
+│                                                                 │
+│  "deploy viva" ≈ "fazer deploy do viva em prod"                │
+│  (understands semantic similarity, not just keywords)          │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**Build with GPU embeddings:**
+
+```bash
+# CPU only
+cargo build --release --features embeddings
+
+# CUDA (RTX 4090)
+cargo build --release --features embeddings-cuda
 ```
 
 ---
@@ -87,6 +146,7 @@ flowchart TB
 
 - Rust 1.75+
 - Linux/macOS/WSL2
+- (Optional) NVIDIA GPU for local embeddings
 
 ### Build
 
@@ -96,7 +156,33 @@ cd winx-code-agent
 cargo build --release
 ```
 
-### Configure Claude Desktop
+### Configure LLM Provider
+
+```bash
+# NVIDIA NIM (recommended, free tier)
+export NVIDIA_API_KEY="nvapi-xxx"
+
+# Or OpenAI
+export OPENAI_API_KEY="sk-xxx"
+
+# Or Ollama (local)
+# Just run ollama serve
+```
+
+### Run
+
+```bash
+# Interactive mode
+./target/release/winx-code-agent
+
+# Or add to PATH
+alias winx="$PWD/target/release/winx-code-agent"
+winx
+```
+
+---
+
+## 📡 MCP Server (Claude Code)
 
 Add to `~/.config/Claude/claude_desktop_config.json`:
 
@@ -104,105 +190,43 @@ Add to `~/.config/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "winx": {
-      "command": "/path/to/winx-code-agent/target/release/winx-code-agent",
-      "args": [],
-      "env": {
-        "RUST_LOG": "info"
-      }
+      "command": "/path/to/winx-code-agent",
+      "args": ["serve"],
+      "env": { "RUST_LOG": "info" }
     }
   }
 }
 ```
 
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `Initialize` | Setup workspace and mode |
+| `BashCommand` | Execute shell with PTY |
+| `ReadFiles` | Read with mmap (zero-copy) |
+| `FileWriteOrEdit` | SEARCH/REPLACE blocks |
+| `ContextSave` | Save project context |
+| `ReadImage` | Image to base64 |
+| `SearchHistory` | Semantic search in sessions |
+| `GetUserContext` | User communication style |
+
 ---
 
-## 🔧 Available Tools
+## 🎯 LLM Providers
 
-### `Initialize`
+| Provider | Models | Free Tier |
+|----------|--------|-----------|
+| **NVIDIA NIM** | Qwen3-235B, DeepSeek-R1, Llama-3.3-70B | 2000 req/month |
+| **OpenAI** | GPT-4o, GPT-4o-mini | ❌ |
+| **Ollama** | Any local model | ∞ (local) |
+| **Gemini** | gemini-2.0-flash | ✅ |
 
-Initialize the workspace environment. **Always call first.**
-
-```json
-{
-  "type": "first_call",
-  "any_workspace_path": "/home/user/project",
-  "mode_name": "wcgw"
-}
-```
-
-**Modes:**
-- `wcgw` - Full access (default)
-- `architect` - Read-only mode
-- `code_writer` - Restricted write access
-
-### `BashCommand`
-
-Execute shell commands with full PTY support.
-
-```json
-{
-  "action_json": {
-    "type": "command",
-    "command": "ls -la"
-  },
-  "thread_id": "abc123"
-}
-```
-
-**Supported actions:**
-- `command` - Execute command
-- `status_check` - Check command status
-- `send_text` - Send text input
-- `send_specials` - Send special keys (Enter, Ctrl-c, etc)
-- `send_ascii` - Send ASCII codes
-
-### `ReadFiles`
-
-Read files with line range support.
-
-```json
-{
-  "file_paths": [
-    "/path/to/file.rs",
-    "/path/to/other.rs:10-50"
-  ]
-}
-```
-
-### `FileWriteOrEdit`
-
-Write or edit files with SEARCH/REPLACE blocks.
-
-```json
-{
-  "file_path": "/path/to/file.rs",
-  "percentage_to_change": 30,
-  "text_or_search_replace_blocks": "<<<<<<< SEARCH\nold code\n=======\nnew code\n>>>>>>> REPLACE",
-  "thread_id": "abc123"
-}
-```
-
-### `ContextSave`
-
-Save project context for later resumption.
-
-```json
-{
-  "id": "my-task",
-  "project_root_path": "/home/user/project",
-  "description": "Implementing feature X",
-  "relevant_file_globs": ["src/**/*.rs", "Cargo.toml"]
-}
-```
-
-### `ReadImage`
-
-Read images and return as base64.
-
-```json
-{
-  "file_path": "/path/to/image.png"
-}
+```bash
+# Switch models
+winx --model nvidia:qwen3-235b-instruct
+winx --model openai:gpt-4o
+winx --model ollama:qwen2.5-coder:32b
 ```
 
 ---
@@ -210,187 +234,136 @@ Read images and return as base64.
 ## 🏗️ Architecture
 
 ```mermaid
-graph LR
-    subgraph Server["🖥️ MCP Server"]
-        main["main.rs"]
-        server["server.rs<br/>(rmcp)"]
+flowchart TB
+    subgraph User["👤 User"]
+        cli["Terminal"]
+        claude["Claude Code"]
     end
 
-    subgraph Tools["🔧 Tools Layer"]
-        bash["BashCommand"]
-        files["ReadFiles"]
-        write["FileWriteOrEdit"]
-        init["Initialize"]
-        ctx["ContextSave"]
-        img["ReadImage"]
+    subgraph Winx["✨ Winx Agent"]
+        direction TB
+        subgraph Modes["Operation Modes"]
+            repl["Interactive REPL"]
+            chat["One-shot Chat"]
+            mcp["MCP Server"]
+        end
+        subgraph Core["Core Systems"]
+            agent["🧠 Agent<br/>(Self-Awareness)"]
+            learn["📚 Learning<br/>(Embeddings)"]
+            sense["👁️ Sense<br/>(Environment)"]
+        end
+        subgraph Tools["MCP Tools"]
+            bash["⚡ BashCommand"]
+            files["📄 ReadFiles"]
+            write["✏️ FileWriteOrEdit"]
+        end
     end
 
-    subgraph State["📦 State Management"]
-        bstate["BashState<br/>(Mutex)"]
-        term["Terminal<br/>(PTY)"]
+    subgraph Providers["🤖 LLM Providers"]
+        nvidia["NVIDIA NIM"]
+        openai["OpenAI"]
+        ollama["Ollama"]
     end
 
-    subgraph Utils["⚙️ Utilities"]
-        cache["FileCache"]
-        mmap["mmap"]
-        path["PathUtils"]
-    end
+    cli --> repl
+    cli --> chat
+    claude -->|MCP| mcp
+    Modes --> Core
+    Core --> Tools
+    repl --> Providers
+    chat --> Providers
 
-    main --> server
-    server --> Tools
-    Tools --> State
-    Tools --> Utils
-    State --> term
-
-    style Server fill:#2d3748,stroke:#ed8936,color:#fff
-    style Tools fill:#553c9a,stroke:#9f7aea,color:#fff
-    style State fill:#2c5282,stroke:#63b3ed,color:#fff
-    style Utils fill:#285e61,stroke:#4fd1c5,color:#fff
+    style Winx fill:#2d3748,stroke:#ed8936,color:#fff
+    style Providers fill:#553c9a,stroke:#9f7aea,color:#fff
 ```
 
 ### Project Structure
 
 ```
 src/
-├── main.rs              # Entry point
+├── main.rs              # Entry point, CLI
 ├── server.rs            # MCP server (rmcp)
-├── lib.rs               # Library exports
-├── types.rs             # Types and schemas
-├── errors.rs            # Error handling
-├── tools/
-│   ├── mod.rs           # Tool registry
-│   ├── bash_command.rs  # Shell execution (PTY)
-│   ├── read_files.rs    # File reading (mmap)
-│   ├── file_write.rs    # File writing
-│   ├── initialize.rs    # Mode initialization
-│   ├── context_save.rs  # Context persistence
-│   └── read_image.rs    # Image processing
-├── state/
-│   ├── mod.rs           # State management
-│   ├── bash_state.rs    # Shell state (Mutex)
-│   └── terminal.rs      # Terminal handling
-└── utils/
-    ├── file_cache.rs    # File caching
-    ├── mmap.rs          # Memory-mapped I/O
-    ├── path.rs          # Path utilities
-    └── repo.rs          # Repository analysis
+├── agent/
+│   ├── identity.rs      # Self-awareness
+│   ├── sense.rs         # Environment detection
+│   └── mod.rs           # Onboarding
+├── chat/
+│   ├── engine.rs        # Chat engine
+│   └── config.rs        # Configuration
+├── interactive/
+│   ├── mod.rs           # REPL loop
+│   ├── render.rs        # Syntax highlighting
+│   └── i18n.rs          # Internationalization
+├── learning/
+│   ├── embedding_engine.rs  # Candle/HTTP/Jaccard
+│   ├── embeddings.rs    # Conversation search
+│   ├── repetitions.rs   # Pattern detection
+│   └── session_parser.rs # Claude session parser
+├── providers/
+│   ├── nvidia.rs        # NVIDIA NIM
+│   ├── openai.rs        # OpenAI
+│   └── ollama.rs        # Ollama
+└── tools/
+    ├── bash_command.rs  # Shell (PTY)
+    ├── read_files.rs    # mmap
+    └── file_write.rs    # SEARCH/REPLACE
 ```
-
-### Core Technologies
-
-| Component | Technology | Why |
-|-----------|------------|-----|
-| Runtime | Tokio | High-performance async I/O |
-| MCP | rmcp | Official Rust SDK for MCP |
-| Shell | portable-pty | Cross-platform PTY |
-| Files | memmap2 | Zero-copy file reading |
-| Concurrency | tokio::sync::Mutex | Thread-safe state |
-| Matching | rayon | Parallel fuzzy matching |
 
 ---
 
 ## 🧪 Tests
 
 ```bash
-# Run all tests
+# All tests
 cargo test
 
-# Tests with output
+# Learning module
+cargo test learning
+
+# With output
 cargo test -- --nocapture
 
-# Specific tests
-cargo test bash_command
-cargo test file_write
+# Embeddings (requires feature)
+cargo test --features embeddings
 ```
 
-**Status:** 118 tests passing (90 unit + 28 integration)
+**Status:** 186 tests passing
 
 ---
 
-## 📊 Performance Details
+## 🔀 Comparison
 
-### Why is Rust faster?
-
-1. **Shell Exec (24x)**
-   - Python: subprocess fork + interpreter overhead
-   - Rust: direct syscall via PTY
-
-2. **File Read (7x)**
-   - Python: object allocation + GIL
-   - Rust: mmap zero-copy
-
-3. **MCP Protocol (230x)**
-   - Python: slow JSON parsing + startup time
-   - Rust: serde + instant startup
-
-### When to use each?
-
-| Scenario | Recommendation |
-|----------|----------------|
-| Hot paths (autocomplete) | **Winx** |
-| Light commands (ls, cat) | **Winx** |
-| Heavy commands (build) | Either works |
-| Debug/compatibility | WCGW |
-
----
-
-## 🔀 Comparison with WCGW
-
-| Feature | WCGW (Python) | Winx (Rust) |
-|---------|---------------|-------------|
-| Language | Python 3.10+ | Rust 1.75+ |
-| Performance | Baseline | **2-230x faster** |
-| Memory | ~50MB | ~5MB |
-| PTY Support | ✅ | ✅ |
-| MCP Protocol | ✅ | ✅ |
-| Search/Replace | ✅ | ✅ |
-| Context Save | ✅ | ✅ |
-| AI Integration | ❌ | ✅ (NVIDIA NIM) |
-| Parallel Matching | ❌ | ✅ (rayon) |
-| Memory-mapped I/O | ❌ | ✅ (memmap2) |
-
----
-
-## 🤖 AI Integration (Optional)
-
-Winx supports AI provider integration for code analysis:
-
-```bash
-# DashScope (Qwen3)
-export DASHSCOPE_API_KEY="your-key"
-
-# NVIDIA NIM
-export NVIDIA_API_KEY="your-key"
-
-# Google Gemini
-export GEMINI_API_KEY="your-key"
-```
-
-**AI Tools:**
-- `code_analyzer` - Bug/security analysis
-- `ai_generate_code` - Code generation
-- `ai_explain_code` - Code explanation
-- `winx_chat` - Assistant chat
+| Feature | WCGW | Cline | Claude Code | **Winx** |
+|---------|------|-------|-------------|----------|
+| Language | Python | TypeScript | TypeScript | **Rust** |
+| MCP Server | ✅ | ✅ | ✅ | ✅ |
+| Interactive Chat | ❌ | ❌ | ✅ | ✅ |
+| Self-Awareness | ❌ | ❌ | ❌ | ✅ |
+| Local Embeddings | ❌ | ❌ | ❌ | ✅ |
+| GPU Support | ❌ | ❌ | ❌ | ✅ |
+| Memory | 50MB | 200MB | 150MB | **5MB** |
+| Startup | 2.5s | 1s | 0.5s | **11ms** |
 
 ---
 
 ## 📝 Changelog
 
-### v0.2.1 (Current)
+### v0.2.3 (Current)
+- ✨ Interactive REPL (aichat-style)
+- 🧠 Agent self-awareness system
+- 👁️ Environment sensing (detects Claude Code, Gemini CLI, etc.)
+- 📚 Learning system with semantic embeddings
+- 🌐 i18n support (PT-BR + EN)
+- 🎨 Syntax highlighting
+- ⌨️ External editor (Ctrl+O)
+
+### v0.2.2
+- 🔒 Security fixes (path traversal, symlink attacks)
+- 🤖 NVIDIA NIM semantic matching
+
+### v0.2.1
 - ✅ 1:1 parity with WCGW Python
 - ✅ 118 tests passing
-- ✅ SpecialKey serialization fixed
-- ✅ Mutex safe error handling
-- ✅ Race condition fix with tokio::sync::Mutex
-
-### v0.2.0
-- Core port of wcgw Python to Rust
-- 6 MCP tools implemented
-- 3 operational modes
-
-### v0.1.5
-- Multi-provider AI integration
-- DashScope, NVIDIA NIM, Gemini
 
 ---
 
@@ -398,7 +371,8 @@ export GEMINI_API_KEY="your-key"
 
 - [rusiaaman/wcgw](https://github.com/rusiaaman/wcgw) - Original Python project
 - [anthropics/claude-code](https://github.com/anthropics/claude-code) - MCP inspiration
-- [modelcontextprotocol](https://github.com/modelcontextprotocol) - MCP specification
+- [sigoden/aichat](https://github.com/sigoden/aichat) - REPL inspiration
+- [huggingface/candle](https://github.com/huggingface/candle) - Rust ML framework
 
 ---
 

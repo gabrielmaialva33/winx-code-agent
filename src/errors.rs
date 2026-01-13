@@ -147,8 +147,8 @@ pub enum WinxError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
-    /// NVIDIA API error
-    #[error("NVIDIA API error: {0}")]
+    /// API error (provider agnostic)
+    #[error("API error: {0}")]
     ApiError(String),
 
     /// Network error for HTTP requests

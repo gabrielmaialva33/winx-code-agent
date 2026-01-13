@@ -24,6 +24,7 @@ async-trait = "0.1"
 # Serialization - Serde ecosystem
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+toml = "0.8"
 
 # Error handling - thiserror for library, anyhow for binary
 thiserror = "2.0"
@@ -52,6 +53,7 @@ rayon = "1.10"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 futures = "0.3"
 tokio-stream = "0.1"
+async-stream = "0.3"
 
 # Advanced string matching algorithms
 strsim = "0.11"
@@ -66,8 +68,29 @@ vte = "0.15"
 # Random number generation
 rand = "0.9"
 
-# CLI (optional, for standalone mode)
-clap = { version = "4.5", features = ["derive"], optional = true }
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Interactive REPL (aichat-style)
+reedline = "0.40"
+syntect = { version = "5.2", default-features = false, features = ["parsing", "default-themes", "default-syntaxes", "regex-fancy"] }
+nu-ansi-term = "0.50"
+textwrap = "0.16"
+unicode-width = "0.2"
+
+# UX Enhancements
+indicatif = "0.17"
+arboard = "3.4"
+shellexpand = "3.1.1"
+hostname = "0.4.2"
+dirs = "6.0.0"
+
+# ML Embeddings (optional, for local inference)
+candle-core = { version = "0.8", optional = true }
+candle-nn = { version = "0.8", optional = true }
+candle-transformers = { version = "0.8", optional = true }
+tokenizers = { version = "0.20", optional = true }
+hf-hub = { version = "0.3", optional = true }
 
 [dev-dependencies]
 tempfile = "3.14"
@@ -79,7 +102,12 @@ predicates = "3.1"
 
 [features]
 default = []
-cli = ["clap"]
+
+# Local embeddings with Candle (CPU)
+embeddings = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "hf-hub"]
+
+# Local embeddings with CUDA (RTX 4090)
+embeddings-cuda = ["embeddings", "candle-core/cuda", "candle-nn/cuda", "candle-transformers/cuda"]
 
 # Clippy lints for quality
 [lints.clippy]
@@ -101,7 +129,9 @@ missing_panics_doc = "allow"
 [lints.rust]
 # Note: unsafe_code is allowed in specific modules (mmap.rs, bash_state.rs) for I/O operations
 # unsafe_code = "deny"  # Re-enable when refactoring complete
-missing_docs = "warn"
+# Allow unused code in library - some functions are for public API or future use
+dead_code = "allow"
+unused = "allow"
 
 [profile.release]
 lto = true

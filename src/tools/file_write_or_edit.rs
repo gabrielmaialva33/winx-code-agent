@@ -17,7 +17,6 @@ use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, FileWhitelistData};
 use crate::types::FileWriteOrEdit;
 use crate::utils::fuzzy_match::{FuzzyMatch, FuzzyMatcher};
-use crate::utils::llm_client::LlmClient;
 use crate::utils::path::{expand_user, validate_path_in_workspace};
 use crate::utils::syntax_checker::{check_syntax, format_syntax_error_context};
 use crate::utils::tolerance::{
@@ -1628,11 +1627,6 @@ pub async fn handle_tool_call(
 
     // Determine if this is an edit or a full file write
     let is_edit_operation = is_edit(content, file_write_or_edit.percentage_to_change);
-
-    // Setup for advanced fuzzy matching (using defaults)
-    let fuzzy_threshold = 0.7;
-    let max_suggestions = 3;
-    let auto_apply_fuzzy = false;
 
     if is_edit_operation {
         // This is a search/replace edit operation
