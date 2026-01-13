@@ -336,16 +336,36 @@ fn get_fallback_app_dir() -> Result<PathBuf> {
 /// A Result with the content of the files, or an error
 fn read_files_content(file_paths: &[PathBuf], max_files: usize) -> Result<String> {
     let mut result = String::new();
+    let mut skipped_binary = Vec::new();
 
     for (i, path) in file_paths.iter().take(max_files).enumerate() {
-        let file_content = fs::read_to_string(path).map_err(|e| WinxError::FileAccessError {
-            path: path.clone(),
-            message: format!("Failed to read file: {e}"),
-        })?;
+        // Try to read as UTF-8 text, skip binary files
+        match fs::read_to_string(path) {
+            Ok(file_content) => {
+                result.push_str(&format!("--- File {}: {} ---\n", i + 1, path.display()));
+                result.push_str(&file_content);
+                result.push_str("\n\n");
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                // Binary file or invalid UTF-8 - skip with note
+                skipped_binary.push(path.display().to_string());
+            }
+            Err(e) => {
+                return Err(WinxError::FileAccessError {
+                    path: path.clone(),
+                    message: format!("Failed to read file: {e}"),
+                });
+            }
+        }
+    }
 
-        result.push_str(&format!("--- File {}: {} ---\n", i + 1, path.display()));
-        result.push_str(&file_content);
-        result.push_str("\n\n");
+    // Add note about skipped binary files
+    if !skipped_binary.is_empty() {
+        result.push_str(&format!(
+            "Note: Skipped {} binary/non-text file(s): {}\n\n",
+            skipped_binary.len(),
+            skipped_binary.join(", ")
+        ));
     }
 
     if file_paths.len() > max_files {
