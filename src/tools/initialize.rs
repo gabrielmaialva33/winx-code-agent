@@ -503,12 +503,24 @@ pub async fn handle_tool_call(
                 bash_state.file_edit_mode = file_edit_mode;
                 bash_state.write_if_empty_mode = write_if_empty_mode;
 
+                // CRITICAL: Reinitialize the shell to clear PTY buffer and create fresh process
+                // This was missing before - reset only updated modes but kept stale PTY buffer
+                info!("Reinitializing interactive bash for clean shell state");
+                if let Err(e) = bash_state.init_interactive_bash() {
+                    warn!("Failed to reinitialize interactive bash: {}", e);
+                    response.push_str(&format!(
+                        "Warning: Failed to reinitialize shell: {e}\n"
+                    ));
+                } else {
+                    debug!("Interactive bash reinitialized successfully");
+                }
+
                 // Save state to disk after reset
                 if let Err(e) = bash_state.save_state_to_disk() {
                     warn!("Failed to save bash state after reset: {}", e);
                 }
 
-                response.push_str("Reset shell\n");
+                response.push_str("Reset shell (new PTY created)\n");
             } else {
                 warn!("BashState not initialized for ResetShell");
                 return Err(WinxError::BashStateNotInitialized);
