@@ -1,6 +1,6 @@
 [package]
 name = "winx-code-agent"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 rust-version = "1.75"
 description = "High-performance Rust implementation of WCGW for LLM code agents"
@@ -47,6 +47,11 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Performance and concurrency
 rayon = "1.10"
+
+# HTTP client for LLM API calls (NVIDIA NIM)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+futures = "0.3"
+tokio-stream = "0.1"
 
 # Advanced string matching algorithms
 strsim = "0.11"

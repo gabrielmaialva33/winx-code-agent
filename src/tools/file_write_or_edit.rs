@@ -17,9 +17,13 @@ use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, FileWhitelistData};
 use crate::types::FileWriteOrEdit;
 use crate::utils::fuzzy_match::{FuzzyMatch, FuzzyMatcher};
+use crate::utils::llm_client::LlmClient;
 use crate::utils::path::{expand_user, validate_path_in_workspace};
 use crate::utils::syntax_checker::{check_syntax, format_syntax_error_context};
-use crate::utils::tolerance::{apply_with_individual_fallback, ApplyError, SearchReplaceBlock};
+use crate::utils::tolerance::{
+    apply_search_replace_with_llm_fallback, apply_with_individual_fallback, ApplyError,
+    SearchReplaceBlock, SemanticMatcher,
+};
 
 // Regex patterns for search/replace blocks
 // Create these with caching to improve performance
@@ -1166,6 +1170,98 @@ fn format_apply_error(error: &ApplyError) -> String {
     msg
 }
 
+/// Apply search/replace blocks with optional LLM semantic matching fallback
+///
+/// This async version uses NVIDIA NIM's Qwen3-Next-80B model as a final fallback
+/// when all tolerance-based matching fails. The LLM can understand code intent
+/// and find semantically equivalent blocks even when there are textual differences.
+///
+/// # Arguments
+///
+/// * `blocks` - Vector of (search, replace) pairs
+/// * `original_content` - The original file content
+/// * `file_path` - Path to the file (used for LLM context)
+/// * `use_llm_fallback` - Whether to enable LLM fallback
+///
+/// # Returns
+///
+/// The modified content or an error with detailed diagnostics
+async fn apply_search_replace_blocks_with_llm(
+    blocks: Vec<(String, String)>,
+    original_content: String,
+    file_path: &str,
+    use_llm_fallback: bool,
+) -> Result<String> {
+    // Convert to SearchReplaceBlock format for the tolerance system
+    let tolerance_blocks: Vec<SearchReplaceBlock> = blocks
+        .into_iter()
+        .map(|(search, replace)| SearchReplaceBlock {
+            search: search.lines().map(std::string::ToString::to_string).collect(),
+            replace: replace.lines().map(std::string::ToString::to_string).collect(),
+        })
+        .collect();
+
+    // Create semantic matcher if LLM fallback is enabled
+    let semantic_matcher = if use_llm_fallback {
+        let matcher = SemanticMatcher::new();
+        if matcher.is_enabled() {
+            debug!("LLM semantic matching enabled for file: {}", file_path);
+            Some(matcher)
+        } else {
+            debug!("LLM semantic matching requested but not available (check NVIDIA_API_KEY)");
+            None
+        }
+    } else {
+        None
+    };
+
+    // Use the async version with LLM fallback
+    match apply_search_replace_with_llm_fallback(
+        &original_content,
+        tolerance_blocks,
+        file_path,
+        semantic_matcher.as_ref(),
+    )
+    .await
+    {
+        Ok(result) => {
+            // Log warnings if any were generated
+            for warning in &result.warnings {
+                warn!("Tolerance warning: {}", warning);
+            }
+
+            if result.total_score > 0.0 {
+                let llm_used = result.warnings.iter().any(|w| w.contains("LLM semantic"));
+                if llm_used {
+                    info!(
+                        "Search/replace completed using LLM semantic matching (score: {:.1})",
+                        result.total_score
+                    );
+                } else {
+                    debug!(
+                        "Search/replace completed with tolerance score: {:.1}",
+                        result.total_score
+                    );
+                }
+            }
+
+            Ok(result.content)
+        }
+        Err(apply_error) => {
+            // Convert ApplyError to WinxError with detailed context
+            let error_msg = format_apply_error(&apply_error);
+            Err(WinxError::SearchBlockNotFound(error_msg))
+        }
+    }
+}
+
+/// Check if LLM semantic matching should be enabled
+///
+/// Returns true if the NVIDIA_API_KEY environment variable is set
+fn is_llm_enabled() -> bool {
+    std::env::var("NVIDIA_API_KEY").is_ok()
+}
+
 /// Write content to a file with optimized buffering
 ///
 /// This function writes content to a file using a buffered writer for better performance,
@@ -1597,14 +1693,21 @@ pub async fn handle_tool_call(
             }
         };
 
-        // Apply search/replace blocks with fuzzy matching parameters
-        let new_content = match apply_search_replace_blocks(
+        // Apply search/replace blocks with LLM fallback (if NVIDIA_API_KEY is set)
+        let use_llm = is_llm_enabled();
+        if use_llm {
+            debug!("LLM semantic matching enabled via NVIDIA_API_KEY");
+        }
+
+        // Use the async version with LLM support
+        let new_content = match apply_search_replace_blocks_with_llm(
             blocks,
             original_content.clone(),
-            Some(fuzzy_threshold),
-            Some(max_suggestions),
-            Some(auto_apply_fuzzy),
-        ) {
+            &file_path,
+            use_llm,
+        )
+        .await
+        {
             Ok(content) => content,
             Err(e) => {
                 // Only log the error once at this level and avoid duplicating in error message

@@ -1,13 +1,15 @@
 //! WCGW-style tolerance system for search/replace matching.
 //!
-//! This module implements a 5-level tolerance system for matching search blocks
-//! in file content, inspired by the wcgw Python implementation.
+//! This module implements a 6-level tolerance system for matching search blocks
+//! in file content, inspired by the wcgw Python implementation and enhanced
+//! with NVIDIA NIM semantic matching via Qwen3-Next-80B.
 //!
-//! ## Optimization: Tiered Matching with Early Exit (v0.2.2)
+//! ## Optimization: Tiered Matching with Early Exit (v0.2.3)
 //!
 //! The matching algorithm uses a tiered approach with early exit:
 //! - **Tier 0**: Exact match (fastest, no tolerance)
 //! - **Tier 1-5**: Progressive tolerance application with early exit
+//! - **Tier 6**: LLM semantic matching (NVIDIA NIM fallback)
 //!
 //! When a unique match is found at any tier, processing stops immediately.
 //! This dramatically reduces processing time for well-formatted code.
@@ -18,10 +20,21 @@
 //! 3. `remove_leading_linenums` - Remove `^\d+ ` patterns (WARNING, score 5x)
 //! 4. `normalize_common_mistakes` - Unicode to ASCII normalization (WARNING, score 5x)
 //! 5. `all_whitespace` - Remove ALL whitespace (WARNING, score 50x)
+//! 6. `llm_semantic` - LLM-based semantic matching (WARNING, score 100x)
+//!
+//! ## NVIDIA NIM Integration
+//!
+//! When all tolerance tiers fail, the system can optionally use NVIDIA NIM's
+//! Qwen3-Next-80B model for semantic code matching. This provides:
+//! - Understanding of code intent beyond string matching
+//! - Handling of refactored/renamed code
+//! - Better matching for structurally similar but textually different code
 
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use tracing::{debug, trace, warn};
+
+use super::llm_client::{LlmClient, LlmError, SemanticMatchResult};
 
 /// Severity categories for tolerances
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +83,8 @@ pub const NORMALIZE_CHARS_WARNING: &str =
     "Warning: matching after normalizing commonly confused characters (quotes, dashes, ellipsis).";
 pub const REMOVE_ALL_WHITESPACE_WARNING: &str =
     "Warning: matching after removing all spaces in lines.";
+pub const LLM_SEMANTIC_WARNING: &str =
+    "Warning: matching using LLM semantic analysis (NVIDIA NIM). The match may not be exact.";
 
 /// A single tolerance level configuration
 #[derive(Clone)]
@@ -1077,6 +1092,380 @@ pub fn apply_with_individual_fallback(
         }
         Err(e) => Err(e),
     }
+}
+
+// ============================================================================
+// LLM Semantic Matching (NVIDIA NIM Integration)
+// ============================================================================
+
+/// Semantic matcher using NVIDIA NIM's Qwen3-Next-80B model
+///
+/// This provides a fallback when all tolerance-based matching fails.
+/// It uses the LLM to understand the semantic intent of the search block
+/// and find the corresponding code in the file.
+#[derive(Debug)]
+pub struct SemanticMatcher {
+    /// The underlying LLM client
+    client: Option<LlmClient>,
+    /// Whether semantic matching is enabled
+    enabled: bool,
+    /// Score multiplier for LLM matches (high penalty)
+    pub score_multiplier: f64,
+}
+
+impl Default for SemanticMatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SemanticMatcher {
+    /// Create a new semantic matcher
+    ///
+    /// Returns a matcher that will attempt to use NVIDIA NIM if available.
+    /// If the API key is not configured, the matcher will be disabled.
+    pub fn new() -> Self {
+        let client = LlmClient::new();
+        let enabled = client.is_some();
+
+        if enabled {
+            debug!("SemanticMatcher: NVIDIA NIM enabled with Qwen3-Next-80B");
+        } else {
+            debug!("SemanticMatcher: NVIDIA NIM disabled (no API key)");
+        }
+
+        Self {
+            client,
+            enabled,
+            score_multiplier: 100.0, // High penalty for LLM matches
+        }
+    }
+
+    /// Check if semantic matching is available
+    pub fn is_enabled(&self) -> bool {
+        self.enabled && self.client.is_some()
+    }
+
+    /// Attempt semantic matching for a search block
+    ///
+    /// This is called when all tolerance-based matching has failed.
+    /// It uses the LLM to find the semantically equivalent code block.
+    pub async fn find_match(
+        &self,
+        search_block: &str,
+        file_content: &str,
+        file_path: &str,
+    ) -> Result<Option<SemanticMatchResult>, LlmError> {
+        let client = match &self.client {
+            Some(c) => c,
+            None => return Ok(None),
+        };
+
+        debug!("Attempting LLM semantic match for file: {}", file_path);
+
+        let result = client.semantic_match(search_block, file_content, file_path).await?;
+
+        if result.success {
+            debug!(
+                "LLM semantic match found with confidence: {:.2}",
+                result.confidence
+            );
+            Ok(Some(result))
+        } else {
+            debug!("LLM semantic match failed: {}", result.explanation);
+            Ok(None)
+        }
+    }
+
+    /// Convert a semantic match result to a tolerance match result
+    pub fn to_match_result(
+        &self,
+        semantic_result: &SemanticMatchResult,
+        content_lines: &[&str],
+        search_lines: &[&str],
+    ) -> Option<MatchResult> {
+        // Find where the corrected search block appears in the file
+        let corrected_lines: Vec<&str> = semantic_result.corrected_search.lines().collect();
+
+        if corrected_lines.is_empty() {
+            return None;
+        }
+
+        // Try exact match with the corrected block
+        let matches = match_exact(content_lines, 0, &corrected_lines);
+
+        if matches.len() == 1 {
+            let (start, end) = matches[0];
+            let matched_lines: Vec<String> = content_lines[start..end]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect();
+
+            let mut warnings = HashSet::new();
+            warnings.insert(LLM_SEMANTIC_WARNING.to_string());
+
+            Some(MatchResult {
+                matched_slice: (start, end),
+                line_range: (start + 1, end),
+                tolerances_hit: vec![ToleranceHit {
+                    tolerance_index: 6, // Tier 6 = LLM semantic
+                    severity: ToleranceSeverity::Warning,
+                    score_multiplier: self.score_multiplier,
+                    error_name: LLM_SEMANTIC_WARNING,
+                    count: search_lines.len(),
+                }],
+                score: self.score_multiplier * search_lines.len() as f64,
+                warnings,
+                matched_lines,
+                removed_indentation: None,
+            })
+        } else {
+            warn!(
+                "LLM semantic match returned {} matches (expected 1)",
+                matches.len()
+            );
+            None
+        }
+    }
+}
+
+/// Result of tiered matching with optional LLM fallback
+#[derive(Debug, Clone)]
+pub struct TieredMatchWithLlmResult {
+    /// The match result
+    pub result: MatchResult,
+    /// Which tier (0-6) found the match (0 = exact, 1-5 = tolerance, 6 = LLM)
+    pub tier: usize,
+    /// Whether early exit was triggered
+    pub early_exit: bool,
+    /// Whether LLM was used
+    pub used_llm: bool,
+    /// LLM confidence score (if LLM was used)
+    pub llm_confidence: Option<f32>,
+}
+
+/// Match with tiered tolerances and optional LLM semantic fallback
+///
+/// This is the most comprehensive matching function that:
+/// 1. Tries exact match (Tier 0)
+/// 2. Tries tolerance matching (Tiers 1-5)
+/// 3. Falls back to LLM semantic matching (Tier 6) if enabled
+///
+/// # Arguments
+/// * `content_lines` - The file content as lines
+/// * `search_lines` - The search block as lines
+/// * `file_path` - Path to the file (for LLM context)
+/// * `semantic_matcher` - Optional semantic matcher for LLM fallback
+///
+/// # Returns
+/// A vector of match results with tier information
+pub async fn match_tiered_with_llm_fallback(
+    content_lines: &[&str],
+    content_offset: usize,
+    search_lines: &[&str],
+    file_path: &str,
+    semantic_matcher: Option<&SemanticMatcher>,
+) -> Vec<TieredMatchWithLlmResult> {
+    // First try regular tiered matching
+    let tiered_results = match_tiered(content_lines, content_offset, search_lines);
+
+    if !tiered_results.is_empty() {
+        // Convert to extended result type
+        return tiered_results
+            .into_iter()
+            .map(|r| TieredMatchWithLlmResult {
+                result: r.result,
+                tier: r.tier,
+                early_exit: r.early_exit,
+                used_llm: false,
+                llm_confidence: None,
+            })
+            .collect();
+    }
+
+    // No matches found - try LLM semantic matching if available
+    let matcher = match semantic_matcher {
+        Some(m) if m.is_enabled() => m,
+        _ => {
+            trace!("LLM semantic matching not available, returning empty");
+            return vec![];
+        }
+    };
+
+    debug!("No tolerance matches found, attempting LLM semantic match");
+
+    let search_block = search_lines.join("\n");
+    let file_content = content_lines.join("\n");
+
+    match matcher.find_match(&search_block, &file_content, file_path).await {
+        Ok(Some(semantic_result)) => {
+            if let Some(match_result) = matcher.to_match_result(
+                &semantic_result,
+                content_lines,
+                search_lines,
+            ) {
+                debug!(
+                    "LLM semantic match successful at Tier 6, confidence: {:.2}",
+                    semantic_result.confidence
+                );
+                vec![TieredMatchWithLlmResult {
+                    result: match_result,
+                    tier: 6,
+                    early_exit: true,
+                    used_llm: true,
+                    llm_confidence: Some(semantic_result.confidence),
+                }]
+            } else {
+                trace!("LLM semantic match returned but couldn't be applied");
+                vec![]
+            }
+        }
+        Ok(None) => {
+            trace!("LLM semantic match returned no results");
+            vec![]
+        }
+        Err(e) => {
+            warn!("LLM semantic match error: {}", e);
+            vec![]
+        }
+    }
+}
+
+/// Apply search/replace blocks with tolerance and LLM fallback
+///
+/// This is the async version of `apply_search_replace_with_tolerance` that
+/// includes LLM semantic matching as a final fallback.
+pub async fn apply_search_replace_with_llm_fallback(
+    content: &str,
+    blocks: Vec<SearchReplaceBlock>,
+    file_path: &str,
+    semantic_matcher: Option<&SemanticMatcher>,
+) -> Result<ApplyResult, ApplyError> {
+    let tolerances = default_tolerances();
+    let mut content_lines: Vec<String> =
+        content.lines().map(std::string::ToString::to_string).collect();
+    let mut all_warnings = HashSet::new();
+    let mut total_score = 0.0;
+    let mut offset: i64 = 0;
+
+    for (block_idx, block) in blocks.iter().enumerate() {
+        let search_refs: Vec<&str> = block.search.iter().map(std::string::String::as_str).collect();
+        let content_refs: Vec<&str> =
+            content_lines.iter().map(std::string::String::as_str).collect();
+
+        trace!(
+            "Processing block {}/{}: {} search lines",
+            block_idx + 1,
+            blocks.len(),
+            search_refs.len()
+        );
+
+        // Try tiered matching with LLM fallback
+        let llm_matches = match_tiered_with_llm_fallback(
+            &content_refs,
+            0,
+            &search_refs,
+            file_path,
+            semantic_matcher,
+        ).await;
+
+        let (match_result, replace_lines) = if !llm_matches.is_empty() {
+            if llm_matches.len() > 1 {
+                return Err(ApplyError {
+                    message: format!(
+                        "Search block {} matched {} times. Add more context.",
+                        block_idx + 1,
+                        llm_matches.len()
+                    ),
+                    failed_block: Some(block.search.join("\n")),
+                    context: None,
+                });
+            }
+
+            let llm_result = llm_matches.into_iter().next().unwrap();
+
+            if llm_result.used_llm {
+                debug!(
+                    "Block {} matched using LLM (confidence: {:.2})",
+                    block_idx + 1,
+                    llm_result.llm_confidence.unwrap_or(0.0)
+                );
+            }
+
+            (llm_result.result, block.replace.clone())
+        } else {
+            // Try tolerance matching with empty line removal
+            let empty_line_matches =
+                match_with_tolerance_empty_lines(&content_refs, 0, &search_refs, &tolerances);
+
+            if empty_line_matches.is_empty() {
+                let context = find_closest_context(&content_refs, &search_refs);
+                return Err(ApplyError {
+                    message: format!(
+                        "Search block {} not found in content (including LLM fallback).\n{}",
+                        block_idx + 1,
+                        "The search block doesn't match any part of the file."
+                    ),
+                    failed_block: Some(block.search.join("\n")),
+                    context: Some(context),
+                });
+            }
+
+            let (result, _) = empty_line_matches.into_iter().next().unwrap();
+            let filtered_replace = remove_leading_trailing_empty_lines(block.replace.clone());
+            (result, filtered_replace)
+        };
+
+        // Apply indentation fix if needed
+        let mut final_replace = replace_lines;
+
+        if match_result.used_lstrip() {
+            debug!("Applying indentation fix for block {}", block_idx + 1);
+            final_replace =
+                fix_indentation(&match_result.matched_lines, &search_refs, final_replace);
+        }
+
+        if match_result.used_line_nums() {
+            debug!("Removing line numbers from replace block {}", block_idx + 1);
+            final_replace = fix_line_nums(final_replace);
+        }
+
+        // Accumulate warnings and score
+        all_warnings.extend(match_result.warnings);
+        total_score += match_result.score;
+
+        // Check score threshold
+        if total_score > MAX_TOLERANCE_SCORE {
+            return Err(ApplyError {
+                message: format!(
+                    "Too many tolerance warnings accumulated (score: {total_score:.1} > {MAX_TOLERANCE_SCORE}). Not applying edits."
+                ),
+                failed_block: None,
+                context: None,
+            });
+        }
+
+        // Apply the replacement with offset adjustment
+        let (start, end) = match_result.matched_slice;
+        let adjusted_start_i64 = start as i64 + offset;
+        let adjusted_end_i64 = end as i64 + offset;
+
+        let adjusted_start = adjusted_start_i64.max(0) as usize;
+        let adjusted_end = adjusted_end_i64.max(0) as usize;
+        let adjusted_end = adjusted_end.min(content_lines.len());
+        let adjusted_start = adjusted_start.min(adjusted_end);
+
+        let before: Vec<String> = content_lines[..adjusted_start].to_vec();
+        let after: Vec<String> = content_lines[adjusted_end..].to_vec();
+
+        let old_len = adjusted_end - adjusted_start;
+        let new_len = final_replace.len();
+        offset += new_len as i64 - old_len as i64;
+
+        content_lines = [before, final_replace, after].concat();
+    }
+
+    Ok(ApplyResult { content: content_lines.join("\n"), warnings: all_warnings, total_score })
 }
 
 #[cfg(test)]
