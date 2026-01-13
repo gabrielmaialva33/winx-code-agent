@@ -381,10 +381,12 @@ const WCGW_PROMPT_PATTERN: &str = r"◉ ([^\n]*)──➤";
 
 /// `PROMPT_COMMAND` that displays dynamic prompt with cwd - matches WCGW Python exactly
 /// Uses printf with special formatting to show current directory
-const WCGW_PROMPT_COMMAND: &str = r#"printf '◉ '"$(pwd)"'──➤ \r\e[2K'"#;
+/// Note: removed \r\e[2K which was erasing the prompt before it could be detected
+const WCGW_PROMPT_COMMAND: &str = r#"printf '◉ '"$(pwd)"'──➤ '"#;
 
 /// Bash prompt statement to set up the dynamic prompt - matches WCGW Python `PROMPT_STATEMENT` setup
-const BASH_PROMPT_STATEMENT: &str = r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ $(pwd)──➤ \r\e[2K"'"#;
+/// Note: removed \r\e[2K which was erasing the prompt before it could be detected
+const BASH_PROMPT_STATEMENT: &str = r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ $(pwd)──➤ '"'"#;
 
 /// Fallback static prompt for detection (used when dynamic prompt fails)
 const FALLBACK_PROMPT: &str = "winx$ ";

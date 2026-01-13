@@ -465,36 +465,30 @@ impl WinxService {
 
     async fn handle_read_files(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let paths = args
-            .get("file_paths")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| McpError::invalid_request("Missing file_paths array", None))?;
 
-        let mut content_parts = Vec::new();
+        // Parse ReadFiles from args - uses custom deserializer that handles line ranges
+        let read_files: crate::types::ReadFiles = serde_json::from_value(args.clone())
+            .map_err(|e| McpError::invalid_request(format!("Invalid ReadFiles parameters: {e}"), None))?;
 
-        for path_value in paths {
-            let path = path_value
-                .as_str()
-                .ok_or_else(|| McpError::invalid_request("Invalid path in array", None))?;
-
-            match tokio::fs::read_to_string(path).await {
-                Ok(content) => {
-                    content_parts.push(format!(
-                        "=== {} ({} bytes) ===\n{}\n",
-                        path,
-                        content.len(),
-                        content
-                    ));
-                }
-                Err(e) => {
-                    content_parts.push(format!("=== {path} ===\nERROR: {e}\n"));
-                }
+        // Call the real implementation with full functionality:
+        // - Line range support (:1-100)
+        // - Path expansion (~)
+        // - Whitelist tracking
+        // - Optimized mmap reading
+        // - Token economy
+        match crate::tools::read_files::handle_tool_call(&self.bash_state, read_files).await {
+            Ok(result) => {
+                info!("ReadFiles succeeded");
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            Err(e) => {
+                warn!("ReadFiles failed: {}", e);
+                Err(McpError::internal_error(
+                    format!("ReadFiles failed: {e}"),
+                    None,
+                ))
             }
         }
-
-        Ok(CallToolResult::success(vec![Content::text(
-            content_parts.join("\n"),
-        )]))
     }
 
     async fn handle_file_write_or_edit(
