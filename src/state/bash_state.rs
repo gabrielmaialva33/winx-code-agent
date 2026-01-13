@@ -628,7 +628,9 @@ impl InteractiveBash {
         }
 
         // Patience counter for adaptive polling
-        let mut patience = 3;
+        // Increased from 3 to 10 to give more time for PROMPT_COMMAND to execute
+        // Each patience tick is ~10ms, so 10 = ~100ms wait after last output
+        let mut patience = 10;
 
         // Try to read until we hit timeout or find the prompt
         while start.elapsed() < timeout && patience > 0 {
@@ -663,7 +665,7 @@ impl InteractiveBash {
                         }
 
                         // Reset patience when we get new data
-                        patience = 3;
+                        patience = 10;
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -693,7 +695,7 @@ impl InteractiveBash {
                         new_data = true;
 
                         // Reset patience when we get new data
-                        patience = 3;
+                        patience = 10;
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -1326,7 +1328,7 @@ impl BashState {
             // Use adaptive polling
             let read_intervals = [0.1, 0.2, 0.5, 1.0, 2.0];
             let mut elapsed = 0.0;
-            let mut patience = 3;
+            let mut patience = 10;
             let mut last_output_len = result.len();
 
             // Poll until complete, timeout, or patience exhausted
@@ -1365,7 +1367,7 @@ impl BashState {
 
                 // Check for new content
                 if new_output.len() > last_output_len {
-                    patience = 3;
+                    patience = 10;
                     last_output_len = new_output.len();
                 } else {
                     patience -= 1;
