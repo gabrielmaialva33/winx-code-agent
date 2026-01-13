@@ -18,25 +18,25 @@
 
 ---
 
-## 🚀 Por que Winx?
+## 🚀 Why Winx?
 
-Winx é uma reimplementação em **Rust** do [WCGW](https://github.com/rusiaaman/wcgw) (Python), oferecendo performance drasticamente superior para operações de código em agentes LLM.
+Winx is a **Rust** reimplementation of [WCGW](https://github.com/rusiaaman/wcgw) (Python), offering drastically superior performance for code operations in LLM agents.
 
 ### ⚡ Benchmark: Winx vs WCGW
 
-| Operação | WCGW (Python) | Winx (Rust) | Speedup |
-|----------|---------------|-------------|---------|
+| Operation | WCGW (Python) | Winx (Rust) | Speedup |
+|-----------|---------------|-------------|---------|
 | **MCP Init** | 2538ms | 11ms | **230x** |
 | Shell Exec | 17.5ms | 0.7ms | **24x** |
 | File Read | 7.0ms | 1.0ms | **7x** |
 | Pattern Search | 11.9ms | 1.2ms | **10x** |
 
-> **MCP Protocol real:** 230x mais rápido no handshake
-> **Média geral:** 8.7x mais rápido em operações típicas
+> **Real MCP Protocol:** 230x faster handshake
+> **Overall average:** 8.7x faster on typical operations
 
 ---
 
-## 📖 Visão Geral
+## 📖 Overview
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -58,16 +58,16 @@ Winx é uma reimplementação em **Rust** do [WCGW](https://github.com/rusiaaman
                       │
                       ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                    Sistema Operacional                      │
-│         Shell (bash/zsh) │ Filesystem │ Processos           │
+│                   Operating System                          │
+│         Shell (bash/zsh) │ Filesystem │ Processes           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 🛠️ Instalação Rápida
+## 🛠️ Quick Installation
 
-### Pré-requisitos
+### Prerequisites
 
 - Rust 1.75+
 - Linux/macOS/WSL2
@@ -80,15 +80,15 @@ cd winx-code-agent
 cargo build --release
 ```
 
-### Configurar Claude Desktop
+### Configure Claude Desktop
 
-Adicione em `~/.config/Claude/claude_desktop_config.json`:
+Add to `~/.config/Claude/claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
     "winx": {
-      "command": "/caminho/para/winx-code-agent/target/release/winx-code-agent",
+      "command": "/path/to/winx-code-agent/target/release/winx-code-agent",
       "args": [],
       "env": {
         "RUST_LOG": "info"
@@ -100,28 +100,28 @@ Adicione em `~/.config/Claude/claude_desktop_config.json`:
 
 ---
 
-## 🔧 Tools Disponíveis
+## 🔧 Available Tools
 
 ### `Initialize`
 
-Inicializa o ambiente de trabalho. **Sempre chame primeiro.**
+Initialize the workspace environment. **Always call first.**
 
 ```json
 {
   "type": "first_call",
-  "any_workspace_path": "/home/user/projeto",
+  "any_workspace_path": "/home/user/project",
   "mode_name": "wcgw"
 }
 ```
 
-**Modos:**
-- `wcgw` - Acesso completo (padrão)
-- `architect` - Somente leitura
-- `code_writer` - Escrita restrita
+**Modes:**
+- `wcgw` - Full access (default)
+- `architect` - Read-only mode
+- `code_writer` - Restricted write access
 
 ### `BashCommand`
 
-Executa comandos shell com PTY completo.
+Execute shell commands with full PTY support.
 
 ```json
 {
@@ -133,33 +133,33 @@ Executa comandos shell com PTY completo.
 }
 ```
 
-**Ações suportadas:**
-- `command` - Executa comando
-- `status_check` - Verifica status
-- `send_text` - Envia texto
-- `send_specials` - Envia teclas especiais (Enter, Ctrl-c, etc)
-- `send_ascii` - Envia códigos ASCII
+**Supported actions:**
+- `command` - Execute command
+- `status_check` - Check command status
+- `send_text` - Send text input
+- `send_specials` - Send special keys (Enter, Ctrl-c, etc)
+- `send_ascii` - Send ASCII codes
 
 ### `ReadFiles`
 
-Lê arquivos com suporte a ranges de linhas.
+Read files with line range support.
 
 ```json
 {
   "file_paths": [
-    "/caminho/arquivo.rs",
-    "/caminho/outro.rs:10-50"
+    "/path/to/file.rs",
+    "/path/to/other.rs:10-50"
   ]
 }
 ```
 
 ### `FileWriteOrEdit`
 
-Escreve ou edita arquivos com SEARCH/REPLACE blocks.
+Write or edit files with SEARCH/REPLACE blocks.
 
 ```json
 {
-  "file_path": "/caminho/arquivo.rs",
+  "file_path": "/path/to/file.rs",
   "percentage_to_change": 30,
   "text_or_search_replace_blocks": "<<<<<<< SEARCH\nold code\n=======\nnew code\n>>>>>>> REPLACE",
   "thread_id": "abc123"
@@ -168,37 +168,37 @@ Escreve ou edita arquivos com SEARCH/REPLACE blocks.
 
 ### `ContextSave`
 
-Salva contexto do projeto para retomar depois.
+Save project context for later resumption.
 
 ```json
 {
-  "id": "minha-tarefa",
-  "project_root_path": "/home/user/projeto",
-  "description": "Implementando feature X",
+  "id": "my-task",
+  "project_root_path": "/home/user/project",
+  "description": "Implementing feature X",
   "relevant_file_globs": ["src/**/*.rs", "Cargo.toml"]
 }
 ```
 
 ### `ReadImage`
 
-Lê imagens e retorna em base64.
+Read images and return as base64.
 
 ```json
 {
-  "file_path": "/caminho/imagem.png"
+  "file_path": "/path/to/image.png"
 }
 ```
 
 ---
 
-## 🏗️ Arquitetura
+## 🏗️ Architecture
 
 ```
 src/
 ├── main.rs              # Entry point
 ├── server.rs            # MCP server (rmcp)
 ├── lib.rs               # Library exports
-├── types.rs             # Tipos e schemas
+├── types.rs             # Types and schemas
 ├── errors.rs            # Error handling
 ├── tools/
 │   ├── mod.rs           # Tool registry
@@ -219,70 +219,70 @@ src/
     └── repo.rs          # Repository analysis
 ```
 
-### Tecnologias Core
+### Core Technologies
 
-| Componente | Tecnologia | Por quê |
-|------------|------------|---------|
-| Runtime | Tokio | Async I/O de alta performance |
-| MCP | rmcp | SDK oficial Rust para MCP |
-| Shell | portable-pty | PTY cross-platform |
+| Component | Technology | Why |
+|-----------|------------|-----|
+| Runtime | Tokio | High-performance async I/O |
+| MCP | rmcp | Official Rust SDK for MCP |
+| Shell | portable-pty | Cross-platform PTY |
 | Files | memmap2 | Zero-copy file reading |
 | Concurrency | tokio::sync::Mutex | Thread-safe state |
 | Matching | rayon | Parallel fuzzy matching |
 
 ---
 
-## 🧪 Testes
+## 🧪 Tests
 
 ```bash
-# Rodar todos os testes
+# Run all tests
 cargo test
 
-# Testes com output
+# Tests with output
 cargo test -- --nocapture
 
-# Testes específicos
+# Specific tests
 cargo test bash_command
 cargo test file_write
 ```
 
-**Status:** 118 testes passando (90 unit + 28 integration)
+**Status:** 118 tests passing (90 unit + 28 integration)
 
 ---
 
 ## 📊 Performance Details
 
-### Por que Rust é mais rápido?
+### Why is Rust faster?
 
-1. **Shell Exec (353x)**
+1. **Shell Exec (24x)**
    - Python: subprocess fork + interpreter overhead
-   - Rust: syscall direto via PTY
+   - Rust: direct syscall via PTY
 
-2. **File Read (3.7x)**
-   - Python: objeto allocation + GIL
+2. **File Read (7x)**
+   - Python: object allocation + GIL
    - Rust: mmap zero-copy
 
-3. **Fuzzy Match (1186x)**
-   - Python: loop interpretado, heap allocation por char
-   - Rust: SIMD automático, inline agressivo
+3. **MCP Protocol (230x)**
+   - Python: slow JSON parsing + startup time
+   - Rust: serde + instant startup
 
-### Quando usar cada um?
+### When to use each?
 
-| Cenário | Recomendação |
-|---------|--------------|
+| Scenario | Recommendation |
+|----------|----------------|
 | Hot paths (autocomplete) | **Winx** |
-| Comandos leves (ls, cat) | **Winx** |
-| Comandos pesados (build) | Tanto faz |
-| Debug/compatibilidade | WCGW |
+| Light commands (ls, cat) | **Winx** |
+| Heavy commands (build) | Either works |
+| Debug/compatibility | WCGW |
 
 ---
 
-## 🔀 Comparação com WCGW
+## 🔀 Comparison with WCGW
 
 | Feature | WCGW (Python) | Winx (Rust) |
 |---------|---------------|-------------|
-| Linguagem | Python 3.10+ | Rust 1.75+ |
-| Performance | Baseline | **2-1000x faster** |
+| Language | Python 3.10+ | Rust 1.75+ |
+| Performance | Baseline | **2-230x faster** |
 | Memory | ~50MB | ~5MB |
 | PTY Support | ✅ | ✅ |
 | MCP Protocol | ✅ | ✅ |
@@ -294,63 +294,63 @@ cargo test file_write
 
 ---
 
-## 🤖 Integração com AI (Opcional)
+## 🤖 AI Integration (Optional)
 
-Winx suporta integração com provedores de AI para análise de código:
+Winx supports AI provider integration for code analysis:
 
 ```bash
 # DashScope (Qwen3)
-export DASHSCOPE_API_KEY="sua-chave"
+export DASHSCOPE_API_KEY="your-key"
 
 # NVIDIA NIM
-export NVIDIA_API_KEY="sua-chave"
+export NVIDIA_API_KEY="your-key"
 
 # Google Gemini
-export GEMINI_API_KEY="sua-chave"
+export GEMINI_API_KEY="your-key"
 ```
 
-**Tools AI:**
-- `code_analyzer` - Análise de bugs/segurança
-- `ai_generate_code` - Geração de código
-- `ai_explain_code` - Explicação de código
-- `winx_chat` - Chat com assistente
+**AI Tools:**
+- `code_analyzer` - Bug/security analysis
+- `ai_generate_code` - Code generation
+- `ai_explain_code` - Code explanation
+- `winx_chat` - Assistant chat
 
 ---
 
 ## 📝 Changelog
 
-### v0.2.1 (Atual)
-- ✅ Paridade 1:1 com WCGW Python
-- ✅ 118 testes passando
-- ✅ SpecialKey serialization corrigida
+### v0.2.1 (Current)
+- ✅ 1:1 parity with WCGW Python
+- ✅ 118 tests passing
+- ✅ SpecialKey serialization fixed
 - ✅ Mutex safe error handling
-- ✅ Race condition fix com tokio::sync::Mutex
+- ✅ Race condition fix with tokio::sync::Mutex
 
 ### v0.2.0
-- Core port de wcgw Python para Rust
-- 6 MCP tools implementadas
-- 3 modos operacionais
+- Core port of wcgw Python to Rust
+- 6 MCP tools implemented
+- 3 operational modes
 
 ### v0.1.5
-- Integração multi-provider AI
+- Multi-provider AI integration
 - DashScope, NVIDIA NIM, Gemini
 
 ---
 
-## 🙏 Créditos
+## 🙏 Credits
 
-- [rusiaaman/wcgw](https://github.com/rusiaaman/wcgw) - Projeto original em Python
-- [anthropics/claude-code](https://github.com/anthropics/claude-code) - Inspiração MCP
-- [modelcontextprotocol](https://github.com/modelcontextprotocol) - Especificação MCP
+- [rusiaaman/wcgw](https://github.com/rusiaaman/wcgw) - Original Python project
+- [anthropics/claude-code](https://github.com/anthropics/claude-code) - MCP inspiration
+- [modelcontextprotocol](https://github.com/modelcontextprotocol) - MCP specification
 
 ---
 
-## 📜 Licença
+## 📜 License
 
 MIT - Gabriel Maia ([@gabrielmaialva33](https://github.com/gabrielmaialva33))
 
 ---
 
 <p align="center">
-  <strong>✨ Feito com 🦀 Rust e ❤️ por Gabriel Maia ✨</strong>
+  <strong>✨ Made with 🦀 Rust and ❤️ by Gabriel Maia ✨</strong>
 </p>
