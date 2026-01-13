@@ -47,6 +47,9 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # Performance and concurrency
 rayon = "1.10"
+
+# Advanced string matching algorithms
+strsim = "0.11"
 bytes = "1.9"
 lazy_static = "1.5"
 libc = "0.2"

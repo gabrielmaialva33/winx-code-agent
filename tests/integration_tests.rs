@@ -2,7 +2,8 @@
 //!
 //! These tests verify the tool handlers work correctly in realistic scenarios.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tempfile::TempDir;
 
 use winx_code_agent::errors::Result;
@@ -51,7 +52,7 @@ async fn test_initialize_first_call_wcgw_mode() -> Result<()> {
     assert!(response.contains("thread_id"));
 
     // Verify bash state was set
-    let state = bash_state_arc.lock().expect("Lock failed");
+    let state = bash_state_arc.lock().await;
     assert!(state.is_some());
 
     let bash_state = state.as_ref().expect("BashState should be Some");
@@ -80,7 +81,7 @@ async fn test_initialize_architect_mode() -> Result<()> {
 
     assert!(response.contains("Initialized"));
 
-    let state = bash_state_arc.lock().expect("Lock failed");
+    let state = bash_state_arc.lock().await;
     let bash_state = state.as_ref().expect("BashState should be Some");
     assert!(bash_state.initialized);
 
@@ -132,7 +133,7 @@ async fn test_initialize_mode_change() -> Result<()> {
 
     // Get the thread_id
     let thread_id = {
-        let state = bash_state_arc.lock().expect("Lock failed");
+        let state = bash_state_arc.lock().await;
         state.as_ref().expect("BashState").current_thread_id.clone()
     };
 
@@ -360,7 +361,7 @@ async fn test_code_writer_mode() -> Result<()> {
 
     assert!(response.contains("CodeWriter") || response.contains("Initialized"));
 
-    let state = bash_state_arc.lock().expect("Lock failed");
+    let state = bash_state_arc.lock().await;
     let bash_state = state.as_ref().expect("BashState should be Some");
     assert!(bash_state.initialized);
 

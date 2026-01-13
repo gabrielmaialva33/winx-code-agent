@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::Mutex;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
@@ -53,7 +54,7 @@ const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can
 /// Manages background shell sessions - matches WCGW Python's `background_shells` dict
 #[derive(Debug, Default)]
 pub struct BackgroundShellManager {
-    shells: HashMap<String, Arc<Mutex<Option<InteractiveBash>>>>,
+    shells: HashMap<String, Arc<StdMutex<Option<InteractiveBash>>>>,
 }
 
 impl BackgroundShellManager {
@@ -71,14 +72,14 @@ impl BackgroundShellManager {
         let bash = InteractiveBash::new(working_dir, restricted_mode)
             .map_err(|e| WinxError::CommandExecutionError(format!("Failed to start background shell: {e}")))?;
 
-        self.shells.insert(cid.clone(), Arc::new(Mutex::new(Some(bash))));
+        self.shells.insert(cid.clone(), Arc::new(StdMutex::new(Some(bash))));
 
         info!("Started background shell with id: {}", cid);
         Ok(cid)
     }
 
     /// Get a background shell by its command ID
-    pub fn get_shell(&self, bg_command_id: &str) -> Option<Arc<Mutex<Option<InteractiveBash>>>> {
+    pub fn get_shell(&self, bg_command_id: &str) -> Option<Arc<StdMutex<Option<InteractiveBash>>>> {
         self.shells.get(bg_command_id).cloned()
     }
 
@@ -120,7 +121,7 @@ impl BackgroundShellManager {
 
 // Global background shell manager (thread-safe) - matches WCGW Python's BashState.background_shells
 lazy_static::lazy_static! {
-    static ref BG_SHELL_MANAGER: Mutex<BackgroundShellManager> = Mutex::new(BackgroundShellManager::new());
+    static ref BG_SHELL_MANAGER: StdMutex<BackgroundShellManager> = StdMutex::new(BackgroundShellManager::new());
 }
 
 // ==================== WCGW-Style Helper Functions ====================
@@ -302,9 +303,7 @@ pub async fn handle_tool_call(
     // Extract bash_state data
     let mut bash_state: BashState;
     {
-        let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
-        })?;
+        let bash_state_guard = bash_state_arc.lock().await;
 
         let state = if let Some(state) = &*bash_state_guard { state } else {
             error!("BashState not initialized");
@@ -358,7 +357,7 @@ async fn execute_bash_action(
     let mut bg_id: Option<String> = None;
 
     // Handle bg_command_id routing - matches WCGW Python
-    let bg_shell: Option<Arc<Mutex<Option<InteractiveBash>>>> = match action {
+    let bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>> = match action {
         BashCommandAction::Command { .. } => None, // Commands don't use bg_command_id for routing
         BashCommandAction::StatusCheck { bg_command_id, .. } |
         BashCommandAction::SendText { bg_command_id, .. } |
@@ -599,7 +598,7 @@ async fn wait_for_output(
 /// Execute a status check - matches WCGW Python's `StatusCheck` handling
 async fn execute_status_check(
     bash_state: &mut BashState,
-    _bg_shell: Option<Arc<Mutex<Option<InteractiveBash>>>>,
+    _bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
@@ -633,7 +632,7 @@ async fn execute_status_check(
 async fn execute_send_text(
     bash_state: &mut BashState,
     text: &str,
-    bg_shell: Option<Arc<Mutex<Option<InteractiveBash>>>>,
+    bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
@@ -683,7 +682,7 @@ async fn execute_send_text(
 async fn execute_send_specials(
     bash_state: &mut BashState,
     keys: &[SpecialKey],
-    bg_shell: Option<Arc<Mutex<Option<InteractiveBash>>>>,
+    bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
@@ -777,7 +776,7 @@ fn send_bytes_to_bash(bash: &mut InteractiveBash, bytes: &[u8]) -> Result<()> {
 async fn execute_send_ascii(
     bash_state: &mut BashState,
     ascii_codes: &[u8],
-    bg_shell: Option<Arc<Mutex<Option<InteractiveBash>>>>,
+    bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,

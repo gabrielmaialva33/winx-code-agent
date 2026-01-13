@@ -9,7 +9,8 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tokio::task;
 use tracing::{debug, error, info, instrument, trace, warn};
 
@@ -1443,9 +1444,7 @@ pub async fn handle_tool_call(
 
     // Lock bash state to extract data
     {
-        let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
-        })?;
+        let bash_state_guard = bash_state_arc.lock().await;
 
         // Ensure bash state is initialized
         let bash_state = if let Some(state) = &*bash_state_guard { state } else {
@@ -1513,9 +1512,7 @@ pub async fn handle_tool_call(
     let mut potential_errors = Vec::new();
 
     // Get a mutex guard for the BashState
-    let mut bash_state_guard = bash_state_arc
-        .lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?;
+    let mut bash_state_guard = bash_state_arc.lock().await;
 
     if let Some(bash_state) = bash_state_guard.as_mut() {
         // Enhanced file access validation for existing files
@@ -1694,24 +1691,22 @@ pub async fn handle_tool_call(
             );
 
             // Record the error for future prediction
-            let bash_state_guard = bash_state_arc.lock().ok();
-            if let Some(guard) = bash_state_guard {
-                if let Some(bash_state) = guard.as_ref() {
-                    if let Err(record_err) = bash_state.error_predictor.record_error(
-                        "file_write",
-                        &format!("Failed to write file: {e}"),
-                        None,
-                        Some(&file_path),
-                        Some(
-                            file_path_obj
-                                .parent()
-                                .unwrap_or_else(|| Path::new("."))
-                                .to_string_lossy()
-                                .as_ref(),
-                        ),
-                    ) {
-                        warn!("Failed to record error for prediction: {}", record_err);
-                    }
+            let bash_state_guard = bash_state_arc.blocking_lock();
+            if let Some(bash_state) = bash_state_guard.as_ref() {
+                if let Err(record_err) = bash_state.error_predictor.record_error(
+                    "file_write",
+                    &format!("Failed to write file: {e}"),
+                    None,
+                    Some(&file_path),
+                    Some(
+                        file_path_obj
+                            .parent()
+                            .unwrap_or_else(|| Path::new("."))
+                            .to_string_lossy()
+                            .as_ref(),
+                    ),
+                ) {
+                    warn!("Failed to record error for prediction: {}", record_err);
                 }
             }
 
@@ -1738,33 +1733,30 @@ pub async fn handle_tool_call(
         let file_path_clone = file_path.clone();
         let bash_state_arc_clone = Arc::clone(bash_state_arc);
         task::spawn_blocking(move || {
-            if let Ok(mut bash_state_guard) = bash_state_arc_clone.lock() {
-                if let Some(bash_state) = bash_state_guard.as_mut() {
-                    // Calculate file hash
-                    let file_content = fs::read(&file_path_clone).ok()?;
-                    let file_hash = format!("{:x}", Sha256::digest(&file_content));
+            let mut bash_state_guard = bash_state_arc_clone.blocking_lock();
+            if let Some(bash_state) = bash_state_guard.as_mut() {
+                // Calculate file hash
+                let file_content = fs::read(&file_path_clone).ok()?;
+                let file_hash = format!("{:x}", Sha256::digest(&file_content));
 
-                    // The line range represents the entire file (1 to total_lines)
-                    let line_range = (1, total_lines);
+                // The line range represents the entire file (1 to total_lines)
+                let line_range = (1, total_lines);
 
-                    // Update or create whitelist entry
-                    if let Some(whitelist_data) =
-                        bash_state.whitelist_for_overwrite.get_mut(&file_path_clone)
-                    {
-                        whitelist_data.file_hash = file_hash;
-                        whitelist_data.total_lines = total_lines;
-                        whitelist_data.add_range(line_range.0, line_range.1);
-                    } else {
-                        bash_state.whitelist_for_overwrite.insert(
-                            file_path_clone,
-                            FileWhitelistData::new(file_hash, vec![line_range], total_lines),
-                        );
-                    }
+                // Update or create whitelist entry
+                if let Some(whitelist_data) =
+                    bash_state.whitelist_for_overwrite.get_mut(&file_path_clone)
+                {
+                    whitelist_data.file_hash = file_hash;
+                    whitelist_data.total_lines = total_lines;
+                    whitelist_data.add_range(line_range.0, line_range.1);
+                } else {
+                    bash_state.whitelist_for_overwrite.insert(
+                        file_path_clone,
+                        FileWhitelistData::new(file_hash, vec![line_range], total_lines),
+                    );
                 }
-                Some(())
-            } else {
-                None
             }
+            Some(())
         });
 
         // Perform syntax check after edit (matches wcgw Python behavior)
@@ -1840,33 +1832,30 @@ pub async fn handle_tool_call(
         let file_path_clone = file_path.clone();
         let bash_state_arc_clone = Arc::clone(bash_state_arc);
         task::spawn_blocking(move || {
-            if let Ok(mut bash_state_guard) = bash_state_arc_clone.lock() {
-                if let Some(bash_state) = bash_state_guard.as_mut() {
-                    // Calculate file hash
-                    let file_content = fs::read(&file_path_clone).ok()?;
-                    let file_hash = format!("{:x}", Sha256::digest(&file_content));
+            let mut bash_state_guard = bash_state_arc_clone.blocking_lock();
+            if let Some(bash_state) = bash_state_guard.as_mut() {
+                // Calculate file hash
+                let file_content = fs::read(&file_path_clone).ok()?;
+                let file_hash = format!("{:x}", Sha256::digest(&file_content));
 
-                    // The line range represents the entire file (1 to total_lines)
-                    let line_range = (1, total_lines);
+                // The line range represents the entire file (1 to total_lines)
+                let line_range = (1, total_lines);
 
-                    // Update or create whitelist entry
-                    if let Some(whitelist_data) =
-                        bash_state.whitelist_for_overwrite.get_mut(&file_path_clone)
-                    {
-                        whitelist_data.file_hash = file_hash;
-                        whitelist_data.total_lines = total_lines;
-                        whitelist_data.add_range(line_range.0, line_range.1);
-                    } else {
-                        bash_state.whitelist_for_overwrite.insert(
-                            file_path_clone,
-                            FileWhitelistData::new(file_hash, vec![line_range], total_lines),
-                        );
-                    }
+                // Update or create whitelist entry
+                if let Some(whitelist_data) =
+                    bash_state.whitelist_for_overwrite.get_mut(&file_path_clone)
+                {
+                    whitelist_data.file_hash = file_hash;
+                    whitelist_data.total_lines = total_lines;
+                    whitelist_data.add_range(line_range.0, line_range.1);
+                } else {
+                    bash_state.whitelist_for_overwrite.insert(
+                        file_path_clone,
+                        FileWhitelistData::new(file_hash, vec![line_range], total_lines),
+                    );
                 }
-                Some(())
-            } else {
-                None
             }
+            Some(())
         });
 
         // Perform syntax check after write (matches wcgw Python behavior)

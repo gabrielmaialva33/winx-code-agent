@@ -10,11 +10,14 @@ use rmcp::{
 use schemars::schema_for;
 use serde_json::Value;
 use std::sync::Arc;
-use std::sync::Mutex;
+use tokio::sync::Mutex; // Changed from std::sync::Mutex for async safety
 use tracing::{info, warn};
 
 use crate::state::BashState;
 use crate::types::{BashCommand, ContextSave, FileWriteOrEdit, Initialize, ReadFiles, ReadImage};
+
+/// Type alias for the shared bash state - uses tokio::sync::Mutex for async safety
+pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
 
 /// Helper function to create JSON schema from schemars Schema
 fn schema_to_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, Value>> {
@@ -27,10 +30,13 @@ fn schema_to_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<Stri
 }
 
 /// Winx service with shared bash state (core WCGW tools only)
+///
+/// Uses `tokio::sync::Mutex` for thread-safe async access to the shell state.
+/// This prevents race conditions when multiple requests access the shell concurrently.
 #[derive(Clone)]
 pub struct WinxService {
-    /// Shared state for the bash shell environment
-    pub bash_state: Arc<Mutex<Option<BashState>>>,
+    /// Shared state for the bash shell environment (async-safe)
+    pub bash_state: SharedBashState,
     /// Version information for the service
     pub version: String,
 }
@@ -431,6 +437,10 @@ impl WinxService {
         }
     }
 
+    /// Handle bash command execution with proper async locking.
+    ///
+    /// Uses `tokio::sync::Mutex` to hold the lock through the entire async operation,
+    /// preventing race conditions when multiple requests execute concurrently.
     async fn handle_bash_command(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
         let command = args
@@ -442,35 +452,18 @@ impl WinxService {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(30) as f32;
 
-        // Clone the bash state to avoid holding the mutex across await
-        let mut bash_state_clone = {
-            let bash_state_guard = self.bash_state.lock().map_err(|e| {
-                McpError::internal_error(format!("Failed to acquire lock: {e}"), None)
-            })?;
-            match bash_state_guard.as_ref() {
-                Some(state) => state.clone(),
-                None => {
-                    return Err(McpError::invalid_request(
-                        "Shell not initialized. Call initialize first.",
-                        None,
-                    ));
-                }
-            }
-        };
+        // FIXED: Hold the async lock through the entire operation
+        // This prevents race conditions between concurrent requests
+        let mut bash_state_guard = self.bash_state.lock().await;
 
-        match bash_state_clone
-            .execute_interactive(command, timeout_seconds)
-            .await
-        {
+        let bash_state = bash_state_guard.as_mut().ok_or_else(|| {
+            McpError::invalid_request("Shell not initialized. Call initialize first.", None)
+        })?;
+
+        // Execute command while holding the lock - state changes are atomic
+        match bash_state.execute_interactive(command, timeout_seconds).await {
             Ok(output) => {
-                // Update the original state with any changes
-                {
-                    let mut bash_state_guard = self.bash_state.lock().map_err(|e| {
-                        McpError::internal_error(format!("Failed to acquire lock: {e}"), None)
-                    })?;
-                    *bash_state_guard = Some(bash_state_clone.clone());
-                }
-                let working_dir = bash_state_clone.cwd.display().to_string();
+                let working_dir = bash_state.cwd.display().to_string();
                 let content = format!("Working directory: {working_dir}\n\n{output}");
                 Ok(CallToolResult::success(vec![Content::text(content)]))
             }
@@ -482,6 +475,7 @@ impl WinxService {
                 ))
             }
         }
+        // Lock is automatically released here when bash_state_guard goes out of scope
     }
 
     async fn handle_read_files(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {

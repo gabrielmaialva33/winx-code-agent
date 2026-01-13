@@ -7,7 +7,8 @@
 use base64::{engine::general_purpose, Engine};
 use mime_guess::MimeGuess;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument};
 
 use crate::errors::{Result, WinxError};
@@ -141,9 +142,7 @@ pub async fn handle_tool_call(
 
     // Lock bash state to extract data
     {
-        let bash_state_guard = bash_state_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
-        })?;
+        let bash_state_guard = bash_state_arc.lock().await;
 
         // Ensure bash state is initialized
         let bash_state = if let Some(state) = &*bash_state_guard { state } else {

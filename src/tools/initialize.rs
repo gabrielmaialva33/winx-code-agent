@@ -7,7 +7,8 @@
 //! in wcgw/src/wcgw/client/tools.py
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex; // Changed from std::sync::Mutex for async safety
 use tracing::{debug, info, instrument, warn};
 
 use crate::errors::{Result, WinxError};
@@ -281,10 +282,9 @@ pub async fn handle_tool_call(
         }
     }
 
-    // Initialize or update BashState with proper error handling
-    let mut bash_state_guard = bash_state_arc
-        .lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?;
+    // Initialize or update BashState with proper async locking
+    // tokio::sync::Mutex doesn't have poisoning, so lock() is infallible
+    let mut bash_state_guard = bash_state_arc.lock().await;
 
     let mode = convert_mode_name(&initialize.mode_name);
 
