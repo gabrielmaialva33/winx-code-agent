@@ -30,13 +30,22 @@ Winx is a **sentient code agent** that combines:
 
 ### ⚡ Benchmark: Winx vs WCGW
 
+```mermaid
+xychart-beta
+    title "Performance Comparison (lower is better)"
+    x-axis ["MCP Init", "Shell Exec", "File Read", "Memory"]
+    y-axis "Time (ms) / Memory (MB)" 0 --> 100
+    bar [100, 100, 100, 100]
+    bar [0.4, 4, 14, 10]
+```
+
 | Operation | WCGW (Python) | Winx (Rust) | Speedup |
-|-----------|---------------|-------------|---------|
-| **MCP Init** | 2538ms | 11ms | **230x** |
-| Shell Exec | 17.5ms | 0.7ms | **24x** |
-| File Read | 7.0ms | 1.0ms | **7x** |
-| Pattern Search | 11.9ms | 1.2ms | **10x** |
-| Memory Usage | ~50MB | ~5MB | **10x** |
+|-----------|:-------------:|:-----------:|:-------:|
+| **MCP Init** | 2538ms | 11ms | 🚀 **230x** |
+| **Shell Exec** | 17.5ms | 0.7ms | 🚀 **24x** |
+| **File Read** | 7.0ms | 1.0ms | 🚀 **7x** |
+| **Pattern Search** | 11.9ms | 1.2ms | 🚀 **10x** |
+| **Memory Usage** | ~50MB | ~5MB | 🚀 **10x** |
 
 ---
 
@@ -81,52 +90,96 @@ winx serve
 
 ## 🧠 Agent Self-Awareness
 
-Winx knows:
+Winx is **sentient** - she knows who she is and what she can do:
 
-```rust
-WinxIdentity {
-    name: "Winx",
-    version: "0.2.3",
-    system: SystemInfo {
-        hostname: "GATO-PC",
-        os: "Windows 11 + WSL2",
-        cpu: "i9-13900K",
-        gpu: Some("RTX 4090"),
-        vram_gb: Some(24),
-        cuda: true,
-    },
-    capabilities: [MCP, Chat, Embeddings, CodeAnalysis],
-    detected_agents: [ClaudeCode, GeminiCLI],
-}
+```mermaid
+flowchart LR
+    subgraph Identity["🪪 SELF"]
+        name["Winx v0.2.3"]
+        caps["Capabilities:<br/>MCP, Chat, Embeddings"]
+    end
+
+    subgraph Sense["👁️ SENSE"]
+        hw["Hardware:<br/>RTX 4090, 24GB VRAM"]
+        agents["Other Agents:<br/>Claude Code, Gemini CLI"]
+        project["Project:<br/>Rust, Git, Cargo.toml"]
+    end
+
+    subgraph Remember["🧠 REMEMBER"]
+        sessions["1087 Claude sessions"]
+        patterns["Communication patterns"]
+        vocab["Vocabulary learned"]
+    end
+
+    Identity --> Sense
+    Sense --> Remember
+
+    style Identity fill:#ed8936,stroke:#fff,color:#fff
+    style Sense fill:#4299e1,stroke:#fff,color:#fff
+    style Remember fill:#48bb78,stroke:#fff,color:#fff
 ```
 
+### What Winx Detects
+
+| Category | Detection |
+|----------|-----------|
+| **Hardware** | GPU model, VRAM, CUDA cores, CPU |
+| **AI Agents** | Claude Code, Gemini CLI, Cline, Cursor, Aider |
+| **Project** | Language, framework, git status, dependencies |
+| **User** | Communication style, vocabulary, patterns |
+
 **On first run, Winx:**
-1. Detects your hardware (GPU, VRAM, CUDA)
-2. Finds other AI agents (Claude Code, Gemini CLI, Cline, Cursor)
-3. Scans current project (language, framework, git status)
-4. Generates personalized system prompt
+1. 🖥️ Detects your hardware (GPU, VRAM, CUDA)
+2. 🤖 Finds other AI agents (Claude Code, Gemini CLI, Cline)
+3. 📁 Scans current project (language, framework, git status)
+4. 💬 Generates personalized system prompt
 
 ---
 
 ## 🔮 Learning System
 
-Semantic search with real embeddings (not just keywords):
+Semantic search with **real embeddings** - not just keywords!
 
+```mermaid
+flowchart TB
+    subgraph Input["📝 Query"]
+        query["'deploy viva'"]
+    end
+
+    subgraph Engine["🔮 Embedding Engine"]
+        direction TB
+        jina["jina-embeddings-v2-base-code<br/>768 dimensions"]
+
+        subgraph Backends["Backends (auto-fallback)"]
+            direction LR
+            candle["🎮 Candle<br/>GPU Local"]
+            http["🌐 HTTP<br/>TEI Container"]
+            jaccard["📊 Jaccard<br/>Fallback"]
+        end
+
+        jina --> Backends
+    end
+
+    subgraph Results["🎯 Semantic Match"]
+        r1["'fazer deploy do viva'<br/>similarity: 0.92"]
+        r2["'deploy viva em prod'<br/>similarity: 0.89"]
+        r3["'viva production deploy'<br/>similarity: 0.87"]
+    end
+
+    Input --> Engine
+    Engine --> Results
+
+    style Engine fill:#553c9a,stroke:#9f7aea,color:#fff
+    style candle fill:#76B900,stroke:#fff,color:#fff
+    style Results fill:#2d3748,stroke:#ed8936,color:#fff
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│  EMBEDDING ENGINE                                               │
-│  jina-embeddings-v2-base-code (768 dims)                       │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  Backends (auto-fallback):                                      │
-│  1. Candle (local GPU) ← RTX 4090                              │
-│  2. HTTP (text-embeddings-inference container)                  │
-│  3. Jaccard (fallback, always works)                           │
-│                                                                 │
-│  "deploy viva" ≈ "fazer deploy do viva em prod"                │
-│  (understands semantic similarity, not just keywords)          │
-└─────────────────────────────────────────────────────────────────┘
-```
+
+### Why Embeddings Matter
+
+| Method | Query | Matches |
+|--------|-------|---------|
+| **Keywords** | "deploy viva" | Only exact "deploy" + "viva" |
+| **Embeddings** | "deploy viva" | "fazer deploy", "viva prod", "deploy application" |
 
 **Build with GPU embeddings:**
 
@@ -134,7 +187,7 @@ Semantic search with real embeddings (not just keywords):
 # CPU only
 cargo build --release --features embeddings
 
-# CUDA (RTX 4090)
+# CUDA (RTX 4090) - ~100ms per embedding
 cargo build --release --features embeddings-cuda
 ```
 
@@ -215,18 +268,46 @@ Add to `~/.config/Claude/claude_desktop_config.json`:
 
 ## 🎯 LLM Providers
 
+```mermaid
+flowchart LR
+    subgraph Winx["✨ Winx"]
+        engine["Chat Engine"]
+    end
+
+    subgraph Cloud["☁️ Cloud Providers"]
+        nvidia["🟢 NVIDIA NIM<br/>Qwen3-235B, DeepSeek-R1<br/>2000 req/month FREE"]
+        openai["🔵 OpenAI<br/>GPT-4o, GPT-4o-mini"]
+        gemini["🟣 Gemini<br/>gemini-2.0-flash<br/>FREE"]
+    end
+
+    subgraph Local["🏠 Local"]
+        ollama["🦙 Ollama<br/>Any model<br/>∞ FREE"]
+    end
+
+    engine --> nvidia
+    engine --> openai
+    engine --> gemini
+    engine --> ollama
+
+    style nvidia fill:#76B900,stroke:#fff,color:#fff
+    style openai fill:#10a37f,stroke:#fff,color:#fff
+    style gemini fill:#8e44ad,stroke:#fff,color:#fff
+    style ollama fill:#fff,stroke:#333,color:#333
+```
+
 | Provider | Models | Free Tier |
 |----------|--------|-----------|
-| **NVIDIA NIM** | Qwen3-235B, DeepSeek-R1, Llama-3.3-70B | 2000 req/month |
-| **OpenAI** | GPT-4o, GPT-4o-mini | ❌ |
-| **Ollama** | Any local model | ∞ (local) |
-| **Gemini** | gemini-2.0-flash | ✅ |
+| **NVIDIA NIM** | Qwen3-235B, DeepSeek-R1, Llama-3.3-70B | ✅ 2000 req/month |
+| **OpenAI** | GPT-4o, GPT-4o-mini | ❌ Paid |
+| **Ollama** | Any local model | ✅ ∞ (local) |
+| **Gemini** | gemini-2.0-flash | ✅ Free |
 
 ```bash
 # Switch models
 winx --model nvidia:qwen3-235b-instruct
 winx --model openai:gpt-4o
 winx --model ollama:qwen2.5-coder:32b
+winx --model gemini:gemini-2.0-flash
 ```
 
 ---
