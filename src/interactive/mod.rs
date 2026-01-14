@@ -30,7 +30,7 @@ use reedline::{
     Validator,
 };
 
-use crate::agent::WinxAgent;
+use crate::agent::AgentState;
 use crate::chat::{ChatConfig, ChatEngine};
 use crate::errors::{Result, WinxError};
 use crate::providers::StreamEvent;
@@ -53,17 +53,17 @@ pub struct Interactive {
     last_response: Option<String>,
     last_input: Option<String>,
     lang: Language,
-    agent: WinxAgent,
+    agent: AgentState,
 }
 
 impl Interactive {
     /// Create new interactive REPL
     pub fn new(config: ChatConfig) -> Result<Self> {
         let mut config = config;
-        let agent = WinxAgent::new();
+        let agent = AgentState::new();
 
         // Set system prompt from agent's identity
-        config.system_prompt = Some(agent.system_prompt());
+        config.system_prompt = Some(agent.identity.generate_system_prompt());
 
         let engine = ChatEngine::new(config);
         let lang = Language::detect();
@@ -86,10 +86,10 @@ impl Interactive {
     /// Create with specific language
     pub fn with_language(config: ChatConfig, lang: Language) -> Result<Self> {
         let mut config = config;
-        let agent = WinxAgent::new();
+        let agent = AgentState::new();
 
         // Set system prompt from agent's identity
-        config.system_prompt = Some(agent.system_prompt());
+        config.system_prompt = Some(agent.identity.generate_system_prompt());
 
         let engine = ChatEngine::new(config);
         let editor = Self::create_editor(&lang)?;
@@ -111,9 +111,9 @@ impl Interactive {
     /// Run the interactive REPL
     pub async fn run(&mut self) -> Result<()> {
         // Check if onboarding is needed
-        if self.agent.needs_onboarding() {
-            self.agent.onboard().await?;
-        }
+        // if self.agent.needs_onboarding() {
+        //     self.agent.onboard().await?;
+        // }
 
         self.print_banner();
 
@@ -122,7 +122,7 @@ impl Interactive {
 
         // Set system prompt from agent (includes sense data)
         if let Some(ref mut session) = self.engine.session {
-            session.set_system_prompt(&self.agent.system_prompt());
+            session.set_system_prompt(&self.agent.identity.generate_system_prompt());
         }
 
         let s = self.lang.strings();
@@ -818,7 +818,7 @@ mod tests {
             last_response: None,
             last_input: None,
             lang: Language::English,
-            agent: WinxAgent::new(),
+            agent: AgentState::new(),
         };
 
         assert_eq!(interactive.process_multiline(":::hello:::"), "hello");
