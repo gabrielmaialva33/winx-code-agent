@@ -91,7 +91,3 @@ impl WinxService {
         self.bash_state.lock().await
     }
 }
-
-// NOTE: Individual tool implementations are temporarily commented out
-// while we migrate to the new rmcp 0.12.0 pattern in server.rs
-// The tools will be re-implemented using the #[tool] macro pattern
