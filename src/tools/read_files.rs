@@ -117,7 +117,7 @@ async fn read_file(
     let max_tokens = max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
     if tokens_count > max_tokens {
-        let truncation_point = result_content.char_indices().nth(max_tokens).map(|(i, _)| i).unwrap_or(result_content.len());
+        let truncation_point = result_content.char_indices().nth(max_tokens).map_or(result_content.len(), |(i, _)| i);
         result_content.truncate(truncation_point);
         result_content.push_str("\n(...truncated due to token limit)");
         truncated = true;
@@ -153,7 +153,7 @@ pub async fn handle_tool_call(
                 if truncated { break; }
             }
             Err(e) => {
-                message.push_str(&format!("\nError reading {}: {}", file_path, e));
+                message.push_str(&format!("\nError reading {file_path}: {e}"));
             }
         }
     }

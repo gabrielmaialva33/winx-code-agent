@@ -29,36 +29,22 @@ fn convert_mode_name(mode_name: &ModeName) -> Modes {
 /// Converts a mode to its corresponding state configuration
 fn mode_to_state(mode: &Modes) -> (BashCommandMode, FileEditMode, WriteIfEmptyMode) {
     match mode {
-        Modes::Wcgw => {
-            (
-                BashCommandMode {
-                    bash_mode: BashMode::NormalMode,
-                    allowed_commands: AllowedCommands::All("all".to_string()),
-                },
-                FileEditMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
-                WriteIfEmptyMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
-            )
-        }
-        Modes::Architect => {
-            (
-                BashCommandMode {
-                    bash_mode: BashMode::RestrictedMode,
-                    allowed_commands: AllowedCommands::All("all".to_string()),
-                },
-                FileEditMode { allowed_globs: AllowedGlobs::List(vec![]) },
-                WriteIfEmptyMode { allowed_globs: AllowedGlobs::List(vec![]) },
-            )
-        }
-        Modes::CodeWriter => {
-            (
-                BashCommandMode {
-                    bash_mode: BashMode::NormalMode,
-                    allowed_commands: AllowedCommands::All("all".to_string()),
-                },
-                FileEditMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
-                WriteIfEmptyMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
-            )
-        }
+        Modes::Wcgw | Modes::CodeWriter => (
+            BashCommandMode {
+                bash_mode: BashMode::NormalMode,
+                allowed_commands: AllowedCommands::All("all".to_string()),
+            },
+            FileEditMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
+            WriteIfEmptyMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
+        ),
+        Modes::Architect => (
+            BashCommandMode {
+                bash_mode: BashMode::RestrictedMode,
+                allowed_commands: AllowedCommands::All("all".to_string()),
+            },
+            FileEditMode { allowed_globs: AllowedGlobs::List(vec![]) },
+            WriteIfEmptyMode { allowed_globs: AllowedGlobs::List(vec![]) },
+        ),
     }
 }
 
@@ -85,15 +71,15 @@ pub async fn handle_tool_call(
     if workspace_path.exists() {
         if workspace_path.is_file() {
             folder_to_start = workspace_path.parent().unwrap_or(&workspace_path).to_path_buf();
-            response.push_str(&format!("Using parent directory of file: {:?}\n", folder_to_start));
+            response.push_str(&format!("Using parent directory of file: {folder_to_start:?}\n"));
         } else if workspace_path.is_dir() {
-            response.push_str(&format!("Using workspace directory: {:?}\n", folder_to_start));
+            response.push_str(&format!("Using workspace directory: {folder_to_start:?}\n"));
         }
     } else if workspace_path.is_absolute() {
         ensure_directory_exists(&workspace_path).map_err(|e| {
             WinxError::WorkspacePathError(format!("Failed to create workspace: {e}"))
         })?;
-        response.push_str(&format!("Created workspace directory: {:?}\n", workspace_path));
+        response.push_str(&format!("Created workspace directory: {workspace_path:?}\n"));
     }
 
     let thread_id = if initialize.thread_id.is_empty() {
@@ -125,7 +111,7 @@ pub async fn handle_tool_call(
     response.push_str(&format!("\n# Environment\nSystem: {}\nMachine: {}\nInitialized in directory: {:?}\n",
         std::env::consts::OS, std::env::consts::ARCH, folder_to_start));
     
-    response.push_str(&format!("\nUse thread_id={} for all winx tool calls.\n", thread_id));
+    response.push_str(&format!("\nUse thread_id={thread_id} for all winx tool calls.\n"));
 
     Ok(response)
 }

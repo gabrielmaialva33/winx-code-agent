@@ -23,7 +23,7 @@ use crate::types::{
     BashCommand, ContextSave, FileWriteOrEdit, Initialize, ReadFiles, ReadImage,
 };
 
-/// Type alias for the shared bash state - uses tokio::sync::Mutex for async safety
+/// Type alias for the shared bash state - uses `tokio::sync::Mutex` for async safety
 pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
 
 /// Helper function to create JSON schema from schemars Schema

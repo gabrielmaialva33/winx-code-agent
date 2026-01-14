@@ -3,6 +3,7 @@
 //! This module provides the implementation for the `FileWriteOrEdit` tool, which is used
 //! to write or edit files, with support for both full file content and search/replace blocks.
 
+#![allow(clippy::unwrap_used)]
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -85,7 +86,7 @@ fn apply_blocks(content: &str, blocks: Vec<(String, String)>) -> Result<String> 
     let mut result = content.to_string();
     for (search, replace) in blocks {
         if !result.contains(&search) {
-            return Err(WinxError::SearchBlockNotFound(format!("Block not found: {}", search)));
+            return Err(WinxError::SearchBlockNotFound(format!("Block not found: {search}")));
         }
         
         let count = result.matches(&search).count();
@@ -127,14 +128,13 @@ pub async fn handle_tool_call(
     let file_path_str = path.to_string_lossy().to_string();
 
     // Whitelist check (WCGW style)
-    if path.exists() {
-        if !bash_state.whitelist_for_overwrite.contains_key(&file_path_str) {
+    if path.exists()
+        && !bash_state.whitelist_for_overwrite.contains_key(&file_path_str) {
             return Err(WinxError::FileAccessError {
                 path: path.clone(),
                 message: "Read file first before editing.".to_string()
             });
         }
-    }
 
     let result = if file_write_or_edit.percentage_to_change <= 50 {
         let original_content = fs::read_to_string(&path)?;
@@ -142,10 +142,10 @@ pub async fn handle_tool_call(
         let new_content = apply_blocks(&original_content, blocks)?;
         
         fs::write(&path, &new_content)?;
-        format!("Successfully edited {}", file_path_str)
+        format!("Successfully edited {file_path_str}")
     } else {
         fs::write(&path, &file_write_or_edit.text_or_search_replace_blocks)?;
-        format!("Successfully wrote {}", file_path_str)
+        format!("Successfully wrote {file_path_str}")
     };
 
     // Update whitelist

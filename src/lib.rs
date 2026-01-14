@@ -4,6 +4,14 @@
 #![allow(unused)]
 // Clippy lints for library flexibility
 #![allow(clippy::too_many_arguments)]
+#![allow(clippy::module_name_repetitions)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::missing_panics_doc)]
+#![allow(clippy::cast_precision_loss)]
+#![allow(clippy::cast_possible_truncation)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_wrap)]
 // Internal modules don't need full documentation
 #![allow(missing_docs)]
 

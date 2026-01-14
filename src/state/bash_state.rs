@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+#![allow(clippy::expect_used)]
 use anyhow::{anyhow, Context as AnyhowContext, Result};
 use glob;
 use lazy_static::lazy_static;
@@ -284,6 +286,12 @@ impl InteractiveBash {
     }
 }
 
+impl Default for BashState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BashState {
     pub fn new() -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"));
@@ -318,7 +326,7 @@ impl BashState {
     pub fn is_command_allowed(&self, _command: &str) -> bool { true }
     pub fn is_file_edit_allowed(&self, _path: &str) -> bool { true }
     pub fn is_file_write_allowed(&self, _path: &str) -> bool { true }
-    pub fn get_mode_violation_message(&self, op: &str, _target: &str) -> String { format!("Operation {} not allowed", op) }
+    pub fn get_mode_violation_message(&self, op: &str, _target: &str) -> String { format!("Operation {op} not allowed") }
 
     pub fn save_state_to_disk(&self) -> Result<()> {
         let snapshot = BashStateSnapshot::from_state(
