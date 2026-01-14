@@ -221,6 +221,7 @@ impl InteractiveBash {
 
     pub fn reinit(&mut self) -> Result<()> {
         let mut cmd = Command::new("bash");
+        cmd.arg("-i");
         if self.restricted_mode {
             cmd.arg("-r");
         }
@@ -252,6 +253,7 @@ impl InteractiveBash {
 
     pub fn new(initial_dir: &Path, restricted_mode: bool) -> Result<Self> {
         let mut cmd = Command::new("bash");
+        cmd.arg("-i");
         if restricted_mode {
             cmd.arg("-r");
         }
@@ -390,14 +392,16 @@ impl BashState {
         Ok(())
     }
 
-    pub fn is_command_allowed(&self, _command: &str) -> bool {
-        true
+    pub fn is_command_allowed(&self, command: &str) -> bool {
+        self.bash_command_mode.allowed_commands.is_allowed(command)
     }
-    pub fn is_file_edit_allowed(&self, _path: &str) -> bool {
-        true
+
+    pub fn is_file_edit_allowed(&self, path: &str) -> bool {
+        self.file_edit_mode.allowed_globs.is_allowed(path)
     }
-    pub fn is_file_write_allowed(&self, _path: &str) -> bool {
-        true
+
+    pub fn is_file_write_allowed(&self, path: &str) -> bool {
+        self.write_if_empty_mode.allowed_globs.is_allowed(path)
     }
     pub fn get_mode_violation_message(&self, op: &str, _target: &str) -> String {
         format!("Operation {op} not allowed")
@@ -452,7 +456,7 @@ impl BashState {
 
         }
 
-    
+
 
         pub fn new_with_thread_id(thread_id: Option<&str>) -> Self {
 
@@ -482,7 +486,7 @@ impl BashState {
 
     }
 
-    
+
 
 pub fn generate_thread_id() -> String {
     let mut rng = rand::rng();

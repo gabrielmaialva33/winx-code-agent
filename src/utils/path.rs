@@ -80,9 +80,65 @@ pub fn validate_path_in_workspace(
     }
 
     // Canonicalize the path (resolves .., symlinks, etc.)
-    let canonical_path = path.canonicalize().map_err(|e| {
-        PathSecurityError::CanonicalizationFailed { path: path.to_path_buf(), error: e }
-    })?;
+    let canonical_path = match path.canonicalize() {
+        Ok(p) => p,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            // If path doesn't exist (creating new file), validate parent
+            if let Some(parent) = path.parent() {
+                // If parent exists, canonicalize it and check
+                if parent.exists() {
+                     let canonical_parent = parent.canonicalize().map_err(|e| {
+                        PathSecurityError::CanonicalizationFailed { path: parent.to_path_buf(), error: e }
+                    })?;
+                    // Return the canonical parent joined with the filename
+                    // This gives us a "pseudo-canonical" path for the new file
+                    canonical_parent.join(path.file_name().unwrap_or_default())
+                } else {
+                     // If parent also doesn't exist, we rely on the workspace check of the "best effort" path
+                     // This is slightly looser but allows recursive directory creation if implemented.
+                     // However, standard canonicalize fails.
+                     // For security, we might want to just enforce that we are inside workspace by simple string check
+                     // or walk up until we find an existing directory.
+                     // For now, let's just attempt to resolve relative components manually if possible,
+                     // or return error.
+                     // But simpler: just fallback to checking the parent recursively?
+                     // A simple fallback: just assume the provided path is relative to CWD if relative,
+                     // and if absolute, sanitize .. components.
+
+                     // BETTER APPROACH: Walk up until we find an existing directory
+                     let mut current = path.to_path_buf();
+                     while !current.exists() {
+                         if let Some(parent) = current.parent() {
+                             current = parent.to_path_buf();
+                         } else {
+                             // Hit root and it doesn't exist? unwritable.
+                             break;
+                         }
+                     }
+                     if current.exists() {
+                        let canonical_base = current.canonicalize().map_err(|e| {
+                            PathSecurityError::CanonicalizationFailed { path: current.to_path_buf(), error: e }
+                        })?;
+                        // Reconstruct the full path
+                        // This identifies the "real" location of the base
+                        // We can't easily reconstruct the full canonical path without resolving the missing components' ..
+                        // But if we assume no .. in the missing part, we can join.
+
+                        // For Winx, let's keep it simple: if file doesn't exist, parent MUST exist for now?
+                        // Or just allow the error to bubble up if we can't verify safety?
+                        // WCGW Python allowed anything under workspace.
+
+                        // Let's return the error for now if simple parent check fails, to match strict security.
+                        return Err(PathSecurityError::CanonicalizationFailed { path: path.to_path_buf(), error: e });
+                     }
+                     return Err(PathSecurityError::CanonicalizationFailed { path: path.to_path_buf(), error: e });
+                }
+            } else {
+                 return Err(PathSecurityError::CanonicalizationFailed { path: path.to_path_buf(), error: e });
+            }
+        }
+        Err(e) => return Err(PathSecurityError::CanonicalizationFailed { path: path.to_path_buf(), error: e }),
+    };
 
     // Canonicalize workspace root
     let canonical_workspace = workspace_root.canonicalize().map_err(|e| {

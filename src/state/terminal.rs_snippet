@@ -1,0 +1,19 @@
+
+/// Strip ANSI escape codes from a string
+pub fn strip_ansi_codes(input: &str) -> String {
+    // Regex to match ANSI escape codes
+    // Matches:
+    // - CSI sequences: \x1b[ ... [a-zA-Z]
+    // - OSC sequences: \x1b] ... \x07 or \x1b\\
+    // - Simple escapes
+
+    // Simple implementation using a loop state machine for better performance than regex
+    // and to avoid regex dependency if not already used heavily.
+    // However, since regex is in Cargo.toml, we can use a robust regex.
+
+    // We'll use a standard ANSI stripping regex pattern
+    // Reference: https://github.com/chalk/ansi-regex/blob/main/index.js
+    let ansi_regex = regex::Regex::new(r"[\u001b\u009b]\[[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]|[\u001b\u009b][\[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-ntqry=><~]))").unwrap();
+
+    ansi_regex.replace_all(input, "").to_string()
+}

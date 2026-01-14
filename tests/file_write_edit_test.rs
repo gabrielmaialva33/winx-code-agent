@@ -26,7 +26,10 @@ async fn create_initialized_state(
     let init = Initialize {
         init_type: InitializeType::FirstCall,
         mode_name: ModeName::Wcgw,
-        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        any_workspace_path: std::fs::canonicalize(temp_dir.path())
+            .expect("Failed to canonicalize temp dir")
+            .to_string_lossy()
+            .to_string(),
         thread_id: thread_id.to_string(),
         code_writer_config: None,
         initial_files_to_read: vec![],

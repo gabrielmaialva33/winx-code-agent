@@ -18,7 +18,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, CommandState, InteractiveBash};
-use crate::state::terminal::render_terminal_output;
+use crate::state::terminal::{render_terminal_output, strip_ansi_codes};
 use crate::types::{BashCommand, BashCommandAction, SpecialKey};
 
 // ==================== WCGW-Style Constants ====================
@@ -1009,6 +1009,9 @@ async fn execute_simple_command(
         let rendered_lines = render_terminal_output(&raw_result);
         if !rendered_lines.is_empty() {
             result = rendered_lines.join("\n");
+        } else {
+            // Fallback: just strip ANSI codes if rendering failed or wasn't needed
+            result = strip_ansi_codes(&raw_result);
         }
     }
 

@@ -1,5 +1,6 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use glob;
 
 /// Type of shell environment initialization
 ///
@@ -124,10 +125,15 @@ impl Default for AllowedGlobs {
 
 impl AllowedGlobs {
     #[allow(dead_code)]
-    pub fn is_allowed(&self, glob: &str) -> bool {
+    pub fn is_allowed(&self, path: &str) -> bool {
         match self {
             AllowedGlobs::All(s) if s == "all" => true,
-            AllowedGlobs::List(globs) => globs.iter().any(|g| glob == g),
+            AllowedGlobs::List(globs) => globs.iter().any(|g| {
+                match glob::Pattern::new(g) {
+                    Ok(pattern) => pattern.matches(path),
+                    Err(_) => false,
+                }
+            }),
             _ => false,
         }
     }
@@ -148,10 +154,13 @@ impl Default for AllowedCommands {
 
 impl AllowedCommands {
     #[allow(dead_code)]
-    pub fn is_allowed(&self, command: &str) -> bool {
+    pub fn is_allowed(&self, command_line: &str) -> bool {
         match self {
             AllowedCommands::All(s) if s == "all" => true,
-            AllowedCommands::List(commands) => commands.iter().any(|c| command == c),
+            AllowedCommands::List(commands) => {
+                let cmd_prog = command_line.trim().split_whitespace().next().unwrap_or("");
+                commands.iter().any(|c| cmd_prog == c)
+            }
             _ => false,
         }
     }
@@ -711,3 +720,5 @@ pub struct ReadImage {
     /// This can be an absolute path or a path relative to the current working directory.
     pub file_path: String,
 }
+
+
