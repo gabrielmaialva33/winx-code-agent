@@ -871,7 +871,7 @@ impl std::fmt::Display for ApplyError {
 }
 
 /// Maximum allowed score before rejecting the edit
-pub const MAX_TOLERANCE_SCORE: f64 = 1000.0;
+pub const MAX_TOLERANCE_SCORE: f64 = 5000.0;
 
 /// Apply search/replace blocks with tolerance matching
 pub fn apply_search_replace_with_tolerance(
