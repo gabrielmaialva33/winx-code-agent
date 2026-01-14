@@ -15,6 +15,8 @@ mod highlighter;
 pub mod i18n;
 mod prompt;
 mod render;
+pub mod status;
+pub mod tui;
 
 use std::io::{self, Write};
 use std::time::Duration;
@@ -38,6 +40,7 @@ use self::highlighter::WinxHighlighter;
 use self::i18n::{Language, COMMANDS};
 use self::prompt::WinxPrompt;
 use self::render::MarkdownRender;
+use self::status::{Phase, StatusDisplay};
 
 const MENU_NAME: &str = "completion_menu";
 
@@ -382,30 +385,31 @@ impl Interactive {
         Ok(false)
     }
 
-    /// Send message to LLM with spinner and stream response
+    /// Send message to LLM with status display and stream response
     async fn send_message(&mut self, message: &str) -> Result<()> {
-        let s = self.lang.strings();
-
         let session = self.engine.session.as_mut().ok_or_else(|| {
             WinxError::ConfigurationError("No active session".to_string())
         })?;
 
-        // Create spinner
-        let spinner = ProgressBar::new_spinner();
-        spinner.set_style(
-            ProgressStyle::default_spinner()
-                .tick_chars("⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏")
-                .template("{spinner:.cyan} {msg}")
-                .unwrap(),
-        );
-        spinner.set_message(s.msg_thinking);
-        spinner.enable_steady_tick(Duration::from_millis(80));
+        // Create status display (like Claude Code)
+        let mut status = StatusDisplay::new(self.lang);
+        status.start();
+
+        // Phase 1: Connecting
+        status.set_phase(Phase::Connecting);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Phase 2: Thinking (while waiting for first token)
+        status.set_phase(Phase::Thinking);
 
         // Start stream
         let stream_result = session.send_stream(message).await;
 
-        // Stop spinner
-        spinner.finish_and_clear();
+        // Phase 3: Generating
+        status.set_phase(Phase::Generating);
+
+        // Stop status display before streaming output
+        status.stop();
 
         let mut stream = stream_result?;
         let mut response = String::new();

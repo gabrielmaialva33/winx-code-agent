@@ -78,7 +78,7 @@ enum Commands {
         no_stream: bool,
     },
 
-    /// Start interactive REPL
+    /// Start reedline REPL (simpler mode, no TUI)
     Repl,
 
     /// List available providers and models
@@ -132,9 +132,9 @@ async fn main() -> Result<()> {
     let lang = cli.lang.as_ref().map(|l| Language::from_code(l));
 
     match cli.command {
-        // Interactive mode (default when no command)
+        // TUI mode (default - Claude Code style)
         None => {
-            run_interactive(cli.model, lang).await
+            run_tui()
         }
 
         // MCP Server mode (for Claude Code integration)
@@ -147,7 +147,7 @@ async fn main() -> Result<()> {
             run_chat(&message, cli.model, !no_stream).await
         }
 
-        // Interactive REPL (same as default)
+        // Reedline REPL (simpler, no TUI)
         Some(Commands::Repl) => {
             run_interactive(cli.model, lang).await
         }
@@ -317,6 +317,13 @@ fn run_config(provider: Option<String>, model: Option<String>) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Executa TUI mode (Claude Code style)
+fn run_tui() -> Result<()> {
+    interactive::tui::run().map_err(|e| {
+        errors::WinxError::ShellInitializationError(format!("TUI error: {e}"))
+    })
 }
 
 /// Executa aprendizado das sessões do Claude Code

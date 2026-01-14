@@ -71,12 +71,19 @@ rand = "0.9"
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 
-# Interactive REPL (aichat-style)
+# Interactive REPL (legacy - reedline mode)
 reedline = "0.40"
 syntect = { version = "5.2", default-features = false, features = ["parsing", "default-themes", "default-syntaxes", "regex-fancy"] }
 nu-ansi-term = "0.50"
 textwrap = "0.16"
 unicode-width = "0.2"
+
+# TUI Framework (ratatui mode - Claude Code style)
+ratatui = { version = "0.29", features = ["crossterm"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
+tui-textarea = "0.7"
+throbber-widgets-tui = "0.7"
+color-eyre = "0.6"
 
 # UX Enhancements
 indicatif = "0.17"
