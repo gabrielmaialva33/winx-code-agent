@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use std::io;
+use std::path::{Path, PathBuf};
 
 /// Security error for path validation
 #[derive(Debug)]
@@ -81,18 +81,12 @@ pub fn validate_path_in_workspace(
 
     // Canonicalize the path (resolves .., symlinks, etc.)
     let canonical_path = path.canonicalize().map_err(|e| {
-        PathSecurityError::CanonicalizationFailed {
-            path: path.to_path_buf(),
-            error: e,
-        }
+        PathSecurityError::CanonicalizationFailed { path: path.to_path_buf(), error: e }
     })?;
 
     // Canonicalize workspace root
     let canonical_workspace = workspace_root.canonicalize().map_err(|e| {
-        PathSecurityError::CanonicalizationFailed {
-            path: workspace_root.to_path_buf(),
-            error: e,
-        }
+        PathSecurityError::CanonicalizationFailed { path: workspace_root.to_path_buf(), error: e }
     })?;
 
     // Check if path is within workspace
@@ -108,9 +102,7 @@ pub fn validate_path_in_workspace(
 
 /// Check if a path is a symlink without following it
 pub fn is_symlink(path: &Path) -> bool {
-    std::fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_symlink())
-        .unwrap_or(false)
+    std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false)
 }
 
 /// Expands a path that starts with ~ to the user's home directory

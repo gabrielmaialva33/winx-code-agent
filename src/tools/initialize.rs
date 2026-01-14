@@ -1,5 +1,5 @@
 //! Implementation of the Initialize tool.
-//! 
+//!
 //! This module provides the implementation for the Initialize tool, which is used
 //! to set up the shell environment with the specified workspace path and configuration.
 
@@ -60,9 +60,7 @@ pub async fn handle_tool_call(
 
     let workspace_path_str = expand_user(&initialize.any_workspace_path);
     if workspace_path_str.is_empty() {
-        return Err(WinxError::WorkspacePathError(
-            "Workspace path cannot be empty.".to_string(),
-        ));
+        return Err(WinxError::WorkspacePathError("Workspace path cannot be empty.".to_string()));
     }
 
     let workspace_path = PathBuf::from(&workspace_path_str);
@@ -108,9 +106,13 @@ pub async fn handle_tool_call(
 
     *bash_state_guard = Some(new_bash_state);
 
-    response.push_str(&format!("\n# Environment\nSystem: {}\nMachine: {}\nInitialized in directory: {:?}\n",
-        std::env::consts::OS, std::env::consts::ARCH, folder_to_start));
-    
+    response.push_str(&format!(
+        "\n# Environment\nSystem: {}\nMachine: {}\nInitialized in directory: {:?}\n",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        folder_to_start
+    ));
+
     response.push_str(&format!("\nUse thread_id={thread_id} for all winx tool calls.\n"));
 
     Ok(response)

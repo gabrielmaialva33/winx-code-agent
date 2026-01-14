@@ -1,5 +1,5 @@
-use std::path::{Path, PathBuf};
 use crate::errors::Result;
+use std::path::{Path, PathBuf};
 
 /// Repository analysis information
 pub struct RepoContext {

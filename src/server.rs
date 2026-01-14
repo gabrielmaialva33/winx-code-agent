@@ -3,10 +3,10 @@
 
 use rmcp::{
     model::{
-        Annotated, CallToolRequestParam, CallToolResult, Content, Implementation, 
-        ListResourcesResult, ListToolsResult, PaginatedRequestParam, ProtocolVersion, 
-        RawResource, ReadResourceRequestParam, ReadResourceResult, ResourceContents, 
-        ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
+        Annotated, CallToolRequestParam, CallToolResult, Content, Implementation,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParam, ProtocolVersion, RawResource,
+        ReadResourceRequestParam, ReadResourceResult, ResourceContents, ServerCapabilities,
+        ServerInfo, Tool, ToolAnnotations,
     },
     service::{RequestContext, RoleServer},
     transport::stdio,
@@ -19,9 +19,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::state::BashState;
-use crate::types::{
-    BashCommand, ContextSave, FileWriteOrEdit, Initialize, ReadFiles, ReadImage,
-};
+use crate::types::{BashCommand, ContextSave, FileWriteOrEdit, Initialize, ReadFiles, ReadImage};
 
 /// Type alias for the shared bash state - uses `tokio::sync::Mutex` for async safety
 pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
@@ -164,21 +162,19 @@ impl ServerHandler for WinxService {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
-            resources: vec![
-                Annotated {
-                    raw: RawResource {
-                        uri: "file://readme".into(),
-                        name: "README".into(),
-                        description: Some("Project README documentation".into()),
-                        mime_type: Some("text/markdown".into()),
-                        size: None,
-                        title: None,
-                        icons: None,
-                        meta: None,
-                    },
-                    annotations: None,
+            resources: vec![Annotated {
+                raw: RawResource {
+                    uri: "file://readme".into(),
+                    name: "README".into(),
+                    description: Some("Project README documentation".into()),
+                    mime_type: Some("text/markdown".into()),
+                    size: None,
+                    title: None,
+                    icons: None,
+                    meta: None,
                 },
-            ],
+                annotations: None,
+            }],
             next_cursor: None,
             meta: None,
         })
@@ -221,10 +217,7 @@ impl ServerHandler for WinxService {
             "FileWriteOrEdit" => self.handle_file_write_or_edit(args_value).await,
             "ContextSave" => self.handle_context_save(args_value).await,
             "ReadImage" => self.handle_read_image(args_value).await,
-            _ => Err(McpError::invalid_request(
-                format!("Unknown tool: {}", param.name),
-                None,
-            )),
+            _ => Err(McpError::invalid_request(format!("Unknown tool: {}", param.name), None)),
         }
     }
 }
@@ -266,13 +259,21 @@ impl WinxService {
         }
     }
 
-    async fn handle_file_write_or_edit(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+    async fn handle_file_write_or_edit(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
         let file_write_or_edit: FileWriteOrEdit = serde_json::from_value(args).map_err(|e| {
             McpError::invalid_request(format!("Invalid FileWriteOrEdit parameters: {e}"), None)
         })?;
 
-        match crate::tools::file_write_or_edit::handle_tool_call(&self.bash_state, file_write_or_edit).await {
+        match crate::tools::file_write_or_edit::handle_tool_call(
+            &self.bash_state,
+            file_write_or_edit,
+        )
+        .await
+        {
             Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
             Err(e) => Err(McpError::internal_error(format!("FileWriteOrEdit failed: {e}"), None)),
         }
@@ -300,7 +301,7 @@ impl WinxService {
             Ok((mime_type, base64_data)) => {
                 let result_text = format!("MIME: {mime_type}\nData: {base64_data}");
                 Ok(CallToolResult::success(vec![Content::text(result_text)]))
-            },
+            }
             Err(e) => Err(McpError::internal_error(format!("ReadImage failed: {e}"), None)),
         }
     }

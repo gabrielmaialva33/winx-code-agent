@@ -1,5 +1,5 @@
 //! Implementation of the `FileWriteOrEdit` tool.
-//! 
+//!
 //! This module provides the implementation for the `FileWriteOrEdit` tool, which is used
 //! to write or edit files, with support for both full file content and search/replace blocks.
 
@@ -56,7 +56,9 @@ fn parse_blocks(content: &str) -> Result<Vec<(String, String)>> {
             }
 
             if i >= lines.len() {
-                return Err(WinxError::SearchReplaceSyntaxError("Missing ======= marker".to_string()));
+                return Err(WinxError::SearchReplaceSyntaxError(
+                    "Missing ======= marker".to_string(),
+                ));
             }
 
             i += 1;
@@ -67,7 +69,9 @@ fn parse_blocks(content: &str) -> Result<Vec<(String, String)>> {
             }
 
             if i >= lines.len() {
-                return Err(WinxError::SearchReplaceSyntaxError("Missing >>>>>>> REPLACE marker".to_string()));
+                return Err(WinxError::SearchReplaceSyntaxError(
+                    "Missing >>>>>>> REPLACE marker".to_string(),
+                ));
             }
 
             blocks.push((search_lines.join("\n"), replace_lines.join("\n")));
@@ -88,7 +92,7 @@ fn apply_blocks(content: &str, blocks: Vec<(String, String)>) -> Result<String> 
         if !result.contains(&search) {
             return Err(WinxError::SearchBlockNotFound(format!("Block not found: {search}")));
         }
-        
+
         let count = result.matches(&search).count();
         if count > 1 {
             return Err(WinxError::SearchBlockAmbiguous {
@@ -128,19 +132,18 @@ pub async fn handle_tool_call(
     let file_path_str = path.to_string_lossy().to_string();
 
     // Whitelist check (WCGW style)
-    if path.exists()
-        && !bash_state.whitelist_for_overwrite.contains_key(&file_path_str) {
-            return Err(WinxError::FileAccessError {
-                path: path.clone(),
-                message: "Read file first before editing.".to_string()
-            });
-        }
+    if path.exists() && !bash_state.whitelist_for_overwrite.contains_key(&file_path_str) {
+        return Err(WinxError::FileAccessError {
+            path: path.clone(),
+            message: "Read file first before editing.".to_string(),
+        });
+    }
 
     let result = if file_write_or_edit.percentage_to_change <= 50 {
         let original_content = fs::read_to_string(&path)?;
         let blocks = parse_blocks(&file_write_or_edit.text_or_search_replace_blocks)?;
         let new_content = apply_blocks(&original_content, blocks)?;
-        
+
         fs::write(&path, &new_content)?;
         format!("Successfully edited {file_path_str}")
     } else {
@@ -152,11 +155,10 @@ pub async fn handle_tool_call(
     let final_content = fs::read_to_string(&path)?;
     let hash = format!("{:x}", Sha256::digest(final_content.as_bytes()));
     let total_lines = final_content.lines().count();
-    
-    bash_state.whitelist_for_overwrite.insert(
-        file_path_str,
-        FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines)
-    );
+
+    bash_state
+        .whitelist_for_overwrite
+        .insert(file_path_str, FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines));
 
     Ok(result)
 }

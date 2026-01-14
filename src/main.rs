@@ -69,9 +69,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         // MCP Server mode is the default and only mode
-        None | Some(Commands::Serve { .. }) => {
-            run_server().await
-        }
+        None | Some(Commands::Serve { .. }) => run_server().await,
     }
 }
 
@@ -86,9 +84,7 @@ async fn run_server() -> Result<()> {
         }
         Err(e) => {
             tracing::error!("Server error: {}", e);
-            Err(errors::WinxError::ShellInitializationError(format!(
-                "Failed to start server: {e}"
-            )))
+            Err(errors::WinxError::ShellInitializationError(format!("Failed to start server: {e}")))
         }
     }
 }

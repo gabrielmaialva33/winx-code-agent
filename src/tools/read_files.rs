@@ -97,7 +97,8 @@ async fn read_file(
     let effective_start = start_line_num.unwrap_or(1);
     let effective_end = end_line_num.unwrap_or(total_lines);
 
-    let filtered_lines = if lines.is_empty() { &[] } else { &lines[start_idx..end_idx.min(lines.len())] };
+    let filtered_lines =
+        if lines.is_empty() { &[] } else { &lines[start_idx..end_idx.min(lines.len())] };
     let mut result_content = String::new();
 
     if show_line_numbers {
@@ -117,7 +118,8 @@ async fn read_file(
     let max_tokens = max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
 
     if tokens_count > max_tokens {
-        let truncation_point = result_content.char_indices().nth(max_tokens).map_or(result_content.len(), |(i, _)| i);
+        let truncation_point =
+            result_content.char_indices().nth(max_tokens).map_or(result_content.len(), |(i, _)| i);
         result_content.truncate(truncation_point);
         result_content.push_str("\n(...truncated due to token limit)");
         truncated = true;
@@ -147,10 +149,12 @@ pub async fn handle_tool_call(
             Ok((content, truncated, _, canon_path, line_range)) => {
                 file_ranges_dict.entry(canon_path.clone()).or_default().push(line_range);
                 message.push_str(&format!("\n{file_path}\n```\n{content}\n```"));
-                
+
                 let _ = cache.record_read_range(Path::new(&canon_path), line_range.0, line_range.1);
-                
-                if truncated { break; }
+
+                if truncated {
+                    break;
+                }
             }
             Err(e) => {
                 message.push_str(&format!("\nError reading {file_path}: {e}"));
@@ -162,11 +166,16 @@ pub async fn handle_tool_call(
     if let Some(bash_state) = bash_state_guard.as_mut() {
         for (path, ranges) in file_ranges_dict {
             let file_hash = cache.get_cached_hash(Path::new(&path)).unwrap_or_default();
-            let total_lines = cache.get_unread_ranges(Path::new(&path)).iter().map(|&(_, end)| end).max().unwrap_or(0);
-            
+            let total_lines = cache
+                .get_unread_ranges(Path::new(&path))
+                .iter()
+                .map(|&(_, end)| end)
+                .max()
+                .unwrap_or(0);
+
             bash_state.whitelist_for_overwrite.insert(
                 path.clone(),
-                crate::state::bash_state::FileWhitelistData::new(file_hash, ranges, total_lines)
+                crate::state::bash_state::FileWhitelistData::new(file_hash, ranges, total_lines),
             );
         }
     }

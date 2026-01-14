@@ -81,60 +81,96 @@ fn get_state_file_path(thread_id: &str) -> Result<PathBuf> {
 }
 
 pub fn save_bash_state(thread_id: &str, state: &BashStateSnapshot) -> Result<()> {
-    if thread_id.is_empty() { return Ok(()); }
+    if thread_id.is_empty() {
+        return Ok(());
+    }
     let json = serde_json::to_string_pretty(state)?;
     fs::write(get_state_file_path(thread_id)?, json)?;
     Ok(())
 }
 
 pub fn load_bash_state(thread_id: &str) -> Result<Option<BashStateSnapshot>> {
-    if thread_id.is_empty() { return Ok(None); }
+    if thread_id.is_empty() {
+        return Ok(None);
+    }
     let path = get_state_file_path(thread_id)?;
-    if !path.exists() { return Ok(None); }
+    if !path.exists() {
+        return Ok(None);
+    }
     let json = fs::read_to_string(path)?;
     Ok(Some(serde_json::from_str(&json)?))
 }
 
 pub fn delete_bash_state(thread_id: &str) -> Result<()> {
-    if thread_id.is_empty() { return Ok(()); }
+    if thread_id.is_empty() {
+        return Ok(());
+    }
     let path = get_state_file_path(thread_id)?;
-    if path.exists() { fs::remove_file(path)?; }
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
     Ok(())
 }
 
 impl BashStateSnapshot {
     pub fn from_state(
-        cwd: &str, workspace_root: &str, mode: &Modes,
-        bash_command_mode: &BashCommandMode, file_edit_mode: &FileEditMode,
+        cwd: &str,
+        workspace_root: &str,
+        mode: &Modes,
+        bash_command_mode: &BashCommandMode,
+        file_edit_mode: &FileEditMode,
         write_if_empty_mode: &WriteIfEmptyMode,
-        whitelist: &HashMap<String, FileWhitelistData>, thread_id: &str,
+        whitelist: &HashMap<String, FileWhitelistData>,
+        thread_id: &str,
     ) -> Self {
         Self {
             bash_command_mode: BashCommandModeSnapshot::from(bash_command_mode),
             file_edit_mode: FileEditModeSnapshot::from(file_edit_mode),
             write_if_empty_mode: WriteIfEmptyModeSnapshot::from(write_if_empty_mode),
-            whitelist_for_overwrite: whitelist.iter()
-                .map(|(k, v)| (k.clone(), FileWhitelistDataSnapshot::from(v))).collect(),
-            mode: mode.to_string(), workspace_root: workspace_root.to_string(),
+            whitelist_for_overwrite: whitelist
+                .iter()
+                .map(|(k, v)| (k.clone(), FileWhitelistDataSnapshot::from(v)))
+                .collect(),
+            mode: mode.to_string(),
+            workspace_root: workspace_root.to_string(),
             chat_id: thread_id.to_string(),
             cwd: if cwd == workspace_root { String::new() } else { cwd.to_string() },
         }
     }
 
-    pub fn to_state_components(&self) -> (String, String, Modes, BashCommandMode, FileEditMode, WriteIfEmptyMode, HashMap<String, FileWhitelistData>, String) {
+    pub fn to_state_components(
+        &self,
+    ) -> (
+        String,
+        String,
+        Modes,
+        BashCommandMode,
+        FileEditMode,
+        WriteIfEmptyMode,
+        HashMap<String, FileWhitelistData>,
+        String,
+    ) {
         let mode = match self.mode.as_str() {
             "architect" => Modes::Architect,
             "code_writer" => Modes::CodeWriter,
             _ => Modes::Wcgw,
         };
-        let whitelist = self.whitelist_for_overwrite.iter()
-            .map(|(k, v)| (k.clone(), v.to_whitelist_data())).collect();
+        let whitelist = self
+            .whitelist_for_overwrite
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_whitelist_data()))
+            .collect();
         let cwd = if self.cwd.is_empty() { self.workspace_root.clone() } else { self.cwd.clone() };
-        (cwd, self.workspace_root.clone(), mode,
-         self.bash_command_mode.to_bash_command_mode(),
-         self.file_edit_mode.to_file_edit_mode(),
-         self.write_if_empty_mode.to_write_if_empty_mode(),
-         whitelist, self.chat_id.clone())
+        (
+            cwd,
+            self.workspace_root.clone(),
+            mode,
+            self.bash_command_mode.to_bash_command_mode(),
+            self.file_edit_mode.to_file_edit_mode(),
+            self.write_if_empty_mode.to_write_if_empty_mode(),
+            whitelist,
+            self.chat_id.clone(),
+        )
     }
 }
 
@@ -156,7 +192,11 @@ impl From<&BashCommandMode> for BashCommandModeSnapshot {
 impl BashCommandModeSnapshot {
     fn to_bash_command_mode(&self) -> BashCommandMode {
         BashCommandMode {
-            bash_mode: if self.bash_mode == "restricted_mode" { BashMode::RestrictedMode } else { BashMode::NormalMode },
+            bash_mode: if self.bash_mode == "restricted_mode" {
+                BashMode::RestrictedMode
+            } else {
+                BashMode::NormalMode
+            },
             allowed_commands: match &self.allowed_commands {
                 AllowedCommandsSnapshot::All(s) => AllowedCommands::All(s.clone()),
                 AllowedCommandsSnapshot::List(l) => AllowedCommands::List(l.clone()),
@@ -167,48 +207,64 @@ impl BashCommandModeSnapshot {
 
 impl From<&FileEditMode> for FileEditModeSnapshot {
     fn from(mode: &FileEditMode) -> Self {
-        Self { allowed_globs: match &mode.allowed_globs {
-            AllowedGlobs::All(s) => AllowedGlobsSnapshot::All(s.clone()),
-            AllowedGlobs::List(l) => AllowedGlobsSnapshot::List(l.clone()),
-        }}
+        Self {
+            allowed_globs: match &mode.allowed_globs {
+                AllowedGlobs::All(s) => AllowedGlobsSnapshot::All(s.clone()),
+                AllowedGlobs::List(l) => AllowedGlobsSnapshot::List(l.clone()),
+            },
+        }
     }
 }
 
 impl FileEditModeSnapshot {
     fn to_file_edit_mode(&self) -> FileEditMode {
-        FileEditMode { allowed_globs: match &self.allowed_globs {
-            AllowedGlobsSnapshot::All(s) => AllowedGlobs::All(s.clone()),
-            AllowedGlobsSnapshot::List(l) => AllowedGlobs::List(l.clone()),
-        }}
+        FileEditMode {
+            allowed_globs: match &self.allowed_globs {
+                AllowedGlobsSnapshot::All(s) => AllowedGlobs::All(s.clone()),
+                AllowedGlobsSnapshot::List(l) => AllowedGlobs::List(l.clone()),
+            },
+        }
     }
 }
 
 impl From<&WriteIfEmptyMode> for WriteIfEmptyModeSnapshot {
     fn from(mode: &WriteIfEmptyMode) -> Self {
-        Self { allowed_globs: match &mode.allowed_globs {
-            AllowedGlobs::All(s) => AllowedGlobsSnapshot::All(s.clone()),
-            AllowedGlobs::List(l) => AllowedGlobsSnapshot::List(l.clone()),
-        }}
+        Self {
+            allowed_globs: match &mode.allowed_globs {
+                AllowedGlobs::All(s) => AllowedGlobsSnapshot::All(s.clone()),
+                AllowedGlobs::List(l) => AllowedGlobsSnapshot::List(l.clone()),
+            },
+        }
     }
 }
 
 impl WriteIfEmptyModeSnapshot {
     fn to_write_if_empty_mode(&self) -> WriteIfEmptyMode {
-        WriteIfEmptyMode { allowed_globs: match &self.allowed_globs {
-            AllowedGlobsSnapshot::All(s) => AllowedGlobs::All(s.clone()),
-            AllowedGlobsSnapshot::List(l) => AllowedGlobs::List(l.clone()),
-        }}
+        WriteIfEmptyMode {
+            allowed_globs: match &self.allowed_globs {
+                AllowedGlobsSnapshot::All(s) => AllowedGlobs::All(s.clone()),
+                AllowedGlobsSnapshot::List(l) => AllowedGlobs::List(l.clone()),
+            },
+        }
     }
 }
 
 impl From<&FileWhitelistData> for FileWhitelistDataSnapshot {
     fn from(d: &FileWhitelistData) -> Self {
-        Self { file_hash: d.file_hash.clone(), line_ranges_read: d.line_ranges_read.clone(), total_lines: d.total_lines }
+        Self {
+            file_hash: d.file_hash.clone(),
+            line_ranges_read: d.line_ranges_read.clone(),
+            total_lines: d.total_lines,
+        }
     }
 }
 
 impl FileWhitelistDataSnapshot {
     fn to_whitelist_data(&self) -> FileWhitelistData {
-        FileWhitelistData { file_hash: self.file_hash.clone(), line_ranges_read: self.line_ranges_read.clone(), total_lines: self.total_lines }
+        FileWhitelistData {
+            file_hash: self.file_hash.clone(),
+            line_ranges_read: self.line_ranges_read.clone(),
+            total_lines: self.total_lines,
+        }
     }
 }

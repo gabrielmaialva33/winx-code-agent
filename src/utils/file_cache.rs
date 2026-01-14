@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
+use crate::errors::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use crate::errors::Result;
 
 /// Minimal file cache for MCP core tools
 #[derive(Debug, Default)]

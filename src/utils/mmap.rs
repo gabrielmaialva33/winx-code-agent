@@ -666,10 +666,15 @@ impl ShareableMap {
         })?;
 
         // Check for empty file
-        if file.metadata().map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Failed to get metadata: {e}"),
-        })?.len() == 0 {
+        if file
+            .metadata()
+            .map_err(|e| WinxError::FileAccessError {
+                path: path.to_path_buf(),
+                message: format!("Failed to get metadata: {e}"),
+            })?
+            .len()
+            == 0
+        {
             return Err(WinxError::FileAccessError {
                 path: path.to_path_buf(),
                 message: "Cannot memory map empty file".to_string(),
