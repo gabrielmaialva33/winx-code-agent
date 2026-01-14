@@ -418,25 +418,71 @@ impl BashState {
         Ok(())
     }
 
-    pub fn load_state_from_disk(&mut self, thread_id: &str) -> Result<bool> {
-        if let Some(snapshot) = load_state_file(thread_id)? {
-            let (cwd, root, mode, bmode, emode, wmode, whitelist, tid) =
-                snapshot.to_state_components();
-            self.cwd = PathBuf::from(cwd);
-            self.workspace_root = PathBuf::from(root);
-            self.mode = mode;
-            self.bash_command_mode = bmode;
-            self.file_edit_mode = emode;
-            self.write_if_empty_mode = wmode;
-            self.whitelist_for_overwrite = whitelist;
-            self.current_thread_id = tid;
-            self.initialized = true;
-            Ok(true)
-        } else {
-            Ok(false)
+        pub fn load_state_from_disk(&mut self, thread_id: &str) -> Result<bool> {
+
+            if let Some(snapshot) = load_state_file(thread_id)? {
+
+                let (cwd, root, mode, bmode, emode, wmode, whitelist, tid) = snapshot.to_state_components();
+
+                self.cwd = PathBuf::from(cwd);
+
+                self.workspace_root = PathBuf::from(root);
+
+                self.mode = mode;
+
+                self.bash_command_mode = bmode;
+
+                self.file_edit_mode = emode;
+
+                self.write_if_empty_mode = wmode;
+
+                self.whitelist_for_overwrite = whitelist;
+
+                self.current_thread_id = tid;
+
+                self.initialized = true;
+
+                Ok(true)
+
+            } else {
+
+                Ok(false)
+
+            }
+
         }
+
+    
+
+        pub fn new_with_thread_id(thread_id: Option<&str>) -> Self {
+
+            let mut state = Self::new();
+
+            if let Some(tid) = thread_id {
+
+                if !tid.is_empty() {
+
+                    if let Ok(true) = state.load_state_from_disk(tid) {
+
+                        info!("Loaded state for thread_id '{}'", tid);
+
+                    } else {
+
+                        state.current_thread_id = tid.to_string();
+
+                    }
+
+                }
+
+            }
+
+            state
+
+        }
+
     }
-}
+
+    
 
 pub fn generate_thread_id() -> String {
     let mut rng = rand::rng();
