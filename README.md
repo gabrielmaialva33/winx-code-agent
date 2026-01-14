@@ -34,11 +34,10 @@ Winx is a **sentient code agent** that combines:
 
 ```mermaid
 xychart-beta
-    title "Performance Comparison (lower is better)"
-    x-axis ["Startup", "Shell Exec", "File Read 1MB", "Memory"]
-    y-axis "Time (ms) / Memory (MB)" 0 --> 100
-    bar [100, 100, 100, 100]
-    bar [0.12, 1.8, 0.9, 7]
+    title "Winx Speedup (x times faster than Python)"
+    x-axis ["Startup", "Shell Exec", "File Read", "Memory"]
+    y-axis "Speedup Factor (x)" 0 --> 900
+    bar [833, 56, 107, 14]
 ```
 
 | Operation | WCGW (Python) | Winx (Rust) | Speedup |
@@ -81,18 +80,16 @@ winx serve
 
 ### Interactive REPL
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  ✨ Winx v0.2.3 • qwen3-235b-instruct • RTX 4090 (23GB)        │
-├─────────────────────────────────────────────────────────────────┤
-│                                                                 │
-│  › Como faço deploy do VIVA?                                   │
-│                                                                 │
-│  Winx: Para fazer deploy do VIVA, você pode usar:              │
-│        fly deploy --app viva-prod                               │
-│                                                                 │
-│  Comandos: /help /model /clear /copy Ctrl+O (editor)           │
-└─────────────────────────────────────────────────────────────────┘
+```text
+$ winx
+✨ Winx v0.2.3 • RTX 4090 • qwen3-235b
+
+› Como faço deploy do VIVA?
+
+Winx: Para fazer deploy do VIVA, você pode usar:
+      fly deploy --app viva-prod
+
+[N]ormal • /help • /model • Ctrl+O (editor)
 ```
 
 **Features:**
@@ -333,46 +330,57 @@ winx --model gemini:gemini-2.0-flash
 
 ```mermaid
 flowchart TB
-    subgraph User["👤 User"]
-        cli["Terminal"]
-        claude["Claude Code"]
+    subgraph User["👤 User Interface"]
+        cli["💻 Terminal (REPL)"]
+        claude["🤖 Claude Code"]
     end
 
-    subgraph Winx["✨ Winx Agent"]
+    subgraph Winx["✨ Winx Agent (Rust)"]
         direction TB
-        subgraph Modes["Operation Modes"]
+        subgraph Modes["Entry Points"]
+            direction LR
             repl["Interactive REPL"]
             chat["One-shot Chat"]
             mcp["MCP Server"]
         end
-        subgraph Core["Core Systems"]
-            agent["🧠 Agent<br/>(Self-Awareness)"]
-            learn["📚 Learning<br/>(Embeddings)"]
-            sense["👁️ Sense<br/>(Environment)"]
+
+        subgraph Core["Cognitive Engine"]
+            direction LR
+            agent["🧠 Agent Identity"]
+            learn["📚 Learning (RAG)"]
+            sense["👁️ Environment Sense"]
         end
-        subgraph Tools["MCP Tools"]
-            bash["⚡ BashCommand"]
-            files["📄 ReadFiles"]
-            write["✏️ FileWriteOrEdit"]
+
+        subgraph Tools["Native Tools"]
+            direction LR
+            bash["⚡ PTY Shell"]
+            files["📄 zero-copy Read"]
+            write["✏️ Search/Replace"]
         end
     end
 
-    subgraph Providers["🤖 LLM Providers"]
-        nvidia["NVIDIA NIM"]
-        openai["OpenAI"]
-        ollama["Ollama"]
+    subgraph Providers["🤖 Brains (LLMs)"]
+        nvidia["🟢 NVIDIA NIM"]
+        openai["🔵 OpenAI"]
+        gemini["🟣 Gemini"]
+        ollama["🏠 Ollama"]
     end
 
     cli --> repl
     cli --> chat
-    claude -->|MCP| mcp
+    claude -->|MCP Protocol| mcp
+    
     Modes --> Core
     Core --> Tools
+    
     repl --> Providers
     chat --> Providers
+    mcp -.->|context| learn
 
-    style Winx fill:#2d3748,stroke:#ed8936,color:#fff
-    style Providers fill:#553c9a,stroke:#9f7aea,color:#fff
+    style Winx fill:#1a1b26,stroke:#7aa2f7,color:#c0caf5
+    style Core fill:#24283b,stroke:#bb9af7,color:#c0caf5
+    style User fill:#16161e,stroke:#414868,color:#c0caf5
+    style Providers fill:#1a1b26,stroke:#9ece6a,color:#c0caf5
 ```
 
 ### Project Structure

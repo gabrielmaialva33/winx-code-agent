@@ -1,7 +1,7 @@
-//! Session Parser - Lê sessões do Claude Code.
+//! Session Parser - Parses Claude Code sessions.
 //!
-//! Parse de arquivos JSONL em `~/.claude/projects/**/*.jsonl`
-//! Extrai mensagens user/assistant para análise.
+//! Parses JSONL files in `~/.claude/projects/**/*.jsonl`.
+//! Extracts user/assistant messages for analysis.
 
 use std::path::PathBuf;
 
@@ -12,32 +12,32 @@ use tracing::{debug, info, warn};
 
 use crate::errors::WinxError;
 
-/// Parser de sessões do Claude Code
+/// Claude Code session parser.
 pub struct SessionParser {
-    /// Diretório das sessões
+    /// Sessions directory
     sessions_dir: PathBuf,
-    /// Contagem de sessões processadas
+    /// Processed session count
     session_count: usize,
 }
 
-/// Mensagem extraída de uma sessão
+/// Message extracted from a session.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMessage {
-    /// ID da sessão
+    /// Session ID
     pub session_id: String,
-    /// Role: "user" ou "assistant"
+    /// Role: "user" or "assistant"
     pub role: String,
-    /// Conteúdo da mensagem
+    /// Message content
     pub content: String,
     /// Timestamp
     pub timestamp: String,
-    /// Diretório de trabalho
+    /// Working directory
     pub cwd: Option<String>,
-    /// Projeto associado
+    /// Associated project
     pub project: Option<String>,
 }
 
-/// Entrada JSONL de uma sessão
+/// JSONL entry of a session.
 #[derive(Debug, Deserialize)]
 struct SessionEntry {
     #[serde(rename = "type")]
@@ -49,7 +49,7 @@ struct SessionEntry {
     cwd: Option<String>,
 }
 
-/// Conteúdo da mensagem (pode ser string ou array)
+/// Message content (can be string or array).
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum MessageContent {
@@ -57,7 +57,7 @@ enum MessageContent {
     Complex { role: String, content: Vec<ContentPart> },
 }
 
-/// Parte do conteúdo (para mensagens complexas)
+/// Content part (for complex messages).
 #[derive(Debug, Deserialize)]
 struct ContentPart {
     #[serde(rename = "type")]
@@ -66,7 +66,7 @@ struct ContentPart {
 }
 
 impl SessionParser {
-    /// Cria novo parser
+    /// Creates a new parser.
     pub fn new(sessions_dir: PathBuf) -> Self {
         Self {
             sessions_dir,
@@ -74,12 +74,12 @@ impl SessionParser {
         }
     }
 
-    /// Retorna contagem de sessões
+    /// Returns session count.
     pub fn session_count(&self) -> usize {
         self.session_count
     }
 
-    /// Encontra todos os arquivos de sessão
+    /// Finds all session files.
     pub async fn find_session_files(&self) -> Result<Vec<PathBuf>, WinxError> {
         let mut files = Vec::new();
 
@@ -88,7 +88,7 @@ impl SessionParser {
             return Ok(files);
         }
 
-        // Recursivamente encontra arquivos .jsonl
+        // Recursively find .jsonl files
         let mut stack = vec![self.sessions_dir.clone()];
 
         while let Some(dir) = stack.pop() {
@@ -110,7 +110,7 @@ impl SessionParser {
         Ok(files)
     }
 
-    /// Parse um único arquivo de sessão
+    /// Parses a single session file.
     pub async fn parse_session_file(
         &self,
         path: &PathBuf,
@@ -122,7 +122,7 @@ impl SessionParser {
         let reader = BufReader::new(file);
         let mut lines = reader.lines();
 
-        // Extrai session_id do nome do arquivo
+        // Extracts session_id from filename
         let default_session_id = path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -136,7 +136,7 @@ impl SessionParser {
 
             match serde_json::from_str::<SessionEntry>(&line) {
                 Ok(entry) => {
-                    // Só processa entradas com mensagem
+                    // Only process entries with messages
                     if let Some(msg) = entry.message {
                         let session_id = entry
                             .session_id
@@ -146,7 +146,7 @@ impl SessionParser {
                         let (role, content) = match msg {
                             MessageContent::Simple { role, content } => (role, content),
                             MessageContent::Complex { role, content } => {
-                                // Concatena textos das partes
+                                // Concatenate content parts
                                 let text = content
                                     .iter()
                                     .filter_map(|p| {
@@ -162,7 +162,7 @@ impl SessionParser {
                             }
                         };
 
-                        // Ignora mensagens vazias ou de sistema
+                        // Ignore empty or system messages
                         if !content.trim().is_empty() && !content.contains("<command-message>") {
                             messages.push(SessionMessage {
                                 session_id,
@@ -170,13 +170,13 @@ impl SessionParser {
                                 content,
                                 timestamp: entry.timestamp.unwrap_or_default(),
                                 cwd: entry.cwd,
-                                project: None, // TODO: extrair do path
+                                project: None,
                             });
                         }
                     }
                 }
                 Err(e) => {
-                    // Log mas continua - algumas linhas podem ter formato diferente
+                    // Log but continue - some lines might have different format
                     debug!("Failed to parse line in {:?}: {}", path, e);
                 }
             }
@@ -185,7 +185,7 @@ impl SessionParser {
         Ok(messages)
     }
 
-    /// Parse todas as sessões
+    /// Parses all sessions.
     pub async fn parse_all_sessions(&mut self) -> Result<Vec<SessionMessage>, WinxError> {
         let files = self.find_session_files().await?;
         self.session_count = files.len();
@@ -199,7 +199,7 @@ impl SessionParser {
 
             match self.parse_session_file(file).await {
                 Ok(messages) => {
-                    // Adiciona projeto baseado no path
+                    // Adds project based on path
                     let project = file
                         .parent()
                         .and_then(|p| p.file_name())

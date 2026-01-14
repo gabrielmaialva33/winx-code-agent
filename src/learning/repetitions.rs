@@ -1,11 +1,11 @@
-//! Repetition Detector - Detecta pedidos repetidos.
+//! Repetition Detector - Detects repeated requests.
 //!
-//! Usa embeddings (jina-embeddings-v2-base-code) para identificar
-//! padrões que o usuário repete em múltiplas sessões.
-//! Esses padrões são candidatos a automação (skills/comandos).
+//! Uses embeddings (jina-embeddings-v2-base-code) to identify
+//! patterns that the user repeats across multiple sessions.
+//! These patterns are candidates for automation (skills/commands).
 //!
-//! Com embeddings reais: "fazer deploy do viva" ≈ "deploy viva prod"
-//! (entende que são semanticamente similares)
+//! With real embeddings: "deploy viva" ≈ "deploy viva prod"
+//! (understands they are semantically similar)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -16,51 +16,51 @@ use tokio::sync::RwLock;
 use super::embedding_engine::{EmbeddingBackend, EmbeddingConfig, EmbeddingEngine, Embedding};
 use super::{AutomationCandidate, FrequentRequest};
 
-/// Detector de repetições com embeddings
+/// Repetition detector with embeddings.
 pub struct RepetitionDetector {
-    /// Índice invertido: palavra -> conjunto de request_ids
+    /// Inverted index: word -> set of request_ids
     inverted_index: HashMap<String, HashSet<usize>>,
-    /// Pedidos armazenados
+    /// Stored requests
     requests: Vec<RequestData>,
-    /// Embeddings dos pedidos
+    /// Request embeddings
     request_embeddings: Vec<Option<Embedding>>,
-    /// Engine de embeddings
+    /// Embedding engine
     engine: Arc<RwLock<Option<EmbeddingEngine>>>,
-    /// Cache de similaridades calculadas
+    /// Cache of calculated similarities
     similarity_cache: HashMap<(usize, usize), f64>,
-    /// Clusters de pedidos similares
+    /// Clusters of similar requests
     clusters: Vec<RequestCluster>,
-    /// Threshold de similaridade
+    /// Similarity threshold
     similarity_threshold: f64,
-    /// Configuração
+    /// Configuration
     config: EmbeddingConfig,
 }
 
-/// Dados de um pedido
+/// Request data.
 #[derive(Debug, Clone)]
 struct RequestData {
-    /// Texto original
+    /// Original text
     original: String,
-    /// Texto normalizado
+    /// Normalized text
     normalized: String,
-    /// Conjunto de palavras (para Jaccard)
+    /// Word set (for Jaccard)
     word_set: HashSet<String>,
     /// TF-IDF vector (lazy computed)
     tfidf: Option<Vec<f64>>,
-    /// Sessão de origem
+    /// Source session
     session_id: String,
-    /// Timestamp para ordenação
+    /// Timestamp for sorting
     timestamp: u64,
 }
 
-/// Cluster de pedidos similares
+/// Cluster of similar requests.
 #[derive(Debug, Clone)]
 struct RequestCluster {
-    /// Centroide (request mais representativo)
+    /// Centroid (most representative request)
     centroid_idx: usize,
-    /// Membros do cluster
+    /// Cluster members
     member_indices: Vec<usize>,
-    /// Score de coesão
+    /// Cohesion score
     cohesion: f64,
 }
 
@@ -71,7 +71,7 @@ impl Default for RepetitionDetector {
 }
 
 impl RepetitionDetector {
-    /// Cria novo detector
+    /// Creates a new detector.
     pub fn new() -> Self {
         Self {
             inverted_index: HashMap::new(),
@@ -85,7 +85,7 @@ impl RepetitionDetector {
         }
     }
 
-    /// Cria com configuração customizada
+    /// Creates with custom configuration.
     pub fn with_config(config: EmbeddingConfig) -> Self {
         Self {
             inverted_index: HashMap::new(),
@@ -99,14 +99,14 @@ impl RepetitionDetector {
         }
     }
 
-    /// Inicializa o engine de embeddings (async)
+    /// Initializes the embedding engine (async).
     pub async fn initialize(&mut self) {
         let engine = EmbeddingEngine::new(self.config.clone()).await;
         let mut lock = self.engine.write().await;
         *lock = Some(engine);
     }
 
-    /// Retorna o backend ativo
+    /// Returns the active backend.
     pub async fn backend(&self) -> EmbeddingBackend {
         let lock = self.engine.read().await;
         lock.as_ref()
@@ -114,11 +114,11 @@ impl RepetitionDetector {
             .unwrap_or(EmbeddingBackend::Jaccard)
     }
 
-    /// Adiciona mensagem para análise
+    /// Adds message for analysis.
     pub fn add_message(&mut self, content: &str, session_id: &str) {
         let normalized = normalize_request(content);
 
-        // Ignora mensagens muito curtas
+        // Ignore very short messages
         if normalized.len() < 10 {
             return;
         }
@@ -128,14 +128,14 @@ impl RepetitionDetector {
             .map(String::from)
             .collect();
 
-        // Ignora se muito poucas palavras
+        // Ignore if too few words
         if word_set.len() < 2 {
             return;
         }
 
         let request_idx = self.requests.len();
 
-        // Atualiza índice invertido
+        // Update inverted index
         for word in &word_set {
             self.inverted_index
                 .entry(word.clone())
@@ -155,18 +155,18 @@ impl RepetitionDetector {
                 .unwrap_or(0),
         });
 
-        // Placeholder para embedding (será computado depois)
+        // Placeholder for embedding (will be computed later)
         self.request_embeddings.push(None);
     }
 
-    /// Computa embeddings para todos os requests pendentes
+    /// Computes embeddings for all pending requests.
     pub async fn compute_embeddings(&mut self) {
         let engine_guard = self.engine.read().await;
         let Some(ref engine) = *engine_guard else {
             return;
         };
 
-        // Se backend é Jaccard, não precisa computar
+        // If backend is Jaccard, no need to compute
         if engine.backend() == EmbeddingBackend::Jaccard {
             return;
         }
@@ -182,13 +182,13 @@ impl RepetitionDetector {
         }
     }
 
-    /// Agrupa pedidos similares usando algoritmo de clustering
+    /// Clusters similar requests using clustering algorithm.
     pub fn cluster_requests(&mut self) {
         if self.requests.is_empty() {
             return;
         }
 
-        // Usa algoritmo de clustering incremental otimizado
+        // Use optimized incremental clustering algorithm
         let mut assigned: HashSet<usize> = HashSet::new();
 
         for i in 0..self.requests.len() {
@@ -196,10 +196,10 @@ impl RepetitionDetector {
                 continue;
             }
 
-            // Encontra candidatos usando índice invertido (O(k) em vez de O(n))
+            // Find candidates using inverted index (O(k) instead of O(n))
             let candidates = self.find_similar_candidates(i);
 
-            // Filtra por threshold real
+            // Filter by real threshold
             let mut cluster_members: Vec<usize> = vec![i];
 
             for &j in &candidates {
@@ -212,10 +212,10 @@ impl RepetitionDetector {
             }
 
             if cluster_members.len() >= 2 {
-                // Calcula cohesion do cluster
+                // Calculate cluster cohesion
                 let cohesion = self.calculate_cluster_cohesion(&cluster_members);
 
-                // Encontra centroide (elemento mais central)
+                // Find centroid (most central element)
                 let centroid = self.find_centroid(&cluster_members);
 
                 self.clusters.push(RequestCluster {
@@ -230,7 +230,7 @@ impl RepetitionDetector {
             }
         }
 
-        // Ordena clusters por tamanho e cohesion
+        // Sort clusters by size and cohesion
         self.clusters.sort_by(|a, b| {
             let score_a = a.member_indices.len() as f64 * a.cohesion;
             let score_b = b.member_indices.len() as f64 * b.cohesion;
@@ -238,12 +238,12 @@ impl RepetitionDetector {
         });
     }
 
-    /// Encontra candidatos similares usando índice invertido
+    /// Finds similar candidates using inverted index.
     fn find_similar_candidates(&self, idx: usize) -> Vec<usize> {
         let req = &self.requests[idx];
         let mut candidate_counts: HashMap<usize, usize> = HashMap::new();
 
-        // Conta quantas palavras em comum cada candidato tem
+        // Count how many common words each candidate has
         for word in &req.word_set {
             if let Some(indices) = self.inverted_index.get(word) {
                 for &other_idx in indices {
@@ -254,7 +254,7 @@ impl RepetitionDetector {
             }
         }
 
-        // Filtra candidatos com pelo menos 50% das palavras em comum
+        // Filter candidates with at least 50% overlapping words
         let min_overlap = (req.word_set.len() / 2).max(1);
         candidate_counts
             .into_iter()
@@ -263,8 +263,8 @@ impl RepetitionDetector {
             .collect()
     }
 
-    /// Calcula similaridade entre dois pedidos
-    /// Usa embeddings (cosine) se disponíveis, senão Jaccard + TF-IDF
+    /// Calculates similarity between two requests.
+    /// Uses embeddings (cosine) if available, otherwise Jaccard + TF-IDF.
     fn calculate_similarity(&mut self, i: usize, j: usize) -> f64 {
         let key = if i < j { (i, j) } else { (j, i) };
 
@@ -272,19 +272,19 @@ impl RepetitionDetector {
             return sim;
         }
 
-        // Tenta usar embeddings primeiro
+        // Try using embeddings first
         let sim = if let (Some(Some(emb_i)), Some(Some(emb_j))) = (
             self.request_embeddings.get(i),
             self.request_embeddings.get(j),
         ) {
-            // Cosine similarity com embeddings reais
+            // Cosine similarity with real embeddings
             EmbeddingEngine::cosine_similarity(emb_i, emb_j) as f64
         } else {
             // Fallback: Jaccard + TF-IDF
             let req_i = &self.requests[i];
             let req_j = &self.requests[j];
 
-            // Jaccard similarity (rápido)
+            // Jaccard similarity (fast)
             let intersection = req_i.word_set.intersection(&req_j.word_set).count();
             let union = req_i.word_set.union(&req_j.word_set).count();
             let jaccard = if union > 0 {
@@ -293,7 +293,7 @@ impl RepetitionDetector {
                 0.0
             };
 
-            // Adiciona peso para palavras raras (pseudo TF-IDF)
+            // Add rare word bonus (pseudo TF-IDF)
             let rare_word_bonus = self.calculate_rare_word_bonus(i, j);
 
             (jaccard * 0.8 + rare_word_bonus * 0.2).min(1.0)
@@ -303,7 +303,7 @@ impl RepetitionDetector {
         sim
     }
 
-    /// Calcula bonus para palavras raras em comum
+    /// Calculates bonus for shared rare words.
     fn calculate_rare_word_bonus(&self, i: usize, j: usize) -> f64 {
         let req_i = &self.requests[i];
         let req_j = &self.requests[j];
@@ -328,7 +328,7 @@ impl RepetitionDetector {
         }
     }
 
-    /// Calcula cohesion de um cluster
+    /// Calculates cluster cohesion.
     fn calculate_cluster_cohesion(&mut self, members: &[usize]) -> f64 {
         if members.len() < 2 {
             return 1.0;
@@ -351,7 +351,7 @@ impl RepetitionDetector {
         }
     }
 
-    /// Encontra o centroide de um cluster
+    /// Finds cluster centroid (most central element).
     fn find_centroid(&mut self, members: &[usize]) -> usize {
         if members.len() == 1 {
             return members[0];
@@ -376,9 +376,9 @@ impl RepetitionDetector {
         best_idx
     }
 
-    /// Retorna pedidos frequentes (que apareceram >= min_count vezes)
+    /// Returns frequent requests (appeared >= min_count times).
     pub fn get_frequent_requests(&self, min_count: usize) -> Vec<FrequentRequest> {
-        // Primeiro, agrupa clusters
+        // First, group clusters
         self.clusters
             .iter()
             .filter(|c| c.member_indices.len() >= min_count)
@@ -401,12 +401,12 @@ impl RepetitionDetector {
             .collect()
     }
 
-    /// Retorna candidatos a automação
+    /// Returns automation candidates.
     pub fn get_automation_candidates(&self) -> Vec<AutomationCandidate> {
         self.clusters
             .iter()
             .filter(|c| {
-                // Multi-session: pelo menos 2 sessões diferentes
+                // Multi-session: at least 2 different sessions
                 let unique_sessions: HashSet<_> = c
                     .member_indices
                     .iter()
@@ -436,7 +436,7 @@ impl RepetitionDetector {
             .collect()
     }
 
-    /// Retorna estatísticas
+    /// Returns statistics.
     pub async fn stats(&self) -> RepetitionStats {
         let total_unique = self.requests.len();
         let clustered = self.clusters.iter().map(|c| c.member_indices.len()).sum();
@@ -480,7 +480,7 @@ impl RepetitionDetector {
     }
 }
 
-/// Estatísticas de repetição
+/// Repetition statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RepetitionStats {
     pub total_unique_requests: usize,
@@ -492,7 +492,7 @@ pub struct RepetitionStats {
     pub embeddings_computed: usize,
 }
 
-/// Normaliza texto para comparação
+/// Normalizes text for comparison.
 fn normalize_request(text: &str) -> String {
     text.to_lowercase()
         .chars()
@@ -504,7 +504,7 @@ fn normalize_request(text: &str) -> String {
         .join(" ")
 }
 
-/// Verifica se é stopword
+/// Checks if word is a stopword.
 fn is_stopword(word: &str) -> bool {
     const STOPWORDS: &[&str] = &[
         "que", "para", "com", "uma", "por", "mais", "como", "mas", "foi",
@@ -515,7 +515,7 @@ fn is_stopword(word: &str) -> bool {
     STOPWORDS.contains(&word)
 }
 
-/// Gera sugestão de nome de comando
+/// Generates suggested command name.
 fn generate_command_name(normalized: &str) -> String {
     let keywords: Vec<_> = normalized
         .split_whitespace()
@@ -546,20 +546,20 @@ mod tests {
     async fn test_clustering() {
         let mut detector = RepetitionDetector::new();
 
-        // Adiciona pedidos muito similares (mesmas palavras-chave)
+        // Adds very similar requests (same keywords)
         detector.add_message("fazer deploy aplicacao viva ambiente producao", "session1");
         detector.add_message("fazer deploy aplicacao viva ambiente staging", "session2");
         detector.add_message("fazer deploy aplicacao viva ambiente desenvolvimento", "session3");
 
-        // Verifica se as mensagens foram adicionadas
+        // Verifies if messages were added
         let pre_stats = detector.stats().await;
         assert_eq!(pre_stats.total_unique_requests, 3, "Should have 3 requests");
 
         detector.cluster_requests();
 
         let stats = detector.stats().await;
-        // Pelo menos 2 devem ser agrupados (threshold 0.6)
-        // Note: clustering pode não encontrar clusters se similaridade < threshold
+        // At least 2 should be grouped (threshold 0.6)
+        // Note: clustering might not find clusters if similarity < threshold
         assert!(stats.total_unique_requests == 3, "Should still have 3 requests");
     }
 
@@ -569,20 +569,20 @@ mod tests {
         detector.add_message("fazer deploy do viva", "s1");
         detector.add_message("deploy viva producao", "s2");
 
-        // Primeira chamada (usa Jaccard já que não inicializamos embeddings)
+        // First call (uses Jaccard since embeddings are not initialized)
         let sim1 = detector.calculate_similarity(0, 1);
-        // Segunda chamada (cache)
+        // Second call (cache)
         let sim2 = detector.calculate_similarity(0, 1);
 
         assert_eq!(sim1, sim2);
-        assert!(sim1 > 0.3); // Devem ter alguma similaridade
+        assert!(sim1 > 0.3); // Should have some similarity
     }
 
     #[tokio::test]
     async fn test_backend_detection() {
         let detector = RepetitionDetector::new();
 
-        // Sem initialize, backend é Jaccard
+        // Without initialize, backend is Jaccard
         let backend = detector.backend().await;
         assert_eq!(backend, EmbeddingBackend::Jaccard);
     }

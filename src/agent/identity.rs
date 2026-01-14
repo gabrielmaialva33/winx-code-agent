@@ -1,7 +1,7 @@
 //! Winx Identity and Self-Awareness
 //!
-//! Faz a Winx saber quem ela é, onde está rodando, e o que pode fazer.
-//! Gera system prompts dinâmicos baseados no estado atual.
+//! Enables Winx to understand its identity, environment, and capabilities.
+//! Generates dynamic system prompts based on current state.
 
 use std::collections::HashMap;
 use std::env;
@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// Informações do sistema onde Winx está rodando
+/// System information where Winx is running.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemInfo {
     pub hostname: String,
@@ -34,13 +34,8 @@ impl SystemInfo {
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
         let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
-        // Detect GPU (NVIDIA)
         let gpu = Self::detect_gpu();
-
-        // Detect CPU
         let cpu = Self::detect_cpu();
-
-        // Detect RAM
         let ram_gb = Self::detect_ram();
 
         Self {
@@ -107,7 +102,7 @@ impl SystemInfo {
     }
 }
 
-/// Capacidade/habilidade da Winx
+/// Capability/Skill of the agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Capability {
     pub name: String,
@@ -115,7 +110,7 @@ pub struct Capability {
     pub enabled: bool,
 }
 
-/// Informação sobre um provider LLM
+/// Information about an LLM provider.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderInfo {
     pub name: String,
@@ -125,7 +120,7 @@ pub struct ProviderInfo {
     pub is_default: bool,
 }
 
-/// Tool disponível para o agente
+/// Tool available to the agent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInfo {
     pub name: String,
@@ -139,7 +134,7 @@ pub enum ToolSource {
     Mcp(String),     // From MCP server (server name)
 }
 
-/// Identidade completa da Winx
+/// Complete Winx Identity.
 #[derive(Debug, Clone)]
 pub struct WinxIdentity {
     pub name: String,
@@ -247,12 +242,12 @@ impl WinxIdentity {
         }
     }
 
-    /// Adiciona informação de providers disponíveis
+    /// Adds information about available providers.
     pub fn set_providers(&mut self, providers: Vec<ProviderInfo>) {
         self.providers = providers;
     }
 
-    /// Adiciona tools de MCP servers conectados
+    /// Adds tools from connected MCP servers.
     pub fn add_mcp_tools(&mut self, server_name: &str, tools: Vec<(String, String)>) {
         for (name, description) in tools {
             self.tools.push(ToolInfo {
@@ -263,12 +258,12 @@ impl WinxIdentity {
         }
     }
 
-    /// Define nome do usuário (para personalização)
+    /// Sets the user name (for personalization).
     pub fn set_user(&mut self, name: &str) {
         self.user_name = Some(name.to_string());
     }
 
-    /// Gera system prompt completo e dinâmico
+    /// Generates the complete dynamic system prompt.
     pub fn generate_system_prompt(&self) -> String {
         let mut prompt = String::new();
 
@@ -372,13 +367,13 @@ impl WinxIdentity {
         prompt
     }
 
-    /// Gera descrição curta das tools (pra incluir em prompts menores)
+    /// Generates a short description of tools (for smaller prompts).
     pub fn describe_tools_short(&self) -> String {
         let tool_names: Vec<&str> = self.tools.iter().map(|t| t.name.as_str()).collect();
         format!("Tools: {}", tool_names.join(", "))
     }
 
-    /// Verifica se uma capability está habilitada
+    /// Checks if a capability is enabled.
     pub fn can(&self, capability: &str) -> bool {
         self.capabilities
             .iter()

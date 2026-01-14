@@ -1,6 +1,6 @@
-//! Learning Store - Persistência do aprendizado.
+//! Learning Store - Learning persistence.
 //!
-//! Salva e carrega dados de aprendizado em `~/.winx/learning/`
+//! Saves and loads learning data in `~/.winx/learning/`.
 
 use std::fs;
 use std::path::PathBuf;
@@ -12,16 +12,16 @@ use crate::errors::WinxError;
 
 use super::LearningReport;
 
-/// Store para persistência de aprendizado
+/// Store for learning persistence.
 pub struct LearningStore {
-    /// Diretório base
+    /// Base directory
     base_dir: PathBuf,
 }
 
 impl LearningStore {
-    /// Cria novo store
+    /// Creates a new store.
     pub fn new(base_dir: PathBuf) -> Result<Self, WinxError> {
-        // Cria diretórios necessários
+        // Create necessary directories
         let dirs = [
             base_dir.join("sessions").join("messages"),
             base_dir.join("communication"),
@@ -39,25 +39,25 @@ impl LearningStore {
         Ok(Self { base_dir })
     }
 
-    /// Salva relatório de aprendizado
+    /// Saves learning report.
     pub fn save_report(&self, report: &LearningReport) -> Result<(), WinxError> {
-        // Salva vocabulário
+        // Save vocabulary
         let vocab_path = self.base_dir.join("communication").join("vocabulary.json");
         self.save_json(&vocab_path, &report.vocabulary)?;
 
-        // Salva pedidos frequentes
+        // Save frequent requests
         let freq_path = self.base_dir.join("repetitions").join("frequent_requests.json");
         self.save_json(&freq_path, &report.frequent_requests)?;
 
-        // Salva candidatos a automação
+        // Save automation candidates
         let auto_path = self.base_dir.join("repetitions").join("automation_candidates.json");
         self.save_json(&auto_path, &report.automation_candidates)?;
 
-        // Salva padrões de pensamento
+        // Save thinking patterns
         let think_path = self.base_dir.join("thinking").join("patterns.json");
         self.save_json(&think_path, &report.thinking_patterns)?;
 
-        // Salva relatório completo
+        // Save full report
         let report_path = self.base_dir.join("learning_report.json");
         self.save_json(&report_path, report)?;
 
@@ -69,7 +69,7 @@ impl LearningStore {
         Ok(())
     }
 
-    /// Carrega relatório existente
+    /// Loads existing report.
     pub fn load_report(&self) -> Option<LearningReport> {
         let report_path = self.base_dir.join("learning_report.json");
 
@@ -92,17 +92,17 @@ impl LearningStore {
         }
     }
 
-    /// Verifica se já existe aprendizado
+    /// Checks if learning data exists.
     pub fn has_learning(&self) -> bool {
         self.base_dir.join("learning_report.json").exists()
     }
 
-    /// Retorna caminho do diretório base
+    /// Returns base directory path.
     pub fn base_dir(&self) -> &PathBuf {
         &self.base_dir
     }
 
-    /// Salva JSON em arquivo
+    /// Saves JSON to file.
     fn save_json<T: serde::Serialize>(&self, path: &PathBuf, data: &T) -> Result<(), WinxError> {
         let json = serde_json::to_string_pretty(data)
             .map_err(|e| WinxError::SerializationError(e.to_string()))?;
@@ -112,7 +112,7 @@ impl LearningStore {
         Ok(())
     }
 
-    /// Carrega JSON de arquivo
+    /// Loads JSON from file.
     pub fn load_json<T: serde::de::DeserializeOwned>(&self, path: &PathBuf) -> Option<T> {
         if !path.exists() {
             return None;

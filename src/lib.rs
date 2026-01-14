@@ -14,6 +14,7 @@
 //! designed to integrate with Claude and other LLMs via the Model Context Protocol (MCP).
 
 pub mod agent;
+pub mod canvas;
 pub mod chat;
 pub mod errors;
 pub mod interactive;

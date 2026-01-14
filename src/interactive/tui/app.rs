@@ -27,8 +27,6 @@ pub enum AppMode {
     Insert,
     /// Streaming mode - receiving AI response
     Streaming,
-    /// Help mode - showing help overlay
-    Help,
 }
 
 /// Message in the chat
@@ -107,9 +105,6 @@ pub struct App {
     /// Provider name
     pub provider: String,
 
-    /// Show sidebar?
-    pub show_sidebar: bool,
-
     /// Last tick time (for animations)
     pub last_tick: Instant,
     /// Spinner frame index
@@ -157,8 +152,6 @@ impl App {
 
             model,
             provider,
-
-            show_sidebar: false,
 
             last_tick: Instant::now(),
             spinner_frame: 0,
@@ -263,7 +256,6 @@ impl App {
             AppMode::Normal => self.handle_normal_key(key),
             AppMode::Insert => self.handle_insert_key(key),
             AppMode::Streaming => Ok(()),
-            AppMode::Help => self.handle_help_key(key),
         }
     }
 
@@ -271,14 +263,12 @@ impl App {
     fn handle_normal_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
             KeyCode::Char('i') | KeyCode::Char('a') => self.mode = AppMode::Insert,
-            KeyCode::Char('?') => self.mode = AppMode::Help,
             KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
             KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
             KeyCode::Char('G') => self.scroll_to_bottom(),
             KeyCode::Char('g') => self.scroll_to_top(),
             KeyCode::Char('y') => self.copy_last_response()?,
             KeyCode::Char('r') => self.regenerate()?,
-            KeyCode::Tab => self.show_sidebar = !self.show_sidebar,
             KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
@@ -323,17 +313,6 @@ impl App {
             KeyCode::Char(c) => {
                 self.input.insert(self.cursor, c);
                 self.cursor += 1;
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    /// Handle key in Help mode
-    fn handle_help_key(&mut self, key: KeyEvent) -> Result<()> {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('?') => {
-                self.mode = AppMode::Insert;
             }
             _ => {}
         }

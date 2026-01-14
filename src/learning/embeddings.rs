@@ -1,9 +1,9 @@
-//! Conversation Embeddings - Busca semântica em conversas.
+//! Conversation Embeddings - Semantic search in conversations.
 //!
-//! Usa embeddings reais (jina-embeddings-v2-base-code) para encontrar
-//! conversas similares. Roda local na RTX 4090.
+//! Uses real embeddings (jina-embeddings-v2-base-code) to find
+//! similar conversations. Runs locally on RTX 4090.
 //!
-//! "Já conversamos sobre isso antes?" → busca semântica real!
+//! "Have we talked about this before?" → real semantic search!
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,41 +14,41 @@ use tokio::sync::RwLock;
 use super::embedding_engine::{EmbeddingBackend, EmbeddingConfig, EmbeddingEngine};
 use super::SessionMessage;
 
-/// Sistema de embeddings de conversas com ML real
+/// Conversation embeddings system with real ML.
 pub struct ConversationEmbeddings {
-    /// Índice de conversas (por tópico normalizado)
+    /// Conversation index (by normalized topic)
     index: HashMap<String, Vec<ConversationEntry>>,
-    /// Engine de embeddings (Candle/HTTP/Jaccard)
+    /// Embedding engine (Candle/HTTP/Jaccard)
     engine: Arc<RwLock<Option<EmbeddingEngine>>>,
-    /// Embeddings computados para cada sessão
+    /// Computed embeddings for each session
     session_embeddings: HashMap<String, Vec<f32>>,
-    /// Configuração
+    /// Configuration
     config: EmbeddingConfig,
 }
 
-/// Entrada no índice de conversas
+/// Conversation index entry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversationEntry {
-    /// ID da sessão
+    /// Session ID
     pub session_id: String,
-    /// Resumo da conversa
+    /// Conversation summary
     pub summary: String,
     /// Timestamp
     pub timestamp: String,
-    /// Projeto associado
+    /// Associated project
     pub project: Option<String>,
-    /// Score de relevância
+    /// Relevance score
     pub relevance: f32,
 }
 
-/// Resultado de busca
+/// Search result.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
-    /// Entradas encontradas
+    /// Found entries
     pub entries: Vec<ConversationEntry>,
-    /// Query original
+    /// Original query
     pub query: String,
-    /// Método usado (text_similarity ou embedding)
+    /// Method used (text_similarity or embedding)
     pub method: String,
 }
 
@@ -64,12 +64,12 @@ impl Default for ConversationEmbeddings {
 }
 
 impl ConversationEmbeddings {
-    /// Cria novo sistema de embeddings
+    /// Creates a new embeddings system.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Cria com configuração customizada
+    /// Creates with custom configuration.
     pub fn with_config(config: EmbeddingConfig) -> Self {
         Self {
             index: HashMap::new(),
@@ -79,14 +79,14 @@ impl ConversationEmbeddings {
         }
     }
 
-    /// Inicializa o engine de embeddings (async)
+    /// Initializes the embedding engine (async).
     pub async fn initialize(&mut self) {
         let engine = EmbeddingEngine::new(self.config.clone()).await;
         let mut lock = self.engine.write().await;
         *lock = Some(engine);
     }
 
-    /// Retorna o backend ativo
+    /// Returns the active backend.
     pub async fn backend(&self) -> EmbeddingBackend {
         let lock = self.engine.read().await;
         lock.as_ref()
@@ -94,9 +94,9 @@ impl ConversationEmbeddings {
             .unwrap_or(EmbeddingBackend::Jaccard)
     }
 
-    /// Indexa mensagens de sessões
+    /// Indexes session messages.
     pub fn index_messages(&mut self, messages: &[SessionMessage]) {
-        // Agrupa por sessão
+        // Group by session
         let mut sessions: HashMap<String, Vec<&SessionMessage>> = HashMap::new();
         for msg in messages {
             sessions.entry(msg.session_id.clone())
@@ -104,9 +104,9 @@ impl ConversationEmbeddings {
                 .push(msg);
         }
 
-        // Cria entrada para cada sessão
+        // Create entry for each session
         for (session_id, session_messages) in sessions {
-            // Extrai tópicos da conversa
+            // Extract conversation topics
             let topics = extract_topics(&session_messages);
 
             for topic in topics {
@@ -128,33 +128,33 @@ impl ConversationEmbeddings {
         }
     }
 
-    /// Busca conversas similares (usa embeddings se disponível)
+    /// Searches for similar conversations (uses embeddings if available).
     pub async fn search(&self, query: &str) -> SearchResult {
-        // Tenta usar embeddings reais primeiro
+        // Try to use real embeddings first
         let engine_guard = self.engine.read().await;
         if let Some(ref engine) = *engine_guard {
             if engine.backend() != EmbeddingBackend::Jaccard {
-                // Busca semântica real com embeddings
+                // Real semantic search with embeddings
                 return self.search_with_embeddings(engine, query).await;
             }
         }
         drop(engine_guard);
 
-        // Fallback para busca por keywords
+        // Fallback to keyword search
         self.search_keywords(query)
     }
 
-    /// Busca semântica com embeddings reais
+    /// Semantic search with real embeddings.
     async fn search_with_embeddings(&self, engine: &EmbeddingEngine, query: &str) -> SearchResult {
         let query_emb = engine.embed(query).await;
         let mut results: Vec<ConversationEntry> = Vec::new();
 
-        // Compara com embeddings de cada sessão
+        // Compare with embeddings of each session
         for (session_id, session_emb) in &self.session_embeddings {
             let similarity = EmbeddingEngine::cosine_similarity(&query_emb, session_emb);
 
             if similarity > 0.5 {
-                // Encontra a entrada correspondente
+                // Find corresponding entry
                 for entries in self.index.values() {
                     for entry in entries {
                         if &entry.session_id == session_id {
@@ -169,7 +169,7 @@ impl ConversationEmbeddings {
             }
         }
 
-        // Ordena por relevância
+        // Sort by relevance
         results.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
         results.truncate(10);
 
@@ -180,18 +180,18 @@ impl ConversationEmbeddings {
         }
     }
 
-    /// Busca por keywords (fallback)
+    /// Keyword search (fallback).
     fn search_keywords(&self, query: &str) -> SearchResult {
         let normalized = normalize_query(query);
         let keywords = extract_keywords(&normalized);
 
         let mut results: Vec<ConversationEntry> = Vec::new();
 
-        // Busca por keywords
+        // Search by keywords
         for keyword in &keywords {
             if let Some(entries) = self.index.get(keyword) {
                 for entry in entries {
-                    // Evita duplicatas
+                    // Avoid duplicates
                     if !results.iter().any(|e| e.session_id == entry.session_id) {
                         let mut entry = entry.clone();
                         entry.relevance = calculate_relevance(&normalized, &entry.summary);
@@ -201,7 +201,7 @@ impl ConversationEmbeddings {
             }
         }
 
-        // Busca por similaridade de texto (fallback)
+        // Search by text similarity (fallback)
         if results.is_empty() {
             for (topic, entries) in &self.index {
                 let sim = text_similarity(&normalized, topic);
@@ -217,7 +217,7 @@ impl ConversationEmbeddings {
             }
         }
 
-        // Ordena por relevância
+        // Sort by relevance
         results.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap());
         results.truncate(10);
 
@@ -228,20 +228,20 @@ impl ConversationEmbeddings {
         }
     }
 
-    /// Verifica se existe conversa sobre um tópico
+    /// Checks if there is a conversation about a topic.
     pub async fn has_conversation_about(&self, topic: &str) -> bool {
         let result = self.search(topic).await;
         !result.entries.is_empty()
     }
 
-    /// Computa embeddings para mensagens indexadas
+    /// Computes embeddings for indexed messages.
     pub async fn compute_embeddings(&mut self, messages: &[SessionMessage]) {
         let engine_guard = self.engine.read().await;
         let Some(ref engine) = *engine_guard else {
             return;
         };
 
-        // Agrupa por sessão
+        // Group by session
         let mut sessions: HashMap<String, Vec<&SessionMessage>> = HashMap::new();
         for msg in messages.iter().filter(|m| m.role == "user") {
             sessions.entry(msg.session_id.clone())
@@ -249,19 +249,19 @@ impl ConversationEmbeddings {
                 .push(msg);
         }
 
-        // Computa embedding para cada sessão (média dos embeddings das mensagens)
+        // Compute embedding for each session (average of message embeddings)
         for (session_id, msgs) in sessions {
             if self.session_embeddings.contains_key(&session_id) {
-                continue; // Já computado
+                continue; // Already computed
             }
 
-            // Concatena mensagens da sessão
+            // Concatenate session messages
             let combined: String = msgs.iter()
                 .map(|m| m.content.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
 
-            // Limita tamanho
+            // Limit size
             let text = if combined.len() > 8000 {
                 &combined[..8000]
             } else {
@@ -273,7 +273,7 @@ impl ConversationEmbeddings {
         }
     }
 
-    /// Retorna estatísticas
+    /// Returns statistics.
     pub async fn stats(&self) -> EmbeddingStats {
         let total_topics = self.index.len();
         let total_entries: usize = self.index.values().map(|v| v.len()).sum();
@@ -299,7 +299,7 @@ impl ConversationEmbeddings {
     }
 }
 
-/// Estatísticas de embeddings
+/// Statistics of embeddings system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingStats {
     pub indexed_topics: usize,
@@ -309,7 +309,7 @@ pub struct EmbeddingStats {
     pub session_embeddings: usize,
 }
 
-/// Extrai tópicos de uma sessão
+/// Extracts topics from a session.
 fn extract_topics(messages: &[&SessionMessage]) -> Vec<String> {
     let mut topics = Vec::new();
 
@@ -322,13 +322,13 @@ fn extract_topics(messages: &[&SessionMessage]) -> Vec<String> {
         }
     }
 
-    topics.truncate(10); // Limite de tópicos por sessão
+    topics.truncate(10); // Topic limit per session
     topics
 }
 
-/// Cria resumo de uma sessão
+/// Creates a session summary.
 fn create_summary(messages: &[&SessionMessage]) -> String {
-    // Pega primeira mensagem do usuário
+    // Get first user message
     messages
         .iter()
         .filter(|m| m.role == "user")
@@ -337,7 +337,7 @@ fn create_summary(messages: &[&SessionMessage]) -> String {
         .unwrap_or_default()
 }
 
-/// Normaliza query para busca
+/// Normalizes search query.
 fn normalize_query(query: &str) -> String {
     query
         .to_lowercase()
@@ -349,7 +349,7 @@ fn normalize_query(query: &str) -> String {
         .join(" ")
 }
 
-/// Extrai keywords de texto
+/// Extracts keywords from text.
 fn extract_keywords(text: &str) -> Vec<String> {
     text.split_whitespace()
         .filter(|w| w.len() > 3)
@@ -358,12 +358,12 @@ fn extract_keywords(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Calcula relevância entre query e texto
+/// Calculates relevance between query and text.
 fn calculate_relevance(query: &str, text: &str) -> f32 {
     text_similarity(query, &text.to_lowercase())
 }
 
-/// Similaridade de texto (Jaccard)
+/// Text similarity (Jaccard).
 fn text_similarity(a: &str, b: &str) -> f32 {
     let words_a: std::collections::HashSet<_> = a.split_whitespace().collect();
     let words_b: std::collections::HashSet<_> = b.split_whitespace().collect();
@@ -378,7 +378,7 @@ fn text_similarity(a: &str, b: &str) -> f32 {
     }
 }
 
-/// Trunca string
+/// Truncates string.
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -387,7 +387,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Verifica se é stopword
+/// Checks if word is a stopword.
 fn is_stopword(word: &str) -> bool {
     const STOPWORDS: &[&str] = &[
         "que", "para", "com", "nao", "uma", "por", "mais", "como", "mas",
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn test_text_similarity() {
         let sim = text_similarity("deploy viva producao", "fazer deploy do viva");
-        assert!(sim > 0.2); // Devem ter alguma similaridade
+        assert!(sim > 0.2); // Should have some similarity
     }
 
     #[test]
@@ -432,7 +432,7 @@ mod tests {
 
         embeddings.index_messages(&messages);
 
-        // Sem initialize(), usa fallback keywords
+        // Without initialize(), uses keyword fallback
         let result = embeddings.search("deploy viva").await;
         assert!(!result.entries.is_empty());
         assert_eq!(result.method, "text_similarity");
@@ -442,7 +442,7 @@ mod tests {
     async fn test_backend_detection() {
         let embeddings = ConversationEmbeddings::new();
 
-        // Sem initialize, backend é Jaccard
+        // Without initialize, backend is Jaccard
         let backend = embeddings.backend().await;
         assert_eq!(backend, EmbeddingBackend::Jaccard);
     }

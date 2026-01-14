@@ -1,9 +1,11 @@
-//! Thinking Patterns - Analisa padrões de pensamento.
+//! Thinking Patterns - Analyzes thinking patterns.
 //!
-//! Detecta:
-//! - Sequências típicas de investigação
-//! - Atalhos mentais que o usuário usa
-//! - O que ele tende a esquecer
+//! Detects:
+//! - Typical investigation sequences
+//! - Mental shortcuts used by the user
+//! - Forgotten contexts
+//!
+//! Focuses on the user's cognitive process.
 
 use std::collections::HashMap;
 
@@ -11,44 +13,44 @@ use serde::{Deserialize, Serialize};
 
 use super::{SessionMessage, ThinkingPattern};
 
-/// Analisador de padrões de pensamento
+/// Thinking patterns analyzer.
 #[derive(Debug, Default)]
 pub struct ThinkingPatterns {
-    /// Sequências de ações detectadas
+    /// Detected action sequences
     action_sequences: HashMap<String, SequenceData>,
-    /// Contextos esquecidos (repetidos após longo tempo)
+    /// Forgotten contexts (repeated after long time)
     forgotten_contexts: Vec<ForgottenContext>,
-    /// Atalhos mentais
+    /// Mental shortcuts
     shortcuts: HashMap<String, usize>,
 }
 
-/// Dados de uma sequência de ações
+/// Action sequence data.
 #[derive(Debug, Clone, Default)]
 struct SequenceData {
-    /// Sequência de ações
+    /// Action sequence
     actions: Vec<String>,
-    /// Frequência
+    /// Frequency
     count: usize,
 }
 
-/// Contexto que o usuário esquece
+/// Context that the user forgets.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ForgottenContext {
-    /// O que foi esquecido
+    /// What was forgotten
     pub context: String,
-    /// Quantas vezes foi re-perguntado
+    /// How many times it was re-asked
     pub times_asked: usize,
 }
 
 impl ThinkingPatterns {
-    /// Cria novo analisador
+    /// Creates a new analyzer.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Analisa sequências de mensagens
+    /// Analyzes message sequences.
     pub fn analyze_sequences(&mut self, messages: &[SessionMessage]) {
-        // Agrupa mensagens por sessão
+        // Group messages by session
         let mut sessions: HashMap<String, Vec<&SessionMessage>> = HashMap::new();
         for msg in messages {
             sessions.entry(msg.session_id.clone())
@@ -56,25 +58,25 @@ impl ThinkingPatterns {
                 .push(msg);
         }
 
-        // Analisa cada sessão
+        // Analyze each session
         for (_session_id, session_messages) in sessions {
             self.analyze_session_sequence(&session_messages);
         }
 
-        // Detecta padrões de esquecimento
+        // Detect forgotten patterns
         self.detect_forgotten_patterns(messages);
     }
 
-    /// Analisa sequência de uma sessão
+    /// Analyzes sequence of a session.
     fn analyze_session_sequence(&mut self, messages: &[&SessionMessage]) {
-        // Extrai ações do usuário
+        // Extract user actions
         let user_actions: Vec<_> = messages
             .iter()
             .filter(|m| m.role == "user")
             .map(|m| extract_action(&m.content))
             .collect();
 
-        // Detecta sequências de 2-3 ações
+        // Detect sequences of 2-3 actions
         for window_size in 2..=3 {
             for window in user_actions.windows(window_size) {
                 let key = window.join(" -> ");
@@ -85,7 +87,7 @@ impl ThinkingPatterns {
             }
         }
 
-        // Detecta atalhos mentais (comandos curtos)
+        // Detect mental shortcuts (short commands)
         for msg in messages {
             if msg.role == "user" {
                 let shortcuts = detect_shortcuts(&msg.content);
@@ -96,9 +98,9 @@ impl ThinkingPatterns {
         }
     }
 
-    /// Detecta padrões de esquecimento
+    /// Detects forgotten patterns.
     fn detect_forgotten_patterns(&mut self, messages: &[SessionMessage]) {
-        // Agrupa perguntas similares que aparecem em sessões diferentes
+        // Group similar questions appearing in different sessions
         let mut question_counts: HashMap<String, Vec<String>> = HashMap::new();
 
         for msg in messages.iter().filter(|m| m.role == "user") {
@@ -111,7 +113,7 @@ impl ThinkingPatterns {
             }
         }
 
-        // Perguntas em múltiplas sessões = contexto esquecido
+        // Questions in multiple sessions = forgotten context
         for (question, sessions) in question_counts {
             let unique_sessions: std::collections::HashSet<_> = sessions.iter().collect();
             if unique_sessions.len() >= 2 {
@@ -123,11 +125,11 @@ impl ThinkingPatterns {
         }
     }
 
-    /// Retorna padrões detectados
+    /// Returns detected patterns.
     pub fn get_patterns(&self) -> Vec<ThinkingPattern> {
         let mut patterns = Vec::new();
 
-        // Sequências frequentes
+        // Frequent sequences
         let mut sequences: Vec<_> = self.action_sequences.iter().collect();
         sequences.sort_by(|a, b| b.1.count.cmp(&a.1.count));
 
@@ -135,13 +137,13 @@ impl ThinkingPatterns {
             if data.count >= 2 {
                 patterns.push(ThinkingPattern {
                     name: format!("Sequence: {}", seq),
-                    description: format!("Aparece {} vezes", data.count),
+                    description: format!("Appears {} times", data.count),
                     frequency: data.count,
                 });
             }
         }
 
-        // Atalhos mais usados
+        // Most used shortcuts
         let mut shortcuts: Vec<_> = self.shortcuts.iter().collect();
         shortcuts.sort_by(|a, b| b.1.cmp(a.1));
 
@@ -149,13 +151,13 @@ impl ThinkingPatterns {
             if **count >= 3 {
                 patterns.push(ThinkingPattern {
                     name: format!("Shortcut: {}", shortcut),
-                    description: "Atalho mental frequente".to_string(),
+                    description: "Frequent mental shortcut".to_string(),
                     frequency: **count,
                 });
             }
         }
 
-        // Contextos esquecidos
+        // Forgotten contexts
         for ctx in &self.forgotten_contexts {
             if ctx.times_asked >= 2 {
                 patterns.push(ThinkingPattern {
@@ -170,7 +172,7 @@ impl ThinkingPatterns {
         patterns
     }
 
-    /// Retorna contextos esquecidos
+    /// Returns forgotten contexts.
     pub fn get_forgotten_contexts(&self) -> Vec<ForgottenContext> {
         let mut contexts = self.forgotten_contexts.clone();
         contexts.sort_by(|a, b| b.times_asked.cmp(&a.times_asked));
@@ -178,11 +180,11 @@ impl ThinkingPatterns {
     }
 }
 
-/// Extrai ação de uma mensagem
+/// Extracts action from a message.
 fn extract_action(content: &str) -> String {
     let lower = content.to_lowercase();
 
-    // Detecta tipo de ação
+    // Detect action type
     if lower.contains("erro") || lower.contains("error") || lower.contains("falha") {
         return "debug".to_string();
     }
@@ -205,14 +207,14 @@ fn extract_action(content: &str) -> String {
     "other".to_string()
 }
 
-/// Detecta atalhos mentais
+/// Detects mental shortcuts.
 fn detect_shortcuts(content: &str) -> Vec<String> {
     let mut shortcuts = Vec::new();
     let lower = content.to_lowercase();
 
-    // Comandos curtos
+    // Short commands
     if lower.len() < 50 {
-        // Expressões de atalho
+        // Shortcut expressions
         if lower.starts_with("faz") || lower.starts_with("roda") {
             shortcuts.push("imperative-short".to_string());
         }
@@ -224,7 +226,7 @@ fn detect_shortcuts(content: &str) -> Vec<String> {
         }
     }
 
-    // Referências implícitas
+    // Implicit references
     if lower.contains("isso") || lower.contains("aquilo") || lower.contains("isso ai") {
         shortcuts.push("implicit-reference".to_string());
     }
@@ -232,7 +234,7 @@ fn detect_shortcuts(content: &str) -> Vec<String> {
     shortcuts
 }
 
-/// Verifica se é pergunta
+/// Checks if it is a question.
 fn is_question(content: &str) -> bool {
     let lower = content.to_lowercase();
     lower.contains("?")
@@ -245,7 +247,7 @@ fn is_question(content: &str) -> bool {
         || lower.starts_with("where")
 }
 
-/// Normaliza pergunta para comparação
+/// Normalizes question for comparison.
 fn normalize_question(content: &str) -> String {
     content
         .to_lowercase()
@@ -253,7 +255,7 @@ fn normalize_question(content: &str) -> String {
         .filter(|c| c.is_alphanumeric() || c.is_whitespace())
         .collect::<String>()
         .split_whitespace()
-        .take(10) // Primeiras 10 palavras
+        .take(10) // First 10 words
         .collect::<Vec<_>>()
         .join(" ")
 }

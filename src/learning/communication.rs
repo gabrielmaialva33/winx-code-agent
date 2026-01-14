@@ -1,40 +1,40 @@
-//! Communication Learner - Aprende estilo de comunicação.
+//! Communication Learner - Learns communication style.
 //!
-//! Analisa:
-//! - Vocabulário típico ("mano", "massa", "kkk")
-//! - Estrutura de pedidos
-//! - Como o usuário corrige o AI
+//! Analyzes:
+//! - Typical vocabulary ("mano", "massa", "kkk")
+//! - Request structure
+//! - How the user corrects the AI
 
 use std::collections::HashMap;
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-/// Aprendizado de padrões de comunicação
+/// Communication pattern learning.
 #[derive(Debug, Default)]
 pub struct CommunicationLearner {
-    /// Contagem de palavras
+    /// Word counts
     word_counts: HashMap<String, usize>,
-    /// Expressões típicas (gírias, etc)
+    /// Typical expressions (slang, etc)
     expressions: HashMap<String, usize>,
-    /// Padrões de correção
+    /// Correction patterns
     corrections: Vec<CorrectionPattern>,
-    /// Total de mensagens analisadas
+    /// Total messages analyzed
     message_count: usize,
 }
 
-/// Padrão de correção detectado
+/// Detected correction pattern.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorrectionPattern {
-    /// Frase de correção
+    /// Correction phrase
     pub phrase: String,
-    /// Contexto (o que veio antes)
+    /// Context (what came before)
     pub context: String,
-    /// Frequência
+    /// Frequency
     pub count: usize,
 }
 
-/// Palavras/expressões típicas para detectar
+/// Typical expressions to detect.
 const TYPICAL_EXPRESSIONS: &[&str] = &[
     "mano",
     "massa",
@@ -74,7 +74,7 @@ const TYPICAL_EXPRESSIONS: &[&str] = &[
     "abre",
 ];
 
-/// Padrões de correção
+/// Correction patterns.
 const CORRECTION_PATTERNS: &[&str] = &[
     "nao e isso",
     "nao era isso",
@@ -92,18 +92,18 @@ const CORRECTION_PATTERNS: &[&str] = &[
 ];
 
 impl CommunicationLearner {
-    /// Cria novo learner
+    /// Creates a new learner.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Analisa uma mensagem
+    /// Analyzes a message.
     pub fn analyze(&mut self, content: &str) {
         self.message_count += 1;
 
         let content_lower = content.to_lowercase();
 
-        // Conta expressões típicas
+        // Count typical expressions
         for expr in TYPICAL_EXPRESSIONS {
             let count = content_lower.matches(expr).count();
             if count > 0 {
@@ -111,10 +111,10 @@ impl CommunicationLearner {
             }
         }
 
-        // Detecta padrões de correção
+        // Detect correction patterns
         for pattern in CORRECTION_PATTERNS {
             if content_lower.contains(pattern) {
-                // Adiciona ou incrementa padrão
+                // Add or increment pattern
                 let existing = self.corrections.iter_mut().find(|c| c.phrase == *pattern);
                 if let Some(correction) = existing {
                     correction.count += 1;
@@ -128,7 +128,7 @@ impl CommunicationLearner {
             }
         }
 
-        // Conta palavras (filtra stopwords)
+        // Count words (filter stopwords)
         let words = extract_words(&content_lower);
         for word in words {
             if word.len() > 2 && !is_stopword(&word) {
@@ -137,7 +137,7 @@ impl CommunicationLearner {
         }
     }
 
-    /// Retorna vocabulário ordenado por frequência
+    /// Returns vocabulary sorted by frequency.
     pub fn get_vocabulary(&self) -> Vec<(String, usize)> {
         let mut vocab: Vec<_> = self.expressions.iter()
             .map(|(k, v)| (k.clone(), *v))
@@ -147,7 +147,7 @@ impl CommunicationLearner {
         vocab
     }
 
-    /// Retorna palavras mais usadas
+    /// Returns most used words.
     pub fn get_top_words(&self, limit: usize) -> Vec<(String, usize)> {
         let mut words: Vec<_> = self.word_counts.iter()
             .map(|(k, v)| (k.clone(), *v))
@@ -157,14 +157,14 @@ impl CommunicationLearner {
         words
     }
 
-    /// Retorna padrões de correção
+    /// Returns correction patterns.
     pub fn get_corrections(&self) -> Vec<CorrectionPattern> {
         let mut corrections = self.corrections.clone();
         corrections.sort_by(|a, b| b.count.cmp(&a.count));
         corrections
     }
 
-    /// Retorna estatísticas
+    /// Returns statistics.
     pub fn stats(&self) -> CommunicationStats {
         CommunicationStats {
             messages_analyzed: self.message_count,
@@ -175,7 +175,7 @@ impl CommunicationLearner {
     }
 }
 
-/// Estatísticas de comunicação
+/// Communication statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommunicationStats {
     pub messages_analyzed: usize,
@@ -184,7 +184,7 @@ pub struct CommunicationStats {
     pub correction_patterns: usize,
 }
 
-/// Extrai palavras de um texto
+/// Extracts words from text.
 fn extract_words(text: &str) -> Vec<String> {
     let re = Regex::new(r"[a-záàâãéèêíïóôõöúçñ]+").unwrap();
     re.find_iter(text)
@@ -192,7 +192,7 @@ fn extract_words(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// Trunca string
+/// Truncates string.
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -201,7 +201,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Verifica se é stopword (português)
+/// Checks if word is a stopword (Portuguese).
 fn is_stopword(word: &str) -> bool {
     const STOPWORDS: &[&str] = &[
         "que", "para", "com", "nao", "uma", "por", "mais", "como", "mas",
@@ -226,7 +226,7 @@ mod tests {
         let vocab = learner.get_vocabulary();
         assert!(!vocab.is_empty());
 
-        // Deve encontrar "mano", "massa", "kkk"
+        // Should find "mano", "massa", "kkk"
         let words: Vec<_> = vocab.iter().map(|(w, _)| w.as_str()).collect();
         assert!(words.contains(&"mano"));
         assert!(words.contains(&"massa"));

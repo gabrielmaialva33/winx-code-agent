@@ -1,11 +1,11 @@
-//! Learning module - Aprende padrões de comunicação do usuário.
+//! Learning module - Learns user communication patterns.
 //!
-//! Este módulo lê as sessões do Claude Code e extrai:
-//! - Padrões de comunicação (vocabulário, estilo)
-//! - Pedidos repetidos (candidatos a automação)
-//! - Padrões de pensamento (atalhos mentais)
+//! This module reads Claude Code sessions and extracts:
+//! - Communication patterns (vocabulary, style)
+//! - Repeated requests (automation candidates)
+//! - Thinking patterns (mental shortcuts)
 //!
-//! Foco em COMO o usuário pensa e se comunica, não em código.
+//! Focuses on HOW the user thinks and communicates, not on the code itself.
 
 pub mod communication;
 pub mod embedding_engine;
@@ -28,7 +28,7 @@ pub use session_parser::{SessionMessage, SessionParser};
 pub use store::LearningStore;
 pub use thinking::ThinkingPatterns;
 
-/// Diretório padrão para armazenar aprendizado
+/// Default directory for storing learning data.
 pub fn default_learning_dir() -> PathBuf {
     BaseDirs::new()
         .map(|d| d.home_dir().to_path_buf())
@@ -37,7 +37,7 @@ pub fn default_learning_dir() -> PathBuf {
         .join("learning")
 }
 
-/// Diretório das sessões do Claude Code
+/// Directory for Claude Code sessions.
 pub fn claude_sessions_dir() -> PathBuf {
     BaseDirs::new()
         .map(|d| d.home_dir().to_path_buf())
@@ -46,22 +46,22 @@ pub fn claude_sessions_dir() -> PathBuf {
         .join("projects")
 }
 
-/// Sistema de aprendizado completo
+/// Complete learning system.
 pub struct LearningSystem {
-    /// Parser de sessões
+    /// Session parser
     pub parser: SessionParser,
-    /// Aprendizado de comunicação
+    /// Communication learner
     pub communication: CommunicationLearner,
-    /// Detector de repetições
+    /// Repetition detector
     pub repetitions: RepetitionDetector,
-    /// Padrões de pensamento
+    /// Thinking patterns
     pub thinking: ThinkingPatterns,
-    /// Storage persistente
+    /// Persistent storage
     pub store: LearningStore,
 }
 
 impl LearningSystem {
-    /// Cria novo sistema de aprendizado
+    /// Creates a new learning system.
     pub fn new() -> Result<Self, WinxError> {
         let sessions_dir = claude_sessions_dir();
         let learning_dir = default_learning_dir();
@@ -75,31 +75,31 @@ impl LearningSystem {
         })
     }
 
-    /// Processa todas as sessões e extrai aprendizado
+    /// Processes all sessions and extracts learning.
     pub async fn process_all_sessions(&mut self) -> Result<LearningReport, WinxError> {
-        // 1. Parse todas as sessões
+        // 1. Parse all sessions
         let messages = self.parser.parse_all_sessions().await?;
 
-        // 2. Extrai apenas mensagens do usuário
+        // 2. Extract only user messages
         let user_messages: Vec<_> = messages
             .iter()
             .filter(|m| m.role == "user")
             .collect();
 
-        // 3. Analisa comunicação
+        // 3. Analyze communication
         for msg in &user_messages {
             self.communication.analyze(&msg.content);
         }
 
-        // 4. Detecta repetições
+        // 4. Detect repetitions
         for msg in &user_messages {
             self.repetitions.add_message(&msg.content, &msg.session_id);
         }
 
-        // 5. Analisa padrões de pensamento
+        // 5. Analyze thinking patterns
         self.thinking.analyze_sequences(&messages);
 
-        // 6. Gera relatório
+        // 6. Generate report
         let report = LearningReport {
             total_sessions: self.parser.session_count(),
             total_messages: messages.len(),
@@ -110,7 +110,7 @@ impl LearningSystem {
             thinking_patterns: self.thinking.get_patterns(),
         };
 
-        // 7. Persiste aprendizado
+        // 7. Persist learning
         self.store.save_report(&report)?;
 
         Ok(report)
@@ -123,57 +123,57 @@ impl Default for LearningSystem {
     }
 }
 
-/// Relatório de aprendizado
+/// Learning report.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LearningReport {
-    /// Total de sessões processadas
+    /// Total processed sessions
     pub total_sessions: usize,
-    /// Total de mensagens
+    /// Total messages
     pub total_messages: usize,
-    /// Mensagens do usuário
+    /// User messages
     pub user_messages: usize,
-    /// Vocabulário aprendido
+    /// Learned vocabulary
     pub vocabulary: Vec<(String, usize)>,
-    /// Pedidos frequentes
+    /// Frequent requests
     pub frequent_requests: Vec<FrequentRequest>,
-    /// Candidatos a automação
+    /// Automation candidates
     pub automation_candidates: Vec<AutomationCandidate>,
-    /// Padrões de pensamento
+    /// Thinking patterns
     pub thinking_patterns: Vec<ThinkingPattern>,
 }
 
-/// Pedido frequente detectado
+/// Detected frequent request.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FrequentRequest {
-    /// Texto do pedido (normalizado)
+    /// Request text (normalized)
     pub text: String,
-    /// Quantas vezes apareceu
+    /// Occurrence count
     pub count: usize,
-    /// Em quais sessões
+    /// Sessions where it appeared
     pub sessions: Vec<String>,
 }
 
-/// Candidato a automação
+/// Automation candidate.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AutomationCandidate {
-    /// Descrição do padrão
+    /// Pattern description
     pub pattern: String,
-    /// Sugestão de comando/skill
+    /// Suggested command/skill
     pub suggested_command: String,
-    /// Frequência
+    /// Frequency
     pub frequency: usize,
-    /// Exemplos de uso
+    /// Usage examples
     pub examples: Vec<String>,
 }
 
-/// Padrão de pensamento detectado
+/// Detected thinking pattern.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ThinkingPattern {
-    /// Nome do padrão
+    /// Pattern name
     pub name: String,
-    /// Descrição
+    /// Description
     pub description: String,
-    /// Frequência
+    /// Frequency
     pub frequency: usize,
 }
 

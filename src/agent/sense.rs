@@ -1,7 +1,7 @@
 //! Winx Sense System
 //!
-//! Percepção do ambiente: hardware, projeto, usuário, e OUTROS AGENTES.
-//! A Winx sabe quem mais está no PC e pode colaborar.
+//! Environment perception: hardware, project, user, and OTHER AGENTS.
+//! Winx knows who else is on the PC and can collaborate.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::process::Command;
 
 use serde::{Deserialize, Serialize};
 
-/// Outros agentes de IA detectados no sistema
+/// Other AI agents detected on the system.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DetectedAgent {
     pub name: String,
@@ -17,7 +17,7 @@ pub struct DetectedAgent {
     pub path: Option<PathBuf>,
     pub version: Option<String>,
     pub is_running: bool,
-    pub can_delegate: bool, // Winx pode delegar tarefas pra ele
+    pub can_delegate: bool, // Can Winx delegate tasks to it?
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,7 +31,7 @@ pub enum AgentType {
     Custom(String),
 }
 
-/// Sistema de percepção do ambiente
+/// Environment perception system.
 #[derive(Debug, Clone, Default)]
 pub struct SenseSystem {
     pub agents: Vec<DetectedAgent>,
@@ -40,7 +40,7 @@ pub struct SenseSystem {
     pub user_context: UserContext,
 }
 
-/// Informação sobre MCP server detectado
+/// Information about a detected MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerInfo {
     pub name: String,
@@ -49,7 +49,7 @@ pub struct McpServerInfo {
     pub is_running: bool,
 }
 
-/// Informações do projeto atual
+/// Current project information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectSense {
     pub root: PathBuf,
@@ -81,12 +81,12 @@ pub enum BuildStatus {
     NotBuilt,
 }
 
-/// Contexto do usuário (horário, padrões, etc)
+/// User context (time, patterns, etc).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct UserContext {
-    pub is_late_night: bool,      // Madrugada (00-06h)
-    pub working_hours: u64,        // Horas trabalhando na sessão
-    pub frustration_level: u8,    // 0-100 baseado em padrões de texto
+    pub is_late_night: bool,      // Late night (00-06h)
+    pub working_hours: u64,        // Hours working in this session
+    pub frustration_level: u8,    // 0-100 based on text patterns
     pub preferred_language: String,
 }
 
@@ -95,7 +95,7 @@ impl SenseSystem {
         Self::default()
     }
 
-    /// Escaneia o sistema completo
+    /// Scans the entire system.
     pub fn scan_all(&mut self) {
         self.detect_agents();
         self.detect_mcp_servers();
@@ -103,7 +103,7 @@ impl SenseSystem {
         self.sense_user_context();
     }
 
-    /// Detecta outros agentes de IA instalados
+    /// Detects other installed AI agents.
     pub fn detect_agents(&mut self) {
         self.agents.clear();
 
@@ -165,7 +165,7 @@ impl SenseSystem {
                     path: Some(PathBuf::from(path)),
                     version,
                     is_running,
-                    can_delegate: true, // Winx pode chamar claude via CLI
+                    can_delegate: true, // Winx can call claude via CLI
                 });
             }
         }
@@ -184,7 +184,7 @@ impl SenseSystem {
                     agent_type: AgentType::Gemini,
                     path: Some(PathBuf::from(path)),
                     version: None,
-                    is_running: false, // gemini-cli é one-shot
+                    is_running: false, // gemini-cli is one-shot
                     can_delegate: true,
                 });
             }
@@ -227,7 +227,7 @@ impl SenseSystem {
                             path: Some(entry.path()),
                             version: None,
                             is_running: false, // VSCode extension
-                            can_delegate: false, // Não dá pra chamar via CLI
+                            can_delegate: false, // Cannot call via CLI
                         });
                     }
                 }
@@ -262,7 +262,7 @@ impl SenseSystem {
         None
     }
 
-    /// Detecta MCP servers configurados
+    /// Detects configured MCP servers.
     pub fn detect_mcp_servers(&mut self) {
         self.mcp_servers.clear();
 
@@ -288,7 +288,7 @@ impl SenseSystem {
         }
     }
 
-    /// Detecta informações do projeto atual
+    /// Detects current project information.
     pub fn detect_project(&mut self) {
         let cwd = std::env::current_dir().ok();
         let cwd = match cwd {
@@ -392,7 +392,7 @@ impl SenseSystem {
         None
     }
 
-    /// Percebe contexto do usuário
+    /// Senses user context.
     pub fn sense_user_context(&mut self) {
         let hour = chrono::Local::now().hour();
         self.user_context.is_late_night = hour < 6;
@@ -401,11 +401,11 @@ impl SenseSystem {
         // TODO: Analyze message patterns for frustration
     }
 
-    /// Gera resumo do ambiente para incluir no system prompt
+    /// Generates environment summary for system prompt.
     pub fn summarize(&self) -> String {
         let mut summary = String::new();
 
-        // Outros agentes
+        // Other agents
         if !self.agents.is_empty() {
             summary.push_str("## Outros Agentes no PC\n\n");
             for agent in &self.agents {
@@ -416,7 +416,7 @@ impl SenseSystem {
             summary.push('\n');
         }
 
-        // Projeto atual
+        // Current project
         if let Some(ref project) = self.project {
             summary.push_str("## Projeto Atual\n\n");
             summary.push_str(&format!("- **Nome:** {}\n", project.name));
@@ -438,7 +438,7 @@ impl SenseSystem {
             summary.push('\n');
         }
 
-        // Contexto do usuário
+        // User context
         if self.user_context.is_late_night {
             summary.push_str("**Nota:** É madrugada. O usuário pode estar cansado.\n\n");
         }
@@ -446,7 +446,7 @@ impl SenseSystem {
         summary
     }
 
-    /// Lista agentes que podem receber delegação
+    /// Lists agents capable of task delegation.
     pub fn delegatable_agents(&self) -> Vec<&DetectedAgent> {
         self.agents.iter().filter(|a| a.can_delegate).collect()
     }

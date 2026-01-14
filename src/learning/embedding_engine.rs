@@ -1,46 +1,46 @@
-//! Embedding Engine - Motor de embeddings para busca semântica
+//! Embedding Engine - Semantic search embedding engine
 //!
-//! Suporta múltiplos backends:
-//! - Candle local (CPU/GPU) com jina-embeddings-v2-base-code
+//! Supports multiple backends:
+//! - Local Candle (CPU/GPU) with jina-embeddings-v2-base-code
 //! - HTTP API (text-embeddings-inference container)
-//! - Fallback para Jaccard (sem deps extras)
+//! - Jaccard fallback (no extra deps)
 //!
-//! A 4090 com 24GB VRAM roda jina-code tranquilamente.
+//! A 4090 with 24GB VRAM runs jina-code comfortably.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
 
-/// Dimensão dos embeddings jina-code-v2
+/// jina-code-v2 embedding dimension
 const EMBEDDING_DIM: usize = 768;
 
-/// Modelo padrão
+/// Default model
 const DEFAULT_MODEL: &str = "jinaai/jina-embeddings-v2-base-code";
 
-/// Backend de embeddings
+/// Embedding backend
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbeddingBackend {
-    /// Candle local (GPU se disponível)
+    /// Local Candle (GPU if available)
     Candle,
     /// HTTP API (text-embeddings-inference)
     HttpApi,
-    /// Fallback Jaccard (sem ML)
+    /// Jaccard fallback (no ML)
     Jaccard,
 }
 
-/// Configuração do engine
+/// Engine configuration
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
-    /// Modelo a usar
+    /// Model to use
     pub model_id: String,
-    /// Backend preferido
+    /// Preferred backend
     pub preferred_backend: EmbeddingBackend,
-    /// URL do servidor TEI (se usar HttpApi)
+    /// TEI server URL (if using HttpApi)
     pub tei_url: Option<String>,
-    /// Usar GPU se disponível
+    /// Use GPU if available
     pub use_gpu: bool,
-    /// Batch size para processamento
+    /// Processing batch size
     pub batch_size: usize,
 }
 
@@ -56,10 +56,10 @@ impl Default for EmbeddingConfig {
     }
 }
 
-/// Vetor de embedding
+/// Embedding vector
 pub type Embedding = Vec<f32>;
 
-/// Engine de embeddings
+/// Embedding Engine
 pub struct EmbeddingEngine {
     config: EmbeddingConfig,
     backend: EmbeddingBackend,
@@ -70,7 +70,7 @@ pub struct EmbeddingEngine {
 }
 
 impl EmbeddingEngine {
-    /// Cria novo engine, detectando melhor backend disponível
+    /// Creates a new engine, detecting the best available backend.
     pub async fn new(config: EmbeddingConfig) -> Self {
         let mut engine = Self {
             config: config.clone(),
@@ -81,7 +81,7 @@ impl EmbeddingEngine {
             http_client: None,
         };
 
-        // Tenta inicializar backends em ordem de preferência
+        // Try to initialize backends in preference order
         match config.preferred_backend {
             EmbeddingBackend::Candle => {
                 if engine.try_init_candle().await {
@@ -98,7 +98,7 @@ impl EmbeddingEngine {
                 }
             }
             EmbeddingBackend::Jaccard => {
-                // Já é o default
+                // Already default
             }
         }
 
@@ -106,7 +106,7 @@ impl EmbeddingEngine {
         engine
     }
 
-    /// Tenta inicializar Candle
+    /// Tries to initialize Candle.
     #[cfg(feature = "embeddings")]
     async fn try_init_candle(&mut self) -> bool {
         match CandleEmbedder::new(&self.config.model_id, self.config.use_gpu) {
@@ -128,12 +128,12 @@ impl EmbeddingEngine {
         false
     }
 
-    /// Tenta inicializar HTTP API
+    /// Tries to initialize HTTP API.
     async fn try_init_http(&mut self) -> bool {
         if let Some(ref url) = self.config.tei_url {
             let client = reqwest::Client::new();
 
-            // Tenta um health check
+            // Try a health check
             match client.get(format!("{}/health", url)).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     self.http_client = Some(client);
@@ -150,12 +150,12 @@ impl EmbeddingEngine {
         }
     }
 
-    /// Retorna backend ativo
+    /// Returns active backend.
     pub fn backend(&self) -> EmbeddingBackend {
         self.backend
     }
 
-    /// Gera embedding para um texto
+    /// Generates embedding for a text.
     pub async fn embed(&self, text: &str) -> Embedding {
         // Check cache
         {
@@ -199,12 +199,12 @@ impl EmbeddingEngine {
         embedding
     }
 
-    /// Gera embeddings em batch
+    /// Generates embeddings in batch.
     pub async fn embed_batch(&self, texts: &[&str]) -> Vec<Embedding> {
         let mut results = Vec::with_capacity(texts.len());
 
-        // Para Candle/HTTP, batch é mais eficiente
-        // Por agora, processa sequencialmente
+        // Batch is more efficient for Candle/HTTP
+        // Process sequentially for now
         for text in texts {
             results.push(self.embed(text).await);
         }
@@ -212,7 +212,7 @@ impl EmbeddingEngine {
         results
     }
 
-    /// Embed via HTTP API
+    /// Embed via HTTP API.
     async fn embed_http(&self, text: &str) -> Result<Embedding, String> {
         let client = self.http_client.as_ref().ok_or("HTTP client not initialized")?;
         let url = self.config.tei_url.as_ref().ok_or("TEI URL not configured")?;
@@ -237,7 +237,7 @@ impl EmbeddingEngine {
         embeddings.into_iter().next().ok_or_else(|| "Empty response".to_string())
     }
 
-    /// Calcula similaridade entre dois embeddings (cosine similarity)
+    /// Calculates similarity between two embeddings (cosine similarity).
     pub fn cosine_similarity(a: &Embedding, b: &Embedding) -> f32 {
         if a.len() != b.len() {
             return 0.0;
@@ -254,7 +254,7 @@ impl EmbeddingEngine {
         }
     }
 
-    /// Encontra os K mais similares
+    /// Finds K most similar items.
     pub async fn find_similar(&self, query: &str, candidates: &[&str], k: usize) -> Vec<(usize, f32)> {
         let query_emb = self.embed(query).await;
         let candidate_embs = self.embed_batch(candidates).await;
@@ -270,7 +270,7 @@ impl EmbeddingEngine {
         scores
     }
 
-    /// Estatísticas do engine
+    /// Engine statistics.
     pub async fn stats(&self) -> EmbeddingStats {
         let cache = self.cache.read().await;
         EmbeddingStats {
@@ -282,7 +282,7 @@ impl EmbeddingEngine {
     }
 }
 
-/// Estatísticas do engine
+/// Engine statistics.
 #[derive(Debug, Clone)]
 pub struct EmbeddingStats {
     pub backend: EmbeddingBackend,
@@ -291,8 +291,8 @@ pub struct EmbeddingStats {
     pub embedding_dim: usize,
 }
 
-/// Pseudo-embedding baseado em Jaccard (fallback)
-/// Cria um vetor esparso baseado nos tokens do texto
+/// Pseudo-embedding based on Jaccard (fallback).
+/// Creates a sparse vector based on text tokens.
 fn jaccard_pseudo_embedding(text: &str) -> Embedding {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -307,7 +307,7 @@ fn jaccard_pseudo_embedding(text: &str) -> Embedding {
         embedding[idx] += 1.0;
     }
 
-    // Normaliza
+    // Normalize
     let norm: f32 = embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm > 0.0 {
         for x in &mut embedding {
@@ -319,7 +319,7 @@ fn jaccard_pseudo_embedding(text: &str) -> Embedding {
 }
 
 // =============================================================================
-// Candle Embedder (compilado só com feature "embeddings")
+// Candle Embedder (compiled only with "embeddings" feature)
 // =============================================================================
 
 #[cfg(feature = "embeddings")]
@@ -338,7 +338,7 @@ mod candle_impl {
 
     impl CandleEmbedder {
         pub fn new(model_id: &str, use_gpu: bool) -> anyhow::Result<Self> {
-            // Determina device
+            // Determine device
             let device = if use_gpu {
                 Device::cuda_if_available(0)?
             } else {
@@ -347,26 +347,26 @@ mod candle_impl {
 
             tracing::info!("Loading model {} on {:?}", model_id, device);
 
-            // Baixa modelo do HuggingFace Hub
+            // Download model from HuggingFace Hub
             let api = Api::new()?;
             let repo = api.repo(Repo::new(model_id.to_string(), RepoType::Model));
 
-            // Carrega tokenizer
+            // Load tokenizer
             let tokenizer_path = repo.get("tokenizer.json")?;
             let tokenizer = Tokenizer::from_file(&tokenizer_path)
                 .map_err(|e| anyhow::anyhow!("Failed to load tokenizer: {}", e))?;
 
-            // Carrega config
+            // Load config
             let config_path = repo.get("config.json")?;
             let config: Config = serde_json::from_slice(&std::fs::read(&config_path)?)?;
 
-            // Carrega weights
+            // Load weights
             let weights_path = repo.get("model.safetensors")?;
             let vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(&[weights_path], DType::F32, &device)?
             };
 
-            // Cria modelo (usa new, não load)
+            // Create model (use new, not load)
             let model = BertModel::new(vb, &config)?;
 
             Ok(Self {
@@ -377,7 +377,7 @@ mod candle_impl {
         }
 
         pub fn embed(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-            // Tokeniza
+            // Tokenize
             let encoding = self.tokenizer.encode(text, true)
                 .map_err(|e| anyhow::anyhow!("Tokenization failed: {}", e))?;
 
@@ -386,10 +386,10 @@ mod candle_impl {
                 .unsqueeze(0)?
                 .to_dtype(DType::F32)?;
 
-            // Forward pass (Module trait fornece o método forward)
+            // Forward pass (Module trait provides the forward method)
             let embeddings = self.model.forward(&input_ids)?;
 
-            // Mean pooling com attention mask
+            // Mean pooling with attention mask
             let (_, seq_len, hidden_size) = embeddings.dims3()?;
             let mask_expanded = attention_mask
                 .unsqueeze(2)?
@@ -399,7 +399,7 @@ mod candle_impl {
             let sum_mask = mask_expanded.sum(1)?.clamp(1e-9, f32::MAX)?;
             let mean_embeddings = (sum_embeddings / sum_mask)?;
 
-            // Converte para Vec<f32>
+            // Convert to Vec<f32>
             let embedding = mean_embeddings.squeeze(0)?.to_vec1::<f32>()?;
             Ok(embedding)
         }
@@ -421,7 +421,7 @@ mod tests {
 
         assert_eq!(emb1.len(), EMBEDDING_DIM);
 
-        // emb1 e emb2 devem ser mais similares que emb1 e emb3
+        // emb1 and emb2 should be more similar than emb1 and emb3
         let sim12 = EmbeddingEngine::cosine_similarity(&emb1, &emb2);
         let sim13 = EmbeddingEngine::cosine_similarity(&emb1, &emb3);
 
