@@ -147,14 +147,6 @@ pub enum WinxError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
-    /// API error (provider agnostic)
-    #[error("API error: {0}")]
-    ApiError(String),
-
-    /// Network error for HTTP requests
-    #[error("Network error: {0}")]
-    NetworkError(String),
-
     /// Configuration error
     #[error("Configuration error: {0}")]
     ConfigurationError(String),
@@ -170,10 +162,6 @@ pub enum WinxError {
     /// File error for file operations
     #[error("File error: {0}")]
     FileError(String),
-
-    /// AI provider error
-    #[error("AI error: {0}")]
-    AIError(String),
 }
 
 /// Type alias for Result with `WinxError`
@@ -186,107 +174,14 @@ impl From<anyhow::Error> for WinxError {
     }
 }
 
-/// Extension trait to convert anyhow errors to `WinxError`
-#[allow(dead_code)]
-pub trait AnyhowErrorExt {
-    /// Convert the error to a `WinxError`
-    fn to_winx_error(self, default_message: &str) -> WinxError;
-}
-
-impl AnyhowErrorExt for anyhow::Error {
-    fn to_winx_error(self, default_message: &str) -> WinxError {
-        // First, try to downcast if it's already a WinxError
-        if let Some(err) = self.downcast_ref::<WinxError>() {
-            return err.clone();
-        }
-
-        // Get error string for pattern matching
-        let err_string = self.to_string();
-        let root_cause = self.root_cause().to_string();
-
-        // Classify based on error content
-        if root_cause.contains("command not found") {
-            WinxError::CommandExecutionError(format!("Command not found: {self}"))
-        } else if root_cause.contains("permission denied") {
-            WinxError::CommandExecutionError(format!("Permission denied: {self}"))
-        } else if err_string.contains("bash state") {
-            WinxError::BashStateLockError(err_string)
-        } else if err_string.contains("workspace") || err_string.contains("directory") {
-            WinxError::WorkspacePathError(err_string)
-        } else if err_string.contains("command") {
-            WinxError::CommandExecutionError(err_string)
-        } else if err_string.contains("null") || err_string.contains("undefined") {
-            WinxError::NullValueError { field: "unknown".to_string() }
-        } else if err_string.contains("parse") || err_string.contains("deserializ") {
-            WinxError::DeserializationError(err_string)
-        } else if err_string.contains("serialize") {
-            WinxError::SerializationError(err_string)
-        } else {
-            WinxError::ShellInitializationError(format!("{default_message}: {err_string}"))
-        }
-    }
-}
-
-/// Helper function to create recoverable errors with suggestions
-pub fn with_suggestion(error: WinxError, suggestion: &str) -> WinxError {
-    match error {
-        WinxError::FileAccessError { path, message } => WinxError::RecoverableSuggestionError {
-            message: format!("File access error for {}: {}", path.display(), message),
-            suggestion: suggestion.to_string(),
-        },
-        WinxError::DeserializationError(msg) => WinxError::RecoverableSuggestionError {
-            message: format!("Failed to parse input: {msg}"),
-            suggestion: suggestion.to_string(),
-        },
-        WinxError::NullValueError { field } => WinxError::RecoverableSuggestionError {
-            message: format!("Null or undefined value found in field: {field}"),
-            suggestion: suggestion.to_string(),
-        },
-        WinxError::ParameterValidationError { field, message } => {
-            WinxError::RecoverableSuggestionError {
-                message: format!("Invalid parameter {field}: {message}"),
-                suggestion: suggestion.to_string(),
-            }
-        }
-        WinxError::MissingParameterError { field, message } => {
-            WinxError::RecoverableSuggestionError {
-                message: format!("Missing required parameter {field}: {message}"),
-                suggestion: suggestion.to_string(),
-            }
-        }
-        // For other error types, just add the suggestion but maintain the original error type
-        _ => WinxError::RecoverableSuggestionError {
-            message: format!("{error}"),
-            suggestion: suggestion.to_string(),
-        },
-    }
-}
-
 /// Advanced error recovery and suggestion options
 pub struct ErrorRecovery;
 
 impl ErrorRecovery {
-    /// Create a recoverable error with suggestion
-    pub fn suggest(error: WinxError, suggestion: &str) -> WinxError {
-        with_suggestion(error, suggestion)
+    pub fn suggest(error: WinxError, _suggestion: &str) -> WinxError {
+        error
     }
 
-    /// Attempt to recover from a parameter error with a default value
-    pub fn with_default<T: Clone>(
-        result: std::result::Result<T, WinxError>,
-        default: T,
-        context: &str,
-    ) -> Result<T> {
-        match result {
-            Ok(value) => Ok(value),
-            Err(e) => {
-                tracing::warn!("Recovering from error in {}: {}", context, e);
-                Ok(default)
-            }
-        }
-    }
-
-    /// Create a parameter validation error
     pub fn param_error(field: &str, message: &str) -> WinxError {
         WinxError::ParameterValidationError {
             field: field.to_string(),
@@ -294,103 +189,12 @@ impl ErrorRecovery {
         }
     }
 
-    /// Create a missing parameter error
     pub fn missing_param(field: &str, message: &str) -> WinxError {
         WinxError::MissingParameterError { field: field.to_string(), message: message.to_string() }
     }
 
-    /// Create a null value error
     pub fn null_value(field: &str) -> WinxError {
         WinxError::NullValueError { field: field.to_string() }
-    }
-
-    /// Retry an operation with exponential backoff
-    pub async fn retry<T, F, Fut>(
-        operation: F,
-        max_retries: usize,
-        initial_delay_ms: u64,
-        context: &str,
-    ) -> Result<T>
-    where
-        F: Fn() -> Fut,
-        Fut: std::future::Future<Output = Result<T>>,
-    {
-        let mut delay_ms = initial_delay_ms;
-        let mut attempt = 0;
-
-        loop {
-            match operation().await {
-                Ok(value) => return Ok(value),
-                Err(e) => {
-                    attempt += 1;
-                    if attempt >= max_retries {
-                        tracing::error!(
-                            "Retry failed after {} attempts in context '{}': {}",
-                            attempt,
-                            context,
-                            e
-                        );
-                        return Err(e);
-                    }
-
-                    tracing::warn!(
-                        "Attempt {} failed in context '{}': {}. Retrying in {}ms...",
-                        attempt,
-                        context,
-                        e,
-                        delay_ms
-                    );
-
-                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-
-                    // Exponential backoff with jitter
-                    delay_ms =
-                        ((delay_ms as f64) * 1.5 * (0.8 + 0.4 * rand::random::<f64>())) as u64;
-                }
-            }
-        }
-    }
-
-    /// Try to recover from common file system errors
-    pub fn recover_fs_error(err: &WinxError) -> Option<String> {
-        match err {
-            WinxError::FileAccessError { path, message } => {
-                if message.contains("No such file or directory") {
-                    Some(format!(
-                        "The file '{}' does not exist. Consider creating it first.",
-                        path.display()
-                    ))
-                } else if message.contains("Permission denied") {
-                    Some(format!("Permission denied for file '{}'. Check file permissions or use sudo if appropriate.", path.display()))
-                } else if message.contains("Is a directory") {
-                    Some(format!(
-                        "'{}' is a directory, not a file. Specify a file path instead.",
-                        path.display()
-                    ))
-                } else {
-                    None
-                }
-            }
-            WinxError::FileWriteError { path, message } => {
-                if message.contains("No space left on device") {
-                    Some(format!("No space left on device while writing to '{}'. Free up disk space and try again.", path.display()))
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    /// Check if an error is potentially recoverable
-    pub fn is_recoverable(err: &WinxError) -> bool {
-        match err {
-            WinxError::BashStateLockError(_) => true,
-            WinxError::FileAccessError { .. } => true,
-            WinxError::CommandExecutionError(msg) if msg.contains("timed out") => true,
-            WinxError::RecoverableSuggestionError { .. } => true,
-            _ => false,
-        }
     }
 }
 
@@ -484,13 +288,10 @@ impl Clone for WinxError {
                 Self::ResourceAllocationError { message: message.clone() }
             }
             Self::IoError(err) => Self::IoError(std::io::Error::new(err.kind(), err.to_string())),
-            Self::ApiError(msg) => Self::ApiError(msg.clone()),
-            Self::NetworkError(msg) => Self::NetworkError(msg.clone()),
             Self::ConfigurationError(msg) => Self::ConfigurationError(msg.clone()),
             Self::ParseError(msg) => Self::ParseError(msg.clone()),
             Self::InvalidInput(msg) => Self::InvalidInput(msg.clone()),
             Self::FileError(msg) => Self::FileError(msg.clone()),
-            Self::AIError(msg) => Self::AIError(msg.clone()),
             Self::PathSecurityError { path, message } => {
                 Self::PathSecurityError { path: path.clone(), message: message.clone() }
             }

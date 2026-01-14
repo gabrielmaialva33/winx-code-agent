@@ -298,6 +298,16 @@ pub enum Modes {
     CodeWriter,
 }
 
+impl std::fmt::Display for Modes {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Modes::Wcgw => write!(f, "wcgw"),
+            Modes::Architect => write!(f, "architect"),
+            Modes::CodeWriter => write!(f, "code_writer"),
+        }
+    }
+}
+
 // Implement schema generation for Modes
 impl JsonSchema for Modes {
     fn schema_name() -> std::borrow::Cow<'static, str> {
@@ -700,96 +710,4 @@ pub struct ReadImage {
     ///
     /// This can be an absolute path or a path relative to the current working directory.
     pub file_path: String,
-}
-
-// ============================================================================
-// Learning Module Tools - Aprende padrões de comunicação do usuário
-// ============================================================================
-
-/// Parameters for the `SearchHistory` tool
-///
-/// Searches through the user's Claude Code sessions using semantic similarity.
-/// Finds conversations related to the query to provide context.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SearchHistory {
-    /// Search query - describes what you're looking for
-    ///
-    /// The system will search through past conversations to find
-    /// discussions related to this query.
-    pub query: String,
-
-    /// Maximum number of results to return (default: 5)
-    #[serde(default = "default_max_results")]
-    pub max_results: usize,
-}
-
-fn default_max_results() -> usize {
-    5
-}
-
-/// Parameters for the `DetectPatterns` tool
-///
-/// Analyzes a user request and checks if it matches known patterns.
-/// Returns information about similar past requests and automation suggestions.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct DetectPatterns {
-    /// The current user request to analyze
-    pub request: String,
-}
-
-/// Parameters for the `GetUserContext` tool
-///
-/// Retrieves the user's communication profile including vocabulary,
-/// preferences, and communication style.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct GetUserContext {
-    /// Include vocabulary analysis (default: true)
-    #[serde(default = "default_bool_true")]
-    pub include_vocabulary: bool,
-
-    /// Include correction patterns (default: true)
-    #[serde(default = "default_bool_true")]
-    pub include_corrections: bool,
-
-    /// Include thinking patterns (default: false)
-    #[serde(default)]
-    pub include_thinking: bool,
-}
-
-fn default_bool_true() -> bool {
-    true
-}
-
-/// Parameters for the `GetAutomationSuggestions` tool
-///
-/// Returns a list of repetitive requests that could be automated
-/// into skills or commands.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct GetAutomationSuggestions {
-    /// Minimum frequency to consider (default: 2)
-    #[serde(default = "default_min_frequency")]
-    pub min_frequency: usize,
-
-    /// Maximum number of suggestions (default: 10)
-    #[serde(default = "default_max_suggestions")]
-    pub max_suggestions: usize,
-}
-
-fn default_min_frequency() -> usize {
-    2
-}
-
-fn default_max_suggestions() -> usize {
-    10
-}
-
-/// Parameters for the `ProcessLearning` tool
-///
-/// Triggers processing of Claude Code sessions to extract learning patterns.
-/// This is a long-running operation that analyzes all available sessions.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ProcessLearning {
-    /// Force reprocessing even if already processed (default: false)
-    #[serde(default)]
-    pub force: bool,
 }
