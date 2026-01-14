@@ -30,18 +30,14 @@ pub use thinking::ThinkingPatterns;
 
 /// Default directory for storing learning data.
 pub fn default_learning_dir() -> PathBuf {
-    BaseDirs::new()
-        .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
+    BaseDirs::new().map_or_else(|| PathBuf::from("."), |d| d.home_dir().to_path_buf())
         .join(".winx")
         .join("learning")
 }
 
 /// Directory for Claude Code sessions.
 pub fn claude_sessions_dir() -> PathBuf {
-    BaseDirs::new()
-        .map(|d| d.home_dir().to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."))
+    BaseDirs::new().map_or_else(|| PathBuf::from("."), |d| d.home_dir().to_path_buf())
         .join(".claude")
         .join("projects")
 }

@@ -95,7 +95,7 @@ impl StatusDisplay {
                 let spinner = spinners[idx % spinners.len()];
 
                 // Clear line and print status
-                print!("\r\x1b[K\x1b[90m{} {} {}\x1b[0m", spinner, icon, msg);
+                print!("\r\x1b[K\x1b[90m{spinner} {icon} {msg}\x1b[0m");
                 io::stdout().flush().ok();
 
                 idx += 1;

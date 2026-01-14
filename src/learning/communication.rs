@@ -107,7 +107,7 @@ impl CommunicationLearner {
         for expr in TYPICAL_EXPRESSIONS {
             let count = content_lower.matches(expr).count();
             if count > 0 {
-                *self.expressions.entry(expr.to_string()).or_insert(0) += count;
+                *self.expressions.entry((*expr).to_string()).or_insert(0) += count;
             }
         }
 
@@ -120,7 +120,7 @@ impl CommunicationLearner {
                     correction.count += 1;
                 } else {
                     self.corrections.push(CorrectionPattern {
-                        phrase: pattern.to_string(),
+                        phrase: (*pattern).to_string(),
                         context: truncate(&content_lower, 100),
                         count: 1,
                     });

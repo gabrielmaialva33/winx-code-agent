@@ -206,13 +206,13 @@ impl Shape for Circle {
 
         // Bounding box
         let min_x = ((cx - r - 1.0).max(0.0)) as u32;
-        let max_x = ((cx + r + 1.0).min(width as f64 - 1.0)) as u32;
+        let max_x = ((cx + r + 1.0).min(f64::from(width) - 1.0)) as u32;
         let min_y = ((cy - r - 1.0).max(0.0)) as u32;
-        let max_y = ((cy + r + 1.0).min(height as f64 - 1.0)) as u32;
+        let max_y = ((cy + r + 1.0).min(f64::from(height) - 1.0)) as u32;
 
         for py in min_y..=max_y {
             for px in min_x..=max_x {
-                let dist = ((px as f64 - cx).powi(2) + (py as f64 - cy).powi(2)).sqrt();
+                let dist = ((f64::from(px) - cx).powi(2) + (f64::from(py) - cy).powi(2)).sqrt();
 
                 let intensity = if self.filled {
                     if dist <= r - 0.5 {

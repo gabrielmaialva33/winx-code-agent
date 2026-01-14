@@ -39,7 +39,7 @@ impl OllamaProvider {
         }
     }
 
-    /// Converte mensagens para formato OpenAI
+    /// Converte mensagens para formato `OpenAI`
     fn convert_messages(&self, messages: &[Message]) -> Vec<OllamaMessage> {
         messages.iter().map(|m| self.convert_message(m)).collect()
     }
@@ -123,7 +123,7 @@ impl Default for OllamaConfig {
 
 #[async_trait]
 impl Provider for OllamaProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "ollama"
     }
 
@@ -201,7 +201,7 @@ impl Provider for OllamaProvider {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
 
-            return Err(ProviderError::ApiError(format!("{}: {}", status, text)));
+            return Err(ProviderError::ApiError(format!("{status}: {text}")));
         }
 
         let mut stream = response.bytes_stream();
@@ -218,8 +218,7 @@ impl Provider for OllamaProvider {
                             let line = buffer[..pos].to_string();
                             buffer = buffer[pos + 1..].to_string();
 
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
+                            if let Some(data) = line.strip_prefix("data: ") {
                                 if data == "[DONE]" {
                                     yield StreamEvent::Done;
                                     break;
@@ -291,7 +290,7 @@ impl Provider for OllamaProvider {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
 
-            return Err(ProviderError::ApiError(format!("{}: {}", status, text)));
+            return Err(ProviderError::ApiError(format!("{status}: {text}")));
         }
 
         let api_response: OllamaResponse = response

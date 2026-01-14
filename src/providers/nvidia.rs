@@ -107,7 +107,7 @@ impl NvidiaProvider {
         }
 
         for i in 1..=10 {
-            if let Ok(key) = env::var(format!("NVIDIA_API_KEY_{}", i)) {
+            if let Ok(key) = env::var(format!("NVIDIA_API_KEY_{i}")) {
                 keys.push(key);
             }
         }
@@ -207,7 +207,7 @@ impl NvidiaProvider {
             let response = self
                 .client
                 .post(NVIDIA_API_URL)
-                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Authorization", format!("Bearer {api_key}"))
                 .header("Content-Type", "application/json")
                 .json(&body)
                 .send()
@@ -233,7 +233,7 @@ impl NvidiaProvider {
             return Err(match status.as_u16() {
                 401 => ProviderError::InvalidApiKey,
                 429 => ProviderError::RateLimited,
-                _ => ProviderError::ApiError(format!("{}: {}", status, text)),
+                _ => ProviderError::ApiError(format!("{status}: {text}")),
             });
         }
 
@@ -243,7 +243,7 @@ impl NvidiaProvider {
 
 #[async_trait]
 impl Provider for NvidiaProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "nvidia"
     }
 
@@ -350,8 +350,7 @@ impl Provider for NvidiaProvider {
                             let line = buffer[..pos].to_string();
                             buffer = buffer[pos + 1..].to_string();
 
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
+                            if let Some(data) = line.strip_prefix("data: ") {
                                 if data == "[DONE]" {
                                     yield StreamEvent::Done;
                                     break;

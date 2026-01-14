@@ -450,7 +450,7 @@ pub struct BashState {
     pub terminal_state: TerminalState,
     /// Interactive bash process (legacy - being replaced by PTY)
     pub interactive_bash: Arc<Mutex<Option<InteractiveBash>>>,
-    /// Real PTY shell (preferred over interactive_bash)
+    /// Real PTY shell (preferred over `interactive_bash`)
     pub pty_shell: Arc<Mutex<Option<PtyShell>>>,
     /// Pattern analyzer for intelligent command suggestions
     pub pattern_analyzer: SharedPatternAnalyzer,
@@ -502,7 +502,7 @@ impl InteractiveBash {
 
     /// Reinitialize the bash process after it has died
     /// This is called automatically when the process is detected as dead
-    /// Uses the stored initial_dir and restricted_mode from when the shell was created
+    /// Uses the stored `initial_dir` and `restricted_mode` from when the shell was created
     pub fn reinit(&mut self) -> Result<()> {
         info!("Reinitializing bash process after death in {}", self.initial_dir.display());
 
@@ -1074,7 +1074,7 @@ impl BashState {
         Ok(())
     }
 
-    /// Initialize the PTY shell (preferred over interactive_bash)
+    /// Initialize the PTY shell (preferred over `interactive_bash`)
     ///
     /// This uses a real pseudo-terminal for better compatibility with
     /// interactive programs like sudo, vim, less, etc.

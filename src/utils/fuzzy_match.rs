@@ -271,8 +271,7 @@ impl CombinedScore {
         scores
             .into_iter()
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(_, t)| t)
-            .unwrap_or(MatchType::NormalizedLevenshtein)
+            .map_or(MatchType::NormalizedLevenshtein, |(_, t)| t)
     }
 }
 

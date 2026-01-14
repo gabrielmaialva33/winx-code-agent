@@ -36,7 +36,7 @@ pub struct EmbeddingConfig {
     pub model_id: String,
     /// Preferred backend
     pub preferred_backend: EmbeddingBackend,
-    /// TEI server URL (if using HttpApi)
+    /// TEI server URL (if using `HttpApi`)
     pub tei_url: Option<String>,
     /// Use GPU if available
     pub use_gpu: bool,
@@ -134,7 +134,7 @@ impl EmbeddingEngine {
             let client = reqwest::Client::new();
 
             // Try a health check
-            match client.get(format!("{}/health", url)).send().await {
+            match client.get(format!("{url}/health")).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     self.http_client = Some(client);
                     tracing::info!("TEI server available at {}", url);
@@ -223,7 +223,7 @@ impl EmbeddingEngine {
         }
 
         let resp = client
-            .post(format!("{}/embed", url))
+            .post(format!("{url}/embed"))
             .json(&EmbedRequest { inputs: text })
             .send()
             .await

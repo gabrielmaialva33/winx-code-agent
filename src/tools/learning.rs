@@ -60,7 +60,7 @@ impl Default for LearningState {
     }
 }
 
-/// Executa o tool SearchHistory
+/// Executa o tool `SearchHistory`
 ///
 /// Busca semântica nas sessões do Claude Code
 pub async fn execute_search_history(
@@ -116,7 +116,7 @@ pub async fn execute_search_history(
     }))
 }
 
-/// Executa o tool DetectPatterns
+/// Executa o tool `DetectPatterns`
 ///
 /// Detecta se o pedido atual é similar a pedidos anteriores
 pub async fn execute_detect_patterns(
@@ -197,7 +197,7 @@ pub async fn execute_detect_patterns(
     }))
 }
 
-/// Executa o tool GetUserContext
+/// Executa o tool `GetUserContext`
 ///
 /// Retorna perfil de comunicação do usuário
 pub async fn execute_get_user_context(
@@ -273,7 +273,7 @@ pub async fn execute_get_user_context(
     Ok(context)
 }
 
-/// Executa o tool GetAutomationSuggestions
+/// Executa o tool `GetAutomationSuggestions`
 ///
 /// Retorna lista de pedidos repetitivos que podem virar automações
 pub async fn execute_get_automation_suggestions(
@@ -337,7 +337,7 @@ pub async fn execute_get_automation_suggestions(
     }))
 }
 
-/// Executa o tool ProcessLearning
+/// Executa o tool `ProcessLearning`
 ///
 /// Processa todas as sessões do Claude Code para extrair aprendizado
 pub async fn execute_process_learning(

@@ -53,7 +53,7 @@ fn default_true() -> bool {
 }
 
 /// Default system prompt for Winx
-const DEFAULT_SYSTEM_PROMPT: &str = r#"You are Winx, a high-performance AI assistant running locally on the user's computer.
+const DEFAULT_SYSTEM_PROMPT: &str = r"You are Winx, a high-performance AI assistant running locally on the user's computer.
 
 Key facts:
 - You are running as `winx-code-agent`, a Rust-based CLI chat application
@@ -62,7 +62,7 @@ Key facts:
 - The user can see what model is being used in their prompt
 
 Be helpful, concise, and direct. Prefer code examples when relevant.
-The user may speak Portuguese (Brazilian) or English - respond in the same language they use."#;
+The user may speak Portuguese (Brazilian) or English - respond in the same language they use.";
 
 impl ChatConfig {
     /// Cria config com valores default sensíveis
@@ -114,15 +114,15 @@ pub fn load_config() -> Result<ChatConfig, WinxError> {
     }
 
     let content = fs::read_to_string(&path)
-        .map_err(|e| WinxError::ConfigurationError(format!("Failed to read config: {}", e)))?;
+        .map_err(|e| WinxError::ConfigurationError(format!("Failed to read config: {e}")))?;
 
     // Tenta TOML primeiro, depois JSON
     if path.extension().is_some_and(|e| e == "toml") {
         toml::from_str(&content)
-            .map_err(|e| WinxError::ConfigurationError(format!("Invalid TOML config: {}", e)))
+            .map_err(|e| WinxError::ConfigurationError(format!("Invalid TOML config: {e}")))
     } else {
         serde_json::from_str(&content)
-            .map_err(|e| WinxError::ConfigurationError(format!("Invalid JSON config: {}", e)))
+            .map_err(|e| WinxError::ConfigurationError(format!("Invalid JSON config: {e}")))
     }
 }
 
@@ -134,19 +134,19 @@ pub fn save_config(config: &ChatConfig) -> Result<(), WinxError> {
     // Cria diretório se não existe
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
-            .map_err(|e| WinxError::ConfigurationError(format!("Failed to create config dir: {}", e)))?;
+            .map_err(|e| WinxError::ConfigurationError(format!("Failed to create config dir: {e}")))?;
     }
 
     let content = if path.extension().is_some_and(|e| e == "toml") {
         toml::to_string_pretty(config)
-            .map_err(|e| WinxError::ConfigurationError(format!("Failed to serialize config: {}", e)))?
+            .map_err(|e| WinxError::ConfigurationError(format!("Failed to serialize config: {e}")))?
     } else {
         serde_json::to_string_pretty(config)
-            .map_err(|e| WinxError::ConfigurationError(format!("Failed to serialize config: {}", e)))?
+            .map_err(|e| WinxError::ConfigurationError(format!("Failed to serialize config: {e}")))?
     };
 
     fs::write(&path, content)
-        .map_err(|e| WinxError::ConfigurationError(format!("Failed to write config: {}", e)))?;
+        .map_err(|e| WinxError::ConfigurationError(format!("Failed to write config: {e}")))?;
 
     Ok(())
 }

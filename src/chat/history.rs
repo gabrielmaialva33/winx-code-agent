@@ -33,7 +33,7 @@ impl ChatHistory {
         let mut sessions = Vec::new();
 
         for entry in fs::read_dir(&self.dir)
-            .map_err(|e| WinxError::FileError(format!("Failed to read history dir: {}", e)))?
+            .map_err(|e| WinxError::FileError(format!("Failed to read history dir: {e}")))?
         {
             let entry = entry.map_err(|e| WinxError::FileError(e.to_string()))?;
             let path = entry.path();
@@ -55,7 +55,7 @@ impl ChatHistory {
 
     /// Carrega sessão do arquivo
     pub fn load_session(&self, id: &str) -> Result<SavedSession, WinxError> {
-        let path = self.dir.join(format!("{}.md", id));
+        let path = self.dir.join(format!("{id}.md"));
 
         if !path.exists() {
             return Err(WinxError::FileAccessError {
@@ -65,7 +65,7 @@ impl ChatHistory {
         }
 
         let content = fs::read_to_string(&path)
-            .map_err(|e| WinxError::FileError(format!("Failed to read session: {}", e)))?;
+            .map_err(|e| WinxError::FileError(format!("Failed to read session: {e}")))?;
 
         parse_chat_markdown(&content)
     }
@@ -75,25 +75,25 @@ impl ChatHistory {
         // Cria diretório se não existe
         if !self.dir.exists() {
             fs::create_dir_all(&self.dir)
-                .map_err(|e| WinxError::FileError(format!("Failed to create history dir: {}", e)))?;
+                .map_err(|e| WinxError::FileError(format!("Failed to create history dir: {e}")))?;
         }
 
         let path = self.dir.join(format!("{}.md", session.meta.id));
         let content = serialize_chat_markdown(session);
 
         fs::write(&path, content)
-            .map_err(|e| WinxError::FileError(format!("Failed to save session: {}", e)))?;
+            .map_err(|e| WinxError::FileError(format!("Failed to save session: {e}")))?;
 
         Ok(path)
     }
 
     /// Remove sessão
     pub fn delete_session(&self, id: &str) -> Result<(), WinxError> {
-        let path = self.dir.join(format!("{}.md", id));
+        let path = self.dir.join(format!("{id}.md"));
 
         if path.exists() {
             fs::remove_file(&path)
-                .map_err(|e| WinxError::FileError(format!("Failed to delete session: {}", e)))?;
+                .map_err(|e| WinxError::FileError(format!("Failed to delete session: {e}")))?;
         }
 
         Ok(())
@@ -139,7 +139,7 @@ pub fn serialize_chat_markdown(session: &ChatSession) -> String {
 
     // Título
     if let Some(ref title) = session.meta.title {
-        out.push_str(&format!("# {}\n\n", title));
+        out.push_str(&format!("# {title}\n\n"));
     }
 
     // Mensagens
@@ -165,7 +165,7 @@ pub fn serialize_chat_markdown(session: &ChatSession) -> String {
                 }).collect::<Vec<_>>().join("\n")
             }
             MessageContent::ToolResult { content, tool_use_id } => {
-                format!("*Tool Result ({})*\n\n{}", tool_use_id, content)
+                format!("*Tool Result ({tool_use_id})*\n\n{content}")
             }
         };
 

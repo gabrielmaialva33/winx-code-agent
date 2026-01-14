@@ -1,4 +1,4 @@
-//! HalfBlock rasterizer - Universal fallback using ▀▄█ characters
+//! `HalfBlock` rasterizer - Universal fallback using ▀▄█ characters
 //!
 //! Each terminal cell represents 2 vertical "pixels":
 //! - Top pixel = foreground color
@@ -32,17 +32,17 @@ impl HalfBlockRasterizer {
         let mut result = Vec::with_capacity(rows as usize);
 
         // Scale factors
-        let scale_x = canvas.width as f64 / cols as f64;
-        let scale_y = canvas.height as f64 / (rows as f64 * 2.0); // 2 subpixels per row
+        let scale_x = f64::from(canvas.width) / f64::from(cols);
+        let scale_y = f64::from(canvas.height) / (f64::from(rows) * 2.0); // 2 subpixels per row
 
         for row in 0..rows {
             let mut line = Vec::with_capacity(cols as usize);
 
             for col in 0..cols {
                 // Sample top and bottom pixels
-                let top_x = (col as f64 * scale_x) as u32;
-                let top_y = (row as f64 * 2.0 * scale_y) as u32;
-                let bot_y = ((row as f64 * 2.0 + 1.0) * scale_y) as u32;
+                let top_x = (f64::from(col) * scale_x) as u32;
+                let top_y = (f64::from(row) * 2.0 * scale_y) as u32;
+                let bot_y = ((f64::from(row) * 2.0 + 1.0) * scale_y) as u32;
 
                 let top_color = canvas
                     .get_pixel(top_x.min(canvas.width - 1), top_y.min(canvas.height - 1))
@@ -84,10 +84,9 @@ impl HalfBlockRasterizer {
             if avg.luminance() < 0.1 {
                 // Very dark - use space with black bg
                 return (' ', ratatui::style::Color::Black, avg.to_ratatui());
-            } else {
-                // Use full block
-                return ('█', avg.to_ratatui(), ratatui::style::Color::Black);
             }
+            // Use full block
+            return ('█', avg.to_ratatui(), ratatui::style::Color::Black);
         }
 
         // Different colors - use half blocks

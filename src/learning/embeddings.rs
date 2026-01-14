@@ -48,7 +48,7 @@ pub struct SearchResult {
     pub entries: Vec<ConversationEntry>,
     /// Original query
     pub query: String,
-    /// Method used (text_similarity or embedding)
+    /// Method used (`text_similarity` or embedding)
     pub method: String,
 }
 
@@ -90,8 +90,7 @@ impl ConversationEmbeddings {
     pub async fn backend(&self) -> EmbeddingBackend {
         let lock = self.engine.read().await;
         lock.as_ref()
-            .map(|e| e.backend())
-            .unwrap_or(EmbeddingBackend::Jaccard)
+            .map_or(EmbeddingBackend::Jaccard, super::embedding_engine::EmbeddingEngine::backend)
     }
 
     /// Indexes session messages.
@@ -276,18 +275,15 @@ impl ConversationEmbeddings {
     /// Returns statistics.
     pub async fn stats(&self) -> EmbeddingStats {
         let total_topics = self.index.len();
-        let total_entries: usize = self.index.values().map(|v| v.len()).sum();
+        let total_entries: usize = self.index.values().map(std::vec::Vec::len).sum();
 
         let engine_guard = self.engine.read().await;
         let using_embeddings = engine_guard
             .as_ref()
-            .map(|e| e.backend() != EmbeddingBackend::Jaccard)
-            .unwrap_or(false);
+            .is_some_and(|e| e.backend() != EmbeddingBackend::Jaccard);
 
         let backend_name = engine_guard
-            .as_ref()
-            .map(|e| format!("{:?}", e.backend()))
-            .unwrap_or_else(|| "None".to_string());
+            .as_ref().map_or_else(|| "None".to_string(), |e| format!("{:?}", e.backend()));
 
         EmbeddingStats {
             indexed_topics: total_topics,
@@ -330,9 +326,7 @@ fn extract_topics(messages: &[&SessionMessage]) -> Vec<String> {
 fn create_summary(messages: &[&SessionMessage]) -> String {
     // Get first user message
     messages
-        .iter()
-        .filter(|m| m.role == "user")
-        .next()
+        .iter().find(|m| m.role == "user")
         .map(|m| truncate(&m.content, 200))
         .unwrap_or_default()
 }
@@ -354,7 +348,7 @@ fn extract_keywords(text: &str) -> Vec<String> {
     text.split_whitespace()
         .filter(|w| w.len() > 3)
         .filter(|w| !is_stopword(w))
-        .map(|w| w.to_string())
+        .map(std::string::ToString::to_string)
         .collect()
 }
 

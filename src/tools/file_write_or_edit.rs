@@ -1256,7 +1256,7 @@ async fn apply_search_replace_blocks_with_llm(
 
 /// Check if LLM semantic matching should be enabled
 ///
-/// Returns true if the NVIDIA_API_KEY environment variable is set
+/// Returns true if the `NVIDIA_API_KEY` environment variable is set
 fn is_llm_enabled() -> bool {
     std::env::var("NVIDIA_API_KEY").is_ok()
 }
@@ -1531,7 +1531,7 @@ pub async fn handle_tool_call(
             absolute_path.clone()
         } else {
             // For new files, validate the parent directory exists and is in workspace
-            absolute_path.parent().map(|p| p.to_path_buf()).unwrap_or(absolute_path.clone())
+            absolute_path.parent().map(std::path::Path::to_path_buf).unwrap_or(absolute_path.clone())
         };
 
         if path_to_validate.exists() {

@@ -1369,7 +1369,28 @@ pub async fn apply_search_replace_with_llm_fallback(
             semantic_matcher,
         ).await;
 
-        let (match_result, replace_lines) = if !llm_matches.is_empty() {
+        let (match_result, replace_lines) = if llm_matches.is_empty() {
+            // Try tolerance matching with empty line removal
+            let empty_line_matches =
+                match_with_tolerance_empty_lines(&content_refs, 0, &search_refs, &tolerances);
+
+            if empty_line_matches.is_empty() {
+                let context = find_closest_context(&content_refs, &search_refs);
+                return Err(ApplyError {
+                    message: format!(
+                        "Search block {} not found in content (including LLM fallback).\n{}",
+                        block_idx + 1,
+                        "The search block doesn't match any part of the file."
+                    ),
+                    failed_block: Some(block.search.join("\n")),
+                    context: Some(context),
+                });
+            }
+
+            let (result, _) = empty_line_matches.into_iter().next().unwrap();
+            let filtered_replace = remove_leading_trailing_empty_lines(block.replace.clone());
+            (result, filtered_replace)
+        } else {
             if llm_matches.len() > 1 {
                 return Err(ApplyError {
                     message: format!(
@@ -1393,27 +1414,6 @@ pub async fn apply_search_replace_with_llm_fallback(
             }
 
             (llm_result.result, block.replace.clone())
-        } else {
-            // Try tolerance matching with empty line removal
-            let empty_line_matches =
-                match_with_tolerance_empty_lines(&content_refs, 0, &search_refs, &tolerances);
-
-            if empty_line_matches.is_empty() {
-                let context = find_closest_context(&content_refs, &search_refs);
-                return Err(ApplyError {
-                    message: format!(
-                        "Search block {} not found in content (including LLM fallback).\n{}",
-                        block_idx + 1,
-                        "The search block doesn't match any part of the file."
-                    ),
-                    failed_block: Some(block.search.join("\n")),
-                    context: Some(context),
-                });
-            }
-
-            let (result, _) = empty_line_matches.into_iter().next().unwrap();
-            let filtered_replace = remove_leading_trailing_empty_lines(block.replace.clone());
-            (result, filtered_replace)
         };
 
         // Apply indentation fix if needed

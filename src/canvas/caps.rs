@@ -2,8 +2,8 @@
 //!
 //! Auto-detects:
 //! - Graphics protocol support (Kitty, Sixel, iTerm2)
-//! - Unicode level (Sextant, Braille, HalfBlock)
-//! - Color depth (TrueColor, 256, 16)
+//! - Unicode level (Sextant, Braille, `HalfBlock`)
+//! - Color depth (`TrueColor`, 256, 16)
 //! - Cell dimensions
 
 use std::env;
@@ -113,19 +113,19 @@ impl TerminalCaps {
     /// Effective resolution in pixels (for graphics protocols)
     pub fn pixel_resolution(&self) -> (u32, u32) {
         (
-            self.cols as u32 * self.cell_width as u32,
-            self.rows as u32 * self.cell_height as u32,
+            u32::from(self.cols) * u32::from(self.cell_width),
+            u32::from(self.rows) * u32::from(self.cell_height),
         )
     }
 
     /// Effective resolution in "subpixels" for Unicode graphics
     pub fn subpixel_resolution(&self) -> (u32, u32) {
         match self.unicode {
-            UnicodeLevel::Sextant => (self.cols as u32 * 2, self.rows as u32 * 3),
-            UnicodeLevel::Braille => (self.cols as u32 * 2, self.rows as u32 * 4),
-            UnicodeLevel::HalfBlock => (self.cols as u32, self.rows as u32 * 2),
-            UnicodeLevel::QuarterBlock => (self.cols as u32 * 2, self.rows as u32 * 2),
-            UnicodeLevel::Ascii => (self.cols as u32, self.rows as u32),
+            UnicodeLevel::Sextant => (u32::from(self.cols) * 2, u32::from(self.rows) * 3),
+            UnicodeLevel::Braille => (u32::from(self.cols) * 2, u32::from(self.rows) * 4),
+            UnicodeLevel::HalfBlock => (u32::from(self.cols), u32::from(self.rows) * 2),
+            UnicodeLevel::QuarterBlock => (u32::from(self.cols) * 2, u32::from(self.rows) * 2),
+            UnicodeLevel::Ascii => (u32::from(self.cols), u32::from(self.rows)),
         }
     }
 

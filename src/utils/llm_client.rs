@@ -238,7 +238,7 @@ OUTPUT FORMAT (JSON):
 }"#;
 
         let user_prompt = format!(
-            r#"Find this search block in the file:
+            r"Find this search block in the file:
 
 FILE: {file_path}
 ---FILE CONTENT START---
@@ -249,7 +249,7 @@ FILE: {file_path}
 {search_block}
 ---SEARCH BLOCK END---
 
-Find the best matching section in the file content. Return JSON with the exact matched block."#
+Find the best matching section in the file content. Return JSON with the exact matched block."
         );
 
         let messages = vec![
@@ -348,7 +348,7 @@ OUTPUT FORMAT (JSON):
 }"#;
 
         let user_prompt = format!(
-            r#"Analyze this code change intent:
+            r"Analyze this code change intent:
 
 FILE: {file_path}
 
@@ -362,7 +362,7 @@ REPLACE (new content):
 {replace_block}
 ```
 
-Analyze the intent and safety of this change."#
+Analyze the intent and safety of this change."
         );
 
         let messages = vec![

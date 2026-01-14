@@ -99,13 +99,12 @@ impl MarkdownRender {
                 self.in_code_block = false;
                 let lang = self.code_lang.take();
                 return self.highlight_code_block(&code, lang.as_deref());
-            } else {
-                // Start code block
-                self.in_code_block = true;
-                self.code_lang = trimmed.strip_prefix("```").map(|s| s.to_string());
-                self.code_buffer.clear();
-                return String::new();
             }
+            // Start code block
+            self.in_code_block = true;
+            self.code_lang = trimmed.strip_prefix("```").map(std::string::ToString::to_string);
+            self.code_buffer.clear();
+            return String::new();
         }
 
         if self.in_code_block {
@@ -116,13 +115,13 @@ impl MarkdownRender {
 
         // Headers
         if trimmed.starts_with("# ") {
-            return format!("\x1b[1;35m{}\x1b[0m", trimmed);
+            return format!("\x1b[1;35m{trimmed}\x1b[0m");
         }
         if trimmed.starts_with("## ") {
-            return format!("\x1b[1;34m{}\x1b[0m", trimmed);
+            return format!("\x1b[1;34m{trimmed}\x1b[0m");
         }
         if trimmed.starts_with("### ") {
-            return format!("\x1b[1;36m{}\x1b[0m", trimmed);
+            return format!("\x1b[1;36m{trimmed}\x1b[0m");
         }
 
         // List items
@@ -136,7 +135,7 @@ impl MarkdownRender {
         // Numbered list
         if let Some(rest) = trimmed.strip_prefix(|c: char| c.is_ascii_digit()) {
             if rest.starts_with(". ") {
-                return format!("  \x1b[33m{}\x1b[0m", trimmed);
+                return format!("  \x1b[33m{trimmed}\x1b[0m");
             }
         }
 
@@ -168,7 +167,7 @@ impl MarkdownRender {
         let chars: Vec<char> = text.chars().collect();
 
         while i < chars.len() {
-            let remaining = &text[text.char_indices().nth(i).map(|(idx, _)| idx).unwrap_or(text.len())..];
+            let remaining = &text[text.char_indices().nth(i).map_or(text.len(), |(idx, _)| idx)..];
 
             if remaining.starts_with(marker) {
                 if in_marker {
@@ -208,21 +207,18 @@ impl MarkdownRender {
         let mut highlighter = HighlightLines::new(syntax, &self.theme);
 
         for line in code.lines() {
-            match highlighter.highlight_line(line, &self.syntax_set) {
-                Ok(ranges) => {
-                    for (style, text) in ranges {
-                        let fg = style.foreground;
-                        output.push_str(&format!(
-                            "\x1b[38;2;{};{};{}m{}",
-                            fg.r, fg.g, fg.b, text
-                        ));
-                    }
-                    output.push('\n');
+            if let Ok(ranges) = highlighter.highlight_line(line, &self.syntax_set) {
+                for (style, text) in ranges {
+                    let fg = style.foreground;
+                    output.push_str(&format!(
+                        "\x1b[38;2;{};{};{}m{}",
+                        fg.r, fg.g, fg.b, text
+                    ));
                 }
-                Err(_) => {
-                    output.push_str(line);
-                    output.push('\n');
-                }
+                output.push('\n');
+            } else {
+                output.push_str(line);
+                output.push('\n');
             }
         }
 
@@ -233,7 +229,7 @@ impl MarkdownRender {
     /// Simple code highlighting for incremental rendering
     fn highlight_code(&self, code: &str) -> String {
         // For incremental, just use a simple background color
-        format!("\x1b[48;5;236m{}\x1b[0m", code)
+        format!("\x1b[48;5;236m{code}\x1b[0m")
     }
 }
 

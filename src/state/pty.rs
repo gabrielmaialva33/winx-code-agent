@@ -240,7 +240,7 @@ impl PtyShell {
 
     /// Read output from the PTY with timeout
     ///
-    /// Returns (output, is_complete) tuple where is_complete indicates
+    /// Returns (output, `is_complete`) tuple where `is_complete` indicates
     /// whether the command has finished (prompt detected)
     pub fn read_output(&mut self, timeout_secs: f32) -> Result<(String, bool)> {
         let timeout = Duration::from_secs_f32(timeout_secs.max(0.1).min(60.0));
@@ -378,7 +378,7 @@ impl PtyShell {
             "CtrlD" | "Ctrl-D" => b"\x04",
             "CtrlZ" | "Ctrl-Z" => b"\x1A",
             "CtrlL" | "Ctrl-L" => b"\x0C",
-            _ => return Err(anyhow!("Unknown special key: {}", key)),
+            _ => return Err(anyhow!("Unknown special key: {key}")),
         };
 
         debug!("PTY sending special key: {} ({:?})", key, bytes);
@@ -412,7 +412,7 @@ impl PtyShell {
     }
 }
 
-/// Thread-safe wrapper for PtyShell
+/// Thread-safe wrapper for `PtyShell`
 pub type SharedPtyShell = Arc<Mutex<Option<PtyShell>>>;
 
 /// Create a new shared PTY shell

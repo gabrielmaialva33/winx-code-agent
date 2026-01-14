@@ -29,7 +29,7 @@ use crate::types::{
     GetUserContext, Initialize, ProcessLearning, ReadFiles, ReadImage, SearchHistory,
 };
 
-/// Type alias for the shared bash state - uses tokio::sync::Mutex for async safety
+/// Type alias for the shared bash state - uses `tokio::sync::Mutex` for async safety
 pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
 
 /// Helper function to create JSON schema from schemars Schema
@@ -524,7 +524,7 @@ impl WinxService {
 
     /// Handle bash command execution using the correct WCGW-compatible schema.
     ///
-    /// Uses the BashCommand struct with action_json field for full WCGW parity.
+    /// Uses the `BashCommand` struct with `action_json` field for full WCGW parity.
     async fn handle_bash_command(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
 
@@ -588,7 +588,7 @@ impl WinxService {
             .to_string();
 
         let percentage_to_change =
-            args.get("percentage_to_change").and_then(|v| v.as_u64()).unwrap_or(100) as u32;
+            args.get("percentage_to_change").and_then(serde_json::Value::as_u64).unwrap_or(100) as u32;
 
         let text_or_search_replace_blocks = args
             .get("text_or_search_replace_blocks")

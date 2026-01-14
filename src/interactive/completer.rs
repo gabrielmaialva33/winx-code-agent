@@ -28,8 +28,7 @@ impl Completer for WinxCompleter {
         // Find word being completed
         let word_start = line_to_pos
             .rfind(|c: char| c.is_whitespace())
-            .map(|i| i + 1)
-            .unwrap_or(0);
+            .map_or(0, |i| i + 1);
 
         let partial = &line_to_pos[word_start..].to_lowercase();
 

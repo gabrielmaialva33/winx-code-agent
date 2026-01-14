@@ -33,17 +33,17 @@ impl Color {
     /// Create from 8-bit RGB values (0-255)
     #[inline]
     pub fn from_rgb8(r: u8, g: u8, b: u8) -> Self {
-        Self::rgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0)
+        Self::rgb(f32::from(r) / 255.0, f32::from(g) / 255.0, f32::from(b) / 255.0)
     }
 
     /// Create from 8-bit RGBA values (0-255)
     #[inline]
     pub fn from_rgba8(r: u8, g: u8, b: u8, a: u8) -> Self {
         Self::rgba(
-            r as f32 / 255.0,
-            g as f32 / 255.0,
-            b as f32 / 255.0,
-            a as f32 / 255.0,
+            f32::from(r) / 255.0,
+            f32::from(g) / 255.0,
+            f32::from(b) / 255.0,
+            f32::from(a) / 255.0,
         )
     }
 

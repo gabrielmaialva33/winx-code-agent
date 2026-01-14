@@ -99,7 +99,7 @@ impl SessionParser {
                 if let Ok(file_type) = entry.file_type().await {
                     if file_type.is_dir() {
                         stack.push(path);
-                    } else if path.extension().map_or(false, |ext| ext == "jsonl") {
+                    } else if path.extension().is_some_and(|ext| ext == "jsonl") {
                         files.push(path);
                     }
                 }
@@ -204,7 +204,7 @@ impl SessionParser {
                         .parent()
                         .and_then(|p| p.file_name())
                         .and_then(|n| n.to_str())
-                        .map(|s| s.to_string());
+                        .map(std::string::ToString::to_string);
 
                     for mut msg in messages {
                         msg.project = project.clone();

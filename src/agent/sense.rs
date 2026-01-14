@@ -330,9 +330,7 @@ impl SenseSystem {
         }
 
         if let Some(root) = project_root {
-            let name = root.file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| "unknown".to_string());
+            let name = root.file_name().map_or_else(|| "unknown".to_string(), |n| n.to_string_lossy().to_string());
 
             let has_git = root.join(".git").exists();
             let has_tests = root.join("tests").exists() || root.join("test").exists();
@@ -422,7 +420,7 @@ impl SenseSystem {
             summary.push_str(&format!("- **Nome:** {}\n", project.name));
             summary.push_str(&format!("- **Linguagem:** {:?}\n", project.language));
             if let Some(ref fw) = project.framework {
-                summary.push_str(&format!("- **Framework:** {}\n", fw));
+                summary.push_str(&format!("- **Framework:** {fw}\n"));
             }
             summary.push_str(&format!("- **Git:** {}\n", if project.has_git { "sim" } else { "não" }));
             summary.push_str(&format!("- **Testes:** {}\n", if project.has_tests { "sim" } else { "não" }));

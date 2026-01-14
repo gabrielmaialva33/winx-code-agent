@@ -1,7 +1,7 @@
 //! Kitty Graphics Protocol rasterizer
 //!
 //! Sends actual PNG images to the terminal for pixel-perfect rendering.
-//! Supported by: Kitty, WezTerm, Ghostty, iTerm2 (with adaptations)
+//! Supported by: Kitty, `WezTerm`, Ghostty, iTerm2 (with adaptations)
 //!
 //! Protocol: <https://sw.kovidgoyal.net/kitty/graphics-protocol/>
 
@@ -125,7 +125,7 @@ impl KittyRasterizer {
     fn crc32(&self, data: &[u8]) -> u32 {
         let mut crc: u32 = 0xFFFFFFFF;
         for byte in data {
-            crc ^= *byte as u32;
+            crc ^= u32::from(*byte);
             for _ in 0..8 {
                 if crc & 1 != 0 {
                     crc = (crc >> 1) ^ 0xEDB88320;
@@ -142,7 +142,7 @@ impl KittyRasterizer {
         let mut a: u32 = 1;
         let mut b: u32 = 0;
         for byte in data {
-            a = (a + *byte as u32) % 65521;
+            a = (a + u32::from(*byte)) % 65521;
             b = (b + a) % 65521;
         }
         (b << 16) | a
@@ -162,7 +162,7 @@ impl KittyRasterizer {
             let nlen = !len;
 
             // Block header
-            output.push(if is_final { 0x01 } else { 0x00 });
+            output.push(u8::from(is_final));
             output.extend_from_slice(&len.to_le_bytes());
             output.extend_from_slice(&nlen.to_le_bytes());
             output.extend_from_slice(chunk);
@@ -188,19 +188,18 @@ impl KittyRasterizer {
         for (i, chunk) in chunks.iter().enumerate() {
             let is_first = i == 0;
             let is_last = i == num_chunks - 1;
-            let more = if is_last { 0 } else { 1 };
+            let more = i32::from(!is_last);
 
             result.push_str("\x1b_G");
 
             if is_first {
                 // First chunk: include metadata
                 result.push_str(&format!(
-                    "a=T,f=100,s={},v={},m={};{}",
-                    width, height, more, chunk
+                    "a=T,f=100,s={width},v={height},m={more};{chunk}"
                 ));
             } else {
                 // Continuation chunk
-                result.push_str(&format!("m={};{}", more, chunk));
+                result.push_str(&format!("m={more};{chunk}"));
             }
 
             result.push_str("\x1b\\");

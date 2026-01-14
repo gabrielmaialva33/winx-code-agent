@@ -145,7 +145,7 @@ impl Interactive {
                         Ok(true) => break, // Exit requested
                         Ok(false) => {}
                         Err(e) => {
-                            eprintln!("\x1b[31m✗ Error: {}\x1b[0m\n", e);
+                            eprintln!("\x1b[31m✗ Error: {e}\x1b[0m\n");
                         }
                     }
                 }
@@ -154,7 +154,7 @@ impl Interactive {
                         Language::Portuguese => "(Pressione Ctrl+D ou digite .sair pra sair)",
                         Language::English => "(Press Ctrl+D or type .exit to quit)",
                     };
-                    println!("\x1b[90m{}\x1b[0m\n", hint);
+                    println!("\x1b[90m{hint}\x1b[0m\n");
                 }
                 Ok(Signal::CtrlD) => {
                     break;
@@ -228,13 +228,13 @@ impl Interactive {
                     Language::Portuguese => "Idioma alterado para Português",
                     Language::English => "Language changed to English",
                 };
-                println!("\x1b[32m✓ {}\x1b[0m\n", msg);
+                println!("\x1b[32m✓ {msg}\x1b[0m\n");
             } else {
                 let usage = match self.lang {
                     Language::Portuguese => "Uso: .idioma <pt|en>",
                     Language::English => "Usage: .lang <pt|en>",
                 };
-                println!("{}\n", usage);
+                println!("{usage}\n");
             }
             return Ok(false);
         }
@@ -253,7 +253,7 @@ impl Interactive {
                         "Usage: .model <provider:model>\n\nExamples:\n  .model nvidia:qwen/qwen3-235b-a22b-fp8\n  .model ollama:llama3.2"
                     }
                 };
-                println!("{}\n", usage);
+                println!("{usage}\n");
             }
             return Ok(false);
         }
@@ -264,10 +264,10 @@ impl Interactive {
                 Language::Portuguese => "Modelos disponíveis",
                 Language::English => "Available models",
             };
-            println!("\x1b[1m{}:\x1b[0m\n", title);
+            println!("\x1b[1m{title}:\x1b[0m\n");
             for (id, desc) in self.engine.list_models() {
-                println!("  \x1b[36m{}\x1b[0m", id);
-                println!("    {}\n", desc);
+                println!("  \x1b[36m{id}\x1b[0m");
+                println!("    {desc}\n");
             }
             return Ok(false);
         }
@@ -278,9 +278,9 @@ impl Interactive {
                 Language::Portuguese => "Providers disponíveis",
                 Language::English => "Available providers",
             };
-            println!("\x1b[1m{}:\x1b[0m\n", title);
+            println!("\x1b[1m{title}:\x1b[0m\n");
             for provider in self.engine.list_providers() {
-                println!("  \x1b[33m{}\x1b[0m", provider);
+                println!("  \x1b[33m{provider}\x1b[0m");
             }
             println!();
             return Ok(false);
@@ -306,7 +306,7 @@ impl Interactive {
                 Language::Portuguese => "Nova sessão iniciada",
                 Language::English => "New session started",
             };
-            println!("\x1b[32m✓ {}\x1b[0m\n", msg);
+            println!("\x1b[32m✓ {msg}\x1b[0m\n");
             return Ok(false);
         }
 
@@ -347,8 +347,8 @@ impl Interactive {
                     Language::Portuguese => "Regenerando resposta...",
                     Language::English => "Regenerating response...",
                 };
-                println!("\x1b[90m{}\x1b[0m\n", msg);
-                self.send_message(&input).await?;
+                println!("\x1b[90m{msg}\x1b[0m\n");
+                self.send_message(input).await?;
             } else {
                 println!("\x1b[90m{}\x1b[0m\n", s.msg_no_message);
             }
@@ -364,7 +364,7 @@ impl Interactive {
                     Language::Portuguese => "Uso: .arquivo <caminho>\n\nExemplos:\n  .arquivo src/main.rs\n  .arquivo ~/docs/texto.md",
                     Language::English => "Usage: .file <path>\n\nExamples:\n  .file src/main.rs\n  .file ~/docs/text.md",
                 };
-                println!("{}\n", usage);
+                println!("{usage}\n");
             }
             return Ok(false);
         }
@@ -377,10 +377,10 @@ impl Interactive {
 
         // Unknown command
         let unknown_msg = match self.lang {
-            Language::Portuguese => format!("Comando desconhecido: {}\nDigite .ajuda pra ver comandos disponíveis.", cmd),
-            Language::English => format!("Unknown command: {}\nType .help to see available commands.", cmd),
+            Language::Portuguese => format!("Comando desconhecido: {cmd}\nDigite .ajuda pra ver comandos disponíveis."),
+            Language::English => format!("Unknown command: {cmd}\nType .help to see available commands."),
         };
-        println!("\x1b[31m{}\x1b[0m\n", unknown_msg);
+        println!("\x1b[31m{unknown_msg}\x1b[0m\n");
 
         Ok(false)
     }
@@ -424,7 +424,7 @@ impl Interactive {
                     response.push_str(&text);
                     // Render markdown incrementally
                     let rendered = self.render.render_incremental(&text);
-                    print!("{}", rendered);
+                    print!("{rendered}");
                     io::stdout().flush().ok();
                 }
                 StreamEvent::Done => {
@@ -456,7 +456,7 @@ impl Interactive {
             match Clipboard::new() {
                 Ok(mut clipboard) => {
                     match clipboard.set_text(response.clone()) {
-                        Ok(_) => {
+                        Ok(()) => {
                             println!(
                                 "\x1b[32m✓ {} ({} chars)\x1b[0m\n",
                                 s.msg_copied,
@@ -472,7 +472,7 @@ impl Interactive {
                     // Fallback: show response for manual copy
                     println!("\x1b[33m⚠ {}: {}\x1b[0m", s.msg_copy_fallback, e);
                     println!("\x1b[90m({} chars):\x1b[0m\n", response.len());
-                    println!("{}\n", response);
+                    println!("{response}\n");
                 }
             }
         } else {
@@ -492,7 +492,7 @@ impl Interactive {
                 Language::Portuguese => format!("Arquivo não encontrado: {}", path.display()),
                 Language::English => format!("File not found: {}", path.display()),
             };
-            println!("\x1b[31m✗ {}\x1b[0m\n", msg);
+            println!("\x1b[31m✗ {msg}\x1b[0m\n");
             return Ok(());
         }
 
@@ -501,12 +501,10 @@ impl Interactive {
                 let filename = path.file_name().unwrap_or_default().to_string_lossy();
                 let message = match self.lang {
                     Language::Portuguese => format!(
-                        "Analise este arquivo ({}):\n\n```\n{}\n```",
-                        filename, content
+                        "Analise este arquivo ({filename}):\n\n```\n{content}\n```"
                     ),
                     Language::English => format!(
-                        "Analyze this file ({}):\n\n```\n{}\n```",
-                        filename, content
+                        "Analyze this file ({filename}):\n\n```\n{content}\n```"
                     ),
                 };
                 println!("\x1b[90m{}: {} ({} bytes)\x1b[0m\n", s.msg_file_included, filename, content.len());
@@ -527,7 +525,7 @@ impl Interactive {
             Language::Portuguese => "Histórico de Mensagens",
             Language::English => "Message History",
         };
-        println!("\n\x1b[1m{}:\x1b[0m\n", title);
+        println!("\n\x1b[1m{title}:\x1b[0m\n");
 
         if let Some(ref session) = self.engine.session {
             let messages = session.messages();
@@ -536,7 +534,7 @@ impl Interactive {
                     Language::Portuguese => "Nenhuma mensagem ainda.",
                     Language::English => "No messages yet.",
                 };
-                println!("  \x1b[90m{}\x1b[0m\n", empty);
+                println!("  \x1b[90m{empty}\x1b[0m\n");
             } else {
                 for (i, msg) in messages.iter().enumerate() {
                     let is_user = matches!(msg.role, Role::User);
@@ -665,7 +663,7 @@ impl Interactive {
             if i > 0 {
                 print!(", ");
             }
-            print!("\x1b[33m{}\x1b[0m", p);
+            print!("\x1b[33m{p}\x1b[0m");
         }
         println!();
         println!();
@@ -685,7 +683,7 @@ impl Interactive {
         for cmd in COMMANDS {
             let name = cmd.name(self.lang);
             let desc = cmd.description(self.lang);
-            println!("  \x1b[33m{:<16}\x1b[0m {}", name, desc);
+            println!("  \x1b[33m{name:<16}\x1b[0m {desc}");
         }
 
         println!();
@@ -713,7 +711,7 @@ impl Interactive {
         };
 
         for (key, desc) in shortcuts {
-            println!("  \x1b[90m{:<16}\x1b[0m {}", key, desc);
+            println!("  \x1b[90m{key:<16}\x1b[0m {desc}");
         }
 
         println!();
@@ -732,7 +730,7 @@ impl Interactive {
         };
 
         for hint in multiline_hint {
-            println!("  {}", hint);
+            println!("  {hint}");
         }
         println!();
     }
@@ -743,7 +741,7 @@ impl Interactive {
             Language::English => "Session Info",
         };
         println!();
-        println!("\x1b[1m{}:\x1b[0m", title);
+        println!("\x1b[1m{title}:\x1b[0m");
         println!();
 
         if let Some(ref session) = self.engine.session {
@@ -768,7 +766,7 @@ impl Interactive {
                 Language::Portuguese => "Nenhuma sessão ativa",
                 Language::English => "No active session",
             };
-            println!("  \x1b[90m{}\x1b[0m", no_session);
+            println!("  \x1b[90m{no_session}\x1b[0m");
         }
         println!();
     }

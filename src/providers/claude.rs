@@ -137,7 +137,7 @@ impl ClaudeProvider {
 
 #[async_trait]
 impl Provider for ClaudeProvider {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "claude"
     }
 
@@ -211,7 +211,7 @@ impl Provider for ClaudeProvider {
             return Err(match status.as_u16() {
                 401 => ProviderError::InvalidApiKey,
                 429 => ProviderError::RateLimited,
-                _ => ProviderError::ApiError(format!("{}: {}", status, text)),
+                _ => ProviderError::ApiError(format!("{status}: {text}")),
             });
         }
 
@@ -296,7 +296,7 @@ impl Provider for ClaudeProvider {
             return Err(match status.as_u16() {
                 401 => ProviderError::InvalidApiKey,
                 429 => ProviderError::RateLimited,
-                _ => ProviderError::ApiError(format!("{}: {}", status, text)),
+                _ => ProviderError::ApiError(format!("{status}: {text}")),
             });
         }
 

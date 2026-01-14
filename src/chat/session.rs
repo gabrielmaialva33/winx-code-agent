@@ -277,7 +277,7 @@ fn generate_session_id() -> String {
 
     let mut rng = rand::rng();
     let random: u64 = rng.random();
-    format!("sess_{:016x}", random)
+    format!("sess_{random:016x}")
 }
 
 #[cfg(test)]

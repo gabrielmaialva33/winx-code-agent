@@ -151,7 +151,7 @@ impl ChatEngine {
     /// Troca provider ativo
     pub fn set_provider(&mut self, name: &str) -> Result<(), WinxError> {
         if self.registry.get(name).is_none() {
-            return Err(WinxError::ConfigurationError(format!("Provider '{}' not found", name)));
+            return Err(WinxError::ConfigurationError(format!("Provider '{name}' not found")));
         }
         self.config.default_provider = Some(name.to_string());
         Ok(())

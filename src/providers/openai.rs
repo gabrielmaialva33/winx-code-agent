@@ -1,6 +1,6 @@
-//! OpenAI Provider
+//! `OpenAI` Provider
 //!
-//! Suporta OpenAI API e compatíveis (Azure, Together, etc.)
+//! Suporta `OpenAI` API e compatíveis (Azure, Together, etc.)
 
 use std::env;
 
@@ -57,7 +57,7 @@ impl OpenAIProvider {
             }
             // Ensure URL has chat/completions endpoint
             if base_url.ends_with("/v1") {
-                provider.base_url = format!("{}/chat/completions", base_url);
+                provider.base_url = format!("{base_url}/chat/completions");
             } else if !base_url.contains("/chat/completions") {
                 provider.base_url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
             } else {
@@ -80,7 +80,7 @@ impl OpenAIProvider {
             provider.is_nvidia_compat = url.contains("nvidia.com");
             // Ensure URL has chat/completions endpoint
             if url.ends_with("/v1") {
-                provider.base_url = format!("{}/chat/completions", url);
+                provider.base_url = format!("{url}/chat/completions");
             } else if !url.contains("/chat/completions") {
                 provider.base_url = format!("{}/chat/completions", url.trim_end_matches('/'));
             } else {
@@ -266,7 +266,7 @@ impl Provider for OpenAIProvider {
             return Err(match status.as_u16() {
                 401 => ProviderError::InvalidApiKey,
                 429 => ProviderError::RateLimited,
-                _ => ProviderError::ApiError(format!("{}: {}", status, text)),
+                _ => ProviderError::ApiError(format!("{status}: {text}")),
             });
         }
 
@@ -284,8 +284,7 @@ impl Provider for OpenAIProvider {
                             let line = buffer[..pos].to_string();
                             buffer = buffer[pos + 1..].to_string();
 
-                            if line.starts_with("data: ") {
-                                let data = &line[6..];
+                            if let Some(data) = line.strip_prefix("data: ") {
                                 if data == "[DONE]" {
                                     yield StreamEvent::Done;
                                     break;
@@ -364,7 +363,7 @@ impl Provider for OpenAIProvider {
             return Err(match status.as_u16() {
                 401 => ProviderError::InvalidApiKey,
                 429 => ProviderError::RateLimited,
-                _ => ProviderError::ApiError(format!("{}: {}", status, text)),
+                _ => ProviderError::ApiError(format!("{status}: {text}")),
             });
         }
 

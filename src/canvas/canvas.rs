@@ -120,8 +120,8 @@ impl Canvas {
         let x1 = x0 + 1;
         let y1 = y0 + 1;
 
-        let fx = (x - x0 as f64) as f32;
-        let fy = (y - y0 as f64) as f32;
+        let fx = (x - f64::from(x0)) as f32;
+        let fy = (y - f64::from(y0)) as f32;
 
         let get = |px: i32, py: i32| -> Color {
             if px >= 0 && px < self.width as i32 && py >= 0 && py < self.height as i32 {
@@ -151,13 +151,13 @@ impl Canvas {
     pub fn resize(&self, new_width: u32, new_height: u32) -> Self {
         let mut new_canvas = Canvas::with_background(new_width, new_height, self.bg_color);
 
-        let scale_x = self.width as f64 / new_width as f64;
-        let scale_y = self.height as f64 / new_height as f64;
+        let scale_x = f64::from(self.width) / f64::from(new_width);
+        let scale_y = f64::from(self.height) / f64::from(new_height);
 
         for y in 0..new_height {
             for x in 0..new_width {
-                let src_x = x as f64 * scale_x;
-                let src_y = y as f64 * scale_y;
+                let src_x = f64::from(x) * scale_x;
+                let src_y = f64::from(y) * scale_y;
                 new_canvas.set_pixel(x, y, self.sample(src_x, src_y));
             }
         }

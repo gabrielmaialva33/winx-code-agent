@@ -24,9 +24,7 @@ pub struct SystemInfo {
 
 impl SystemInfo {
     pub fn detect() -> Self {
-        let hostname = hostname::get()
-            .map(|h| h.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
+        let hostname = hostname::get().map_or_else(|_| "unknown".to_string(), |h| h.to_string_lossy().to_string());
 
         let os = std::env::consts::OS.to_string();
         let arch = std::env::consts::ARCH.to_string();
@@ -282,8 +280,7 @@ impl WinxIdentity {
         // User context
         if let Some(ref user) = self.user_name {
             prompt.push_str(&format!(
-                "Estou trabalhando com **{}**.\n\n",
-                user
+                "Estou trabalhando com **{user}**.\n\n"
             ));
         }
 
@@ -299,15 +296,15 @@ impl WinxIdentity {
         ));
 
         if let Some(ref cpu) = self.system.cpu {
-            prompt.push_str(&format!("- **CPU:** {}\n", cpu));
+            prompt.push_str(&format!("- **CPU:** {cpu}\n"));
         }
 
         if let Some(ref gpu) = self.system.gpu {
-            prompt.push_str(&format!("- **GPU:** {}\n", gpu));
+            prompt.push_str(&format!("- **GPU:** {gpu}\n"));
         }
 
         if let Some(ram) = self.system.ram_gb {
-            prompt.push_str(&format!("- **RAM:** {}GB\n", ram));
+            prompt.push_str(&format!("- **RAM:** {ram}GB\n"));
         }
 
         prompt.push_str(&format!(
@@ -346,7 +343,7 @@ impl WinxIdentity {
         for tool in &self.tools {
             let source = match &tool.source {
                 ToolSource::Local => "local".to_string(),
-                ToolSource::Mcp(server) => format!("MCP:{}", server),
+                ToolSource::Mcp(server) => format!("MCP:{server}"),
             };
             prompt.push_str(&format!(
                 "- `{}` ({}): {}\n",

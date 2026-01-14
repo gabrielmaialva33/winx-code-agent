@@ -1,6 +1,6 @@
 //! Custom prompt for winx REPL
 //!
-//! Shows: provider:model session_info >
+//! Shows: provider:model `session_info` >
 
 use std::borrow::Cow;
 
@@ -10,21 +10,13 @@ use crate::chat::ChatEngine;
 use super::i18n::Language;
 
 /// Winx custom prompt with language support
+#[derive(Default)]
 pub struct WinxPrompt {
     left: String,
     right: String,
     lang: Language,
 }
 
-impl Default for WinxPrompt {
-    fn default() -> Self {
-        Self {
-            left: String::new(),
-            right: String::new(),
-            lang: Language::default(),
-        }
-    }
-}
 
 impl WinxPrompt {
     /// Create new prompt
@@ -53,8 +45,7 @@ impl WinxPrompt {
         let model_short = shorten_model_name(model);
 
         self.left = format!(
-            "\x1b[33m{}\x1b[0m:\x1b[36m{}\x1b[0m ",
-            provider, model_short
+            "\x1b[33m{provider}\x1b[0m:\x1b[36m{model_short}\x1b[0m "
         );
 
         // Right: message count if session active
@@ -65,7 +56,7 @@ impl WinxPrompt {
                     Language::Portuguese => "msgs",
                     Language::English => "msgs",
                 };
-                self.right = format!("\x1b[90m[{} {}]\x1b[0m", count, label);
+                self.right = format!("\x1b[90m[{count} {label}]\x1b[0m");
             } else {
                 self.right = String::new();
             }

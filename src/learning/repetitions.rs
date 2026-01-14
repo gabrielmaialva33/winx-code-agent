@@ -18,7 +18,7 @@ use super::{AutomationCandidate, FrequentRequest};
 
 /// Repetition detector with embeddings.
 pub struct RepetitionDetector {
-    /// Inverted index: word -> set of request_ids
+    /// Inverted index: word -> set of `request_ids`
     inverted_index: HashMap<String, HashSet<usize>>,
     /// Stored requests
     requests: Vec<RequestData>,
@@ -110,8 +110,7 @@ impl RepetitionDetector {
     pub async fn backend(&self) -> EmbeddingBackend {
         let lock = self.engine.read().await;
         lock.as_ref()
-            .map(|e| e.backend())
-            .unwrap_or(EmbeddingBackend::Jaccard)
+            .map_or(EmbeddingBackend::Jaccard, super::embedding_engine::EmbeddingEngine::backend)
     }
 
     /// Adds message for analysis.
@@ -278,7 +277,7 @@ impl RepetitionDetector {
             self.request_embeddings.get(j),
         ) {
             // Cosine similarity with real embeddings
-            EmbeddingEngine::cosine_similarity(emb_i, emb_j) as f64
+            f64::from(EmbeddingEngine::cosine_similarity(emb_i, emb_j))
         } else {
             // Fallback: Jaccard + TF-IDF
             let req_i = &self.requests[i];
@@ -313,7 +312,7 @@ impl RepetitionDetector {
         let mut count = 0;
 
         for word in req_i.word_set.intersection(&req_j.word_set) {
-            if let Some(doc_count) = self.inverted_index.get(word).map(|s| s.len()) {
+            if let Some(doc_count) = self.inverted_index.get(word).map(std::collections::HashSet::len) {
                 // IDF: log(N/df)
                 let idf = (total_docs / doc_count as f64).ln();
                 bonus += idf;
@@ -322,7 +321,7 @@ impl RepetitionDetector {
         }
 
         if count > 0 {
-            (bonus / count as f64).min(1.0)
+            (bonus / f64::from(count)).min(1.0)
         } else {
             0.0
         }
@@ -345,7 +344,7 @@ impl RepetitionDetector {
         }
 
         if pairs > 0 {
-            total_sim / pairs as f64
+            total_sim / f64::from(pairs)
         } else {
             0.0
         }
@@ -376,7 +375,7 @@ impl RepetitionDetector {
         best_idx
     }
 
-    /// Returns frequent requests (appeared >= min_count times).
+    /// Returns frequent requests (appeared >= `min_count` times).
     pub fn get_frequent_requests(&self, min_count: usize) -> Vec<FrequentRequest> {
         // First, group clusters
         self.clusters
@@ -456,13 +455,10 @@ impl RepetitionDetector {
         let engine_guard = self.engine.read().await;
         let using_embeddings = engine_guard
             .as_ref()
-            .map(|e| e.backend() != EmbeddingBackend::Jaccard)
-            .unwrap_or(false);
+            .is_some_and(|e| e.backend() != EmbeddingBackend::Jaccard);
 
         let backend_name = engine_guard
-            .as_ref()
-            .map(|e| format!("{:?}", e.backend()))
-            .unwrap_or_else(|| "None".to_string());
+            .as_ref().map_or_else(|| "None".to_string(), |e| format!("{:?}", e.backend()));
 
         let embeddings_computed = self.request_embeddings.iter()
             .filter(|e| e.is_some())

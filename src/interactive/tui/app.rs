@@ -1,6 +1,6 @@
 //! Application state and main loop
 //!
-//! Core TUI application struct with async ChatEngine integration.
+//! Core TUI application struct with async `ChatEngine` integration.
 
 use std::time::{Duration, Instant};
 
@@ -217,7 +217,7 @@ impl App {
                     AsyncEvent::StreamError(err) => {
                         self.phase = Phase::Error;
                         self.mode = AppMode::Insert;
-                        self.messages.push(ChatMessage::system(format!("Erro: {}", err)));
+                        self.messages.push(ChatMessage::system(format!("Erro: {err}")));
                         self.streaming_buffer.clear();
                     }
                 }
@@ -262,7 +262,7 @@ impl App {
     /// Handle key in Normal mode
     fn handle_normal_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
-            KeyCode::Char('i') | KeyCode::Char('a') => self.mode = AppMode::Insert,
+            KeyCode::Char('i' | 'a') => self.mode = AppMode::Insert,
             KeyCode::Char('j') | KeyCode::Down => self.scroll_down(),
             KeyCode::Char('k') | KeyCode::Up => self.scroll_up(),
             KeyCode::Char('G') => self.scroll_to_bottom(),

@@ -223,7 +223,7 @@ async fn print_stream(mut stream: providers::EventStream) -> Result<()> {
     while let Some(event) = stream.next().await {
         match event {
             StreamEvent::Text(text) => {
-                print!("{}", text);
+                print!("{text}");
                 stdout.flush().ok();
             }
             StreamEvent::Done => {
@@ -231,7 +231,7 @@ async fn print_stream(mut stream: providers::EventStream) -> Result<()> {
                 break;
             }
             StreamEvent::Error(err) => {
-                eprintln!("\n\x1b[31mError: {}\x1b[0m", err);
+                eprintln!("\n\x1b[31mError: {err}\x1b[0m");
                 break;
             }
             _ => {}
@@ -272,7 +272,7 @@ fn run_providers() -> Result<()> {
     println!();
 
     for provider in engine.list_providers() {
-        println!("  \x1b[33m{}\x1b[0m", provider);
+        println!("  \x1b[33m{provider}\x1b[0m");
     }
 
     println!();
@@ -280,8 +280,8 @@ fn run_providers() -> Result<()> {
     println!();
 
     for (id, desc) in engine.list_models() {
-        println!("  \x1b[36m{}\x1b[0m", id);
-        println!("    {}", desc);
+        println!("  \x1b[36m{id}\x1b[0m");
+        println!("    {desc}");
     }
 
     Ok(())
@@ -300,9 +300,9 @@ fn run_config(provider: Option<String>, model: Option<String>) -> Result<()> {
         println!("  Model: \x1b[33m{}\x1b[0m",
             config.default_model.as_deref().unwrap_or("(auto)"));
         println!("  Temperature: \x1b[33m{}\x1b[0m",
-            config.temperature.map(|t| t.to_string()).unwrap_or("(default)".to_string()));
+            config.temperature.map_or("(default)".to_string(), |t| t.to_string()));
         println!("  Max tokens: \x1b[33m{}\x1b[0m",
-            config.max_tokens.map(|t| t.to_string()).unwrap_or("(default)".to_string()));
+            config.max_tokens.map_or("(default)".to_string(), |t| t.to_string()));
     } else {
         // Atualiza config
         if let Some(p) = provider {
@@ -355,7 +355,7 @@ async fn run_learn(verbose: bool) -> Result<()> {
     if !report.vocabulary.is_empty() {
         println!("\x1b[1mVocabulário (top 10):\x1b[0m");
         for (word, count) in report.vocabulary.iter().take(10) {
-            println!("  \x1b[33m{}\x1b[0m - {}x", word, count);
+            println!("  \x1b[33m{word}\x1b[0m - {count}x");
         }
         println!();
     }
@@ -367,7 +367,7 @@ async fn run_learn(verbose: bool) -> Result<()> {
             println!("  \x1b[36m{}\x1b[0m ({}x)", req.text, req.count);
             if verbose {
                 for session in &req.sessions {
-                    println!("    \x1b[90m└─ {}\x1b[0m", session);
+                    println!("    \x1b[90m└─ {session}\x1b[0m");
                 }
             }
         }
@@ -385,7 +385,7 @@ async fn run_learn(verbose: bool) -> Result<()> {
             if verbose && !candidate.examples.is_empty() {
                 println!("    Exemplos:");
                 for example in candidate.examples.iter().take(2) {
-                    println!("      \x1b[90m\"{}\"\x1b[0m", example);
+                    println!("      \x1b[90m\"{example}\"\x1b[0m");
                 }
             }
         }

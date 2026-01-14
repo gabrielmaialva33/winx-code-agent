@@ -122,15 +122,15 @@ pub fn send_notification_with_protocol(title: &str, body: &str, protocol: Notifi
     match protocol {
         NotificationProtocol::ITerm2 => {
             // OSC 9 ; message ST
-            let _ = write!(stdout, "\x1b]9;{}: {}\x07", title, body);
+            let _ = write!(stdout, "\x1b]9;{title}: {body}\x07");
         }
         NotificationProtocol::Kitty => {
             // OSC 99 ; i=1:d=0 ; message ST
-            let _ = write!(stdout, "\x1b]99;i=1:d=0;{}: {}\x1b\\", title, body);
+            let _ = write!(stdout, "\x1b]99;i=1:d=0;{title}: {body}\x1b\\");
         }
         NotificationProtocol::Ghostty => {
             // OSC 777 ; notify ; title ; body ST
-            let _ = write!(stdout, "\x1b]777;notify;{};{}\x1b\\", title, body);
+            let _ = write!(stdout, "\x1b]777;notify;{title};{body}\x1b\\");
         }
         NotificationProtocol::Bell => {
             // Simple terminal bell
@@ -146,7 +146,7 @@ pub fn send_notification_with_protocol(title: &str, body: &str, protocol: Notifi
 pub fn set_title(title: &str) {
     let mut stdout = stdout();
     // OSC 0 ; title ST - works in most terminals
-    let _ = write!(stdout, "\x1b]0;{}\x1b\\", title);
+    let _ = write!(stdout, "\x1b]0;{title}\x1b\\");
     let _ = stdout.flush();
 }
 

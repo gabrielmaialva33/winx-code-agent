@@ -2,7 +2,7 @@
 //!
 //! Suporta múltiplos providers de LLM com interface unificada:
 //! - Claude (Anthropic)
-//! - OpenAI
+//! - `OpenAI`
 //! - NVIDIA NIM (nosso pool)
 //! - Gemini
 //! - Ollama (local)

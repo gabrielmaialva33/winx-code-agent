@@ -58,9 +58,9 @@ impl StreamPrinter {
             StreamEvent::ToolCallStart { id, name } => {
                 if self.show_tools {
                     let msg = if self.colors {
-                        format!("\n\x1b[33m⚡ Tool: {}\x1b[0m ({})\n", name, id)
+                        format!("\n\x1b[33m⚡ Tool: {name}\x1b[0m ({id})\n")
                     } else {
-                        format!("\n⚡ Tool: {} ({})\n", name, id)
+                        format!("\n⚡ Tool: {name} ({id})\n")
                     };
                     Some(msg)
                 } else {
@@ -90,9 +90,9 @@ impl StreamPrinter {
 
             StreamEvent::Error(err) => {
                 let msg = if self.colors {
-                    format!("\n\x1b[31m✗ Error: {}\x1b[0m\n", err)
+                    format!("\n\x1b[31m✗ Error: {err}\x1b[0m\n")
                 } else {
-                    format!("\n✗ Error: {}\n", err)
+                    format!("\n✗ Error: {err}\n")
                 };
                 Some(msg)
             }
@@ -117,7 +117,7 @@ pub async fn print_stream(mut stream: EventStream) -> Result<String, WinxError> 
 
     while let Some(event) = stream.next().await {
         if let Some(text) = printer.process_event(&event) {
-            print!("{}", text);
+            print!("{text}");
             stdout.flush().map_err(|e| WinxError::FileError(e.to_string()))?;
         }
 

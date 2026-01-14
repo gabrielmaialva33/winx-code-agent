@@ -1,8 +1,8 @@
-//! # TermCanvas - God Tier TUI Graphics Engine
+//! # `TermCanvas` - God Tier TUI Graphics Engine
 //!
 //! Hierarchical rendering:
 //! 1. Kitty/Sixel Graphics (pixel perfect) - if terminal supports
-//! 2. HalfBlock ▀▄ (2 colors per cell) - universal fallback
+//! 2. `HalfBlock` ▀▄ (2 colors per cell) - universal fallback
 //! 3. Braille ⠀⠁⠂⠃ (8 subpixels) - sparklines only
 //!
 //! ## Architecture

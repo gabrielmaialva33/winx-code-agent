@@ -136,7 +136,7 @@ impl ThinkingPatterns {
         for (seq, data) in sequences.iter().take(10) {
             if data.count >= 2 {
                 patterns.push(ThinkingPattern {
-                    name: format!("Sequence: {}", seq),
+                    name: format!("Sequence: {seq}"),
                     description: format!("Appears {} times", data.count),
                     frequency: data.count,
                 });
@@ -150,7 +150,7 @@ impl ThinkingPatterns {
         for (shortcut, count) in shortcuts.iter().take(10) {
             if **count >= 3 {
                 patterns.push(ThinkingPattern {
-                    name: format!("Shortcut: {}", shortcut),
+                    name: format!("Shortcut: {shortcut}"),
                     description: "Frequent mental shortcut".to_string(),
                     frequency: **count,
                 });
@@ -188,7 +188,7 @@ fn extract_action(content: &str) -> String {
     if lower.contains("erro") || lower.contains("error") || lower.contains("falha") {
         return "debug".to_string();
     }
-    if lower.contains("como") || lower.contains("what") || lower.contains("?") {
+    if lower.contains("como") || lower.contains("what") || lower.contains('?') {
         return "question".to_string();
     }
     if lower.contains("faz") || lower.contains("cria") || lower.contains("adiciona") {
@@ -237,7 +237,7 @@ fn detect_shortcuts(content: &str) -> Vec<String> {
 /// Checks if it is a question.
 fn is_question(content: &str) -> bool {
     let lower = content.to_lowercase();
-    lower.contains("?")
+    lower.contains('?')
         || lower.starts_with("como")
         || lower.starts_with("onde")
         || lower.starts_with("o que")
