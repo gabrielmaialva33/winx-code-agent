@@ -193,6 +193,11 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
 ///
 /// Returns an error if the file cannot be mapped
 fn read_mmap(file: &File, path: &Path) -> Result<Vec<u8>> {
+    // Check for empty file to avoid mmap error
+    if file.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+        return Ok(Vec::new());
+    }
+
     // SAFETY: Memory mapping a file is inherently unsafe because:
     // - The file could be modified by another process during access
     // - The file could be truncated, causing access to invalid memory
@@ -660,6 +665,17 @@ impl ShareableMap {
             message: format!("Error opening file: {e}"),
         })?;
 
+        // Check for empty file
+        if file.metadata().map_err(|e| WinxError::FileAccessError {
+            path: path.to_path_buf(),
+            message: format!("Failed to get metadata: {e}"),
+        })?.len() == 0 {
+            return Err(WinxError::FileAccessError {
+                path: path.to_path_buf(),
+                message: "Cannot memory map empty file".to_string(),
+            });
+        }
+
         // SAFETY: ShareableMap wraps the Mmap in Arc for thread-safe sharing.
         // The mapped data is read-only and the Arc ensures the Mmap outlives
         // all references. Users must be aware the underlying file should not
@@ -689,6 +705,13 @@ impl ShareableMap {
     ///
     /// Returns an error if the file segment cannot be mapped
     pub fn new_segment(path: &Path, offset: u64, length: u64) -> Result<Self> {
+        if length == 0 {
+            return Err(WinxError::FileAccessError {
+                path: path.to_path_buf(),
+                message: "Cannot memory map segment of length 0".to_string(),
+            });
+        }
+
         let file = File::open(path).map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
             message: format!("Error opening file: {e}"),
