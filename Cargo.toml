@@ -71,7 +71,7 @@ shellexpand = "3.1.1"
 tempfile = "3.14"
 tokio-test = "0.4"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
-rstest = "0.23"
+rstest = "0.26"
 assert_cmd = "2.0"
 predicates = "3.1"
 
