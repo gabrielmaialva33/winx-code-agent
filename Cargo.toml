@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 # MCP SDK - Official Rust SDK for Model Context Protocol
-rmcp = { version = "0.12", features = ["transport-io", "server"] }
+rmcp = { version = "0.13", features = ["transport-io", "server"] }
 
 # Schema generation for MCP tools
 schemars = "1.2"
