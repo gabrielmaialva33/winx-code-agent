@@ -60,7 +60,7 @@ libc = "0.2"
 vte = "0.15"
 
 # Random number generation
-rand = "0.9"
+rand = "0.10"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
