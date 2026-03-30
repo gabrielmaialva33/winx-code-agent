@@ -37,7 +37,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # File and system operations
 home = "0.5"
 directories = "6.0"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 glob = "0.3"
 regex = "1.11"
