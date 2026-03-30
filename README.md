@@ -80,3 +80,8 @@ MIT - Gabriel Maia ([@gabrielmaialva33](https://github.com/gabrielmaialva33))
 <p align="center">
   <strong>✨ Optimized for the next generation of AI Agents ✨</strong>
 </p>
+
+## Hosted deployment
+
+A hosted deployment is available on [Fronteir AI](https://fronteir.ai/mcp/gabrielmaialva33-winx-code-agent).
+
