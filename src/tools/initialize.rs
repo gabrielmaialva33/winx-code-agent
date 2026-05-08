@@ -1,5 +1,6 @@
 //! Implementation of the Initialize tool.
 
+use std::fmt::Write as FmtWrite;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -23,7 +24,7 @@ fn convert_mode_name(mode_name: &ModeName) -> Modes {
     }
 }
 
-fn mode_to_state(mode: &Modes) -> (BashCommandMode, FileEditMode, WriteIfEmptyMode) {
+fn mode_to_state(mode: Modes) -> (BashCommandMode, FileEditMode, WriteIfEmptyMode) {
     match mode {
         Modes::Wcgw | Modes::CodeWriter => (
             BashCommandMode {
@@ -57,7 +58,7 @@ fn read_initial_files_simple(files: &[String], workspace: &std::path::Path) -> S
         if let Ok(validated) = validate_path_in_workspace(&path, workspace) {
             if validated.exists() && validated.is_file() {
                 if let Ok(content) = read_file_to_string(&validated, 10_000_000) {
-                    output.push_str(&format!("\n{file_path}\n```\n{content}\n```\n"));
+                    let _ = write!(output, "\n{file_path}\n```\n{content}\n```\n");
                 }
             }
         }
@@ -85,15 +86,16 @@ pub async fn handle_tool_call(
     if workspace_path.exists() {
         if workspace_path.is_file() {
             folder_to_start = workspace_path.parent().unwrap_or(&workspace_path).to_path_buf();
-            response.push_str(&format!("Using parent directory of file: {folder_to_start:?}\n"));
+            let _ =
+                writeln!(response, "Using parent directory of file: {}", folder_to_start.display());
         } else if workspace_path.is_dir() {
-            response.push_str(&format!("Using workspace directory: {folder_to_start:?}\n"));
+            let _ = writeln!(response, "Using workspace directory: {}", folder_to_start.display());
         }
     } else if workspace_path.is_absolute() {
         ensure_directory_exists(&workspace_path).map_err(|e| {
             WinxError::WorkspacePathError(format!("Failed to create workspace: {e}"))
         })?;
-        response.push_str(&format!("Created workspace directory: {workspace_path:?}\n"));
+        let _ = writeln!(response, "Created workspace directory: {}", workspace_path.display());
     }
 
     let thread_id = if initialize.thread_id.is_empty() {
@@ -104,12 +106,12 @@ pub async fn handle_tool_call(
 
     let mut bash_state_guard = bash_state_arc.lock().await;
     let mode = convert_mode_name(&initialize.mode_name);
-    let (bash_command_mode, file_edit_mode, write_if_empty_mode) = mode_to_state(&mode);
+    let (bash_command_mode, file_edit_mode, write_if_empty_mode) = mode_to_state(mode);
 
     match initialize.init_type {
         InitializeType::FirstCall => {
             let mut new_bash_state = BashState::new();
-            new_bash_state.current_thread_id = thread_id.clone();
+            new_bash_state.current_thread_id.clone_from(&thread_id);
             new_bash_state.mode = mode;
             new_bash_state.bash_command_mode = bash_command_mode;
             new_bash_state.file_edit_mode = file_edit_mode;
@@ -124,20 +126,21 @@ pub async fn handle_tool_call(
 
             *bash_state_guard = Some(new_bash_state);
 
-            response.push_str(&format!(
-                "\n# Environment\nSystem: {}\nMachine: {}\nInitialized in directory: {:?}\n",
+            let _ = write!(
+                response,
+                "\n# Environment\nSystem: {}\nMachine: {}\nInitialized in directory: {}\n",
                 std::env::consts::OS,
                 std::env::consts::ARCH,
-                folder_to_start
-            ));
+                folder_to_start.display()
+            );
 
-            response.push_str(&format!("\nUse thread_id={thread_id} for all winx tool calls.\n"));
+            let _ = writeln!(response, "\nUse thread_id={thread_id} for all winx tool calls.");
 
             if !initialize.initial_files_to_read.is_empty() {
                 let content =
                     read_initial_files_simple(&initialize.initial_files_to_read, &folder_to_start);
                 if !content.is_empty() {
-                    response.push_str(&format!("\n# Requested files\n{content}\n"));
+                    let _ = writeln!(response, "\n# Requested files\n{content}");
                 }
             }
         }
@@ -147,7 +150,7 @@ pub async fn handle_tool_call(
                 state.bash_command_mode = bash_command_mode;
                 state.file_edit_mode = file_edit_mode;
                 state.write_if_empty_mode = write_if_empty_mode;
-                response.push_str(&format!("Changed mode to: {mode:?}\n"));
+                let _ = writeln!(response, "Changed mode to: {mode:?}");
             } else {
                 return Err(WinxError::BashStateNotInitialized);
             }
@@ -169,11 +172,14 @@ pub async fn handle_tool_call(
                 if folder_to_start.exists() {
                     state.update_cwd(&folder_to_start)?;
                     state.update_workspace_root(&folder_to_start)?;
-                    response.push_str(&format!("Changed workspace to: {folder_to_start:?}\n"));
+                    let _ =
+                        writeln!(response, "Changed workspace to: {}", folder_to_start.display());
                 } else {
-                    response.push_str(&format!(
-                        "Warning: Workspace path {folder_to_start:?} does not exist\n"
-                    ));
+                    let _ = writeln!(
+                        response,
+                        "Warning: Workspace path {} does not exist",
+                        folder_to_start.display()
+                    );
                 }
             } else {
                 return Err(WinxError::BashStateNotInitialized);

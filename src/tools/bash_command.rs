@@ -7,6 +7,7 @@
 use anyhow::Context as AnyhowContext;
 use rand::RngExt;
 use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -167,20 +168,20 @@ fn get_status(
 
     if is_bg {
         if let Some(id) = bg_id {
-            status.push_str(&format!("bg_command_id = {id}\n"));
+            let _ = writeln!(status, "bg_command_id = {id}");
         }
     }
 
     if is_running {
         status.push_str("status = still running\n");
         if let Some(duration) = running_for {
-            status.push_str(&format!("running for = {duration}\n"));
+            let _ = writeln!(status, "running for = {duration}");
         }
     } else {
         status.push_str("status = process exited\n");
     }
 
-    status.push_str(&format!("cwd = {}\n", bash_state.cwd.display()));
+    let _ = writeln!(status, "cwd = {}", bash_state.cwd.display());
 
     if !is_bg {
         // Add background shell info for main shell - matches WCGW Python
@@ -304,9 +305,7 @@ pub async fn handle_tool_call(
     {
         let bash_state_guard = bash_state_arc.lock().await;
 
-        let state = if let Some(state) = &*bash_state_guard {
-            state
-        } else {
+        let Some(state) = &*bash_state_guard else {
             error!("BashState not initialized");
             return Err(WinxError::BashStateNotInitialized);
         };
@@ -981,11 +980,7 @@ async fn execute_in_background(
 /// Process simple command execution for a bash command (legacy)
 #[allow(dead_code)]
 #[tracing::instrument(level = "debug", skip(command, cwd))]
-async fn execute_simple_command(
-    command: &str,
-    cwd: &Path,
-    _timeout: Option<f32>,
-) -> Result<String> {
+async fn execute_simple_command(command: &str, cwd: &Path) -> Result<String> {
     debug!("Executing command: {}", command);
 
     let start_time = Instant::now();
@@ -1045,7 +1040,7 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
 
     if !screen_check.status.success() {
         warn!("Screen command not found, falling back to direct execution");
-        return execute_simple_command(command, cwd, None).await;
+        return execute_simple_command(command, cwd).await;
     }
 
     let _cleanup = Command::new("screen").args(["-X", "-S", screen_name, "quit"]).output();
@@ -1093,7 +1088,7 @@ async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Resu
 
 /// Converts a `SpecialKey` to its screen stuff input representation (legacy)
 #[allow(dead_code)]
-fn special_key_to_screen_input(key: &SpecialKey) -> String {
+fn special_key_to_screen_input(key: SpecialKey) -> String {
     match key {
         SpecialKey::Enter => String::from("\r"),
         SpecialKey::KeyUp => String::from("\x1b[A"),

@@ -327,7 +327,7 @@ impl InteractiveBash {
         if complete {
             self.command_state = CommandState::Idle;
         }
-        self.last_output = full_output.clone();
+        self.last_output.clone_from(&full_output);
         Ok((full_output, complete))
     }
 

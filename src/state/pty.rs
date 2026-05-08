@@ -62,7 +62,7 @@ impl std::fmt::Debug for PtyShell {
             .field("command_running", &self.command_running)
             .field("output_truncated", &self.output_truncated)
             .field("output_buffer_len", &self.output_buffer.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -177,7 +177,7 @@ impl PtyShell {
 
         // Wait for prompt to be ready
         std::thread::sleep(Duration::from_millis(100));
-        self.drain_output()?;
+        let _ = self.drain_output();
 
         Ok(())
     }
@@ -192,7 +192,7 @@ impl PtyShell {
     }
 
     /// Drain any pending output from the PTY channel
-    fn drain_output(&mut self) -> Result<String> {
+    fn drain_output(&mut self) -> String {
         let mut output = String::new();
         let deadline = Instant::now() + Duration::from_millis(200);
 
@@ -219,7 +219,7 @@ impl PtyShell {
             }
         }
 
-        Ok(output)
+        output
     }
 
     /// Send a command to the shell and start reading output
@@ -243,7 +243,7 @@ impl PtyShell {
     /// Returns (output, `is_complete`) tuple where `is_complete` indicates
     /// whether the command has finished (prompt detected)
     pub fn read_output(&mut self, timeout_secs: f32) -> Result<(String, bool)> {
-        let timeout = Duration::from_secs_f32(timeout_secs.max(0.1).min(60.0));
+        let timeout = Duration::from_secs_f32(timeout_secs.clamp(0.1, 60.0));
         let start = Instant::now();
         let mut complete = false;
         let mut no_data_count = 0;
@@ -257,8 +257,8 @@ impl PtyShell {
 
                     // Check for WCGW prompt indicating command completion
                     if prompt_detected_at.is_none()
-                        && (self.check_prompt_complete(&chunk)
-                            || self.check_prompt_complete(&self.output_buffer))
+                        && (Self::check_prompt_complete(&chunk)
+                            || Self::check_prompt_complete(&self.output_buffer))
                     {
                         prompt_detected_at = Some(Instant::now());
                         debug!("Prompt detected, draining remaining output...");
@@ -289,7 +289,7 @@ impl PtyShell {
                             debug!("Command completed - prompt detected and drained");
                             break;
                         }
-                    } else if no_data_count > 10 && self.check_prompt_complete(&self.output_buffer)
+                    } else if no_data_count > 10 && Self::check_prompt_complete(&self.output_buffer)
                     {
                         // Prompt detected during empty reads
                         prompt_detected_at = Some(Instant::now());
@@ -314,7 +314,7 @@ impl PtyShell {
     }
 
     /// Check if the output contains the WCGW-style prompt
-    fn check_prompt_complete(&self, text: &str) -> bool {
+    fn check_prompt_complete(text: &str) -> bool {
         // Look for the WCGW prompt pattern: ◉ /path──➤
         text.contains(WCGW_PROMPT_PATTERN) && text.contains(WCGW_PROMPT_END)
     }

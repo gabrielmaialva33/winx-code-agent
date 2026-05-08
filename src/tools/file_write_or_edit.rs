@@ -3,13 +3,13 @@
 //! This module provides the implementation for the `FileWriteOrEdit` tool, which is used
 //! to write or edit files, with support for both full file content and search/replace blocks.
 
-#![allow(clippy::unwrap_used)]
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -18,25 +18,29 @@ use crate::state::bash_state::{BashState, FileWhitelistData};
 use crate::types::FileWriteOrEdit;
 use crate::utils::path::{expand_user, validate_path_in_workspace};
 
-fn search_marker() -> &'static Regex {
-    lazy_static::lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"(?m)^<<<<<<< SEARCH\s*$").unwrap();
-    }
-    &REGEX
+static SEARCH_MARKER: OnceLock<std::result::Result<Regex, regex::Error>> = OnceLock::new();
+static DIVIDER_MARKER: OnceLock<std::result::Result<Regex, regex::Error>> = OnceLock::new();
+static REPLACE_MARKER: OnceLock<std::result::Result<Regex, regex::Error>> = OnceLock::new();
+
+fn regex_marker(
+    marker: &'static OnceLock<std::result::Result<Regex, regex::Error>>,
+    pattern: &'static str,
+) -> Result<&'static Regex> {
+    marker.get_or_init(|| Regex::new(pattern)).as_ref().map_err(|error| {
+        WinxError::ArgumentParseError(format!("Invalid edit marker regex: {error}"))
+    })
 }
 
-fn divider_marker() -> &'static Regex {
-    lazy_static::lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"(?m)^=======\s*$").unwrap();
-    }
-    &REGEX
+fn search_marker() -> Result<&'static Regex> {
+    regex_marker(&SEARCH_MARKER, r"(?m)^<<<<<<< SEARCH\s*$")
 }
 
-fn replace_marker() -> &'static Regex {
-    lazy_static::lazy_static! {
-        static ref REGEX: Regex = Regex::new(r"(?m)^>>>>>>> REPLACE\s*$").unwrap();
-    }
-    &REGEX
+fn divider_marker() -> Result<&'static Regex> {
+    regex_marker(&DIVIDER_MARKER, r"(?m)^=======\s*$")
+}
+
+fn replace_marker() -> Result<&'static Regex> {
+    regex_marker(&REPLACE_MARKER, r"(?m)^>>>>>>> REPLACE\s*$")
 }
 
 const MAX_FILE_SIZE: u64 = 50_000_000;
@@ -47,10 +51,10 @@ fn parse_blocks(content: &str) -> Result<Vec<(String, String)>> {
     let mut i = 0;
 
     while i < lines.len() {
-        if search_marker().is_match(lines[i]) {
+        if search_marker()?.is_match(lines[i]) {
             i += 1;
             let mut search_lines = Vec::new();
-            while i < lines.len() && !divider_marker().is_match(lines[i]) {
+            while i < lines.len() && !divider_marker()?.is_match(lines[i]) {
                 search_lines.push(lines[i]);
                 i += 1;
             }
@@ -63,7 +67,7 @@ fn parse_blocks(content: &str) -> Result<Vec<(String, String)>> {
 
             i += 1;
             let mut replace_lines = Vec::new();
-            while i < lines.len() && !replace_marker().is_match(lines[i]) {
+            while i < lines.len() && !replace_marker()?.is_match(lines[i]) {
                 replace_lines.push(lines[i]);
                 i += 1;
             }
@@ -154,7 +158,10 @@ pub async fn handle_tool_call(
     // Update whitelist
     let final_content = fs::read_to_string(&path)?;
     let digest = Sha256::digest(final_content.as_bytes());
-    let hash = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hash = digest.iter().fold(String::with_capacity(digest.len() * 2), |mut hash, byte| {
+        let _ = write!(hash, "{byte:02x}");
+        hash
+    });
     let total_lines = final_content.lines().count();
 
     bash_state

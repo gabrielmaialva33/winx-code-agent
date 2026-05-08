@@ -6,6 +6,7 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -104,7 +105,7 @@ async fn read_file(
     if show_line_numbers {
         for (i, line) in filtered_lines.iter().enumerate() {
             let line_num = start_idx + i + 1;
-            result_content.push_str(&format!("{line_num} {line}\n"));
+            let _ = writeln!(result_content, "{line_num} {line}");
         }
     } else {
         for line in filtered_lines {
@@ -148,7 +149,7 @@ pub async fn handle_tool_call(
         match read_file(file_path, None, &cwd, &workspace_root, true, None, None).await {
             Ok((content, truncated, _, canon_path, line_range)) => {
                 file_ranges_dict.entry(canon_path.clone()).or_default().push(line_range);
-                message.push_str(&format!("\n{file_path}\n```\n{content}\n```"));
+                let _ = write!(message, "\n{file_path}\n```\n{content}\n```");
 
                 let _ = cache.record_read_range(Path::new(&canon_path), line_range.0, line_range.1);
 
@@ -157,7 +158,7 @@ pub async fn handle_tool_call(
                 }
             }
             Err(e) => {
-                message.push_str(&format!("\nError reading {file_path}: {e}"));
+                let _ = write!(message, "\nError reading {file_path}: {e}");
             }
         }
     }

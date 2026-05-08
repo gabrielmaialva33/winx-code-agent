@@ -1,4 +1,5 @@
 use glob::glob;
+use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -164,13 +165,13 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
             if let Err(e) = file.write_all(memory_data.as_bytes()) {
                 warn!("Failed to write memory data: {}", e);
                 // Try writing to temp file as last resort
-                return save_to_temp_file(memory_data, &context);
+                return save_to_temp_file(&memory_data, &context);
             }
         }
         Err(e) => {
             warn!("Failed to create memory file: {}", e);
             // Try writing to temp file as last resort
-            return save_to_temp_file(memory_data, &context);
+            return save_to_temp_file(&memory_data, &context);
         }
     }
 
@@ -242,7 +243,7 @@ fn format_memory(context: &ContextSave, relevant_files_data: &str) -> String {
 
     // Add project root path if provided
     if !context.project_root_path.is_empty() {
-        memory_data.push_str(&format!("Project root path: {}\n\n", context.project_root_path));
+        let _ = write!(memory_data, "Project root path: {}\n\n", context.project_root_path);
     }
 
     // Add the description
@@ -250,8 +251,8 @@ fn format_memory(context: &ContextSave, relevant_files_data: &str) -> String {
     memory_data.push_str("\n\n");
 
     // Add the relevant file globs
-    memory_data
-        .push_str(&format!("Relevant file globs: {}\n\n", context.relevant_file_globs.join(", ")));
+    let _ =
+        write!(memory_data, "Relevant file globs: {}\n\n", context.relevant_file_globs.join(", "));
 
     // Add the content of the relevant files
     memory_data.push_str("File contents:\n\n");
@@ -342,7 +343,7 @@ fn read_files_content(file_paths: &[PathBuf], max_files: usize) -> Result<String
         // Try to read as UTF-8 text, skip binary files
         match fs::read_to_string(path) {
             Ok(file_content) => {
-                result.push_str(&format!("--- File {}: {} ---\n", i + 1, path.display()));
+                let _ = writeln!(result, "--- File {}: {} ---", i + 1, path.display());
                 result.push_str(&file_content);
                 result.push_str("\n\n");
             }
@@ -361,19 +362,21 @@ fn read_files_content(file_paths: &[PathBuf], max_files: usize) -> Result<String
 
     // Add note about skipped binary files
     if !skipped_binary.is_empty() {
-        result.push_str(&format!(
+        let _ = write!(
+            result,
             "Note: Skipped {} binary/non-text file(s): {}\n\n",
             skipped_binary.len(),
             skipped_binary.join(", ")
-        ));
+        );
     }
 
     if file_paths.len() > max_files {
-        result.push_str(&format!(
-            "Note: Only showing the first {} files out of {}.\n",
+        let _ = writeln!(
+            result,
+            "Note: Only showing the first {} files out of {}.",
             max_files,
             file_paths.len()
-        ));
+        );
     }
 
     Ok(result)
@@ -439,7 +442,7 @@ fn try_open_file(file_path: &str) -> Result<()> {
 }
 
 /// Save context data to a temporary file as a last resort
-fn save_to_temp_file(memory_data: String, context: &ContextSave) -> Result<String> {
+fn save_to_temp_file(memory_data: &str, context: &ContextSave) -> Result<String> {
     let temp_dir = std::env::temp_dir();
     let safe_id = sanitize_filename(&context.id);
     let temp_file_path = temp_dir.join(format!("winx-{safe_id}.txt"));
