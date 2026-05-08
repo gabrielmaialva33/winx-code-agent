@@ -1,7 +1,7 @@
 //! Implementation of the Initialize tool.
 
 use std::fmt::Write as FmtWrite;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
@@ -9,8 +9,8 @@ use tracing::{debug, info, instrument, warn};
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{generate_thread_id, BashState};
 use crate::types::{
-    normalize_thread_id, AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode,
-    Initialize, InitializeType, ModeName, Modes, WriteIfEmptyMode,
+    normalize_thread_id, AllowedCommands, AllowedGlobs, BashCommandMode, BashMode,
+    CodeWriterConfig, FileEditMode, Initialize, InitializeType, ModeName, Modes, WriteIfEmptyMode,
 };
 use crate::utils::mmap::read_file_to_string;
 use crate::utils::path::{ensure_directory_exists, expand_user, validate_path_in_workspace};
@@ -24,24 +24,53 @@ fn convert_mode_name(mode_name: &ModeName) -> Modes {
     }
 }
 
-fn mode_to_state(mode: Modes) -> (BashCommandMode, FileEditMode, WriteIfEmptyMode) {
+fn code_writer_state(
+    config: &CodeWriterConfig,
+    workspace_root: &Path,
+) -> (BashCommandMode, FileEditMode, WriteIfEmptyMode) {
+    let mut config = config.clone();
+    config.update_relative_globs(&workspace_root.to_string_lossy());
+
+    (
+        BashCommandMode {
+            bash_mode: BashMode::NormalMode,
+            allowed_commands: config.allowed_commands,
+        },
+        FileEditMode { allowed_globs: config.allowed_globs.clone() },
+        WriteIfEmptyMode { allowed_globs: config.allowed_globs },
+    )
+}
+
+fn mode_to_state(
+    mode: Modes,
+    config: Option<&CodeWriterConfig>,
+    workspace_root: &Path,
+) -> Result<(BashCommandMode, FileEditMode, WriteIfEmptyMode)> {
     match mode {
-        Modes::Wcgw | Modes::CodeWriter => (
+        Modes::Wcgw => Ok((
             BashCommandMode {
                 bash_mode: BashMode::NormalMode,
                 allowed_commands: AllowedCommands::All("all".to_string()),
             },
             FileEditMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
             WriteIfEmptyMode { allowed_globs: AllowedGlobs::All("all".to_string()) },
-        ),
-        Modes::Architect => (
+        )),
+        Modes::Architect => Ok((
             BashCommandMode {
                 bash_mode: BashMode::RestrictedMode,
                 allowed_commands: AllowedCommands::All("all".to_string()),
             },
             FileEditMode { allowed_globs: AllowedGlobs::List(vec![]) },
             WriteIfEmptyMode { allowed_globs: AllowedGlobs::List(vec![]) },
-        ),
+        )),
+        Modes::CodeWriter => {
+            let config = config.ok_or_else(|| {
+                WinxError::ArgumentParseError(
+                    "code_writer_config is required when mode_name is code_writer.".to_string(),
+                )
+            })?;
+            Ok(code_writer_state(config, workspace_root))
+        }
     }
 }
 
@@ -124,12 +153,14 @@ pub async fn handle_tool_call(
 
     info!("Initialize called for workspace: {}", initialize.any_workspace_path);
 
+    validate_thread_id(&initialize)?;
     let folder_to_start = prepare_workspace(&initialize, &mut response)?;
     let thread_id = initialize_thread_id(&initialize);
 
     let mut bash_state_guard = bash_state_arc.lock().await;
     let mode = convert_mode_name(&initialize.mode_name);
-    let (bash_command_mode, file_edit_mode, write_if_empty_mode) = mode_to_state(mode);
+    let (bash_command_mode, file_edit_mode, write_if_empty_mode) =
+        mode_to_state(mode, initialize.code_writer_config.as_ref(), &folder_to_start)?;
 
     match initialize.init_type {
         InitializeType::FirstCall => {
