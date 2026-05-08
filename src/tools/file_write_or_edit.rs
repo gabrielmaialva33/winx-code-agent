@@ -337,25 +337,59 @@ fn find_contiguous_candidates(
         return Vec::new();
     }
 
+    if ignore_empty_lines {
+        return find_empty_line_tolerant_candidates(lines, block, offset, &search_lines);
+    }
+
     let max_start = lines.len() - search_lines.len();
     (offset..=max_start)
-        .filter_map(|start| match_candidate(lines, &search_lines, block, start, ignore_empty_lines))
+        .filter_map(|start| {
+            let end = start + search_lines.len();
+            let actual_lines: Vec<&String> = lines[start..end].iter().collect();
+            match_candidate(lines, &actual_lines, &search_lines, block, start, end, false)
+        })
+        .collect()
+}
+
+fn find_empty_line_tolerant_candidates(
+    lines: &[String],
+    block: &SearchReplaceBlock,
+    offset: usize,
+    search_lines: &[String],
+) -> Vec<MatchCandidate> {
+    let compact_lines: Vec<(usize, &String)> =
+        lines.iter().enumerate().skip(offset).filter(|(_, line)| !line.trim().is_empty()).collect();
+
+    if compact_lines.len() < search_lines.len() {
+        return Vec::new();
+    }
+
+    let max_start = compact_lines.len() - search_lines.len();
+    (0..=max_start)
+        .filter_map(|compact_start| {
+            let compact_end = compact_start + search_lines.len();
+            let start = compact_lines[compact_start].0;
+            let end = compact_lines[compact_end - 1].0 + 1;
+            let actual_lines: Vec<&String> =
+                compact_lines[compact_start..compact_end].iter().map(|(_, line)| *line).collect();
+            match_candidate(lines, &actual_lines, search_lines, block, start, end, true)
+        })
         .collect()
 }
 
 fn match_candidate(
     lines: &[String],
+    actual_lines: &[&String],
     search_lines: &[String],
     block: &SearchReplaceBlock,
     start: usize,
+    end: usize,
     ignore_empty_lines: bool,
 ) -> Option<MatchCandidate> {
-    let end = start + search_lines.len();
-    let matched = &lines[start..end];
     let mut tolerances = Vec::new();
     let mut score = 0;
 
-    for (actual, expected) in matched.iter().zip(search_lines) {
+    for (actual, expected) in actual_lines.iter().zip(search_lines) {
         let line_match = matching_tolerance(actual, expected)?;
         if let LineMatch::Tolerated(tolerance) = line_match {
             score += tolerance.score();
@@ -374,6 +408,7 @@ fn match_candidate(
         replace = replace.into_iter().map(|line| remove_leading_line_number(&line)).collect();
     }
     if tolerances.contains(&ToleranceKind::IgnoreIndentation) {
+        let matched = &lines[start..end];
         replace = fix_indentation(matched, search_lines, &replace);
     }
 

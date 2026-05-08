@@ -517,6 +517,62 @@ class Example:
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_search_replace_matches_across_extra_blank_lines() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "blank-lines").await?;
+
+    let file_path = temp_dir.path().join("blank_lines.txt");
+    std::fs::write(&file_path, "alpha\n\nbeta\ngamma\n")?;
+    read_file_before_edit(&bash_state_arc, &file_path).await?;
+
+    let edit = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 10,
+        text_or_search_replace_blocks: r"<<<<<<< SEARCH
+alpha
+beta
+=======
+alpha
+beta-updated
+>>>>>>> REPLACE"
+            .to_string(),
+        thread_id: "blanklines".to_string(),
+    };
+
+    winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, edit).await?;
+
+    let content = std::fs::read_to_string(&file_path)?;
+    assert_eq!(content, "alpha\nbeta-updated\ngamma\n");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_replace_normalizes_common_unicode_mistakes() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "unicode-mistakes").await?;
+
+    let file_path = temp_dir.path().join("unicode.txt");
+    std::fs::write(&file_path, "println!(\"hello - world...\");\n")?;
+    read_file_before_edit(&bash_state_arc, &file_path).await?;
+
+    let edit = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 10,
+        text_or_search_replace_blocks: "<<<<<<< SEARCH\nprintln!(\u{201c}hello \u{2014} world\u{2026}\u{201d});\n=======\nprintln!(\"updated\");\n>>>>>>> REPLACE"
+            .to_string(),
+        thread_id: "unicodemistakes".to_string(),
+    };
+
+    winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, edit).await?;
+
+    let content = std::fs::read_to_string(&file_path)?;
+    assert_eq!(content, "println!(\"updated\");\n");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_search_replace_removes_readfiles_line_numbers() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, "line-nums").await?;
