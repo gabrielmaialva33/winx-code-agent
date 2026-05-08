@@ -1,6 +1,6 @@
 [package]
 name = "winx-code-agent"
-version = "0.2.3"
+version = "0.2.301"
 edition = "2021"
 rust-version = "1.75"
 description = "High-performance Rust implementation of WCGW for LLM code agents"
@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 # MCP SDK - Official Rust SDK for Model Context Protocol
-rmcp = { version = "0.12", features = ["transport-io", "server"] }
+rmcp = { version = "1.6.0", features = ["transport-io", "server"] }
 
 # Schema generation for MCP tools
 schemars = "1.2"
@@ -24,7 +24,6 @@ async-trait = "0.1"
 # Serialization - Serde ecosystem
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-toml = "0.8"
 
 # Error handling - thiserror for library, anyhow for binary
 thiserror = "2.0"
@@ -36,23 +35,19 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # File and system operations
 home = "0.5"
-directories = "6.0"
-sha2 = "0.10"
+sha2 = "0.11.0"
 base64 = "0.22"
 glob = "0.3"
 regex = "1.11"
 mime_guess = "2.0"
 memmap2 = "0.9"
 tempfile = "3.14"
-chrono = { version = "0.4", features = ["serde"] }
 
 # Performance and concurrency
 rayon = "1.10"
 
 # Advanced string matching algorithms
-strsim = "0.11"
-portable-pty = "0.8"
-bytes = "1.9"
+portable-pty = "0.9.0"
 lazy_static = "1.5"
 libc = "0.2"
 
@@ -60,20 +55,13 @@ libc = "0.2"
 vte = "0.15"
 
 # Random number generation
-rand = "0.9"
+rand = "0.10.1"
 
 # CLI
 clap = { version = "4.5", features = ["derive"] }
 
-shellexpand = "3.1.1"
-
 [dev-dependencies]
 tempfile = "3.14"
-tokio-test = "0.4"
-criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
-rstest = "0.23"
-assert_cmd = "2.0"
-predicates = "3.1"
 
 [features]
 default = []
