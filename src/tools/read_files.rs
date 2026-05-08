@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -21,7 +21,8 @@ use crate::utils::mmap::read_file_to_string;
 use crate::utils::path::{expand_user, validate_path_in_workspace};
 
 /// Default token limits for file reading
-const DEFAULT_MAX_TOKENS: usize = 24000;
+const CODING_MAX_TOKENS: usize = 24_000;
+const NONCODING_MAX_TOKENS: usize = 8_000;
 
 /// Type alias for file reading result
 type FileReadResult = (String, bool, usize, String, (usize, usize));
@@ -115,20 +116,114 @@ async fn read_file(
     }
 
     let mut truncated = false;
-    let tokens_count = result_content.len();
-    let max_tokens = max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+    let tokens_count = count_tokens(&result_content);
+    let max_tokens = max_tokens.unwrap_or_else(|| select_max_tokens(file_path));
 
     if tokens_count > max_tokens {
-        let truncation_point =
-            result_content.char_indices().nth(max_tokens).map_or(result_content.len(), |(i, _)| i);
-        result_content.truncate(truncation_point);
-        result_content.push_str("\n(...truncated due to token limit)");
+        truncate_to_token_budget(&mut result_content, max_tokens);
+        let _ = write!(
+            result_content,
+            "\n(...truncated) {tokens_count} tokens exceeded limit {max_tokens}."
+        );
         truncated = true;
     }
 
     let canon_path = path.to_string_lossy().to_string();
 
     Ok((result_content, truncated, tokens_count, canon_path, (effective_start, effective_end)))
+}
+
+fn count_tokens(content: &str) -> usize {
+    static TOKENIZER: OnceLock<Option<tiktoken_rs::CoreBPE>> = OnceLock::new();
+
+    TOKENIZER.get_or_init(|| tiktoken_rs::cl100k_base().ok()).as_ref().map_or_else(
+        || estimate_tokens(content),
+        |encoder| encoder.encode_with_special_tokens(content).len(),
+    )
+}
+
+fn estimate_tokens(content: &str) -> usize {
+    content.chars().count().div_ceil(4).max(content.split_whitespace().count())
+}
+
+fn truncate_to_token_budget(content: &mut String, max_tokens: usize) {
+    let mut low = 0;
+    let mut high = content.chars().count();
+
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        let byte_idx = byte_index_for_char_count(content, mid);
+
+        if count_tokens(&content[..byte_idx]) <= max_tokens {
+            low = mid;
+        } else {
+            high = mid.saturating_sub(1);
+        }
+    }
+
+    let byte_idx = byte_index_for_char_count(content, low);
+    content.truncate(byte_idx);
+}
+
+fn byte_index_for_char_count(content: &str, char_count: usize) -> usize {
+    content.char_indices().nth(char_count).map_or(content.len(), |(idx, _)| idx)
+}
+
+fn select_max_tokens(file_path: &str) -> usize {
+    if is_source_code_file(file_path) {
+        CODING_MAX_TOKENS
+    } else {
+        NONCODING_MAX_TOKENS
+    }
+}
+
+fn is_source_code_file(file_path: &str) -> bool {
+    let path = Path::new(file_path);
+    let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
+    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+
+    matches!(file_name, "Makefile" | "Dockerfile" | "Jenkinsfile")
+        || matches!(
+            extension,
+            "py" | "pyx"
+                | "pyi"
+                | "pyw"
+                | "js"
+                | "jsx"
+                | "ts"
+                | "tsx"
+                | "mjs"
+                | "cjs"
+                | "html"
+                | "css"
+                | "scss"
+                | "sass"
+                | "less"
+                | "c"
+                | "h"
+                | "cpp"
+                | "cxx"
+                | "cc"
+                | "hpp"
+                | "java"
+                | "kt"
+                | "go"
+                | "rs"
+                | "rb"
+                | "php"
+                | "sh"
+                | "bash"
+                | "zsh"
+                | "sql"
+                | "xml"
+                | "json"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "md"
+                | "ex"
+                | "exs"
+        )
 }
 
 pub async fn handle_tool_call(
@@ -152,7 +247,7 @@ pub async fn handle_tool_call(
 
         match read_file(
             &clean_path,
-            None,
+            Some(select_max_tokens(&clean_path)),
             &cwd,
             &workspace_root,
             read_files.show_line_numbers(),

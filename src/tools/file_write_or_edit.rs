@@ -587,19 +587,27 @@ fn closest_snippet(lines: &[String], offset: usize, search: &[String]) -> String
     }
 
     let max_start = lines.len().saturating_sub(window);
-    let best_start = (offset..=max_start)
-        .min_by_key(|start| rough_distance(&lines[*start..(*start + window)], search))
-        .unwrap_or(offset);
+    let mut best_start = offset;
+    let mut best_score = f64::MIN;
+    for start in offset..=max_start {
+        let score = snippet_similarity(&lines[start..(start + window)], search);
+        if score > best_score {
+            best_score = score;
+            best_start = start;
+        }
+    }
     lines[best_start..(best_start + window).min(lines.len())].join("\n")
 }
 
-fn rough_distance(candidate: &[String], search: &[String]) -> usize {
+fn snippet_similarity(candidate: &[String], search: &[String]) -> f64 {
     candidate
         .iter()
         .zip(search)
-        .map(|(candidate_line, search_line)| candidate_line.len().abs_diff(search_line.len()))
-        .sum::<usize>()
-        + candidate.len().abs_diff(search.len()) * 10
+        .map(|(candidate_line, search_line)| {
+            strsim::normalized_levenshtein(candidate_line.trim(), search_line.trim())
+        })
+        .sum::<f64>()
+        - candidate.len().abs_diff(search.len()) as f64
 }
 
 fn uses_search_replace(file_write_or_edit: &FileWriteOrEdit) -> bool {
@@ -665,10 +673,15 @@ pub async fn handle_tool_call(
         let new_content = apply_blocks(&original_content, &blocks)?;
 
         fs::write(&path, &new_content)?;
-        format!("Successfully edited {file_path_str}")
+        operation_result("edited", &file_path_str, &path, &new_content)
     } else {
         fs::write(&path, &file_write_or_edit.text_or_search_replace_blocks)?;
-        format!("Successfully wrote {file_path_str}")
+        operation_result(
+            "wrote",
+            &file_path_str,
+            &path,
+            &file_write_or_edit.text_or_search_replace_blocks,
+        )
     };
 
     // Update whitelist
@@ -685,4 +698,12 @@ pub async fn handle_tool_call(
         .insert(file_path_str, FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines));
 
     Ok(result)
+}
+
+fn operation_result(action: &str, file_path: &str, path: &Path, content: &str) -> String {
+    let mut result = format!("Successfully {action} {file_path}");
+    if let Some(warning) = crate::utils::syntax::syntax_warning(path, content) {
+        let _ = write!(result, "\n\n{warning}");
+    }
+    result
 }
