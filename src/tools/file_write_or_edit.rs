@@ -316,9 +316,48 @@ fn find_candidates(
 ) -> Vec<MatchCandidate> {
     let mut candidates = find_contiguous_candidates(lines, block, offset, false);
     if candidates.is_empty() {
+        candidates = find_single_line_substring_candidates(lines, block, offset);
+    }
+    if candidates.is_empty() {
         candidates = find_contiguous_candidates(lines, block, offset, true);
     }
     candidates
+}
+
+fn find_single_line_substring_candidates(
+    lines: &[String],
+    block: &SearchReplaceBlock,
+    offset: usize,
+) -> Vec<MatchCandidate> {
+    if block.search.len() != 1 {
+        return Vec::new();
+    }
+
+    let search = &block.search[0];
+    if search.is_empty() {
+        return Vec::new();
+    }
+
+    let replace = block.replace.join("\n");
+    lines
+        .iter()
+        .enumerate()
+        .skip(offset)
+        .flat_map(|(index, line)| {
+            let replace = replace.clone();
+            line.match_indices(search).map(move |(byte_index, _)| {
+                let mut replaced_line = line.clone();
+                replaced_line.replace_range(byte_index..byte_index + search.len(), &replace);
+                MatchCandidate {
+                    start: index,
+                    end: index + 1,
+                    score: 0,
+                    tolerances: Vec::new(),
+                    replace: split_lines(&replaced_line),
+                }
+            })
+        })
+        .collect()
 }
 
 fn find_contiguous_candidates(
