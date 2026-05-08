@@ -12,7 +12,8 @@ use winx_code_agent::errors::{Result, WinxError};
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::tools::WinxService;
 use winx_code_agent::types::{
-    BashCommand, BashCommandAction, Initialize, InitializeType, ModeName, ReadFiles,
+    BashCommand, BashCommandAction, FileWriteOrEdit, Initialize, InitializeType, ModeName,
+    ReadFiles,
 };
 
 // ==================== WinxService Tests ====================
@@ -497,12 +498,13 @@ async fn test_code_writer_mode() -> Result<()> {
     use winx_code_agent::types::{AllowedCommands, AllowedGlobs, CodeWriterConfig};
 
     let temp_dir = TempDir::new()?;
+    let workspace = temp_dir.path().to_string_lossy().to_string();
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
 
     let init = Initialize {
         init_type: InitializeType::FirstCall,
         mode_name: ModeName::CodeWriter,
-        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        any_workspace_path: workspace.clone(),
         thread_id: String::new(),
         code_writer_config: Some(CodeWriterConfig {
             allowed_globs: AllowedGlobs::List(vec!["*.rs".to_string(), "*.toml".to_string()]),
@@ -520,6 +522,89 @@ async fn test_code_writer_mode() -> Result<()> {
     let state = bash_state_arc.lock().await;
     let bash_state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
     assert!(bash_state.initialized);
+    assert_eq!(
+        bash_state.file_edit_mode.allowed_globs,
+        AllowedGlobs::List(vec![format!("{workspace}/*.rs"), format!("{workspace}/*.toml")])
+    );
+    assert_eq!(
+        bash_state.write_if_empty_mode.allowed_globs,
+        AllowedGlobs::List(vec![format!("{workspace}/*.rs"), format!("{workspace}/*.toml")])
+    );
+    assert_eq!(
+        bash_state.bash_command_mode.allowed_commands,
+        AllowedCommands::List(vec!["cargo".to_string(), "rustc".to_string()])
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_code_writer_mode_requires_config() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+
+    let init = Initialize {
+        init_type: InitializeType::FirstCall,
+        mode_name: ModeName::CodeWriter,
+        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        thread_id: String::new(),
+        code_writer_config: None,
+        initial_files_to_read: vec![],
+        task_id_to_resume: String::new(),
+    };
+
+    let result = winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await;
+
+    assert!(matches!(result, Err(WinxError::ArgumentParseError(_))));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_code_writer_mode_enforces_file_write_globs() -> Result<()> {
+    use winx_code_agent::types::{AllowedCommands, AllowedGlobs, CodeWriterConfig};
+
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+
+    let init = Initialize {
+        init_type: InitializeType::FirstCall,
+        mode_name: ModeName::CodeWriter,
+        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        thread_id: "code-writer-mode".to_string(),
+        code_writer_config: Some(CodeWriterConfig {
+            allowed_globs: AllowedGlobs::List(vec!["*.rs".to_string()]),
+            allowed_commands: AllowedCommands::List(vec![]),
+        }),
+        initial_files_to_read: vec![],
+        task_id_to_resume: String::new(),
+    };
+
+    winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+
+    let allowed_write = FileWriteOrEdit {
+        file_path: temp_dir.path().join("allowed.rs").to_string_lossy().to_string(),
+        percentage_to_change: 100,
+        text_or_search_replace_blocks: "fn main() {}\n".to_string(),
+        thread_id: "codewritermode".to_string(),
+    };
+    winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, allowed_write)
+        .await?;
+
+    let disallowed_write = FileWriteOrEdit {
+        file_path: temp_dir.path().join("blocked.txt").to_string_lossy().to_string(),
+        percentage_to_change: 100,
+        text_or_search_replace_blocks: "blocked\n".to_string(),
+        thread_id: "codewritermode".to_string(),
+    };
+
+    let result = winx_code_agent::tools::file_write_or_edit::handle_tool_call(
+        &bash_state_arc,
+        disallowed_write,
+    )
+    .await;
+
+    assert!(matches!(result, Err(WinxError::FileAccessError { .. })));
 
     Ok(())
 }
