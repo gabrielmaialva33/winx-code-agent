@@ -119,6 +119,15 @@ fn prepare_workspace(initialize: &Initialize, response: &mut String) -> Result<P
         let _ = writeln!(response, "Created workspace directory: {}", workspace_path.display());
     }
 
+    // Canonicalize so downstream comparisons (workspace checks, glob prefixes) match
+    // paths that were canonicalized via fs::canonicalize — important on macOS where
+    // /var, /tmp etc. are symlinks to /private/var, /private/tmp.
+    if folder_to_start.exists() {
+        if let Ok(canonical) = folder_to_start.canonicalize() {
+            folder_to_start = canonical;
+        }
+    }
+
     Ok(folder_to_start)
 }
 
