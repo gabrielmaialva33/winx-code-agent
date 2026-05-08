@@ -180,7 +180,7 @@ fn write_memory_file(
     memory_data: &str,
     context: &ContextSave,
 ) -> Result<Option<String>> {
-    match File::create(&memory_file_path) {
+    match File::create(memory_file_path) {
         Ok(mut file) => {
             if let Err(e) = file.write_all(memory_data.as_bytes()) {
                 warn!("Failed to write memory data: {}", e);
@@ -212,7 +212,7 @@ fn write_bash_state_file(state_file_path: &Path, bash_state: &BashState) -> Resu
     })?;
 
     // Try to create and write state file, but don't fail if it doesn't work
-    match File::create(&state_file_path) {
+    match File::create(state_file_path) {
         Ok(mut state_file) => {
             if let Err(e) = state_file.write_all(state_json.as_bytes()) {
                 warn!("Failed to write bash state data: {}", e);
