@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
-use winx_code_agent::errors::Result;
+use winx_code_agent::errors::{Result, WinxError};
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::types::{FileWriteOrEdit, Initialize, InitializeType, ModeName, ReadFiles};
 
@@ -36,6 +36,20 @@ async fn create_initialized_state(
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     Ok(bash_state_arc)
+}
+
+async fn read_file_before_edit(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    file_path: &std::path::Path,
+) -> Result<()> {
+    let read_files = ReadFiles {
+        file_paths: vec![file_path.to_string_lossy().to_string()],
+        start_line_nums: vec![None],
+        end_line_nums: vec![None],
+    };
+
+    winx_code_agent::tools::read_files::handle_tool_call(bash_state_arc, read_files).await?;
+    Ok(())
 }
 
 // ==================== Test 1: Create New File (percentage > 50) ====================
@@ -459,6 +473,182 @@ if __name__ == "__main__":
     }
 
     assert!(all_passed, "Not all edits were applied.\nFinal content:\n{final_content}");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_replace_matches_with_indentation_tolerance() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "indent-tolerance").await?;
+
+    let file_path = temp_dir.path().join("indent.py");
+    std::fs::write(
+        &file_path,
+        "  class Example:\n      def method(self):\n          print('hello')\n",
+    )?;
+    read_file_before_edit(&bash_state_arc, &file_path).await?;
+
+    let edit = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 10,
+        text_or_search_replace_blocks: r"<<<<<<< SEARCH
+class Example:
+    def method(self):
+        print('hello')
+=======
+class Example:
+    def another_method(self):
+        print('world')
+>>>>>>> REPLACE"
+            .to_string(),
+        thread_id: "indenttolerance".to_string(),
+    };
+
+    winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, edit).await?;
+
+    let content = std::fs::read_to_string(&file_path)?;
+    assert_eq!(
+        content,
+        "  class Example:\n      def another_method(self):\n          print('world')\n"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_replace_removes_readfiles_line_numbers() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "line-nums").await?;
+
+    let file_path = temp_dir.path().join("line_nums.rs");
+    std::fs::write(&file_path, "fn main() {\n    println!(\"old\");\n}\n")?;
+    read_file_before_edit(&bash_state_arc, &file_path).await?;
+
+    let edit = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 10,
+        text_or_search_replace_blocks: r#"<<<<<<< SEARCH
+1 fn main() {
+2     println!("old");
+3 }
+=======
+1 fn main() {
+2     println!("new");
+3 }
+>>>>>>> REPLACE"#
+            .to_string(),
+        thread_id: "linenums".to_string(),
+    };
+
+    winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, edit).await?;
+
+    let content = std::fs::read_to_string(&file_path)?;
+    assert_eq!(content, "fn main() {\n    println!(\"new\");\n}\n");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_replace_uses_surrounding_blocks_to_disambiguate() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "context-match").await?;
+
+    let file_path = temp_dir.path().join("context.txt");
+    std::fs::write(&file_path, "A\nB\nC\nB\n")?;
+    read_file_before_edit(&bash_state_arc, &file_path).await?;
+
+    let edit = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 10,
+        text_or_search_replace_blocks: r"<<<<<<< SEARCH
+A
+=======
+A
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+B
+=======
+B_MODIFIED_FIRST
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+C
+=======
+C
+>>>>>>> REPLACE"
+            .to_string(),
+        thread_id: "contextmatch".to_string(),
+    };
+
+    winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, edit).await?;
+
+    let content = std::fs::read_to_string(&file_path)?;
+    assert_eq!(content, "A\nB_MODIFIED_FIRST\nC\nB\n");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_replace_applies_unordered_independent_blocks() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "unordered-blocks").await?;
+
+    let file_path = temp_dir.path().join("unordered.txt");
+    std::fs::write(&file_path, "A\nB\nC\nB\n")?;
+    read_file_before_edit(&bash_state_arc, &file_path).await?;
+
+    let edit = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 10,
+        text_or_search_replace_blocks: r"<<<<<<< SEARCH
+C
+=======
+CPrime
+>>>>>>> REPLACE
+<<<<<<< SEARCH
+A
+=======
+A_MODIFIED
+>>>>>>> REPLACE"
+            .to_string(),
+        thread_id: "unorderedblocks".to_string(),
+    };
+
+    winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, edit).await?;
+
+    let content = std::fs::read_to_string(&file_path)?;
+    assert_eq!(content, "A_MODIFIED\nB\nCPrime\nB\n");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_search_replace_ambiguous_match_does_not_write() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "ambiguous-match").await?;
+
+    let file_path = temp_dir.path().join("ambiguous.txt");
+    let original = "A\nB\nB\n";
+    std::fs::write(&file_path, original)?;
+    read_file_before_edit(&bash_state_arc, &file_path).await?;
+
+    let edit = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 10,
+        text_or_search_replace_blocks: r"<<<<<<< SEARCH
+B
+=======
+B_CHANGED
+>>>>>>> REPLACE"
+            .to_string(),
+        thread_id: "ambiguousmatch".to_string(),
+    };
+
+    let result =
+        winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, edit).await;
+
+    assert!(matches!(result, Err(WinxError::SearchBlockAmbiguous { .. })));
+    assert_eq!(std::fs::read_to_string(&file_path)?, original);
 
     Ok(())
 }
