@@ -66,15 +66,7 @@ fn read_initial_files_simple(files: &[String], workspace: &std::path::Path) -> S
     output
 }
 
-#[instrument(level = "info", skip(bash_state_arc, initialize))]
-pub async fn handle_tool_call(
-    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
-    initialize: Initialize,
-) -> Result<String> {
-    let mut response = String::new();
-
-    info!("Initialize called for workspace: {}", initialize.any_workspace_path);
-
+fn prepare_workspace(initialize: &Initialize, response: &mut String) -> Result<PathBuf> {
     let workspace_path_str = expand_user(&initialize.any_workspace_path);
     if workspace_path_str.is_empty() {
         return Err(WinxError::WorkspacePathError("Workspace path cannot be empty.".to_string()));
@@ -98,11 +90,28 @@ pub async fn handle_tool_call(
         let _ = writeln!(response, "Created workspace directory: {}", workspace_path.display());
     }
 
-    let thread_id = if initialize.thread_id.is_empty() {
+    Ok(folder_to_start)
+}
+
+fn initialize_thread_id(initialize: &Initialize) -> String {
+    if initialize.thread_id.is_empty() {
         generate_thread_id()
     } else {
         initialize.thread_id.clone()
-    };
+    }
+}
+
+#[instrument(level = "info", skip(bash_state_arc, initialize))]
+pub async fn handle_tool_call(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    initialize: Initialize,
+) -> Result<String> {
+    let mut response = String::new();
+
+    info!("Initialize called for workspace: {}", initialize.any_workspace_path);
+
+    let folder_to_start = prepare_workspace(&initialize, &mut response)?;
+    let thread_id = initialize_thread_id(&initialize);
 
     let mut bash_state_guard = bash_state_arc.lock().await;
     let mode = convert_mode_name(&initialize.mode_name);
