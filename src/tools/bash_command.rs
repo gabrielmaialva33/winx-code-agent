@@ -126,36 +126,6 @@ lazy_static::lazy_static! {
 
 // ==================== WCGW-Style Helper Functions ====================
 
-/// Assert that command contains only a single statement - matches WCGW Python `assert_single_statement`
-fn assert_single_statement(command: &str) -> Result<()> {
-    if command.contains('\n') {
-        // Check if the newline is inside quotes or a heredoc
-        let mut in_single_quote = false;
-        let mut in_double_quote = false;
-        let mut escape_next = false;
-
-        for ch in command.chars() {
-            if escape_next {
-                escape_next = false;
-                continue;
-            }
-
-            match ch {
-                '\\' => escape_next = true,
-                '\'' if !in_double_quote => in_single_quote = !in_single_quote,
-                '"' if !in_single_quote => in_double_quote = !in_double_quote,
-                '\n' if !in_single_quote && !in_double_quote => {
-                    return Err(WinxError::CommandExecutionError(
-                        "Command should not contain newline character in middle. Run only one command at a time.".to_string()
-                    ));
-                }
-                _ => {}
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Get WCGW-style status string - matches WCGW Python's `get_status()`
 fn get_status(
     bash_state: &BashState,
@@ -439,7 +409,7 @@ async fn execute_command(
 
     // Validate single statement - matches WCGW Python assert_single_statement
     let command = command.trim();
-    assert_single_statement(command)?;
+    crate::utils::bash_parser::assert_single_statement(command)?;
 
     // If background execution requested, start new shell - matches WCGW Python is_background handling
     if is_background {

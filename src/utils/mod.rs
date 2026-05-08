@@ -3,11 +3,13 @@
 //! This module contains various utility functions and types used throughout
 //! the application, such as file and path handling, repository analysis, etc.
 
+pub mod bash_parser;
 pub mod command_safety;
 pub mod file_cache;
 pub mod mmap;
 pub mod path;
 pub mod repo;
+pub mod syntax;
 
 use crate::types::Initialize;
 use serde_json::Value;
