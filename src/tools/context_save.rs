@@ -57,12 +57,38 @@ pub async fn handle_tool_call(
 ///
 /// A Result with the path where the context file was saved, or an error
 fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<String> {
-    // Expand the project root path if provided
+    normalize_context(&mut context)?;
+
+    let (relevant_files, warnings) = collect_relevant_files(&context)?;
+    let memory_dir = resolve_memory_dir()?;
+    let relevant_files_data = read_files_content(&relevant_files, 10_000)?;
+    let memory_data = format_memory(&context, &relevant_files_data);
+    let safe_id = sanitize_filename(&context.id);
+
+    let memory_file_path = memory_dir.join(format!("{safe_id}.txt"));
+    if let Some(response) = write_memory_file(&memory_file_path, &memory_data, &context)? {
+        return Ok(response);
+    }
+
+    let state_file_path = memory_dir.join(format!("{safe_id}_bash_state.json"));
+    write_bash_state_file(&state_file_path, bash_state)?;
+
+    Ok(context_save_response(&relevant_files, &warnings, &context, &memory_file_path))
+}
+
+fn normalize_context(context: &mut ContextSave) -> Result<()> {
     if !context.project_root_path.is_empty() {
         context.project_root_path = expand_user(&context.project_root_path);
     }
 
-    // Find all files matching the globs
+    if context.id.is_empty() {
+        return Err(WinxError::ArgumentParseError("Task ID cannot be empty".to_string()));
+    }
+
+    Ok(())
+}
+
+fn collect_relevant_files(context: &ContextSave) -> Result<(Vec<PathBuf>, Vec<String>)> {
     let mut relevant_files = Vec::new();
     let mut warnings = Vec::new();
 
@@ -114,8 +140,10 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
     }
 
     debug!("Found {} relevant files", relevant_files.len());
+    Ok((relevant_files, warnings))
+}
 
-    // Get the app directory for storing memory files
+fn resolve_memory_dir() -> Result<PathBuf> {
     let app_dir = match get_app_dir_xdg() {
         Ok(dir) => dir,
         Err(e) => {
@@ -144,41 +172,31 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
         }
     }
 
-    // Validate the task ID
-    if context.id.is_empty() {
-        return Err(WinxError::ArgumentParseError("Task ID cannot be empty".to_string()));
-    }
+    Ok(memory_dir)
+}
 
-    // Read the content of the relevant files
-    let relevant_files_data = read_files_content(&relevant_files, 10_000)?;
-
-    // Format the memory data
-    let memory_data = format_memory(&context, &relevant_files_data);
-
-    // Create safe filenames by replacing any invalid characters
-    let safe_id = sanitize_filename(&context.id);
-
-    // Save the memory file
-    let memory_file_path = memory_dir.join(format!("{safe_id}.txt"));
+fn write_memory_file(
+    memory_file_path: &Path,
+    memory_data: &str,
+    context: &ContextSave,
+) -> Result<Option<String>> {
     match File::create(&memory_file_path) {
         Ok(mut file) => {
             if let Err(e) = file.write_all(memory_data.as_bytes()) {
                 warn!("Failed to write memory data: {}", e);
-                // Try writing to temp file as last resort
-                return save_to_temp_file(&memory_data, &context);
+                return Ok(Some(save_to_temp_file(memory_data, context)?));
             }
         }
         Err(e) => {
             warn!("Failed to create memory file: {}", e);
-            // Try writing to temp file as last resort
-            return save_to_temp_file(&memory_data, &context);
+            return Ok(Some(save_to_temp_file(memory_data, context)?));
         }
     }
 
-    // Save the bash state if available
-    let state_file_path = memory_dir.join(format!("{safe_id}_bash_state.json"));
+    Ok(None)
+}
 
-    // Serialize the bash state (simplified for now)
+fn write_bash_state_file(state_file_path: &Path, bash_state: &BashState) -> Result<()> {
     let bash_state_dict = serde_json::json!({
         "cwd": bash_state.cwd.to_string_lossy().to_string(),
         "workspace_root": bash_state.workspace_root.to_string_lossy().to_string(),
@@ -207,9 +225,17 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
         }
     }
 
-    // Prepare the response message
+    Ok(())
+}
+
+fn context_save_response(
+    relevant_files: &[PathBuf],
+    warnings: &[String],
+    context: &ContextSave,
+    memory_file_path: &Path,
+) -> String {
     let memory_file_path_str = memory_file_path.to_string_lossy().to_string();
-    let response = if !relevant_files.is_empty() || context.relevant_file_globs.is_empty() {
+    if !relevant_files.is_empty() || context.relevant_file_globs.is_empty() {
         if warnings.is_empty() {
             memory_file_path_str
         } else {
@@ -223,9 +249,7 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
         format!(
             "Error: No files found for the given globs. Context file successfully saved at \"{memory_file_path_str}\", but please fix the error."
         )
-    };
-
-    Ok(response)
+    }
 }
 
 /// Format the memory data for saving
