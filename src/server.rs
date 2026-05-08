@@ -234,11 +234,7 @@ impl ServerHandler for WinxService {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult {
-            tools: winx_tools(),
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListToolsResult { tools: winx_tools(), next_cursor: None, meta: None })
     }
 
     async fn list_resources(
