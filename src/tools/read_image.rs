@@ -91,7 +91,6 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
         let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_lowercase();
 
         let mime_type = match extension.as_str() {
-            "jpg" | "jpeg" => "image/jpeg",
             "png" => "image/png",
             "gif" => "image/gif",
             "webp" => "image/webp",
@@ -136,9 +135,7 @@ pub async fn handle_tool_call(
         let bash_state_guard = bash_state_arc.lock().await;
 
         // Ensure bash state is initialized
-        let bash_state = if let Some(state) = &*bash_state_guard {
-            state
-        } else {
+        let Some(bash_state) = &*bash_state_guard else {
             error!("BashState not initialized");
             return Err(WinxError::BashStateNotInitialized);
         };

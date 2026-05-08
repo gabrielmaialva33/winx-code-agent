@@ -2,6 +2,7 @@
 //!
 //! These tests verify the tool handlers work correctly in realistic scenarios.
 
+use base64::{engine::general_purpose, Engine};
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -604,7 +605,6 @@ async fn test_read_image_png() -> Result<()> {
     assert!(!base64_data.is_empty());
 
     // Decode and verify it matches original
-    use base64::{engine::general_purpose, Engine};
     let decoded = general_purpose::STANDARD
         .decode(&base64_data)
         .map_err(|e| WinxError::InvalidInput(e.to_string()))?;

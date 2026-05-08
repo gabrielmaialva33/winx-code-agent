@@ -21,6 +21,10 @@ pub const MAX_SEGMENTED_MMAP_SIZE: u64 = 4_000_000_000;
 /// Segment size for large file memory mapping (256MB)
 pub const SEGMENT_SIZE: u64 = 256_000_000;
 
+const DIRECT_READ_CHUNK_SIZE: usize = 1_048_576;
+const MMAP_PARALLEL_CHUNK_SIZE: usize = 1_048_576;
+const STREAMING_CHUNK_SIZE: usize = 4_194_304;
+
 /// Read file contents optimally based on file size
 ///
 /// This function chooses the optimal reading strategy based on file size:
@@ -141,8 +145,7 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
 
     let mut reader = BufReader::with_capacity(262_144, file_handle); // 256KB buffer
 
-    const CHUNK_SIZE: usize = 1_048_576; // 1MB chunks
-    let mut chunk = vec![0; CHUNK_SIZE];
+    let mut chunk = vec![0; DIRECT_READ_CHUNK_SIZE];
     let mut bytes_read = 0;
 
     loop {
@@ -153,7 +156,7 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
                 bytes_read += n as u64;
 
                 // Log progress for larger files
-                if file_size > 5_000_000 && bytes_read % 5_000_000 < CHUNK_SIZE as u64 {
+                if file_size > 5_000_000 && bytes_read % 5_000_000 < DIRECT_READ_CHUNK_SIZE as u64 {
                     trace!(
                         "Read progress for {}: {}MB/{}MB ({}%)",
                         path.display(),
@@ -216,16 +219,15 @@ fn read_mmap(file: &File, path: &Path) -> Result<Vec<u8>> {
         debug!("Using parallel processing for large mmap file: {}", path.display());
 
         // Process in parallel chunks
-        const CHUNK_SIZE: usize = 1_048_576; // 1MB chunks
-        let chunk_count = mmap.len().div_ceil(CHUNK_SIZE);
+        let chunk_count = mmap.len().div_ceil(MMAP_PARALLEL_CHUNK_SIZE);
         let mut result = vec![0; mmap.len()];
 
         // Process in parallel with Rayon - use collect for parallel map
         let chunks: Vec<_> = (0..chunk_count)
             .into_par_iter()
             .map(|i| {
-                let start = i * CHUNK_SIZE;
-                let end = min((i + 1) * CHUNK_SIZE, mmap.len());
+                let start = i * MMAP_PARALLEL_CHUNK_SIZE;
+                let end = min((i + 1) * MMAP_PARALLEL_CHUNK_SIZE, mmap.len());
 
                 if start < mmap.len() {
                     // Extract chunk from mmap
@@ -358,9 +360,8 @@ fn read_streaming(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
     let initial_capacity = min(file_size as usize, 1_000_000_000); // 1GB initial max
     let mut buffer = Vec::with_capacity(initial_capacity);
 
-    let mut reader = BufReader::with_capacity(4_194_304, file); // 4MB buffer
-    const CHUNK_SIZE: usize = 4_194_304; // 4MB chunks
-    let mut chunk = vec![0; CHUNK_SIZE];
+    let mut reader = BufReader::with_capacity(STREAMING_CHUNK_SIZE, file);
+    let mut chunk = vec![0; STREAMING_CHUNK_SIZE];
     let mut bytes_read = 0;
 
     loop {
@@ -371,7 +372,7 @@ fn read_streaming(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
                 bytes_read += n as u64;
 
                 // Log progress every 100MB
-                if bytes_read % 100_000_000 < CHUNK_SIZE as u64 {
+                if bytes_read % 100_000_000 < STREAMING_CHUNK_SIZE as u64 {
                     info!(
                         "Read progress for large file {}: {:.2}GB/{:.2}GB ({:.1}%)",
                         path.display(),
@@ -761,8 +762,8 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    fn create_test_file(size: usize) -> (NamedTempFile, Vec<u8>) {
-        let mut file = NamedTempFile::new().unwrap();
+    fn create_test_file(size: usize) -> Result<(NamedTempFile, Vec<u8>)> {
+        let mut file = NamedTempFile::new()?;
         let mut data = Vec::with_capacity(size);
 
         // Fill with pattern data (more realistic than zeros)
@@ -770,90 +771,99 @@ mod tests {
             data.push((i % 256) as u8);
         }
 
-        file.write_all(&data).unwrap();
-        file.flush().unwrap();
+        file.write_all(&data)?;
+        file.flush()?;
 
-        (file, data)
+        Ok((file, data))
     }
 
     #[test]
-    fn test_direct_read_small_file() {
+    fn test_direct_read_small_file() -> Result<()> {
         let size = 10 * 1024; // 10KB
-        let (file, expected_data) = create_test_file(size);
+        let (file, expected_data) = create_test_file(size)?;
 
-        let result = read_direct(file.as_file(), size as u64, file.path()).unwrap();
+        let result = read_direct(file.as_file(), size as u64, file.path())?;
         assert_eq!(result, expected_data);
+        Ok(())
     }
 
     #[test]
-    fn test_mmap_read() {
+    fn test_mmap_read() -> Result<()> {
         let size = 1024 * 1024; // 1MB
-        let (file, expected_data) = create_test_file(size);
+        let (file, expected_data) = create_test_file(size)?;
 
-        let result = read_mmap(file.as_file(), file.path()).unwrap();
+        let result = read_mmap(file.as_file(), file.path())?;
         assert_eq!(result, expected_data);
+        Ok(())
     }
 
     #[test]
-    fn test_file_segment_read() {
+    fn test_file_segment_read() -> Result<()> {
         let size = 1024 * 1024; // 1MB
-        let (file, data) = create_test_file(size);
+        let (file, data) = create_test_file(size)?;
 
         // Read a segment from the middle
         let offset = 100 * 1024; // 100KB
         let length = 200 * 1024; // 200KB
         let expected_segment = &data[offset as usize..(offset + length) as usize];
 
-        let result = read_segment_direct(file.as_file(), offset, length, file.path()).unwrap();
+        let result = read_segment_direct(file.as_file(), offset, length, file.path())?;
         assert_eq!(result, expected_segment);
 
-        let result = read_segment_mmap(file.as_file(), offset, length, file.path()).unwrap();
+        let result = read_segment_mmap(file.as_file(), offset, length, file.path())?;
         assert_eq!(result, expected_segment);
+        Ok(())
     }
 
     #[test]
-    fn test_shareable_map() {
+    fn test_shareable_map() -> Result<()> {
         let size = 100 * 1024; // 100KB
-        let (file, data) = create_test_file(size);
+        let (file, data) = create_test_file(size)?;
 
-        let map = ShareableMap::new(file.path()).unwrap();
+        let map = ShareableMap::new(file.path())?;
         assert_eq!(map.as_slice(), &data);
 
         // Test segment
         let offset = 10 * 1024; // 10KB
         let length = 20 * 1024; // 20KB
-        let segment_map = ShareableMap::new_segment(file.path(), offset, length).unwrap();
+        let segment_map = ShareableMap::new_segment(file.path(), offset, length)?;
         assert_eq!(segment_map.as_slice(), &data[offset as usize..(offset + length) as usize]);
+        Ok(())
     }
 
     #[test]
-    fn test_parallel_processing() {
+    fn test_parallel_processing() -> Result<()> {
         // Create a test file with lines
-        let mut file = NamedTempFile::new().unwrap();
+        let mut file = NamedTempFile::new()?;
         let mut lines = Vec::new();
 
         for i in 0..1000 {
             let line = format!("Line {i}\n");
-            file.write_all(line.as_bytes()).unwrap();
+            file.write_all(line.as_bytes())?;
             lines.push(format!("Line {i}"));
         }
-        file.flush().unwrap();
+        file.flush()?;
 
         // Test parallel processing
         let processed_lines = std::sync::Mutex::new(Vec::new());
 
         process_text_file_parallel(file.path(), 1_000_000, |line| {
-            processed_lines.lock().unwrap().push(line.to_string());
-        })
-        .unwrap();
+            if let Ok(mut lines) = processed_lines.lock() {
+                lines.push(line.to_string());
+            }
+        })?;
 
         // Verify results (order may differ due to parallel processing)
-        let result = processed_lines.lock().unwrap();
+        let result =
+            processed_lines.lock().map_err(|error| WinxError::ResourceAllocationError {
+                message: format!("Failed to lock processed lines: {error}"),
+            })?;
         assert_eq!(result.len(), lines.len());
 
         // Check that all lines are present
         for line in &lines {
             assert!(result.contains(line));
         }
+        Ok(())
     }
 }
