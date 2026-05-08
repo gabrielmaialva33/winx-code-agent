@@ -421,6 +421,53 @@ async fn test_read_files_with_wcgw_path_suffix_range() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_file_write_or_edit_treats_search_marker_as_edit_even_with_high_percentage(
+) -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let file_path = temp_dir.path().join("edit.rs");
+    std::fs::write(&file_path, "fn main() {\n    println!(\"old\");\n}\n")?;
+
+    let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+    let init = Initialize {
+        init_type: InitializeType::FirstCall,
+        mode_name: ModeName::Wcgw,
+        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        thread_id: "search-marker-edit".to_string(),
+        code_writer_config: None,
+        initial_files_to_read: vec![],
+        task_id_to_resume: String::new(),
+    };
+    winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+
+    let read = ReadFiles {
+        file_paths: vec![file_path.to_string_lossy().to_string()],
+        start_line_nums: vec![None],
+        end_line_nums: vec![None],
+    };
+    winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
+
+    let edit = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 100,
+        text_or_search_replace_blocks: r#"<<<<<<< SEARCH
+    println!("old");
+=======
+    println!("new");
+>>>>>>> REPLACE"#
+            .to_string(),
+        thread_id: "searchmarkeredit".to_string(),
+    };
+
+    winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, edit).await?;
+
+    let content = std::fs::read_to_string(&file_path)?;
+    assert!(content.contains("println!(\"new\")"));
+    assert!(!content.contains("<<<<<<< SEARCH"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_read_files_nonexistent() -> Result<()> {
     let temp_dir = TempDir::new()?;
 

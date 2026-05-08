@@ -111,6 +111,16 @@ fn apply_blocks(content: &str, blocks: Vec<(String, String)>) -> Result<String> 
     Ok(result)
 }
 
+fn uses_search_replace(file_write_or_edit: &FileWriteOrEdit) -> bool {
+    if file_write_or_edit.percentage_to_change <= 50 {
+        return true;
+    }
+
+    let first_content_line =
+        file_write_or_edit.text_or_search_replace_blocks.trim_start().lines().next();
+    first_content_line.is_some_and(|line| search_marker().is_ok_and(|marker| marker.is_match(line)))
+}
+
 #[instrument(level = "info", skip(bash_state_arc, file_write_or_edit))]
 pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
@@ -136,7 +146,7 @@ pub async fn handle_tool_call(
 
     let file_path_str = path.to_string_lossy().to_string();
 
-    let uses_search_replace = file_write_or_edit.percentage_to_change <= 50;
+    let uses_search_replace = uses_search_replace(&file_write_or_edit);
     let operation_allowed = if uses_search_replace {
         bash_state.is_file_edit_allowed(&file_path_str)
     } else {
