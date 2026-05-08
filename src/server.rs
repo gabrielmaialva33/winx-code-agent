@@ -42,6 +42,148 @@ fn mcp_tool<T: schemars::JsonSchema>(
     Tool::new(name, description, schema_to_input_schema::<T>()).with_annotations(annotations)
 }
 
+const INITIALIZE_DESCRIPTION: &str =
+    "- Always call this at the start of the conversation before using any of the shell tools from wcgw. \
+     - Use `any_workspace_path` to initialize the shell in the appropriate project directory. \
+     - If the user has mentioned a workspace or project root or any other file or folder use it to set `any_workspace_path`. \
+     - If user has mentioned any files use `initial_files_to_read` to read, use absolute paths only (~ allowed) \
+     - By default use mode \"wcgw\" \
+     - In \"code-writer\" mode, set the commands and globs which user asked to set, otherwise use 'all'. \
+     - Use type=\"first_call\" if it's the first call to this tool. \
+     - Use type=\"user_asked_mode_change\" if in a conversation user has asked to change mode. \
+     - Use type=\"reset_shell\" if in a conversation shell is not working after multiple tries. \
+     - Use type=\"user_asked_change_workspace\" if in a conversation user asked to change workspace";
+
+const BASH_COMMAND_DESCRIPTION: &str =
+    "- Execute a bash command. This is stateful (beware with subsequent calls). \
+     - Status of the command and the current working directory will always be returned at the end. \
+     - The first or the last line might be `(...truncated)` if the output is too long. \
+     - Always run `pwd` if you get any file or directory not found error to make sure you're not lost. \
+     - Do not run bg commands using \"&\", instead use this tool. \
+     - You must not use echo/cat to read/write files, use ReadFiles/FileWriteOrEdit \
+     - In order to check status of previous command, use `status_check` with empty command argument. \
+     - Only command is allowed to run at a time. You need to wait for any previous command to finish before running a new one. \
+     - Programs don't hang easily, so most likely explanation for no output is usually that the program is still running, and you need to check status again. \
+     - Do not send Ctrl-c before checking for status till 10 minutes or whatever is appropriate for the program to finish. \
+     - Only run long running commands in background. Each background command is run in a new non-reusable shell. \
+     - On running a bg command you'll get a bg command id that you should use to get status or interact.";
+
+const READ_FILES_DESCRIPTION: &str =
+    "- Read full file content of one or more files. \
+     - Provide absolute paths only (~ allowed) \
+     - Only if the task requires line numbers understanding: \
+     - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10`";
+
+const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
+    "- Writes or edits a file based on the percentage of changes. \
+     - Use absolute path only (~ allowed). \
+     - First write down percentage of lines that need to be replaced in the file (between 0-100) in percentage_to_change \
+     - percentage_to_change should be low if mostly new code is to be added. It should be high if a lot of things are to be replaced. \
+     - If percentage_to_change > 50, provide full file content in text_or_search_replace_blocks \
+     - If percentage_to_change <= 50, text_or_search_replace_blocks should be search/replace blocks. \
+     \
+     Instructions for editing files. \
+     # Example \
+     ## Input file \
+     ``` \
+     import numpy as np \
+     from impls import impl1, impl2 \
+     \
+     def hello(): \
+         \"print a greeting\" \
+         print(\"hello\") \
+     \
+     def call_hello(): \
+         \"call hello\" \
+         hello() \
+         print(\"Called\") \
+         impl1() \
+         hello() \
+         impl2() \
+     ``` \
+     ## Edit format on the input file \
+     ``` \
+     <<<<<<< SEARCH \
+     from impls import impl1, impl2 \
+     ======= \
+     from impls import impl1, impl2 \
+     from hello import hello as hello_renamed \
+     >>>>>>> REPLACE \
+     <<<<<<< SEARCH \
+     def hello(): \
+         \"print a greeting\" \
+         print(\"hello\") \
+     ======= \
+     >>>>>>> REPLACE \
+     <<<<<<< SEARCH \
+     def call_hello(): \
+         \"call hello\" \
+         hello() \
+     ======= \
+     def call_hello_renamed(): \
+         \"call hello renamed\" \
+         hello_renamed() \
+     >>>>>>> REPLACE \
+     <<<<<<< SEARCH \
+     impl1() \
+     hello() \
+     impl2() \
+     ======= \
+     impl1() \
+     hello_renamed() \
+     impl2() \
+     >>>>>>> REPLACE \
+     ``` \
+     # *SEARCH/REPLACE block* Rules: \
+     Every \"<<<<<<< SEARCH\" section must *EXACTLY MATCH* the existing file content, character for character, including all comments, docstrings, whitespaces, etc. \
+     Including multiple unique *SEARCH/REPLACE* blocks if needed. \
+     Include enough and only enough lines in each SEARCH section to uniquely match each set of lines that need to change. \
+     Keep *SEARCH/REPLACE* blocks concise. \
+     Break large *SEARCH/REPLACE* blocks into a series of smaller blocks that each change a small portion of the file. \
+     Include just the changing lines, and a few surrounding lines (0-3 lines) if needed for uniqueness. \
+     Other than for uniqueness, avoid including those lines which do not change in search (and replace) blocks. Target 0-3 non trivial extra lines per block. \
+     Preserve leading spaces and indentations in both SEARCH and REPLACE blocks.";
+
+const CONTEXT_SAVE_DESCRIPTION: &str =
+    "Saves provided description and file contents of all the relevant file paths or globs in a single text file. \
+     - Provide random 3 word unqiue id or whatever user provided. \
+     - Leave project path as empty string if no project path";
+
+fn winx_tools() -> Vec<Tool> {
+    vec![
+        mcp_tool::<Initialize>(
+            "Initialize",
+            INITIALIZE_DESCRIPTION,
+            ToolAnnotations::new().read_only(true).open_world(false),
+        ),
+        mcp_tool::<BashCommand>(
+            "BashCommand",
+            BASH_COMMAND_DESCRIPTION,
+            ToolAnnotations::new().destructive(true).open_world(true),
+        ),
+        mcp_tool::<ReadFiles>(
+            "ReadFiles",
+            READ_FILES_DESCRIPTION,
+            ToolAnnotations::new().read_only(true).open_world(false),
+        ),
+        mcp_tool::<FileWriteOrEdit>(
+            "FileWriteOrEdit",
+            FILE_WRITE_OR_EDIT_DESCRIPTION,
+            ToolAnnotations::new().destructive(true).open_world(false),
+        ),
+        mcp_tool::<ContextSave>(
+            "ContextSave",
+            CONTEXT_SAVE_DESCRIPTION,
+            ToolAnnotations::new().destructive(false).open_world(false),
+        ),
+        mcp_tool::<ReadImage>(
+            "ReadImage",
+            "Read an image from the shell.",
+            ToolAnnotations::new().read_only(true).open_world(false),
+        ),
+    ]
+}
+
 /// Winx service with shared bash state
 #[derive(Clone)]
 pub struct WinxService {
@@ -93,131 +235,7 @@ impl ServerHandler for WinxService {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
-            tools: vec![
-                mcp_tool::<Initialize>(
-                    "Initialize",
-                        "- Always call this at the start of the conversation before using any of the shell tools from wcgw. \
-                         - Use `any_workspace_path` to initialize the shell in the appropriate project directory. \
-                         - If the user has mentioned a workspace or project root or any other file or folder use it to set `any_workspace_path`. \
-                         - If user has mentioned any files use `initial_files_to_read` to read, use absolute paths only (~ allowed) \
-                         - By default use mode \"wcgw\" \
-                         - In \"code-writer\" mode, set the commands and globs which user asked to set, otherwise use 'all'. \
-                         - Use type=\"first_call\" if it's the first call to this tool. \
-                         - Use type=\"user_asked_mode_change\" if in a conversation user has asked to change mode. \
-                         - Use type=\"reset_shell\" if in a conversation shell is not working after multiple tries. \
-                         - Use type=\"user_asked_change_workspace\" if in a conversation user asked to change workspace",
-                    ToolAnnotations::new().read_only(true).open_world(false),
-                ),
-                mcp_tool::<BashCommand>(
-                    "BashCommand",
-                        "- Execute a bash command. This is stateful (beware with subsequent calls). \
-                         - Status of the command and the current working directory will always be returned at the end. \
-                         - The first or the last line might be `(...truncated)` if the output is too long. \
-                         - Always run `pwd` if you get any file or directory not found error to make sure you're not lost. \
-                         - Do not run bg commands using \"&\", instead use this tool. \
-                         - You must not use echo/cat to read/write files, use ReadFiles/FileWriteOrEdit \
-                         - In order to check status of previous command, use `status_check` with empty command argument. \
-                         - Only command is allowed to run at a time. You need to wait for any previous command to finish before running a new one. \
-                         - Programs don't hang easily, so most likely explanation for no output is usually that the program is still running, and you need to check status again. \
-                         - Do not send Ctrl-c before checking for status till 10 minutes or whatever is appropriate for the program to finish. \
-                         - Only run long running commands in background. Each background command is run in a new non-reusable shell. \
-                         - On running a bg command you'll get a bg command id that you should use to get status or interact.",
-                    ToolAnnotations::new().destructive(true).open_world(true),
-                ),
-                mcp_tool::<ReadFiles>(
-                    "ReadFiles",
-                        "- Read full file content of one or more files. \
-                         - Provide absolute paths only (~ allowed) \
-                         - Only if the task requires line numbers understanding: \
-                         - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10`",
-                    ToolAnnotations::new().read_only(true).open_world(false),
-                ),
-                mcp_tool::<FileWriteOrEdit>(
-                    "FileWriteOrEdit",
-                        "- Writes or edits a file based on the percentage of changes. \
-                         - Use absolute path only (~ allowed). \
-                         - First write down percentage of lines that need to be replaced in the file (between 0-100) in percentage_to_change \
-                         - percentage_to_change should be low if mostly new code is to be added. It should be high if a lot of things are to be replaced. \
-                         - If percentage_to_change > 50, provide full file content in text_or_search_replace_blocks \
-                         - If percentage_to_change <= 50, text_or_search_replace_blocks should be search/replace blocks. \
-                         \
-                         Instructions for editing files. \
-                         # Example \
-                         ## Input file \
-                         ``` \
-                         import numpy as np \
-                         from impls import impl1, impl2 \
-                         \
-                         def hello(): \
-                             \"print a greeting\" \
-                             print(\"hello\") \
-                         \
-                         def call_hello(): \
-                             \"call hello\" \
-                             hello() \
-                             print(\"Called\") \
-                             impl1() \
-                             hello() \
-                             impl2() \
-                         ``` \
-                         ## Edit format on the input file \
-                         ``` \
-                         <<<<<<< SEARCH \
-                         from impls import impl1, impl2 \
-                         ======= \
-                         from impls import impl1, impl2 \
-                         from hello import hello as hello_renamed \
-                         >>>>>>> REPLACE \
-                         <<<<<<< SEARCH \
-                         def hello(): \
-                             \"print a greeting\" \
-                             print(\"hello\") \
-                         ======= \
-                         >>>>>>> REPLACE \
-                         <<<<<<< SEARCH \
-                         def call_hello(): \
-                             \"call hello\" \
-                             hello() \
-                         ======= \
-                         def call_hello_renamed(): \
-                             \"call hello renamed\" \
-                             hello_renamed() \
-                         >>>>>>> REPLACE \
-                         <<<<<<< SEARCH \
-                         impl1() \
-                         hello() \
-                         impl2() \
-                         ======= \
-                         impl1() \
-                         hello_renamed() \
-                         impl2() \
-                         >>>>>>> REPLACE \
-                         ``` \
-                         # *SEARCH/REPLACE block* Rules: \
-                         Every \"<<<<<<< SEARCH\" section must *EXACTLY MATCH* the existing file content, character for character, including all comments, docstrings, whitespaces, etc. \
-                         Including multiple unique *SEARCH/REPLACE* blocks if needed. \
-                         Include enough and only enough lines in each SEARCH section to uniquely match each set of lines that need to change. \
-                         Keep *SEARCH/REPLACE* blocks concise. \
-                         Break large *SEARCH/REPLACE* blocks into a series of smaller blocks that each change a small portion of the file. \
-                         Include just the changing lines, and a few surrounding lines (0-3 lines) if needed for uniqueness. \
-                         Other than for uniqueness, avoid including those lines which do not change in search (and replace) blocks. Target 0-3 non trivial extra lines per block. \
-                         Preserve leading spaces and indentations in both SEARCH and REPLACE blocks.",
-                    ToolAnnotations::new().destructive(true).open_world(false),
-                ),
-                mcp_tool::<ContextSave>(
-                    "ContextSave",
-                        "Saves provided description and file contents of all the relevant file paths or globs in a single text file. \
-                         - Provide random 3 word unqiue id or whatever user provided. \
-                         - Leave project path as empty string if no project path",
-                    ToolAnnotations::new().destructive(false).open_world(false),
-                ),
-                mcp_tool::<ReadImage>(
-                    "ReadImage",
-                    "Read an image from the shell.",
-                    ToolAnnotations::new().read_only(true).open_world(false),
-                ),
-
-            ],
+            tools: winx_tools(),
             next_cursor: None,
             meta: None,
         })
