@@ -401,45 +401,54 @@ impl<'de> Deserialize<'de> for ReadFiles {
         };
 
         // Parse line ranges from file paths (like wcgw Python's model_post_init)
+        let mut clean_file_paths = Vec::with_capacity(file_paths.len());
         let mut start_line_nums = Vec::with_capacity(file_paths.len());
         let mut end_line_nums = Vec::with_capacity(file_paths.len());
 
-        for path in &file_paths {
-            let (start, end) = parse_line_range_from_path(path);
+        for path in file_paths {
+            let (clean_path, start, end) = parse_file_path_with_line_range(&path);
+            clean_file_paths.push(clean_path);
             start_line_nums.push(start);
             end_line_nums.push(end);
         }
 
-        Ok(ReadFiles { file_paths, start_line_nums, end_line_nums })
+        Ok(ReadFiles { file_paths: clean_file_paths, start_line_nums, end_line_nums })
     }
 }
 
-/// Parse line range from a file path (e.g., "file.rs:10-20")
-fn parse_line_range_from_path(path: &str) -> (Option<usize>, Option<usize>) {
-    // Find the last colon that's followed by digits or a dash
-    if let Some(colon_pos) = path.rfind(':') {
-        let range_part = &path[colon_pos + 1..];
+fn parse_file_path_with_line_range(path: &str) -> (String, Option<usize>, Option<usize>) {
+    let Some((potential_path, line_spec)) = path.rsplit_once(':') else {
+        return (path.to_string(), None, None);
+    };
 
-        // Check if it looks like a line range (not a Windows drive letter)
-        if range_part.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-') {
-            if let Some(dash_pos) = range_part.find('-') {
-                // Format: start-end or start- or -end
-                let start_str = &range_part[..dash_pos];
-                let end_str = &range_part[dash_pos + 1..];
+    let Some((start, end)) = parse_line_spec(line_spec) else {
+        return (path.to_string(), None, None);
+    };
 
-                let start = if start_str.is_empty() { None } else { start_str.parse().ok() };
+    (potential_path.to_string(), start, end)
+}
 
-                let end = if end_str.is_empty() { None } else { end_str.parse().ok() };
-
-                return (start, end);
-            }
-            // Single line number
-            if let Ok(line) = range_part.parse::<usize>() {
-                return (Some(line), Some(line));
-            }
-        }
+fn parse_line_spec(line_spec: &str) -> Option<(Option<usize>, Option<usize>)> {
+    if line_spec.chars().all(|c| c.is_ascii_digit()) {
+        return line_spec.parse().ok().map(|line| (Some(line), None));
     }
-    (None, None)
+
+    let (start, end) = line_spec.split_once('-')?;
+
+    if start.is_empty() && !end.is_empty() && end.chars().all(|c| c.is_ascii_digit()) {
+        return end.parse().ok().map(|line| (None, Some(line)));
+    }
+
+    if !start.is_empty()
+        && start.chars().all(|c| c.is_ascii_digit())
+        && (end.is_empty() || end.chars().all(|c| c.is_ascii_digit()))
+    {
+        let start = start.parse().ok()?;
+        let end = if end.is_empty() { None } else { Some(end.parse().ok()?) };
+        return Some((Some(start), end));
+    }
+
+    None
 }
 
 impl ReadFiles {
@@ -640,11 +649,15 @@ if err_str.contains("unexpected token") || err_str.contains("Unexpected token") 
 serde::de::Error::custom(format!("Invalid action_json: {e}. Please ensure your JSON is properly formatted."))
         })?;
 
+        if let BashCommandAction::Command { command, .. } = &mut action {
+            *command = strip_tail_pipe(command);
+        }
+
         // Return the properly constructed BashCommand
         Ok(BashCommand {
             action_json: action,
             wait_for_seconds: helper.wait_for_seconds,
-            thread_id: helper.thread_id,
+            thread_id: normalize_thread_id(&helper.thread_id),
         })
     }
 }

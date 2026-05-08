@@ -160,7 +160,122 @@ async fn test_initialize_mode_change() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn test_initialize_normalizes_thread_id() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+
+    let init = Initialize {
+        init_type: InitializeType::FirstCall,
+        mode_name: ModeName::Wcgw,
+        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        thread_id: "thread-123_$".to_string(),
+        code_writer_config: None,
+        initial_files_to_read: vec![],
+        task_id_to_resume: String::new(),
+    };
+
+    winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+
+    let state = bash_state_arc.lock().await;
+    let bash_state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+    assert_eq!(bash_state.current_thread_id, "thread123_");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_initialize_requires_thread_id_after_first_call() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+
+    let mode_change = Initialize {
+        init_type: InitializeType::UserAskedModeChange,
+        mode_name: ModeName::Architect,
+        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        thread_id: String::new(),
+        code_writer_config: None,
+        initial_files_to_read: vec![],
+        task_id_to_resume: String::new(),
+    };
+
+    let result =
+        winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, mode_change).await;
+
+    assert!(matches!(result, Err(WinxError::ThreadIdMismatch(_))));
+
+    Ok(())
+}
+
 // ==================== ReadFiles Tool Tests ====================
+
+#[test]
+fn test_read_files_deserializes_wcgw_line_ranges(
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let plain_path = "/tmp/example.txt";
+    let colon_path = "/tmp/example.txt:colon_in_name";
+    let url_like_path = "/path/to/http://example.com/file.txt";
+
+    let read: ReadFiles = serde_json::from_value(json!({
+        "file_paths": [
+            plain_path,
+            format!("{plain_path}:2"),
+            format!("{plain_path}:-3"),
+            format!("{plain_path}:2-4"),
+            format!("{plain_path}:5-"),
+            format!("{plain_path}:invalid-line"),
+            colon_path,
+            url_like_path,
+            format!("{url_like_path}:10-20")
+        ]
+    }))?;
+
+    assert_eq!(
+        read.file_paths,
+        vec![
+            plain_path,
+            plain_path,
+            plain_path,
+            plain_path,
+            plain_path,
+            "/tmp/example.txt:invalid-line",
+            colon_path,
+            url_like_path,
+            url_like_path,
+        ]
+    );
+    assert_eq!(
+        read.start_line_nums,
+        vec![None, Some(2), None, Some(2), Some(5), None, None, None, Some(10),]
+    );
+    assert_eq!(
+        read.end_line_nums,
+        vec![None, None, Some(3), Some(4), None, None, None, None, Some(20)]
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_bash_command_deserializer_normalizes_thread_id_and_strips_tail(
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let bash_command: BashCommand = serde_json::from_value(json!({
+        "action_json": {
+            "type": "command",
+            "command": "rg TODO src | tail -n 20"
+        },
+        "thread_id": "thread-123_$"
+    }))?;
+
+    assert_eq!(bash_command.thread_id, "thread123_");
+    if let BashCommandAction::Command { command, .. } = bash_command.action_json {
+        assert_eq!(command, "rg TODO src");
+    } else {
+        return Err("expected command action".into());
+    }
+
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_read_files_single_file() -> Result<()> {

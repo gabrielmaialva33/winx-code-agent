@@ -145,11 +145,30 @@ pub async fn handle_tool_call(
     let cache = FileCache::global();
     let mut file_ranges_dict: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
 
-    for file_path in &read_files.file_paths {
-        match read_file(file_path, None, &cwd, &workspace_root, true, None, None).await {
+    for (index, file_path) in read_files.file_paths.iter().enumerate() {
+        let clean_path = read_files.get_clean_path(index);
+        let start_line_num = read_files.start_line_nums.get(index).copied().flatten();
+        let end_line_num = read_files.end_line_nums.get(index).copied().flatten();
+
+        match read_file(
+            &clean_path,
+            None,
+            &cwd,
+            &workspace_root,
+            read_files.show_line_numbers(),
+            start_line_num,
+            end_line_num,
+        )
+        .await
+        {
             Ok((content, truncated, _, canon_path, line_range)) => {
                 file_ranges_dict.entry(canon_path.clone()).or_default().push(line_range);
-                let _ = write!(message, "\n{file_path}\n```\n{content}\n```");
+                let _ = write!(
+                    message,
+                    "\n{}{}\n```\n{content}\n```",
+                    clean_path,
+                    range_format(start_line_num, end_line_num)
+                );
 
                 let _ = cache.record_read_range(Path::new(&canon_path), line_range.0, line_range.1);
 
