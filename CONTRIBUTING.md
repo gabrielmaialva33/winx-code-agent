@@ -1,208 +1,90 @@
 # Contributing to Winx Code Agent
 
-Thank you for your interest in contributing to Winx Code Agent! This document provides guidelines and information for contributors.
-
-## Table of Contents
-
-- [Code of Conduct](#code-of-conduct)
-- [Getting Started](#getting-started)
-- [Development Setup](#development-setup)
-- [Contributing Guidelines](#contributing-guidelines)
-- [Pull Request Process](#pull-request-process)
-- [Issue Reporting](#issue-reporting)
-- [Development Workflow](#development-workflow)
-- [Testing](#testing)
-- [Documentation](#documentation)
+Thanks for taking the time to contribute. Winx is a Rust MCP server for local code-agent workflows, so changes should be grounded in real behavior, tested, and careful around filesystem and shell access.
 
 ## Code of Conduct
 
-This project adheres to a [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
+By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-## Getting Started
+## Development Setup
 
-### Prerequisites
+Requirements:
 
-- Rust 1.70+ (latest stable recommended)
-- Cargo (comes with Rust)
+- Rust 1.75 or newer
+- Cargo
 - Git
 
-### Development Setup
-
-1. Fork the repository on GitHub
-2. Clone your fork locally:
-   ```bash
-   git clone https://github.com/YOUR_USERNAME/winx-code-agent.git
-   cd winx-code-agent
-   ```
-
-3. Add the upstream repository:
-   ```bash
-   git remote add upstream https://github.com/original-repo/winx-code-agent.git
-   ```
-
-4. Install dependencies and build:
-   ```bash
-   cargo build
-   ```
-
-5. Run tests to ensure everything works:
-   ```bash
-   cargo test
-   ```
-
-## Contributing Guidelines
-
-### Types of Contributions
-
-We welcome various types of contributions:
-
-- **Bug fixes**: Help us identify and fix issues
-- **Feature enhancements**: Propose and implement new features
-- **Documentation**: Improve existing docs or add new ones
-- **Performance improvements**: Optimize code for better performance
-- **Test coverage**: Add or improve test cases
-- **Code quality**: Refactoring and code cleanup
-
-### Before You Start
-
-1. **Check existing issues**: Look for existing issues or discussions related to your contribution
-2. **Create an issue**: For significant changes, create an issue first to discuss the approach
-3. **Follow conventions**: Adhere to the project's coding standards and conventions
-
-## Pull Request Process
-
-### 1. Create a Feature Branch
+Setup:
 
 ```bash
-git checkout -b feature/your-feature-name
-# or
-git checkout -b fix/issue-description
+git clone https://github.com/YOUR_USERNAME/winx-code-agent.git
+cd winx-code-agent
+git remote add upstream https://github.com/gabrielmaialva33/winx-code-agent.git
+cargo check --tests
 ```
 
-### 2. Make Your Changes
+## Project Structure
 
-- Write clean, readable code
-- Follow Rust best practices and idioms
-- Add tests for new functionality
-- Update documentation as needed
-- Ensure all tests pass
+- `src/server.rs`: MCP server wiring, tool registration, resource handlers.
+- `src/tools/`: MCP tool implementations.
+- `src/types.rs`: tool schemas and input deserialization.
+- `src/state/`: shell, PTY, persistence, and terminal state.
+- `src/utils/`: shared file, path, mmap, repo, and command-safety helpers.
+- `tests/`: integration and lifecycle tests.
+- `.github/workflows/`: CI, release, and publish workflows.
 
-### 3. Commit Your Changes
+## Local Checks
 
-Use clear, descriptive commit messages:
+Run these before opening a pull request:
 
 ```bash
-git commit -m "feat: add MCP resources support"
-# or
-git commit -m "fix: resolve memory leak in terminal state"
+cargo fmt --all -- --check
+cargo check --tests
+cargo clippy --all-targets --all-features
+cargo test --all-features
 ```
 
-**Commit Message Format:**
-- `feat:` for new features
-- `fix:` for bug fixes
-- `docs:` for documentation changes
-- `test:` for test additions/modifications
-- `refactor:` for code refactoring
-- `perf:` for performance improvements
-- `chore:` for maintenance tasks
+Use `cargo fmt --all` to format changes.
 
-### 4. Push and Create Pull Request
+## Code Guidelines
 
-```bash
-git push origin feature/your-feature-name
-```
+- Follow existing Rust module boundaries and naming.
+- Keep tool behavior explicit and covered by tests.
+- Prefer structured parsing and typed errors over ad hoc string handling.
+- Do not weaken filesystem, thread-id, mode, or command restrictions.
+- Avoid broad `#[allow(...)]` additions. Refactor instead when practical.
+- Keep comments in English and only add them when they clarify non-obvious logic.
 
-Then create a pull request on GitHub with:
-- Clear title and description
-- Reference to related issues
-- Screenshots/examples if applicable
-- Checklist of completed items
+## Testing Guidance
 
-### 5. Code Review Process
+- Add focused tests for bug fixes.
+- Add integration tests when changing tool behavior or MCP-facing schemas.
+- For file edits, verify both success behavior and failure atomicity.
+- For shell behavior, account for PTY-sensitive tests that may be ignored in CI.
 
-- Maintainers will review your PR
-- Address feedback and requested changes
-- Keep your branch updated with main
-- Once approved, your PR will be merged
+## Commit Style
 
-## Issue Reporting
+Use short, descriptive commit subjects. Conventional prefixes are welcome:
 
-### Bug Reports
+- `feat:` new behavior
+- `fix:` bug fix
+- `docs:` documentation only
+- `test:` test changes
+- `refactor:` internal restructuring
+- `chore:` maintenance
 
-When reporting bugs, please include:
+## Pull Requests
 
-- **Environment**: OS, Rust version, dependencies
-- **Steps to reproduce**: Clear, step-by-step instructions
-- **Expected behavior**: What should happen
-- **Actual behavior**: What actually happens
-- **Error messages**: Full error output if applicable
-- **Additional context**: Screenshots, logs, etc.
+Before opening a PR:
 
-### Feature Requests
+- Rebase or merge the latest `main`.
+- Keep the change focused.
+- Explain behavior changes and security impact.
+- Include the exact commands you ran.
+- Link related issues when applicable.
 
-For feature requests, please provide:
+Security-sensitive changes should call out filesystem access, shell execution, mode restrictions, and persistence behavior explicitly.
 
-- **Problem description**: What problem does this solve?
-- **Proposed solution**: How should it work?
-- **Alternatives considered**: Other approaches you've thought about
-- **Additional context**: Use cases, examples, etc.
+## Reporting Issues
 
-## Development Workflow
-
-### Code Style
-
-- Use `cargo fmt` to format code
-- Use `cargo clippy` to catch common mistakes
-- Follow Rust naming conventions
-- Write self-documenting code with clear variable names
-- Add comments for complex logic
-
-### Testing
-
-- Write unit tests for new functions
-- Add integration tests for new features
-- Ensure all tests pass: `cargo test`
-- Aim for good test coverage
-- Test edge cases and error conditions
-
-### Performance
-
-- Profile performance-critical code
-- Use benchmarks for performance improvements
-- Consider memory usage and allocations
-- Test with realistic data sizes
-
-## Documentation
-
-### Code Documentation
-
-- Add rustdoc comments for public APIs
-- Include examples in documentation
-- Document complex algorithms and data structures
-- Keep documentation up-to-date with code changes
-
-### User Documentation
-
-- Update README.md for user-facing changes
-- Add examples and usage instructions
-- Document configuration options
-- Include troubleshooting information
-
-## Getting Help
-
-- **GitHub Issues**: For bugs and feature requests
-- **GitHub Discussions**: For questions and general discussion
-- **Code Review**: Ask questions in PR comments
-
-## Recognition
-
-Contributors are recognized in:
-- GitHub contributors list
-- Release notes for significant contributions
-- Special mentions for outstanding contributions
-
-## License
-
-By contributing to Winx Code Agent, you agree that your contributions will be licensed under the same license as the project.
-
-Thank you for contributing to Winx Code Agent! 🚀
+Use the GitHub issue templates for bugs and feature requests. Do not file public issues for security vulnerabilities; follow [SECURITY.md](SECURITY.md) instead.
