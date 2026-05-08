@@ -14,7 +14,7 @@ use rmcp::{
 };
 use schemars::schema_for;
 use serde_json::Value;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
@@ -149,7 +149,13 @@ const CONTEXT_SAVE_DESCRIPTION: &str =
      - Provide random 3 word unqiue id or whatever user provided. \
      - Leave project path as empty string if no project path";
 
+static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
+
 fn winx_tools() -> Vec<Tool> {
+    WINX_TOOLS.get_or_init(build_winx_tools).clone()
+}
+
+fn build_winx_tools() -> Vec<Tool> {
     vec![
         mcp_tool::<Initialize>(
             "Initialize",
