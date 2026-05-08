@@ -472,7 +472,7 @@ fn sanitize_filename(input: &str) -> String {
 
     // Limit length to avoid issues
     if result.len() > 50 {
-        use rand::Rng;
+        use rand::RngExt;
         result = format!("{}-{}", &result[0..45], rand::rng().random_range(1000..9999));
     }
 

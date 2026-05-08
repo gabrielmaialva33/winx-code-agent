@@ -8,19 +8,11 @@ use tracing::{debug, info, instrument, warn};
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{generate_thread_id, BashState};
 use crate::types::{
-    AllowedCommands,
-    AllowedGlobs,
-    BashCommandMode,
-    BashMode,
-    FileEditMode,
-    Initialize,
-    InitializeType,
-    ModeName,
-    Modes,
-    WriteIfEmptyMode,
+    AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Initialize,
+    InitializeType, ModeName, Modes, WriteIfEmptyMode,
 };
-use crate::utils::path::{ensure_directory_exists, expand_user, validate_path_in_workspace};
 use crate::utils::mmap::read_file_to_string;
+use crate::utils::path::{ensure_directory_exists, expand_user, validate_path_in_workspace};
 
 #[inline]
 fn convert_mode_name(mode_name: &ModeName) -> Modes {
@@ -84,9 +76,7 @@ pub async fn handle_tool_call(
 
     let workspace_path_str = expand_user(&initialize.any_workspace_path);
     if workspace_path_str.is_empty() {
-        return Err(WinxError::WorkspacePathError(
-            "Workspace path cannot be empty.".to_string(),
-        ));
+        return Err(WinxError::WorkspacePathError("Workspace path cannot be empty.".to_string()));
     }
 
     let workspace_path = PathBuf::from(&workspace_path_str);
@@ -95,15 +85,15 @@ pub async fn handle_tool_call(
     if workspace_path.exists() {
         if workspace_path.is_file() {
             folder_to_start = workspace_path.parent().unwrap_or(&workspace_path).to_path_buf();
-            response.push_str(&format!("Using parent directory of file: {:?}\n", folder_to_start));
+            response.push_str(&format!("Using parent directory of file: {folder_to_start:?}\n"));
         } else if workspace_path.is_dir() {
-            response.push_str(&format!("Using workspace directory: {:?}\n", folder_to_start));
+            response.push_str(&format!("Using workspace directory: {folder_to_start:?}\n"));
         }
     } else if workspace_path.is_absolute() {
         ensure_directory_exists(&workspace_path).map_err(|e| {
             WinxError::WorkspacePathError(format!("Failed to create workspace: {e}"))
         })?;
-        response.push_str(&format!("Created workspace directory: {:?}\n", workspace_path));
+        response.push_str(&format!("Created workspace directory: {workspace_path:?}\n"));
     }
 
     let thread_id = if initialize.thread_id.is_empty() {
@@ -134,15 +124,18 @@ pub async fn handle_tool_call(
 
             *bash_state_guard = Some(new_bash_state);
 
-            response.push_str(&format!("\n# Environment\nSystem: {}\nMachine: {}\nInitialized in directory: {:?}\n",
+            response.push_str(&format!(
+                "\n# Environment\nSystem: {}\nMachine: {}\nInitialized in directory: {:?}\n",
                 std::env::consts::OS,
                 std::env::consts::ARCH,
-                folder_to_start));
-            
+                folder_to_start
+            ));
+
             response.push_str(&format!("\nUse thread_id={thread_id} for all winx tool calls.\n"));
 
             if !initialize.initial_files_to_read.is_empty() {
-                let content = read_initial_files_simple(&initialize.initial_files_to_read, &folder_to_start);
+                let content =
+                    read_initial_files_simple(&initialize.initial_files_to_read, &folder_to_start);
                 if !content.is_empty() {
                     response.push_str(&format!("\n# Requested files\n{content}\n"));
                 }
@@ -154,7 +147,7 @@ pub async fn handle_tool_call(
                 state.bash_command_mode = bash_command_mode;
                 state.file_edit_mode = file_edit_mode;
                 state.write_if_empty_mode = write_if_empty_mode;
-                response.push_str(&format!("Changed mode to: {:?}\n", mode));
+                response.push_str(&format!("Changed mode to: {mode:?}\n"));
             } else {
                 return Err(WinxError::BashStateNotInitialized);
             }
@@ -176,9 +169,11 @@ pub async fn handle_tool_call(
                 if folder_to_start.exists() {
                     state.update_cwd(&folder_to_start)?;
                     state.update_workspace_root(&folder_to_start)?;
-                    response.push_str(&format!("Changed workspace to: {:?}\n", folder_to_start));
+                    response.push_str(&format!("Changed workspace to: {folder_to_start:?}\n"));
                 } else {
-                    response.push_str(&format!("Warning: Workspace path {:?} does not exist\n", folder_to_start));
+                    response.push_str(&format!(
+                        "Warning: Workspace path {folder_to_start:?} does not exist\n"
+                    ));
                 }
             } else {
                 return Err(WinxError::BashStateNotInitialized);

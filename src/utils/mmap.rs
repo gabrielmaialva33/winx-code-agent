@@ -787,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_mmap_read() {
-        let size = 1 * 1024 * 1024; // 1MB
+        let size = 1024 * 1024; // 1MB
         let (file, expected_data) = create_test_file(size);
 
         let result = read_mmap(file.as_file(), file.path()).unwrap();
@@ -796,7 +796,7 @@ mod tests {
 
     #[test]
     fn test_file_segment_read() {
-        let size = 1 * 1024 * 1024; // 1MB
+        let size = 1024 * 1024; // 1MB
         let (file, data) = create_test_file(size);
 
         // Read a segment from the middle
@@ -833,9 +833,9 @@ mod tests {
         let mut lines = Vec::new();
 
         for i in 0..1000 {
-            let line = format!("Line {}\n", i);
+            let line = format!("Line {i}\n");
             file.write_all(line.as_bytes()).unwrap();
-            lines.push(format!("Line {}", i));
+            lines.push(format!("Line {i}"));
         }
         file.flush().unwrap();
 

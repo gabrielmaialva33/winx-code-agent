@@ -3,7 +3,7 @@
 use anyhow::{anyhow, Context as AnyhowContext, Result};
 use glob;
 use lazy_static::lazy_static;
-use rand::{Rng, RngCore};
+use rand::RngExt;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -422,73 +422,53 @@ impl BashState {
         Ok(())
     }
 
-        pub fn load_state_from_disk(&mut self, thread_id: &str) -> Result<bool> {
+    pub fn load_state_from_disk(&mut self, thread_id: &str) -> Result<bool> {
+        if let Some(snapshot) = load_state_file(thread_id)? {
+            let (cwd, root, mode, bmode, emode, wmode, whitelist, tid) =
+                snapshot.to_state_components();
 
-            if let Some(snapshot) = load_state_file(thread_id)? {
+            self.cwd = PathBuf::from(cwd);
 
-                let (cwd, root, mode, bmode, emode, wmode, whitelist, tid) = snapshot.to_state_components();
+            self.workspace_root = PathBuf::from(root);
 
-                self.cwd = PathBuf::from(cwd);
+            self.mode = mode;
 
-                self.workspace_root = PathBuf::from(root);
+            self.bash_command_mode = bmode;
 
-                self.mode = mode;
+            self.file_edit_mode = emode;
 
-                self.bash_command_mode = bmode;
+            self.write_if_empty_mode = wmode;
 
-                self.file_edit_mode = emode;
+            self.whitelist_for_overwrite = whitelist;
 
-                self.write_if_empty_mode = wmode;
+            self.current_thread_id = tid;
 
-                self.whitelist_for_overwrite = whitelist;
+            self.initialized = true;
 
-                self.current_thread_id = tid;
-
-                self.initialized = true;
-
-                Ok(true)
-
-            } else {
-
-                Ok(false)
-
-            }
-
+            Ok(true)
+        } else {
+            Ok(false)
         }
-
-
-
-        pub fn new_with_thread_id(thread_id: Option<&str>) -> Self {
-
-            let mut state = Self::new();
-
-            if let Some(tid) = thread_id {
-
-                if !tid.is_empty() {
-
-                    if let Ok(true) = state.load_state_from_disk(tid) {
-
-                        info!("Loaded state for thread_id '{}'", tid);
-
-                    } else {
-
-                        state.current_thread_id = tid.to_string();
-
-                    }
-
-                }
-
-            }
-
-            state
-
-        }
-
     }
 
+    pub fn new_with_thread_id(thread_id: Option<&str>) -> Self {
+        let mut state = Self::new();
 
+        if let Some(tid) = thread_id {
+            if !tid.is_empty() {
+                if let Ok(true) = state.load_state_from_disk(tid) {
+                    info!("Loaded state for thread_id '{}'", tid);
+                } else {
+                    state.current_thread_id = tid.to_string();
+                }
+            }
+        }
+
+        state
+    }
+}
 
 pub fn generate_thread_id() -> String {
     let mut rng = rand::rng();
-    format!("tid_{:x}", rng.next_u64())
+    format!("tid_{:x}", rng.random::<u64>())
 }

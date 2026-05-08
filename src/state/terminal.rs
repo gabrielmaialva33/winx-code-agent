@@ -1536,16 +1536,13 @@ pub fn render_terminal_output(text: &str) -> Vec<String> {
     }
 
     // Periodically clean up expired cache entries
-    if rand::random::<u32>().is_multiple_of(100) {
+    if rand::random::<u32>() % 100 == 0 {
         TERMINAL_CACHE.cleanup();
     }
 
     // IMPORTANT: Strip any remaining ANSI codes from the result lines to prevent JSON-RPC errors.
     // This is the core fix for "invalid character '\x1b'" errors.
-    result
-        .into_iter()
-        .map(|line| strip_ansi_codes(&line))
-        .collect()
+    result.into_iter().map(|line| strip_ansi_codes(&line)).collect()
 }
 
 /// Get incremental text output by comparing old and new terminal states
@@ -1627,6 +1624,19 @@ pub fn incremental_text(text: &str, last_pending_output: &str) -> String {
     }
 
     changes.join("\n")
+}
+
+/// Strip ANSI escape codes from a string using a robust regex
+pub fn strip_ansi_codes(input: &str) -> String {
+    // Regex to match ANSI escape codes
+    // Matches most common CSI and other sequences
+    let pattern = r"[\u001b\u009b]\[[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]";
+    // Regex compilation is expensive for single use, but this effectively sanitizes output
+    // preventing JSON RPC crashes.
+    match Regex::new(pattern) {
+        Ok(re) => re.replace_all(input, "").to_string(),
+        Err(_) => input.replace('\x1b', ""), // Fallback
+    }
 }
 
 #[cfg(test)]
@@ -1726,7 +1736,7 @@ mod tests {
 
         // Add 30 lines of content
         for i in 0..30 {
-            let line = format!("Line {}", i);
+            let line = format!("Line {i}");
             for c in line.chars() {
                 screen.put_char(c, ScreenCellAttributes::default());
             }
@@ -1791,18 +1801,5 @@ mod tests {
         terminal.process("\x1b[38;5;208mOrange\x1b[0mNormal");
         let display = terminal.display();
         assert_eq!(display, vec!["OrangeNormal"]);
-    }
-}
-
-/// Strip ANSI escape codes from a string using a robust regex
-pub fn strip_ansi_codes(input: &str) -> String {
-    // Regex to match ANSI escape codes
-    // Matches most common CSI and other sequences
-    let pattern = r"[\u001b\u009b]\[[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]";
-    // Regex compilation is expensive for single use, but this effectively sanitizes output
-    // preventing JSON RPC crashes.
-    match Regex::new(pattern) {
-        Ok(re) => re.replace_all(input, "").to_string(),
-        Err(_) => input.replace('\x1b', ""), // Fallback
     }
 }

@@ -427,41 +427,44 @@ mod tests {
     use tempfile::TempDir;
 
     #[test]
-    fn test_pty_shell_creation() {
-        let temp_dir = TempDir::new().unwrap();
+    fn test_pty_shell_creation() -> Result<()> {
+        let temp_dir = TempDir::new()?;
         let result = PtyShell::new(temp_dir.path(), false);
         assert!(result.is_ok(), "Failed to create PTY shell: {:?}", result.err());
+        Ok(())
     }
 
     #[test]
-    fn test_pty_shell_echo() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut shell = PtyShell::new(temp_dir.path(), false).unwrap();
+    fn test_pty_shell_echo() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut shell = PtyShell::new(temp_dir.path(), false)?;
 
-        shell.send_command("echo 'hello pty'").unwrap();
-        let (output, _complete) = shell.read_output(2.0).unwrap();
+        shell.send_command("echo 'hello pty'")?;
+        let (output, _complete) = shell.read_output(2.0)?;
 
-        assert!(output.contains("hello pty"), "Output should contain 'hello pty': {}", output);
+        assert!(output.contains("hello pty"), "Output should contain 'hello pty': {output}");
+        Ok(())
     }
 
     #[test]
-    fn test_pty_shell_pwd() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut shell = PtyShell::new(temp_dir.path(), false).unwrap();
+    fn test_pty_shell_pwd() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut shell = PtyShell::new(temp_dir.path(), false)?;
 
         // Simply verify shell responds to pwd command
         // Use single quotes like echo test for consistency
-        shell.send_command("pwd && echo 'pwd_done'").unwrap();
-        let (output, _complete) = shell.read_output(2.0).unwrap();
+        shell.send_command("pwd && echo 'pwd_done'")?;
+        let (output, _complete) = shell.read_output(2.0)?;
 
         // Verify the echo marker appears (proves command executed)
-        assert!(output.contains("pwd_done"), "Output should contain 'pwd_done': {}", output);
+        assert!(output.contains("pwd_done"), "Output should contain 'pwd_done': {output}");
+        Ok(())
     }
 
     #[test]
-    fn test_pty_resize() {
-        let temp_dir = TempDir::new().unwrap();
-        let mut shell = PtyShell::new(temp_dir.path(), false).unwrap();
+    fn test_pty_resize() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut shell = PtyShell::new(temp_dir.path(), false)?;
 
         let result = shell.resize(120, 40);
         assert!(result.is_ok());
@@ -469,5 +472,6 @@ mod tests {
         let (cols, rows) = shell.get_size();
         assert_eq!(cols, 120);
         assert_eq!(rows, 40);
+        Ok(())
     }
 }

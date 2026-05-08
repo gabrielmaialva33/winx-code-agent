@@ -153,7 +153,8 @@ pub async fn handle_tool_call(
 
     // Update whitelist
     let final_content = fs::read_to_string(&path)?;
-    let hash = format!("{:x}", Sha256::digest(final_content.as_bytes()));
+    let digest = Sha256::digest(final_content.as_bytes());
+    let hash = digest.iter().map(|byte| format!("{byte:02x}")).collect();
     let total_lines = final_content.lines().count();
 
     bash_state

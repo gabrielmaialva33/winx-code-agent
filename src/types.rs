@@ -1,6 +1,5 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use glob;
 
 /// Type of shell environment initialization
 ///
@@ -128,11 +127,9 @@ impl AllowedGlobs {
     pub fn is_allowed(&self, path: &str) -> bool {
         match self {
             AllowedGlobs::All(s) if s == "all" => true,
-            AllowedGlobs::List(globs) => globs.iter().any(|g| {
-                match glob::Pattern::new(g) {
-                    Ok(pattern) => pattern.matches(path),
-                    Err(_) => false,
-                }
+            AllowedGlobs::List(globs) => globs.iter().any(|g| match glob::Pattern::new(g) {
+                Ok(pattern) => pattern.matches(path),
+                Err(_) => false,
             }),
             _ => false,
         }
@@ -158,7 +155,7 @@ impl AllowedCommands {
         match self {
             AllowedCommands::All(s) if s == "all" => true,
             AllowedCommands::List(commands) => {
-                let cmd_prog = command_line.trim().split_whitespace().next().unwrap_or("");
+                let cmd_prog = command_line.split_whitespace().next().unwrap_or("");
                 commands.iter().any(|c| cmd_prog == c)
             }
             _ => false,
@@ -720,5 +717,3 @@ pub struct ReadImage {
     /// This can be an absolute path or a path relative to the current working directory.
     pub file_path: String,
 }
-
-

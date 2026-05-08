@@ -5,7 +5,7 @@
 //! Matches the behavior of wcgw Python implementation 1:1.
 
 use anyhow::Context as AnyhowContext;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
@@ -1007,11 +1007,11 @@ async fn execute_simple_command(
     let mut result = raw_result.clone();
     if !raw_result.is_empty() {
         let rendered_lines = render_terminal_output(&raw_result);
-        if !rendered_lines.is_empty() {
-            result = rendered_lines.join("\n");
-        } else {
+        if rendered_lines.is_empty() {
             // Fallback: just strip ANSI codes if rendering failed or wasn't needed
             result = strip_ansi_codes(&raw_result);
+        } else {
+            result = rendered_lines.join("\n");
         }
     }
 
