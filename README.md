@@ -1,3 +1,7 @@
+<p align="center">
+  <img src=".github/assets/fairy.png" alt="Winx fairy mascot" width="160" />
+</p>
+
 # ✨ Winx - Rust MCP Server for Code Agents ✨
 
 <p align="center">
