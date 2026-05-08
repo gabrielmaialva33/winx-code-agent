@@ -42,10 +42,12 @@ impl CellStyle {
     pub const SUBSCRIPT: Self = Self(1 << 14);
     pub const HYPERLINK: Self = Self(1 << 15);
 
+    #[must_use]
     pub const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
+    #[must_use]
     pub const fn contains(self, flag: Self) -> bool {
         self.0 & flag.0 != 0
     }
