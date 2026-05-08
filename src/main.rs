@@ -3,15 +3,8 @@
 //! Winx is a high-performance Rust implementation of the Model Context Protocol (MCP).
 //! It provides core tools for shell execution and file management with extreme efficiency.
 
-mod errors;
-mod server;
-mod state;
-mod tools;
-mod types;
-mod utils;
-
 use clap::Parser;
-use errors::Result;
+use winx_code_agent::{start_winx_server, Result, WinxError};
 
 /// Winx - High Performance MCP Server
 #[derive(Parser)]
@@ -77,14 +70,14 @@ async fn main() -> Result<()> {
 async fn run_server() -> Result<()> {
     tracing::info!("Starting winx MCP server v{}", env!("CARGO_PKG_VERSION"));
 
-    match server::start_winx_server().await {
+    match start_winx_server().await {
         Ok(()) => {
             tracing::info!("Server shutting down normally");
             Ok(())
         }
         Err(e) => {
             tracing::error!("Server error: {}", e);
-            Err(errors::WinxError::ShellInitializationError(format!("Failed to start server: {e}")))
+            Err(WinxError::ShellInitializationError(format!("Failed to start server: {e}")))
         }
     }
 }

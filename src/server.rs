@@ -3,9 +3,9 @@
 
 use rmcp::{
     model::{
-        Annotated, CallToolRequestParam, CallToolResult, Content, Implementation,
-        ListResourcesResult, ListToolsResult, PaginatedRequestParam, ProtocolVersion, RawResource,
-        ReadResourceRequestParam, ReadResourceResult, ResourceContents, ServerCapabilities,
+        Annotated, CallToolRequestParams, CallToolResult, Content, Implementation,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion, RawResource,
+        ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
         ServerInfo, Tool, ToolAnnotations,
     },
     service::{RequestContext, RoleServer},
@@ -19,9 +19,7 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::state::BashState;
-use crate::types::{
-    BashCommand, ContextSave, FileWriteOrEdit, Initialize, ReadFiles, ReadImage,
-};
+use crate::types::{BashCommand, ContextSave, FileWriteOrEdit, Initialize, ReadFiles, ReadImage};
 
 /// Type alias for the shared bash state - uses `tokio::sync::Mutex` for async safety
 pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
@@ -34,6 +32,14 @@ fn schema_to_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<Stri
         Value::Object(map) => Arc::new(map),
         _ => Arc::new(serde_json::Map::new()),
     }
+}
+
+fn mcp_tool<T: schemars::JsonSchema>(
+    name: &'static str,
+    description: &'static str,
+    annotations: ToolAnnotations,
+) -> Tool {
+    Tool::new(name, description, schema_to_input_schema::<T>()).with_annotations(annotations)
 }
 
 /// Winx service with shared bash state
@@ -65,36 +71,31 @@ impl WinxService {
 /// `ServerHandler` implementation
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            server_info: Implementation {
-                name: "winx-mcp-server".into(),
-                version: self.version.clone(),
-                title: Some("Winx High-Performance MCP".into()),
-                icons: None,
-                website_url: None,
-            },
-            protocol_version: ProtocolVersion::V_2024_11_05,
-            capabilities: ServerCapabilities::builder()
+        ServerInfo::new(
+            ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
                 .build(),
-            instructions: Some(
+        )
+        .with_server_info(
+            Implementation::new("winx-mcp-server", self.version.clone())
+                .with_title("Winx High-Performance MCP"),
+        )
+        .with_protocol_version(ProtocolVersion::V_2024_11_05)
+        .with_instructions(
                 "Winx is a high-performance Rust implementation of MCP tools for shell and file management."
-                    .into(),
-            ),
-        }
+        )
     }
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParam>,
+        _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         Ok(ListToolsResult {
             tools: vec![
-                Tool {
-                    name: "Initialize".into(),
-                    description: Some(
+                mcp_tool::<Initialize>(
+                    "Initialize",
                         "- Always call this at the start of the conversation before using any of the shell tools from wcgw. \
                          - Use `any_workspace_path` to initialize the shell in the appropriate project directory. \
                          - If the user has mentioned a workspace or project root or any other file or folder use it to set `any_workspace_path`. \
@@ -104,19 +105,11 @@ impl ServerHandler for WinxService {
                          - Use type=\"first_call\" if it's the first call to this tool. \
                          - Use type=\"user_asked_mode_change\" if in a conversation user has asked to change mode. \
                          - Use type=\"reset_shell\" if in a conversation shell is not working after multiple tries. \
-                         - Use type=\"user_asked_change_workspace\" if in a conversation user asked to change workspace"
-                            .into(),
-                    ),
-                    input_schema: schema_to_input_schema::<Initialize>(),
-                    output_schema: None,
-                    annotations: Some(ToolAnnotations::new().read_only(true).open_world(false)),
-                    title: None,
-                    icons: None,
-                    meta: None,
-                },
-                Tool {
-                    name: "BashCommand".into(),
-                    description: Some(
+                         - Use type=\"user_asked_change_workspace\" if in a conversation user asked to change workspace",
+                    ToolAnnotations::new().read_only(true).open_world(false),
+                ),
+                mcp_tool::<BashCommand>(
+                    "BashCommand",
                         "- Execute a bash command. This is stateful (beware with subsequent calls). \
                          - Status of the command and the current working directory will always be returned at the end. \
                          - The first or the last line might be `(...truncated)` if the output is too long. \
@@ -128,35 +121,19 @@ impl ServerHandler for WinxService {
                          - Programs don't hang easily, so most likely explanation for no output is usually that the program is still running, and you need to check status again. \
                          - Do not send Ctrl-c before checking for status till 10 minutes or whatever is appropriate for the program to finish. \
                          - Only run long running commands in background. Each background command is run in a new non-reusable shell. \
-                         - On running a bg command you'll get a bg command id that you should use to get status or interact."
-                            .into(),
-                    ),
-                    input_schema: schema_to_input_schema::<BashCommand>(),
-                    output_schema: None,
-                    annotations: Some(ToolAnnotations::new().destructive(true).open_world(true)),
-                    title: None,
-                    icons: None,
-                    meta: None,
-                },
-                Tool {
-                    name: "ReadFiles".into(),
-                    description: Some(
+                         - On running a bg command you'll get a bg command id that you should use to get status or interact.",
+                    ToolAnnotations::new().destructive(true).open_world(true),
+                ),
+                mcp_tool::<ReadFiles>(
+                    "ReadFiles",
                         "- Read full file content of one or more files. \
                          - Provide absolute paths only (~ allowed) \
                          - Only if the task requires line numbers understanding: \
-                         - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10`"
-                            .into(),
-                    ),
-                    input_schema: schema_to_input_schema::<ReadFiles>(),
-                    output_schema: None,
-                    annotations: Some(ToolAnnotations::new().read_only(true).open_world(false)),
-                    title: None,
-                    icons: None,
-                    meta: None,
-                },
-                Tool {
-                    name: "FileWriteOrEdit".into(),
-                    description: Some(
+                         - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10`",
+                    ToolAnnotations::new().read_only(true).open_world(false),
+                ),
+                mcp_tool::<FileWriteOrEdit>(
+                    "FileWriteOrEdit",
                         "- Writes or edits a file based on the percentage of changes. \
                          - Use absolute path only (~ allowed). \
                          - First write down percentage of lines that need to be replaced in the file (between 0-100) in percentage_to_change \
@@ -224,41 +201,21 @@ impl ServerHandler for WinxService {
                          Break large *SEARCH/REPLACE* blocks into a series of smaller blocks that each change a small portion of the file. \
                          Include just the changing lines, and a few surrounding lines (0-3 lines) if needed for uniqueness. \
                          Other than for uniqueness, avoid including those lines which do not change in search (and replace) blocks. Target 0-3 non trivial extra lines per block. \
-                         Preserve leading spaces and indentations in both SEARCH and REPLACE blocks."
-                            .into(),
-                    ),
-                    input_schema: schema_to_input_schema::<FileWriteOrEdit>(),
-                    output_schema: None,
-                    annotations: Some(ToolAnnotations::new().destructive(true).open_world(false)),
-                    title: None,
-                    icons: None,
-                    meta: None,
-                },
-                Tool {
-                    name: "ContextSave".into(),
-                    description: Some(
+                         Preserve leading spaces and indentations in both SEARCH and REPLACE blocks.",
+                    ToolAnnotations::new().destructive(true).open_world(false),
+                ),
+                mcp_tool::<ContextSave>(
+                    "ContextSave",
                         "Saves provided description and file contents of all the relevant file paths or globs in a single text file. \
                          - Provide random 3 word unqiue id or whatever user provided. \
-                         - Leave project path as empty string if no project path"
-                            .into(),
-                    ),
-                    input_schema: schema_to_input_schema::<ContextSave>(),
-                    output_schema: None,
-                    annotations: Some(ToolAnnotations::new().destructive(false).open_world(false)),
-                    title: None,
-                    icons: None,
-                    meta: None,
-                },
-                Tool {
-                    name: "ReadImage".into(),
-                    description: Some("Read an image from the shell.".into()),
-                    input_schema: schema_to_input_schema::<ReadImage>(),
-                    output_schema: None,
-                    annotations: Some(ToolAnnotations::new().read_only(true).open_world(false)),
-                    title: None,
-                    icons: None,
-                    meta: None,
-                },
+                         - Leave project path as empty string if no project path",
+                    ToolAnnotations::new().destructive(false).open_world(false),
+                ),
+                mcp_tool::<ReadImage>(
+                    "ReadImage",
+                    "Read an image from the shell.",
+                    ToolAnnotations::new().read_only(true).open_world(false),
+                ),
 
             ],
             next_cursor: None,
@@ -268,7 +225,7 @@ impl ServerHandler for WinxService {
 
     async fn list_resources(
         &self,
-        _param: Option<PaginatedRequestParam>,
+        _param: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         Ok(ListResourcesResult {
@@ -292,7 +249,7 @@ impl ServerHandler for WinxService {
 
     async fn read_resource(
         &self,
-        param: ReadResourceRequestParam,
+        param: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         let content = match param.uri.as_ref() {
@@ -311,12 +268,12 @@ impl ServerHandler for WinxService {
             }
         };
 
-        Ok(ReadResourceResult { contents: content })
+        Ok(ReadResourceResult::new(content))
     }
 
     async fn call_tool(
         &self,
-        param: CallToolRequestParam,
+        param: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args_value = param.arguments.map(Value::Object);
@@ -415,8 +372,6 @@ impl WinxService {
             Err(e) => Err(McpError::internal_error(format!("ReadImage failed: {e}"), None)),
         }
     }
-
-
 }
 
 /// Create and start the Winx MCP server
