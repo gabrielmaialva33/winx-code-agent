@@ -136,6 +136,20 @@ pub async fn handle_tool_call(
 
     let file_path_str = path.to_string_lossy().to_string();
 
+    let uses_search_replace = file_write_or_edit.percentage_to_change <= 50;
+    let operation_allowed = if uses_search_replace {
+        bash_state.is_file_edit_allowed(&file_path_str)
+    } else {
+        bash_state.is_file_write_allowed(&file_path_str)
+    };
+
+    if !operation_allowed {
+        return Err(WinxError::FileAccessError {
+            path: path.clone(),
+            message: "File operation not allowed in current mode.".to_string(),
+        });
+    }
+
     // Whitelist check (WCGW style)
     if path.exists() && !bash_state.whitelist_for_overwrite.contains_key(&file_path_str) {
         return Err(WinxError::FileAccessError {
@@ -144,7 +158,7 @@ pub async fn handle_tool_call(
         });
     }
 
-    let result = if file_write_or_edit.percentage_to_change <= 50 {
+    let result = if uses_search_replace {
         let original_content = fs::read_to_string(&path)?;
         let blocks = parse_blocks(&file_write_or_edit.text_or_search_replace_blocks)?;
         let new_content = apply_blocks(&original_content, blocks)?;
