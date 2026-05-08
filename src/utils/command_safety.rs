@@ -102,9 +102,9 @@ static BACKGROUND_COMMANDS: &[&str] = &[
 /// Command safety analyzer
 #[derive(Debug, Clone)]
 pub struct CommandSafety {
-    interactive_commands: HashSet<String>,
-    long_running_commands: HashSet<String>,
-    background_commands: HashSet<String>,
+    interactive: HashSet<String>,
+    long_running: HashSet<String>,
+    background: HashSet<String>,
 }
 
 impl Default for CommandSafety {
@@ -116,27 +116,26 @@ impl Default for CommandSafety {
 impl CommandSafety {
     /// Create a new command safety analyzer
     pub fn new() -> Self {
-        let interactive_commands = INTERACTIVE_COMMANDS.iter().map(|s| (*s).to_string()).collect();
+        let interactive = INTERACTIVE_COMMANDS.iter().map(|s| (*s).to_string()).collect();
 
-        let long_running_commands =
-            LONG_RUNNING_COMMANDS.iter().map(|s| (*s).to_string()).collect();
+        let long_running = LONG_RUNNING_COMMANDS.iter().map(|s| (*s).to_string()).collect();
 
-        let background_commands = BACKGROUND_COMMANDS.iter().map(|s| (*s).to_string()).collect();
+        let background = BACKGROUND_COMMANDS.iter().map(|s| (*s).to_string()).collect();
 
-        Self { interactive_commands, long_running_commands, background_commands }
+        Self { interactive, long_running, background }
     }
 
     /// Check if a command is potentially interactive
     pub fn is_interactive(&self, command: &str) -> bool {
-        let normalized = self.normalize_command(command);
+        let normalized = Self::normalize_command(command);
 
         // Check exact matches
-        if self.interactive_commands.contains(&normalized) {
+        if self.interactive.contains(&normalized) {
             return true;
         }
 
         // Check if command starts with any interactive command
-        for interactive_cmd in &self.interactive_commands {
+        for interactive_cmd in &self.interactive {
             if normalized.starts_with(interactive_cmd) {
                 // Check that it's a word boundary
                 let rest = &normalized[interactive_cmd.len()..];
@@ -161,14 +160,14 @@ impl CommandSafety {
         }
 
         // Special cases for other interactive commands
-        self.check_special_interactive_cases(&normalized)
+        Self::check_special_interactive_cases(&normalized)
     }
 
     /// Check if a command might run for a long time
     pub fn is_long_running(&self, command: &str) -> bool {
-        let normalized = self.normalize_command(command);
+        let normalized = Self::normalize_command(command);
 
-        for long_cmd in &self.long_running_commands {
+        for long_cmd in &self.long_running {
             if normalized.starts_with(long_cmd) {
                 let rest = &normalized[long_cmd.len()..];
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
@@ -182,14 +181,14 @@ impl CommandSafety {
 
     /// Check if a command spawns background processes
     pub fn is_background_command(&self, command: &str) -> bool {
-        let normalized = self.normalize_command(command);
+        let normalized = Self::normalize_command(command);
 
         // Check for explicit background operators
         if normalized.contains(" &") || normalized.ends_with('&') {
             return true;
         }
 
-        for bg_cmd in &self.background_commands {
+        for bg_cmd in &self.background {
             if normalized.starts_with(bg_cmd) {
                 let rest = &normalized[bg_cmd.len()..];
                 if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
@@ -237,12 +236,12 @@ impl CommandSafety {
     }
 
     /// Normalize command for comparison
-    fn normalize_command(&self, command: &str) -> String {
+    fn normalize_command(command: &str) -> String {
         command.trim().to_lowercase()
     }
 
     /// Check special cases for interactive commands
-    fn check_special_interactive_cases(&self, command: &str) -> bool {
+    fn check_special_interactive_cases(command: &str) -> bool {
         // Git commit without -m flag
         if command.starts_with("git commit")
             && !command.contains("-m")

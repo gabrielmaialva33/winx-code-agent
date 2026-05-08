@@ -11,6 +11,7 @@ pub mod repo;
 
 use crate::types::Initialize;
 use serde_json::Value;
+use tracing::debug;
 
 /// Debug helper to test JSON parsing of an Initialize request
 pub fn test_json_parsing(json_str: &str) -> Result<(), String> {
@@ -24,12 +25,13 @@ pub fn test_json_parsing(json_str: &str) -> Result<(), String> {
     let init_result = serde_json::from_str::<Initialize>(json_str);
     match init_result {
         Ok(init) => {
-            // Log the successfully parsed values
-            eprintln!("Successfully parsed JSON into Initialize struct:");
-            eprintln!("  type: {:?}", init.init_type);
-            eprintln!("  mode_name: {:?}", init.mode_name);
-            eprintln!("  code_writer_config: {:?}", init.code_writer_config);
-            eprintln!("  task_id_to_resume: {}", init.task_id_to_resume);
+            debug!(
+                init_type = ?init.init_type,
+                mode_name = ?init.mode_name,
+                code_writer_config = ?init.code_writer_config,
+                task_id_to_resume = init.task_id_to_resume,
+                "Successfully parsed JSON into Initialize struct"
+            );
             Ok(())
         }
         Err(e) => Err(format!("Failed to parse JSON into Initialize struct: {e}")),

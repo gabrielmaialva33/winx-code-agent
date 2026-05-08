@@ -131,7 +131,7 @@ impl AllowedGlobs {
                 Ok(pattern) => pattern.matches(path),
                 Err(_) => false,
             }),
-            _ => false,
+            AllowedGlobs::All(_) => false,
         }
     }
 }
@@ -158,7 +158,7 @@ impl AllowedCommands {
                 let cmd_prog = command_line.split_whitespace().next().unwrap_or("");
                 commands.iter().any(|c| cmd_prog == c)
             }
-            _ => false,
+            AllowedCommands::All(_) => false,
         }
     }
 }

@@ -179,7 +179,7 @@ impl From<&BashCommandMode> for BashCommandModeSnapshot {
         Self {
             bash_mode: match mode.bash_mode {
                 BashMode::RestrictedMode => "restricted_mode".to_string(),
-                _ => "normal_mode".to_string(),
+                BashMode::NormalMode => "normal_mode".to_string(),
             },
             allowed_commands: match &mode.allowed_commands {
                 AllowedCommands::All(s) => AllowedCommandsSnapshot::All(s.clone()),
