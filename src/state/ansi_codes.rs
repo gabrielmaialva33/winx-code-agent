@@ -4,13 +4,30 @@
 //! commonly used in terminal output, focusing on rich text formatting including
 //! 24-bit true color and extended attribute support.
 
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
 static ANSI_REGEX: OnceLock<std::result::Result<Regex, regex::Error>> = OnceLock::new();
+const BASIC_COLORS: &[(&str, u8)] = &[
+    ("black", 0),
+    ("red", 1),
+    ("green", 2),
+    ("yellow", 3),
+    ("blue", 4),
+    ("magenta", 5),
+    ("cyan", 6),
+    ("white", 7),
+    ("brightblack", 8),
+    ("brightred", 9),
+    ("brightgreen", 10),
+    ("brightyellow", 11),
+    ("brightblue", 12),
+    ("brightmagenta", 13),
+    ("brightcyan", 14),
+    ("brightwhite", 15),
+];
 
 fn ansi_regex() -> Option<&'static Regex> {
     ANSI_REGEX.get_or_init(|| Regex::new(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")).as_ref().ok()
@@ -501,31 +518,9 @@ pub fn parse_ansi_sequences(text: &str) -> Vec<(usize, String)> {
 
 /// Color name to ANSI code mapping
 pub fn color_name_to_code(name: &str) -> Option<TermColor> {
-    lazy_static! {
-        static ref BASIC_COLORS: HashMap<String, u8> = {
-            let mut m = HashMap::new();
-            m.insert("black".to_string(), 0);
-            m.insert("red".to_string(), 1);
-            m.insert("green".to_string(), 2);
-            m.insert("yellow".to_string(), 3);
-            m.insert("blue".to_string(), 4);
-            m.insert("magenta".to_string(), 5);
-            m.insert("cyan".to_string(), 6);
-            m.insert("white".to_string(), 7);
-            m.insert("brightblack".to_string(), 8);
-            m.insert("brightred".to_string(), 9);
-            m.insert("brightgreen".to_string(), 10);
-            m.insert("brightyellow".to_string(), 11);
-            m.insert("brightblue".to_string(), 12);
-            m.insert("brightmagenta".to_string(), 13);
-            m.insert("brightcyan".to_string(), 14);
-            m.insert("brightwhite".to_string(), 15);
-            m
-        };
-    }
-
     // Try as a basic color name
-    if let Some(code) = BASIC_COLORS.get(&name.to_lowercase()) {
+    if let Some((_, code)) = BASIC_COLORS.iter().find(|(color, _)| color.eq_ignore_ascii_case(name))
+    {
         return Some(TermColor::Basic(*code));
     }
 
