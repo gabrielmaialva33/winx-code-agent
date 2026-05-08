@@ -517,210 +517,172 @@ impl TerminalPerformer {
         self.attributes.hyperlink_url = None;
     }
 
+    fn track_sgr(&mut self, param: u16) {
+        self.sgr_state.insert(param, true);
+    }
+
+    fn untrack_sgr(&mut self, params: &[u16]) {
+        for param in params {
+            self.sgr_state.remove(param);
+        }
+    }
+
     /// Parse and handle SGR (Select Graphic Rendition) parameters
     fn handle_sgr_params(&mut self, params: &vte::Params) {
         if params.is_empty() {
-            // Reset attributes if no parameters
             self.reset_attributes();
             return;
         }
 
         for param_values in params.iter().flatten() {
-            let param = *param_values;
-            match param {
-                0 => {
-                    // Reset all attributes
-                    self.reset_attributes();
-                }
-                1 => {
-                    // Bold
-                    self.attributes.style.set(CellStyle::BOLD, true);
-                    self.sgr_state.insert(1, true);
-                }
-                2 => {
-                    // Faint/dim
-                    self.attributes.style.set(CellStyle::DIM, true);
-                    self.sgr_state.insert(2, true);
-                }
-                3 => {
-                    // Italic
-                    self.attributes.style.set(CellStyle::ITALIC, true);
-                    self.sgr_state.insert(3, true);
-                }
-                4 => {
-                    // Underline
-                    self.attributes.style.set(CellStyle::UNDERLINE, true);
-                    self.attributes.style.set(CellStyle::DOUBLE_UNDERLINE, false);
-                    self.sgr_state.insert(4, true);
-                }
-                5 | 6 => {
-                    // Blink (slow or rapid)
-                    self.attributes.style.set(CellStyle::BLINK, true);
-                    self.sgr_state.insert(param, true);
-                }
-                7 => {
-                    // Reverse
-                    self.attributes.style.set(CellStyle::REVERSE, true);
-                    self.sgr_state.insert(7, true);
-                }
-                8 => {
-                    // Conceal/Hidden
-                    self.attributes.style.set(CellStyle::CONCEAL, true);
-                    self.sgr_state.insert(8, true);
-                }
-                9 => {
-                    // Strikethrough
-                    self.attributes.style.set(CellStyle::STRIKETHROUGH, true);
-                    self.sgr_state.insert(9, true);
-                }
-                10 => {
-                    // Primary (default) font
-                    self.attributes.font = 0;
-                    self.sgr_state.insert(10, true);
-                }
-                11..=19 => {
-                    // Alternative fonts (1-9)
-                    self.attributes.font = (param - 10) as u8;
-                    self.sgr_state.insert(param, true);
-                }
-                20 => {
-                    // Fraktur (Gothic)
-                    self.attributes.style.set(CellStyle::FRAKTUR, true);
-                    self.sgr_state.insert(20, true);
-                }
-                21 => {
-                    // Double underline
-                    self.attributes.style.set(CellStyle::UNDERLINE, true);
-                    self.attributes.style.set(CellStyle::DOUBLE_UNDERLINE, true);
-                    self.sgr_state.insert(21, true);
-                }
-                22 => {
-                    // Normal intensity (not bold and not faint)
-                    self.attributes.style.set(CellStyle::BOLD, false);
-                    self.attributes.style.set(CellStyle::DIM, false);
-                    self.sgr_state.remove(&1);
-                    self.sgr_state.remove(&2);
-                }
-                23 => {
-                    // Not italic, not fraktur
-                    self.attributes.style.set(CellStyle::ITALIC, false);
-                    self.attributes.style.set(CellStyle::FRAKTUR, false);
-                    self.sgr_state.remove(&3);
-                    self.sgr_state.remove(&20);
-                }
-                24 => {
-                    // Not underlined (single or double)
-                    self.attributes.style.set(CellStyle::UNDERLINE, false);
-                    self.attributes.style.set(CellStyle::DOUBLE_UNDERLINE, false);
-                    self.sgr_state.remove(&4);
-                    self.sgr_state.remove(&21);
-                }
-                25 => {
-                    // Not blinking
-                    self.attributes.style.set(CellStyle::BLINK, false);
-                    self.sgr_state.remove(&5);
-                    self.sgr_state.remove(&6);
-                }
-                26 | 38 | 48 => {
-                    // Reserved or extended color control handled elsewhere.
-                }
-                27 => {
-                    // Not reversed
-                    self.attributes.style.set(CellStyle::REVERSE, false);
-                    self.sgr_state.remove(&7);
-                }
-                28 => {
-                    // Reveal (not concealed)
-                    self.attributes.style.set(CellStyle::CONCEAL, false);
-                    self.sgr_state.remove(&8);
-                }
-                29 => {
-                    // Not strikethrough
-                    self.attributes.style.set(CellStyle::STRIKETHROUGH, false);
-                    self.sgr_state.remove(&9);
-                }
-                30..=37 => {
-                    // Basic foreground color
-                    self.attributes.fg_color = Some(TerminalColor::Basic(param as u8 - 30));
-                }
-                39 => {
-                    // Default foreground color
-                    self.attributes.fg_color = None;
-                }
-                40..=47 => {
-                    // Basic background color
-                    self.attributes.bg_color = Some(TerminalColor::Basic(param as u8 - 40));
-                }
-                49 => {
-                    // Default background color
-                    self.attributes.bg_color = None;
-                }
-                51 => {
-                    // Framed
-                    self.attributes.style.set(CellStyle::FRAMED, true);
-                    self.attributes.style.set(CellStyle::ENCIRCLED, false);
-                    self.sgr_state.insert(51, true);
-                }
-                52 => {
-                    // Encircled
-                    self.attributes.style.set(CellStyle::FRAMED, false);
-                    self.attributes.style.set(CellStyle::ENCIRCLED, true);
-                    self.sgr_state.insert(52, true);
-                }
-                53 => {
-                    // Overlined
-                    self.attributes.style.set(CellStyle::OVERLINED, true);
-                    self.sgr_state.insert(53, true);
-                }
-                54 => {
-                    // Not framed, not encircled
-                    self.attributes.style.set(CellStyle::FRAMED, false);
-                    self.attributes.style.set(CellStyle::ENCIRCLED, false);
-                    self.sgr_state.remove(&51);
-                    self.sgr_state.remove(&52);
-                }
-                55 => {
-                    // Not overlined
-                    self.attributes.style.set(CellStyle::OVERLINED, false);
-                    self.sgr_state.remove(&53);
-                }
-                60..=65 => {
-                    // Ideogram attributes (not implemented, but tracked)
-                    self.sgr_state.insert(param, true);
-                }
-                73 => {
-                    // Superscript
-                    self.attributes.style.set(CellStyle::SUPERSCRIPT, true);
-                    self.attributes.style.set(CellStyle::SUBSCRIPT, false);
-                    self.sgr_state.insert(73, true);
-                }
-                74 => {
-                    // Subscript
-                    self.attributes.style.set(CellStyle::SUBSCRIPT, true);
-                    self.attributes.style.set(CellStyle::SUPERSCRIPT, false);
-                    self.sgr_state.insert(74, true);
-                }
-                75 => {
-                    // Neither superscript nor subscript
-                    self.attributes.style.set(CellStyle::SUPERSCRIPT, false);
-                    self.attributes.style.set(CellStyle::SUBSCRIPT, false);
-                    self.sgr_state.remove(&73);
-                    self.sgr_state.remove(&74);
-                }
-                90..=97 => {
-                    // Bright foreground color
-                    self.attributes.fg_color = Some(TerminalColor::Basic(param as u8 - 90 + 8));
-                }
-                100..=107 => {
-                    // Bright background color
-                    self.attributes.bg_color = Some(TerminalColor::Basic(param as u8 - 100 + 8));
-                }
-                _ => {
-                    // Ignore unsupported SGR codes but trace for debugging
-                    debug!("Unsupported SGR parameter: {}", param);
-                }
-            }
+            self.handle_sgr_param(*param_values);
         }
+    }
+
+    fn handle_sgr_param(&mut self, param: u16) {
+        if self.handle_basic_sgr_style(param)
+            || self.handle_font_sgr(param)
+            || self.handle_color_sgr(param)
+            || self.handle_frame_sgr(param)
+            || self.handle_script_sgr(param)
+        {
+            return;
+        }
+
+        debug!("Unsupported SGR parameter: {}", param);
+    }
+
+    fn handle_basic_sgr_style(&mut self, param: u16) -> bool {
+        match param {
+            0 => self.reset_attributes(),
+            1 => self.attributes.style.set(CellStyle::BOLD, true),
+            2 => self.attributes.style.set(CellStyle::DIM, true),
+            3 => self.attributes.style.set(CellStyle::ITALIC, true),
+            4 => {
+                self.attributes.style.set(CellStyle::UNDERLINE, true);
+                self.attributes.style.set(CellStyle::DOUBLE_UNDERLINE, false);
+            }
+            5 | 6 => self.attributes.style.set(CellStyle::BLINK, true),
+            7 => self.attributes.style.set(CellStyle::REVERSE, true),
+            8 => self.attributes.style.set(CellStyle::CONCEAL, true),
+            9 => self.attributes.style.set(CellStyle::STRIKETHROUGH, true),
+            20 => self.attributes.style.set(CellStyle::FRAKTUR, true),
+            21 => {
+                self.attributes.style.set(CellStyle::UNDERLINE, true);
+                self.attributes.style.set(CellStyle::DOUBLE_UNDERLINE, true);
+            }
+            22 => {
+                self.attributes.style.set(CellStyle::BOLD, false);
+                self.attributes.style.set(CellStyle::DIM, false);
+                self.untrack_sgr(&[1, 2]);
+                return true;
+            }
+            23 => {
+                self.attributes.style.set(CellStyle::ITALIC, false);
+                self.attributes.style.set(CellStyle::FRAKTUR, false);
+                self.untrack_sgr(&[3, 20]);
+                return true;
+            }
+            24 => {
+                self.attributes.style.set(CellStyle::UNDERLINE, false);
+                self.attributes.style.set(CellStyle::DOUBLE_UNDERLINE, false);
+                self.untrack_sgr(&[4, 21]);
+                return true;
+            }
+            25 => {
+                self.attributes.style.set(CellStyle::BLINK, false);
+                self.untrack_sgr(&[5, 6]);
+                return true;
+            }
+            27 => self.attributes.style.set(CellStyle::REVERSE, false),
+            28 => self.attributes.style.set(CellStyle::CONCEAL, false),
+            29 => self.attributes.style.set(CellStyle::STRIKETHROUGH, false),
+            _ => return false,
+        }
+
+        self.track_sgr(param);
+        true
+    }
+
+    fn handle_font_sgr(&mut self, param: u16) -> bool {
+        match param {
+            10 => self.attributes.font = 0,
+            11..=19 => self.attributes.font = (param - 10) as u8,
+            _ => return false,
+        }
+
+        self.track_sgr(param);
+        true
+    }
+
+    fn handle_color_sgr(&mut self, param: u16) -> bool {
+        match param {
+            26 | 38 | 48 => {}
+            30..=37 => self.attributes.fg_color = Some(TerminalColor::Basic(param as u8 - 30)),
+            39 => self.attributes.fg_color = None,
+            40..=47 => self.attributes.bg_color = Some(TerminalColor::Basic(param as u8 - 40)),
+            49 => self.attributes.bg_color = None,
+            90..=97 => self.attributes.fg_color = Some(TerminalColor::Basic(param as u8 - 90 + 8)),
+            100..=107 => {
+                self.attributes.bg_color = Some(TerminalColor::Basic(param as u8 - 100 + 8));
+            }
+            _ => return false,
+        }
+
+        true
+    }
+
+    fn handle_frame_sgr(&mut self, param: u16) -> bool {
+        match param {
+            51 => {
+                self.attributes.style.set(CellStyle::FRAMED, true);
+                self.attributes.style.set(CellStyle::ENCIRCLED, false);
+            }
+            52 => {
+                self.attributes.style.set(CellStyle::FRAMED, false);
+                self.attributes.style.set(CellStyle::ENCIRCLED, true);
+            }
+            53 => self.attributes.style.set(CellStyle::OVERLINED, true),
+            54 => {
+                self.attributes.style.set(CellStyle::FRAMED, false);
+                self.attributes.style.set(CellStyle::ENCIRCLED, false);
+                self.untrack_sgr(&[51, 52]);
+                return true;
+            }
+            55 => {
+                self.attributes.style.set(CellStyle::OVERLINED, false);
+                self.untrack_sgr(&[53]);
+                return true;
+            }
+            60..=65 => {}
+            _ => return false,
+        }
+
+        self.track_sgr(param);
+        true
+    }
+
+    fn handle_script_sgr(&mut self, param: u16) -> bool {
+        match param {
+            73 => {
+                self.attributes.style.set(CellStyle::SUPERSCRIPT, true);
+                self.attributes.style.set(CellStyle::SUBSCRIPT, false);
+            }
+            74 => {
+                self.attributes.style.set(CellStyle::SUBSCRIPT, true);
+                self.attributes.style.set(CellStyle::SUPERSCRIPT, false);
+            }
+            75 => {
+                self.attributes.style.set(CellStyle::SUPERSCRIPT, false);
+                self.attributes.style.set(CellStyle::SUBSCRIPT, false);
+                self.untrack_sgr(&[73, 74]);
+                return true;
+            }
+            _ => return false,
+        }
+
+        self.track_sgr(param);
+        true
     }
 }
 
@@ -849,6 +811,110 @@ impl TerminalPerformer {
         }
         // Add support for other OSC sequences here (window title, color definitions, etc.)
     }
+
+    fn csi_param(params: &vte::Params, index: usize, default: u16) -> u16 {
+        params.iter().nth(index).and_then(|p| p.first().copied()).unwrap_or(default)
+    }
+
+    fn handle_cursor_csi(screen: &mut Screen, params: &vte::Params, c: char) -> bool {
+        let n = usize::from(Self::csi_param(params, 0, 1));
+        let current_row = screen.cursor_row();
+        let current_col = screen.cursor_col();
+
+        match c {
+            'A' => screen.move_cursor(current_row.saturating_sub(n), current_col),
+            'B' => screen.move_cursor(current_row + n, current_col),
+            'C' => screen.move_cursor(current_row, current_col + n),
+            'D' => screen.move_cursor(current_row, current_col.saturating_sub(n)),
+            'H' | 'f' => {
+                let row = usize::from(Self::csi_param(params, 0, 1)).saturating_sub(1);
+                let col = usize::from(Self::csi_param(params, 1, 1)).saturating_sub(1);
+                screen.move_cursor(row, col);
+            }
+            _ => return false,
+        }
+
+        true
+    }
+
+    fn clear_line_to_cursor(screen: &mut Screen) {
+        let row = screen.cursor_row();
+        let col = screen.cursor_col();
+
+        if row < screen.lines.len() {
+            for i in 0..=col.min(screen.lines[row].len().saturating_sub(1)) {
+                screen.lines[row][i] = ScreenCell::default();
+            }
+        }
+    }
+
+    fn handle_erase_csi(screen: &mut Screen, params: &vte::Params, c: char) -> bool {
+        match c {
+            'J' => Self::handle_erase_display(screen, Self::csi_param(params, 0, 0)),
+            'K' => Self::handle_erase_line(screen, Self::csi_param(params, 0, 0)),
+            _ => return false,
+        }
+
+        true
+    }
+
+    fn handle_erase_display(screen: &mut Screen, mode: u16) {
+        match mode {
+            0 => {
+                screen.clear_line_forward();
+                let row = screen.cursor_row();
+                if row + 1 < screen.lines.len() {
+                    for i in row + 1..screen.lines.len() {
+                        screen.lines[i] = vec![ScreenCell::default(); screen.columns];
+                    }
+                }
+            }
+            1 => {
+                Self::clear_line_to_cursor(screen);
+                for i in 0..screen.cursor_row() {
+                    if i < screen.lines.len() {
+                        screen.lines[i] = vec![ScreenCell::default(); screen.columns];
+                    }
+                }
+            }
+            2 | 3 => screen.clear(),
+            _ => debug!("Unhandled erase in display: {}", mode),
+        }
+    }
+
+    fn handle_erase_line(screen: &mut Screen, mode: u16) {
+        match mode {
+            0 => screen.clear_line_forward(),
+            1 => Self::clear_line_to_cursor(screen),
+            2 => screen.clear_line(),
+            _ => debug!("Unhandled erase in line: {}", mode),
+        }
+    }
+
+    fn handle_scroll_csi(screen: &mut Screen, params: &vte::Params, c: char) -> bool {
+        let n = usize::from(Self::csi_param(params, 0, 1));
+
+        match c {
+            'S' => {
+                for _ in 0..n {
+                    screen.scroll_up();
+                }
+            }
+            'T' => {
+                let columns = screen.columns;
+                for _ in 0..n {
+                    screen.lines.push_front(vec![ScreenCell::default(); columns]);
+                    if screen.lines.len() > screen.max_lines {
+                        screen.lines.pop_back();
+                    }
+                }
+                screen.move_cursor(screen.cursor_row() + n, screen.cursor_col());
+            }
+            _ => return false,
+        }
+
+        true
+    }
 }
 
 // Implement the VTE Perform trait
@@ -931,152 +997,14 @@ impl Perform for TerminalPerformer {
         }
 
         if let Ok(mut screen) = self.screen.lock() {
-            match c {
-                'A' => {
-                    // Cursor Up
-                    let n =
-                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
-                    let current_row = screen.cursor_row();
-                    let new_row = current_row.saturating_sub(n);
-                    let current_col = screen.cursor_col();
-                    screen.move_cursor(new_row, current_col);
-                }
-                'B' => {
-                    // Cursor Down
-                    let n =
-                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
-                    let current_row = screen.cursor_row();
-                    let current_col = screen.cursor_col();
-                    screen.move_cursor(current_row + n, current_col);
-                }
-                'C' => {
-                    // Cursor Forward
-                    let n =
-                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
-                    let current_row = screen.cursor_row();
-                    let current_col = screen.cursor_col();
-                    screen.move_cursor(current_row, current_col + n);
-                }
-                'D' => {
-                    // Cursor Back
-                    let n =
-                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
-                    let current_row = screen.cursor_row();
-                    let current_col = screen.cursor_col();
-                    let new_col = current_col.saturating_sub(n);
-                    screen.move_cursor(current_row, new_col);
-                }
-                'H' | 'f' => {
-                    // Cursor Position
-                    let row =
-                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
-                    let col =
-                        params.iter().nth(1).and_then(|p| p.first().copied()).unwrap_or(1) as usize;
-                    // Convert 1-based to 0-based
-                    let row = row.saturating_sub(1);
-                    let col = col.saturating_sub(1);
-                    screen.move_cursor(row, col);
-                }
-                'J' => {
-                    // Erase in Display
-                    let n = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
-                    match n {
-                        0 => {
-                            // Clear from cursor to end of screen
-                            screen.clear_line_forward();
-                            // Clear all lines below cursor
-                            let row = screen.cursor_row();
-                            if row + 1 < screen.lines.len() {
-                                for i in row + 1..screen.lines.len() {
-                                    screen.lines[i] = vec![ScreenCell::default(); screen.columns];
-                                }
-                            }
-                        }
-                        1 => {
-                            // Clear from beginning of screen to cursor
-                            let row = screen.cursor_row();
-                            let col = screen.cursor_col();
-
-                            // Clear current line up to cursor
-                            if row < screen.lines.len() {
-                                for i in 0..=col.min(screen.lines[row].len().saturating_sub(1)) {
-                                    screen.lines[row][i] = ScreenCell::default();
-                                }
-                            }
-
-                            // Clear all lines above cursor
-                            for i in 0..row {
-                                if i < screen.lines.len() {
-                                    screen.lines[i] = vec![ScreenCell::default(); screen.columns];
-                                }
-                            }
-                        }
-                        2 => {
-                            // Clear entire screen
-                            screen.clear();
-                        }
-                        3 => {
-                            // Clear entire screen and delete scrollback buffer
-                            screen.clear();
-                            // In a real terminal, this would also clear scrollback
-                        }
-                        _ => debug!("Unhandled erase in display: {}", n),
-                    }
-                }
-                'K' => {
-                    // Erase in Line
-                    let n = params.iter().next().and_then(|p| p.first().copied()).unwrap_or(0);
-                    match n {
-                        0 => screen.clear_line_forward(),
-                        1 => {
-                            // Clear from start of line to cursor
-                            let row = screen.cursor_row();
-                            let col = screen.cursor_col();
-
-                            if row < screen.lines.len() {
-                                for i in 0..=col.min(screen.lines[row].len().saturating_sub(1)) {
-                                    screen.lines[row][i] = ScreenCell::default();
-                                }
-                            }
-                        }
-                        2 => screen.clear_line(),
-                        _ => debug!("Unhandled erase in line: {}", n),
-                    }
-                }
-                'S' => {
-                    // Scroll up
-                    let n =
-                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
-
-                    for _ in 0..n {
-                        screen.scroll_up();
-                    }
-                }
-                'T' => {
-                    // Scroll down
-                    let n =
-                        params.iter().next().and_then(|p| p.first().copied()).unwrap_or(1) as usize;
-
-                    // Implement scroll down by adding empty lines at the top
-                    let columns = screen.columns; // Copy the columns value
-
-                    for _ in 0..n {
-                        screen.lines.push_front(vec![ScreenCell::default(); columns]);
-                        if screen.lines.len() > screen.max_lines {
-                            screen.lines.pop_back();
-                        }
-                    }
-
-                    // Adjust cursor position
-                    let new_row = screen.cursor_row() + n;
-                    let cursor_col = screen.cursor_col(); // Copy the cursor column
-                    screen.move_cursor(new_row, cursor_col);
-                }
-                // 'm' case is now handled separately before acquiring the screen lock
-                _ => {
-                    debug!("Unhandled CSI: {:?} {:?}", params, c);
-                }
+            if Self::handle_cursor_csi(&mut screen, params, c)
+                || Self::handle_erase_csi(&mut screen, params, c)
+                || Self::handle_scroll_csi(&mut screen, params, c)
+            {
+                return;
             }
+
+            debug!("Unhandled CSI: {:?} {:?}", params, c);
         } else {
             warn!("Failed to lock screen for csi_dispatch");
         }
