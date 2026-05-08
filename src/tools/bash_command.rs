@@ -20,7 +20,7 @@ use tracing::{debug, error, info, warn};
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, CommandState, InteractiveBash};
 use crate::state::terminal::{render_terminal_output, strip_ansi_codes};
-use crate::types::{BashCommand, BashCommandAction, SpecialKey};
+use crate::types::{normalize_thread_id, BashCommand, BashCommandAction, SpecialKey};
 
 // ==================== WCGW-Style Constants ====================
 
@@ -292,8 +292,10 @@ pub async fn handle_tool_call(
 ) -> Result<String> {
     info!("BashCommand tool called with: {:?}", bash_command);
 
+    let thread_id = normalize_thread_id(&bash_command.thread_id);
+
     // Check if thread_id is empty
-    if bash_command.thread_id.is_empty() {
+    if thread_id.is_empty() {
         error!("Empty thread_id provided in BashCommand");
         return Err(WinxError::ThreadIdMismatch(
             "Error: No saved bash state found for thread ID \"\". Please initialize first with this ID.".to_string()
@@ -314,12 +316,11 @@ pub async fn handle_tool_call(
     }
 
     // Verify thread ID matches - matches WCGW Python thread_id check
-    if bash_command.thread_id != bash_state.current_thread_id {
+    if thread_id != bash_state.current_thread_id {
         // Try to load state from thread_id - matches WCGW Python load_state_from_thread_id
-        if !bash_state.load_state_from_disk(&bash_command.thread_id).unwrap_or(false) {
+        if !bash_state.load_state_from_disk(&thread_id).unwrap_or(false) {
             return Err(WinxError::ThreadIdMismatch(format!(
-                "Error: No saved bash state found for thread_id `{}`. Please initialize first with this ID.",
-                bash_command.thread_id
+                "Error: No saved bash state found for thread_id `{thread_id}`. Please initialize first with this ID."
             )));
         }
     }

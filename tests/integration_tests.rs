@@ -3,6 +3,7 @@
 //! These tests verify the tool handlers work correctly in realistic scenarios.
 
 use base64::{engine::general_purpose, Engine};
+use serde_json::json;
 use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
@@ -10,7 +11,9 @@ use tokio::sync::Mutex;
 use winx_code_agent::errors::{Result, WinxError};
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::tools::WinxService;
-use winx_code_agent::types::{Initialize, InitializeType, ModeName, ReadFiles};
+use winx_code_agent::types::{
+    BashCommand, BashCommandAction, Initialize, InitializeType, ModeName, ReadFiles,
+};
 
 // ==================== WinxService Tests ====================
 
@@ -262,6 +265,41 @@ async fn test_read_files_with_line_range() -> Result<()> {
     assert!(response.contains("Line 2"));
     assert!(response.contains("Line 3"));
     assert!(response.contains("Line 4"));
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_read_files_with_wcgw_path_suffix_range() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let file_path = temp_dir.path().join("lines.txt");
+    std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n")?;
+
+    let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+    let init = Initialize {
+        init_type: InitializeType::FirstCall,
+        mode_name: ModeName::Wcgw,
+        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        thread_id: String::new(),
+        code_writer_config: None,
+        initial_files_to_read: vec![],
+        task_id_to_resume: String::new(),
+    };
+    winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+
+    let read: ReadFiles = serde_json::from_value(json!({
+        "file_paths": [format!("{}:2-4", file_path.to_string_lossy())]
+    }))
+    .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?;
+
+    let response =
+        winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
+
+    assert!(response.contains("2 Line 2"));
+    assert!(response.contains("3 Line 3"));
+    assert!(response.contains("4 Line 4"));
+    assert!(!response.contains("1 Line 1"));
+    assert!(!response.contains("5 Line 5"));
 
     Ok(())
 }

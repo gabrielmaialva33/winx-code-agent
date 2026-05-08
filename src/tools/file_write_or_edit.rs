@@ -15,7 +15,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{BashState, FileWhitelistData};
-use crate::types::FileWriteOrEdit;
+use crate::types::{normalize_thread_id, FileWriteOrEdit};
 use crate::utils::path::{expand_user, validate_path_in_workspace};
 
 static SEARCH_MARKER: OnceLock<std::result::Result<Regex, regex::Error>> = OnceLock::new();
@@ -119,8 +119,9 @@ pub async fn handle_tool_call(
     let mut bash_state_guard = bash_state_arc.lock().await;
     let bash_state = bash_state_guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
 
-    if file_write_or_edit.thread_id != bash_state.current_thread_id {
-        return Err(WinxError::ThreadIdMismatch(file_write_or_edit.thread_id));
+    let thread_id = normalize_thread_id(&file_write_or_edit.thread_id);
+    if thread_id != bash_state.current_thread_id {
+        return Err(WinxError::ThreadIdMismatch(thread_id));
     }
 
     let expanded_path = expand_user(&file_write_or_edit.file_path);

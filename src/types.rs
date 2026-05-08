@@ -1,6 +1,10 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub fn normalize_thread_id(thread_id: &str) -> String {
+    thread_id.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect()
+}
+
 /// Type of shell environment initialization
 ///
 /// This enum represents the different ways the Initialize tool can be called,
@@ -446,15 +450,43 @@ impl ReadFiles {
 
     /// Get the clean file path without line range suffix
     pub fn get_clean_path(&self, index: usize) -> String {
-        let path = &self.file_paths[index];
-        if let Some(colon_pos) = path.rfind(':') {
-            let range_part = &path[colon_pos + 1..];
-            if range_part.chars().next().is_some_and(|c| c.is_ascii_digit() || c == '-') {
-                return path[..colon_pos].to_string();
-            }
-        }
-        path.clone()
+        parse_file_path_with_line_range(&self.file_paths[index]).0
     }
+}
+
+fn strip_tail_pipe(command: &str) -> String {
+    let trimmed = command.trim_end();
+    let Some((prefix, tail_part)) = trimmed.rsplit_once('|') else {
+        return command.to_string();
+    };
+
+    if is_tail_invocation(tail_part.trim()) {
+        prefix.trim_end().to_string()
+    } else {
+        command.to_string()
+    }
+}
+
+fn is_tail_invocation(tail_part: &str) -> bool {
+    let mut parts = tail_part.split_whitespace();
+    if parts.next() != Some("tail") {
+        return false;
+    }
+
+    match (parts.next(), parts.next(), parts.next()) {
+        (None, None, None) => true,
+        (Some(count), None, None) => tail_count_arg(count),
+        (Some("-n"), Some(count), None) => count.chars().all(|c| c.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+fn tail_count_arg(arg: &str) -> bool {
+    if arg.chars().all(|c| c.is_ascii_digit()) {
+        return true;
+    }
+
+    arg.strip_prefix('-').is_some_and(|count| count.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Default true value for `status_check`
@@ -588,7 +620,8 @@ impl<'de> Deserialize<'de> for BashCommand {
         };
 
         // Now deserialize the action_json to our BashCommandAction enum
-        let action: BashCommandAction = serde_json::from_value(action_json.clone()).map_err(|e| {
+        let mut action: BashCommandAction =
+            serde_json::from_value(action_json.clone()).map_err(|e| {
 // Log both the error and the problematic JSON for debugging
 tracing::error!(
     "Failed to deserialize action_json to BashCommandAction: {}\nProblematic JSON: {}",

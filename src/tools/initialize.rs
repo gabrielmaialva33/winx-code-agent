@@ -9,8 +9,8 @@ use tracing::{debug, info, instrument, warn};
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{generate_thread_id, BashState};
 use crate::types::{
-    AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Initialize,
-    InitializeType, ModeName, Modes, WriteIfEmptyMode,
+    normalize_thread_id, AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode,
+    Initialize, InitializeType, ModeName, Modes, WriteIfEmptyMode,
 };
 use crate::utils::mmap::read_file_to_string;
 use crate::utils::path::{ensure_directory_exists, expand_user, validate_path_in_workspace};
@@ -94,11 +94,25 @@ fn prepare_workspace(initialize: &Initialize, response: &mut String) -> Result<P
 }
 
 fn initialize_thread_id(initialize: &Initialize) -> String {
-    if initialize.thread_id.is_empty() {
+    let thread_id = normalize_thread_id(&initialize.thread_id);
+    if thread_id.is_empty() {
         generate_thread_id()
     } else {
-        initialize.thread_id.clone()
+        thread_id
     }
+}
+
+fn validate_thread_id(initialize: &Initialize) -> Result<()> {
+    if initialize.init_type != InitializeType::FirstCall
+        && normalize_thread_id(&initialize.thread_id).is_empty()
+    {
+        return Err(WinxError::ThreadIdMismatch(
+            "Thread id should be provided if type != 'first_call', including when resetting."
+                .to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 #[instrument(level = "info", skip(bash_state_arc, initialize))]
