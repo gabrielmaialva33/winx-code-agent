@@ -2,7 +2,7 @@
   <img src=".github/assets/fairy.png" alt="Winx fairy mascot" width="160" />
 </p>
 
-# ✨ Winx - Rust MCP Server for Shell & Coding Agents ✨
+# ✨ Winx - MCP Server for Shell & Coding Agents ✨
 
 <p align="center">
   <strong>🦀 Native Rust implementation inspired by WCGW, built for local code-agent workflows</strong>
