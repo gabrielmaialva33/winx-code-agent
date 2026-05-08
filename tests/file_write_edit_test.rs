@@ -1,4 +1,4 @@
-//! Integration tests for FileWriteOrEdit tool.
+//! Integration tests for `FileWriteOrEdit` tool.
 //!
 //! Tests:
 //! 1. Create new file with percentage > 50 (full write)
@@ -26,10 +26,7 @@ async fn create_initialized_state(
     let init = Initialize {
         init_type: InitializeType::FirstCall,
         mode_name: ModeName::Wcgw,
-        any_workspace_path: std::fs::canonicalize(temp_dir.path())
-            .expect("Failed to canonicalize temp dir")
-            .to_string_lossy()
-            .to_string(),
+        any_workspace_path: std::fs::canonicalize(temp_dir.path())?.to_string_lossy().to_string(),
         thread_id: thread_id.to_string(),
         code_writer_config: None,
         initial_files_to_read: vec![],
@@ -45,7 +42,7 @@ async fn create_initialized_state(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_new_file_full_write() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, TEST_THREAD_ID).await?;
 
     let file_path = temp_dir.path().join("new_file.py");
@@ -79,27 +76,25 @@ if __name__ == "__main__":
     // Verify response indicates success
     assert!(
         response.contains("Successfully") || response.contains("wrote"),
-        "Expected success message, got: {}",
-        response
+        "Expected success message, got: {response}"
     );
 
     // Verify file exists and content matches
     assert!(file_path.exists(), "File was not created");
 
-    let actual_content = std::fs::read_to_string(&file_path).expect("Failed to read created file");
+    let actual_content = std::fs::read_to_string(&file_path)?;
     assert_eq!(actual_content, content, "File content does not match");
 
-    println!("TEST 1 PASSED: New file created successfully with percentage > 50");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_create_new_rust_file() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, "test-rust-create").await?;
 
     let file_path = temp_dir.path().join("lib.rs");
-    let content = r#"//! A test library module.
+    let content = r"//! A test library module.
 
 /// Add two numbers together.
 pub fn add(a: i32, b: i32) -> i32 {
@@ -125,7 +120,7 @@ mod tests {
         assert_eq!(subtract(5, 3), 2);
     }
 }
-"#;
+";
 
     let file_write = FileWriteOrEdit {
         file_path: file_path.to_string_lossy().to_string(),
@@ -140,17 +135,15 @@ mod tests {
 
     assert!(
         response.contains("Successfully") || response.contains("wrote"),
-        "Expected success message, got: {}",
-        response
+        "Expected success message, got: {response}"
     );
 
     // Verify file content
-    let actual = std::fs::read_to_string(&file_path).expect("Failed to read file");
+    let actual = std::fs::read_to_string(&file_path)?;
     assert!(actual.contains("pub fn add"));
     assert!(actual.contains("pub fn subtract"));
     assert!(actual.contains("#[cfg(test)]"));
 
-    println!("TEST PASSED: Rust file created successfully");
     Ok(())
 }
 
@@ -158,7 +151,7 @@ mod tests {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_edit_with_search_replace() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, "test-search-replace").await?;
 
     // First create a file
@@ -221,18 +214,16 @@ def greet(name: str, formal: bool = False) -> str:
 
     assert!(
         response.contains("Successfully") || response.contains("edited"),
-        "Expected success message, got: {}",
-        response
+        "Expected success message, got: {response}"
     );
 
     // Verify the edit was applied
-    let final_content = std::fs::read_to_string(&file_path).expect("Failed to read edited file");
+    let final_content = std::fs::read_to_string(&file_path)?;
 
     assert!(final_content.contains("formal: bool = False"), "Type hint not added");
     assert!(final_content.contains("Good day"), "New code not present");
     assert!(final_content.contains("if formal:"), "Conditional not added");
 
-    println!("TEST 2 PASSED: SEARCH/REPLACE edit successful");
     Ok(())
 }
 
@@ -240,19 +231,19 @@ def greet(name: str, formal: bool = False) -> str:
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_whitelist_enforcement_edit_without_read() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, "test-whitelist").await?;
 
     // Create a file OUTSIDE the tool (simulating external file)
     let file_path = temp_dir.path().join("unread_file.txt");
-    std::fs::write(&file_path, "Original content here.\n").expect("Failed to write file");
+    std::fs::write(&file_path, "Original content here.\n")?;
 
     // Try to edit WITHOUT reading first
-    let search_replace = r#"<<<<<<< SEARCH
+    let search_replace = r"<<<<<<< SEARCH
 Original content here.
 =======
 Modified content here.
->>>>>>> REPLACE"#;
+>>>>>>> REPLACE";
 
     let file_edit = FileWriteOrEdit {
         file_path: file_path.to_string_lossy().to_string(),
@@ -270,13 +261,10 @@ Modified content here.
         Ok(response) => {
             // In wcgw mode with full permissions, it might work
             // But there should be some indication about whitelist
-            println!("INFO: Edit allowed in wcgw mode (full permissions). Response: {}", response);
 
             // Verify the file was modified if it succeeded
-            let content = std::fs::read_to_string(&file_path).expect("Failed to read file");
-            if content.contains("Modified content") {
-                println!("TEST 3 INFO: In wcgw mode, edit was allowed (expected in full-permission mode)");
-            }
+            let content = std::fs::read_to_string(&file_path)?;
+            if content.contains("Modified content") {}
         }
         Err(e) => {
             // Expected error about whitelist or reading file first
@@ -285,10 +273,8 @@ Modified content here.
                 error_msg.contains("read")
                     || error_msg.contains("whitelist")
                     || error_msg.contains("access"),
-                "Expected whitelist error, got: {}",
-                e
+                "Expected whitelist error, got: {e}"
             );
-            println!("TEST 3 PASSED: Whitelist properly enforced (edit blocked)");
         }
     }
 
@@ -298,13 +284,12 @@ Modified content here.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "race condition on macOS CI - whitelist async update timing"]
 async fn test_whitelist_after_read() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, "test-whitelist-read").await?;
 
     // Create a file OUTSIDE the tool
     let file_path = temp_dir.path().join("to_be_read.txt");
-    std::fs::write(&file_path, "Original line one.\nOriginal line two.\n")
-        .expect("Failed to write file");
+    std::fs::write(&file_path, "Original line one.\nOriginal line two.\n")?;
 
     // Read the file first (adds to whitelist)
     let read_files = ReadFiles {
@@ -319,11 +304,11 @@ async fn test_whitelist_after_read() -> Result<()> {
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
     // Now edit should work
-    let search_replace = r#"<<<<<<< SEARCH
+    let search_replace = r"<<<<<<< SEARCH
 Original line one.
 =======
 Modified line one.
->>>>>>> REPLACE"#;
+>>>>>>> REPLACE";
 
     let file_edit = FileWriteOrEdit {
         file_path: file_path.to_string_lossy().to_string(),
@@ -338,14 +323,12 @@ Modified line one.
 
     assert!(
         response.contains("Successfully") || response.contains("edited"),
-        "Expected success after reading file, got: {}",
-        response
+        "Expected success after reading file, got: {response}"
     );
 
-    let content = std::fs::read_to_string(&file_path).expect("Failed to read file");
+    let content = std::fs::read_to_string(&file_path)?;
     assert!(content.contains("Modified line one"), "Edit was not applied");
 
-    println!("TEST PASSED: Edit worked after reading file (whitelist populated)");
     Ok(())
 }
 
@@ -353,7 +336,7 @@ Modified line one.
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiple_search_replace_blocks() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, "test-multi-blocks").await?;
 
     // Create a file with multiple functions
@@ -449,12 +432,11 @@ if __name__ == "__main__":
 
     assert!(
         response.contains("Successfully") || response.contains("edited"),
-        "Expected success message, got: {}",
-        response
+        "Expected success message, got: {response}"
     );
 
     // Verify all edits were applied
-    let final_content = std::fs::read_to_string(&file_path).expect("Failed to read edited file");
+    let final_content = std::fs::read_to_string(&file_path)?;
 
     // Check for all expected changes
     let checks = [
@@ -469,18 +451,15 @@ if __name__ == "__main__":
     ];
 
     let mut all_passed = true;
-    for (check, description) in checks.iter() {
+    for (check, description) in &checks {
         if *check {
-            println!("  OK: {}", description);
         } else {
-            println!("  FAIL: {}", description);
             all_passed = false;
         }
     }
 
-    assert!(all_passed, "Not all edits were applied.\nFinal content:\n{}", final_content);
+    assert!(all_passed, "Not all edits were applied.\nFinal content:\n{final_content}");
 
-    println!("TEST 4 PASSED: All multiple SEARCH/REPLACE blocks applied correctly");
     Ok(())
 }
 
@@ -488,7 +467,7 @@ if __name__ == "__main__":
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_search_replace_not_found() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, "test-not-found").await?;
 
     // Create a file
@@ -515,11 +494,11 @@ async fn test_search_replace_not_found() -> Result<()> {
     winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read_files).await?;
 
     // Try to edit with non-existent search block
-    let search_replace = r#"<<<<<<< SEARCH
+    let search_replace = r"<<<<<<< SEARCH
 This text does not exist in the file
 =======
 Replacement text
->>>>>>> REPLACE"#;
+>>>>>>> REPLACE";
 
     let file_edit = FileWriteOrEdit {
         file_path: file_path.to_string_lossy().to_string(),
@@ -535,20 +514,18 @@ Replacement text
     // Should fail because search block was not found
     assert!(result.is_err(), "Expected error for non-existent search block");
 
-    let error_msg = result.unwrap_err().to_string().to_lowercase();
+    let error_msg = result.err().map_or_else(String::new, |error| error.to_string().to_lowercase());
     assert!(
         error_msg.contains("not found") || error_msg.contains("search"),
-        "Expected 'not found' error, got: {}",
-        error_msg
+        "Expected 'not found' error, got: {error_msg}"
     );
 
-    println!("TEST PASSED: Search block not found error properly returned");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_empty_replacement() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, "test-empty-replace").await?;
 
     // Create a file with some content to remove
@@ -575,10 +552,10 @@ async fn test_empty_replacement() -> Result<()> {
     winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read_files).await?;
 
     // Edit with empty replacement (to remove a line)
-    let search_replace = r#"<<<<<<< SEARCH
+    let search_replace = r"<<<<<<< SEARCH
 Remove this line
 =======
->>>>>>> REPLACE"#;
+>>>>>>> REPLACE";
 
     let file_edit = FileWriteOrEdit {
         file_path: file_path.to_string_lossy().to_string(),
@@ -593,23 +570,21 @@ Remove this line
 
     assert!(
         response.contains("Successfully") || response.contains("edited"),
-        "Expected success message, got: {}",
-        response
+        "Expected success message, got: {response}"
     );
 
     // Verify line was removed
-    let final_content = std::fs::read_to_string(&file_path).expect("Failed to read file");
+    let final_content = std::fs::read_to_string(&file_path)?;
     assert!(!final_content.contains("Remove this line"), "Line was not removed");
     assert!(final_content.contains("Keep this line"), "Other content was incorrectly removed");
     assert!(final_content.contains("Keep this too"), "Other content was incorrectly removed");
 
-    println!("TEST PASSED: Empty replacement (line deletion) works");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_overwrite_existing_file_full_content() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, "test-overwrite").await?;
 
     // Create a file
@@ -651,22 +626,20 @@ async fn test_overwrite_existing_file_full_content() -> Result<()> {
 
     assert!(
         response.contains("Successfully") || response.contains("wrote"),
-        "Expected success message, got: {}",
-        response
+        "Expected success message, got: {response}"
     );
 
     // Verify new content
-    let final_content = std::fs::read_to_string(&file_path).expect("Failed to read file");
+    let final_content = std::fs::read_to_string(&file_path)?;
     assert!(!final_content.contains("Original"), "Old content still present");
     assert_eq!(final_content, new_content, "Content does not match new content");
 
-    println!("TEST PASSED: File overwrite with percentage > 50 works");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_thread_id_mismatch() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc = create_initialized_state(&temp_dir, "correct-thread-id").await?;
 
     let file_path = temp_dir.path().join("test.txt");
@@ -686,13 +659,11 @@ async fn test_thread_id_mismatch() -> Result<()> {
     // Should fail due to thread ID mismatch
     assert!(result.is_err(), "Expected error for thread ID mismatch");
 
-    let error_msg = result.unwrap_err().to_string().to_lowercase();
+    let error_msg = result.err().map_or_else(String::new, |error| error.to_string().to_lowercase());
     assert!(
         error_msg.contains("thread") || error_msg.contains("mismatch") || error_msg.contains("id"),
-        "Expected thread ID mismatch error, got: {}",
-        error_msg
+        "Expected thread ID mismatch error, got: {error_msg}"
     );
 
-    println!("TEST PASSED: Thread ID mismatch properly rejected");
     Ok(())
 }

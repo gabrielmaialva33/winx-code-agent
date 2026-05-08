@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 use tokio::sync::Mutex;
 
-use winx_code_agent::errors::Result;
+use winx_code_agent::errors::{Result, WinxError};
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::tools::WinxService;
 use winx_code_agent::types::{Initialize, InitializeType, ModeName, ReadFiles};
@@ -30,7 +30,7 @@ fn test_winx_service_default() {
 
 #[tokio::test]
 async fn test_initialize_first_call_wcgw_mode() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
 
     let init = Initialize {
@@ -54,7 +54,7 @@ async fn test_initialize_first_call_wcgw_mode() -> Result<()> {
     let state = bash_state_arc.lock().await;
     assert!(state.is_some());
 
-    let bash_state = state.as_ref().expect("BashState should be Some");
+    let bash_state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
     assert!(bash_state.initialized);
     assert!(!bash_state.current_thread_id.is_empty());
 
@@ -63,7 +63,7 @@ async fn test_initialize_first_call_wcgw_mode() -> Result<()> {
 
 #[tokio::test]
 async fn test_initialize_architect_mode() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
 
     let init = Initialize {
@@ -82,7 +82,7 @@ async fn test_initialize_architect_mode() -> Result<()> {
     assert!(response.contains("Initialized"));
 
     let state = bash_state_arc.lock().await;
-    let bash_state = state.as_ref().expect("BashState should be Some");
+    let bash_state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
     assert!(bash_state.initialized);
 
     Ok(())
@@ -90,9 +90,9 @@ async fn test_initialize_architect_mode() -> Result<()> {
 
 #[tokio::test]
 async fn test_initialize_with_file_path() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let file_path = temp_dir.path().join("test.txt");
-    std::fs::write(&file_path, "test content").expect("Failed to write file");
+    std::fs::write(&file_path, "test content")?;
 
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
 
@@ -117,7 +117,7 @@ async fn test_initialize_with_file_path() -> Result<()> {
 
 #[tokio::test]
 async fn test_initialize_mode_change() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
 
     // First call to initialize
@@ -135,7 +135,7 @@ async fn test_initialize_mode_change() -> Result<()> {
     // Get the thread_id
     let thread_id = {
         let state = bash_state_arc.lock().await;
-        state.as_ref().expect("BashState").current_thread_id.clone()
+        state.as_ref().ok_or(WinxError::BashStateNotInitialized)?.current_thread_id.clone()
     };
 
     // Mode change
@@ -160,10 +160,9 @@ async fn test_initialize_mode_change() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_read_files_single_file() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let file_path = temp_dir.path().join("test.rs");
-    std::fs::write(&file_path, "fn main() {\n    println!(\"Hello\");\n}\n")
-        .expect("Failed to write file");
+    std::fs::write(&file_path, "fn main() {\n    println!(\"Hello\");\n}\n")?;
 
     // Initialize bash state first
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -195,12 +194,12 @@ async fn test_read_files_single_file() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_read_files_multiple_files() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
 
     let file1 = temp_dir.path().join("file1.txt");
     let file2 = temp_dir.path().join("file2.txt");
-    std::fs::write(&file1, "Content of file 1").expect("Failed to write file1");
-    std::fs::write(&file2, "Content of file 2").expect("Failed to write file2");
+    std::fs::write(&file1, "Content of file 1")?;
+    std::fs::write(&file2, "Content of file 2")?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -232,10 +231,9 @@ async fn test_read_files_multiple_files() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_read_files_with_line_range() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let file_path = temp_dir.path().join("lines.txt");
-    std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n")
-        .expect("Failed to write file");
+    std::fs::write(&file_path, "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n")?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -269,7 +267,7 @@ async fn test_read_files_with_line_range() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_read_files_nonexistent() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -302,7 +300,7 @@ async fn test_read_files_nonexistent() -> Result<()> {
         || response.to_lowercase().contains("failed")
         || response.is_empty();
 
-    assert!(has_error_indication, "Expected error indication in response: {}", response);
+    assert!(has_error_indication, "Expected error indication in response: {response}");
 
     Ok(())
 }
@@ -344,7 +342,7 @@ fn test_generate_thread_id() {
 async fn test_code_writer_mode() -> Result<()> {
     use winx_code_agent::types::{AllowedCommands, AllowedGlobs, CodeWriterConfig};
 
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
 
     let init = Initialize {
@@ -366,7 +364,7 @@ async fn test_code_writer_mode() -> Result<()> {
     assert!(response.contains("CodeWriter") || response.contains("Initialized"));
 
     let state = bash_state_arc.lock().await;
-    let bash_state = state.as_ref().expect("BashState should be Some");
+    let bash_state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
     assert!(bash_state.initialized);
 
     Ok(())
@@ -376,10 +374,9 @@ async fn test_code_writer_mode() -> Result<()> {
 
 #[tokio::test]
 async fn test_initialize_with_initial_files() -> Result<()> {
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
     let file_path = temp_dir.path().join("initial.rs");
-    std::fs::write(&file_path, "// Initial file content\nfn init() {}\n")
-        .expect("Failed to write file");
+    std::fs::write(&file_path, "// Initial file content\nfn init() {}\n")?;
 
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
 
@@ -408,12 +405,16 @@ async fn test_initialize_with_initial_files() -> Result<()> {
 async fn test_context_save_basic() -> Result<()> {
     use winx_code_agent::types::ContextSave;
 
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
 
     // Create a test file to be included via glob
     let test_file = temp_dir.path().join("src/main.rs");
-    std::fs::create_dir_all(test_file.parent().unwrap()).expect("Failed to create src dir");
-    std::fs::write(&test_file, "fn main() { println!(\"Hello\"); }").expect("Failed to write file");
+    std::fs::create_dir_all(
+        test_file
+            .parent()
+            .ok_or(WinxError::InvalidInput("missing parent directory".to_string()))?,
+    )?;
+    std::fs::write(&test_file, "fn main() { println!(\"Hello\"); }")?;
 
     // Initialize bash state first
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -431,7 +432,9 @@ async fn test_context_save_basic() -> Result<()> {
     // Generate unique ID for test
     let unique_id = format!(
         "test-context-{}",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis())
     );
 
     let context_save = ContextSave {
@@ -457,7 +460,7 @@ async fn test_context_save_basic() -> Result<()> {
 async fn test_context_save_empty_globs() -> Result<()> {
     use winx_code_agent::types::ContextSave;
 
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -474,7 +477,9 @@ async fn test_context_save_empty_globs() -> Result<()> {
 
     let unique_id = format!(
         "test-empty-{}",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis())
     );
 
     let context_save = ContextSave {
@@ -498,7 +503,7 @@ async fn test_context_save_empty_globs() -> Result<()> {
 async fn test_context_save_no_matching_files() -> Result<()> {
     use winx_code_agent::types::ContextSave;
 
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -515,7 +520,9 @@ async fn test_context_save_no_matching_files() -> Result<()> {
 
     let unique_id = format!(
         "test-nomatch-{}",
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_millis())
     );
 
     let context_save = ContextSave {
@@ -546,7 +553,7 @@ async fn test_context_save_no_matching_files() -> Result<()> {
 async fn test_read_image_png() -> Result<()> {
     use winx_code_agent::types::ReadImage;
 
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
 
     // Create a minimal valid PNG file (1x1 red pixel)
     // PNG header + IHDR + IDAT + IEND chunks
@@ -570,7 +577,7 @@ async fn test_read_image_png() -> Result<()> {
     ];
 
     let image_path = temp_dir.path().join("test.png");
-    std::fs::write(&image_path, &png_data).expect("Failed to write PNG");
+    std::fs::write(&image_path, &png_data)?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -598,7 +605,9 @@ async fn test_read_image_png() -> Result<()> {
 
     // Decode and verify it matches original
     use base64::{engine::general_purpose, Engine};
-    let decoded = general_purpose::STANDARD.decode(&base64_data).expect("Failed to decode base64");
+    let decoded = general_purpose::STANDARD
+        .decode(&base64_data)
+        .map_err(|e| WinxError::InvalidInput(e.to_string()))?;
     assert_eq!(decoded, png_data);
 
     Ok(())
@@ -608,7 +617,7 @@ async fn test_read_image_png() -> Result<()> {
 async fn test_read_image_jpeg() -> Result<()> {
     use winx_code_agent::types::ReadImage;
 
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
 
     // Create a minimal valid JPEG file
     // SOI + APP0 + DQT + SOF0 + DHT + SOS + EOI
@@ -625,7 +634,7 @@ async fn test_read_image_jpeg() -> Result<()> {
     ];
 
     let image_path = temp_dir.path().join("test.jpg");
-    std::fs::write(&image_path, &jpeg_data).expect("Failed to write JPEG");
+    std::fs::write(&image_path, &jpeg_data)?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -655,7 +664,7 @@ async fn test_read_image_jpeg() -> Result<()> {
 async fn test_read_image_nonexistent() -> Result<()> {
     use winx_code_agent::types::ReadImage;
 
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -687,11 +696,11 @@ async fn test_read_image_nonexistent() -> Result<()> {
 async fn test_read_image_non_image_file() -> Result<()> {
     use winx_code_agent::types::ReadImage;
 
-    let temp_dir = TempDir::new().expect("Failed to create temp dir");
+    let temp_dir = TempDir::new()?;
 
     // Create a text file (not an image)
     let text_path = temp_dir.path().join("test.txt");
-    std::fs::write(&text_path, "This is not an image").expect("Failed to write text file");
+    std::fs::write(&text_path, "This is not an image")?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -714,20 +723,17 @@ async fn test_read_image_non_image_file() -> Result<()> {
         winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await;
 
     // The function should succeed but with fallback MIME type
-    match result {
-        Ok((mime_type, base64_data)) => {
-            // It uses fallback for unknown extensions
-            assert!(
-                mime_type == "image/jpeg"
-                    || mime_type == "text/plain"
-                    || mime_type.starts_with("text/")
-            );
-            assert!(!base64_data.is_empty());
-        }
-        Err(_) => {
-            // Some implementations might error on non-image files
-            // This is also acceptable behavior
-        }
+    if let Ok((mime_type, base64_data)) = result {
+        // It uses fallback for unknown extensions
+        assert!(
+            mime_type == "image/jpeg"
+                || mime_type == "text/plain"
+                || mime_type.starts_with("text/")
+        );
+        assert!(!base64_data.is_empty());
+    } else {
+        // Some implementations might error on non-image files
+        // This is also acceptable behavior
     }
 
     Ok(())
