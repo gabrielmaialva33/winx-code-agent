@@ -545,7 +545,10 @@ async fn test_code_writer_mode() -> Result<()> {
     use winx_code_agent::types::{AllowedCommands, AllowedGlobs, CodeWriterConfig};
 
     let temp_dir = TempDir::new()?;
-    let workspace = temp_dir.path().to_string_lossy().to_string();
+    // Canonicalize so assertions match the workspace stored in BashState
+    // (canonicalized via initialize::prepare_workspace, important on macOS where
+    // /var/folders is a symlink to /private/var/folders).
+    let workspace = temp_dir.path().canonicalize()?.to_string_lossy().to_string();
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
 
     let init = Initialize {
