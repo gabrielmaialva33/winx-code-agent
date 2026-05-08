@@ -1,82 +1,48 @@
 ---
 name: Feature request
-about: Suggest an idea for this project
-title: '[FEATURE] '
-labels: 'enhancement'
-assignees: ''
-
+about: Suggest an improvement for Winx Code Agent
+title: "[FEATURE] "
+labels: enhancement
+assignees: ""
 ---
 
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is. Ex. I'm always frustrated when [...]
+## Problem
 
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
+What problem should this solve?
 
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
+## Proposed Solution
 
-**Use Cases**
-Describe specific use cases where this feature would be helpful:
-1. Use case 1: [...]
-2. Use case 2: [...]
-3. Use case 3: [...]
+Describe the behavior you want.
 
-**Proposed Implementation**
-If you have ideas on how this could be implemented, please describe them here:
-- API changes needed
-- New dependencies
-- Configuration options
-- Breaking changes (if any)
+## Use Case
 
-**MCP Protocol Considerations**
-If this feature affects the MCP protocol implementation:
-- [ ] New MCP tools needed
-- [ ] New MCP resources needed
-- [ ] New MCP prompts needed
-- [ ] Changes to server capabilities
-- [ ] Protocol version compatibility
+Who benefits from this and in what workflow?
 
-**AI Integration Impact**
-If this feature affects AI integrations:
-- [ ] DashScope/Qwen integration
-- [ ] NVIDIA NIM integration
-- [ ] Gemini integration
-- [ ] New AI provider support
-- [ ] Prompt engineering changes
+## MCP Impact
 
-**Performance Considerations**
-- Expected performance impact: [None/Low/Medium/High]
-- Memory usage impact: [None/Low/Medium/High]
-- Network usage impact: [None/Low/Medium/High]
+- [ ] New or changed tool
+- [ ] Tool schema change
+- [ ] Resource behavior change
+- [ ] Server capability change
+- [ ] No MCP protocol impact
 
-**Documentation Requirements**
-- [ ] User documentation updates needed
-- [ ] API documentation updates needed
-- [ ] Configuration examples needed
-- [ ] Migration guide needed (for breaking changes)
+## Runtime / Security Impact
 
-**Testing Requirements**
-- [ ] Unit tests needed
-- [ ] Integration tests needed
-- [ ] Performance tests needed
-- [ ] Manual testing scenarios
+- [ ] File read/write behavior
+- [ ] Shell command behavior
+- [ ] Workspace or path validation
+- [ ] Mode restrictions
+- [ ] State persistence
+- [ ] No security-sensitive impact
 
-**Additional context**
-Add any other context, screenshots, mockups, or examples about the feature request here.
+## Alternatives
 
-**Related Issues/PRs**
-Link any related issues, pull requests, or discussions here.
+What other approaches did you consider?
 
-**Priority**
-How important is this feature to you?
-- [ ] Critical (blocking current work)
-- [ ] High (would significantly improve workflow)
-- [ ] Medium (nice to have)
-- [ ] Low (minor improvement)
+## Testing Ideas
 
-**Willingness to Contribute**
-- [ ] I'm willing to implement this feature
-- [ ] I can help with testing
-- [ ] I can help with documentation
-- [ ] I can provide feedback during development
+What tests or examples should prove this works?
+
+## Additional Context
+
+Links, examples, screenshots, or related issues.

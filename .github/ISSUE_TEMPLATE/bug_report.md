@@ -1,57 +1,63 @@
 ---
 name: Bug report
-about: Create a report to help us improve
-title: '[BUG] '
-labels: 'bug'
-assignees: ''
-
+about: Report a reproducible problem in Winx Code Agent
+title: "[BUG] "
+labels: bug
+assignees: ""
 ---
 
-**Describe the bug**
-A clear and concise description of what the bug is.
+## Summary
 
-**To Reproduce**
-Steps to reproduce the behavior:
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+Describe the bug clearly.
 
-**Expected behavior**
-A clear and concise description of what you expected to happen.
+## Steps to Reproduce
 
-**Actual behavior**
-A clear and concise description of what actually happened.
+1.
+2.
+3.
 
-**Screenshots/Logs**
-If applicable, add screenshots or log output to help explain your problem.
+## Expected Behavior
 
-**Environment (please complete the following information):**
- - OS: [e.g. macOS, Linux, Windows]
- - Rust version: [e.g. 1.75.0]
- - Winx version: [e.g. 0.1.5]
- - MCP client: [e.g. Claude Desktop, other]
+What should have happened?
 
-**Configuration**
-- API Keys configured: [e.g. DashScope, NVIDIA, Gemini]
-- Shell environment: [e.g. bash, zsh]
-- Working directory: [e.g. /path/to/project]
+## Actual Behavior
 
-**Error Messages**
-If applicable, paste the full error message here:
-```
-[Paste error message here]
+What happened instead?
+
+## Environment
+
+- OS:
+- Rust version:
+- Winx version or commit:
+- MCP client:
+- Shell:
+
+## Logs / Errors
+
+```text
+Paste relevant output here.
 ```
 
-**Additional context**
-Add any other context about the problem here. This could include:
-- Recent changes to your setup
-- Other tools or extensions that might interfere
-- Specific files or commands that trigger the issue
-- Frequency of the issue (always, sometimes, once)
+## Affected Area
 
-**Possible Solution**
-If you have ideas on how to fix the issue, please describe them here.
+- [ ] `Initialize`
+- [ ] `BashCommand`
+- [ ] `ReadFiles`
+- [ ] `FileWriteOrEdit`
+- [ ] `ContextSave`
+- [ ] `ReadImage`
+- [ ] CI/build/release
+- [ ] Documentation
 
-**Related Issues**
-Link any related issues or discussions here.
+## Safety Impact
+
+- [ ] Unexpected file read/write
+- [ ] Unexpected command execution
+- [ ] Workspace/path validation issue
+- [ ] Mode restriction issue
+- [ ] State/thread-id issue
+- [ ] No safety impact
+
+## Additional Context
+
+Recent changes, related issues, or suspected cause.
