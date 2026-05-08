@@ -161,6 +161,29 @@ mod tests {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn test_full_write_reports_syntax_warning() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "syntax-warning").await?;
+
+    let file_path = temp_dir.path().join("bad.json");
+    let file_write = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 100,
+        text_or_search_replace_blocks: "{".to_string(),
+        thread_id: "syntaxwarning".to_string(),
+    };
+
+    let response =
+        winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, file_write)
+            .await?;
+
+    assert!(response.contains("Successfully wrote"));
+    assert!(response.contains("Syntax warning"));
+
+    Ok(())
+}
+
 // ==================== Test 2: Edit with SEARCH/REPLACE (percentage <= 50) ====================
 
 #[tokio::test(flavor = "multi_thread")]
