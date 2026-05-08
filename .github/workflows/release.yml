@@ -5,40 +5,25 @@ on:
     tags:
       - 'v*'
 
-jobs:
-  create-release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
-    outputs:
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
-    steps:
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
+permissions:
+  contents: write
 
+jobs:
   build:
     name: Build Release
-    needs: create-release
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ ubuntu-latest, macos-latest, windows-latest ]
         include:
           - os: ubuntu-latest
-            artifact_name: winx
+            artifact_name: winx-code-agent
             asset_name: winx-linux-amd64
           - os: macos-latest
-            artifact_name: winx
-            asset_name: winx-macos-amd64
+            artifact_name: winx-code-agent
+            asset_name: winx-macos-arm64
           - os: windows-latest
-            artifact_name: winx.exe
+            artifact_name: winx-code-agent.exe
             asset_name: winx-windows-amd64.exe
 
     steps:
@@ -49,25 +34,43 @@ jobs:
 
       - name: Rust Cache
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-release
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release --locked
 
-      - name: Rename binary
+      - name: Stage artifact
         shell: bash
         run: |
-          if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp target/release/winx-code-agent.exe ${{ matrix.artifact_name }}
-          else
-            cp target/release/winx-code-agent ${{ matrix.artifact_name }}
-          fi
+          mkdir -p dist
+          cp "target/release/${{ matrix.artifact_name }}" "dist/${{ matrix.asset_name }}"
 
-      - name: Upload release asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
         with:
-          upload_url: ${{ needs.create-release.outputs.upload_url }}
-          asset_path: ./${{ matrix.artifact_name }}
-          asset_name: ${{ matrix.asset_name }}
-          asset_content_type: application/octet-stream
+          name: ${{ matrix.asset_name }}
+          path: dist/${{ matrix.asset_name }}
+          retention-days: 5
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v6
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: dist/*

@@ -15,23 +15,36 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Verify tag version matches Cargo.toml
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: publish
+
+      - name: Verify tag matches Cargo.toml
         run: |
-          # Extract version from Cargo.toml
-          CARGO_VERSION=$(grep -m1 'version =' Cargo.toml | cut -d '"' -f2)
-          # Extract version from git tag
-          TAG_VERSION=${GITHUB_REF#refs/tags/v}
-          
-          # Check if versions match
+          CARGO_VERSION=$(grep -m1 '^version = ' Cargo.toml | cut -d '"' -f2)
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
           if [ "$CARGO_VERSION" != "$TAG_VERSION" ]; then
-            echo "Version mismatch: Cargo.toml version ($CARGO_VERSION) does not match tag version ($TAG_VERSION)"
+            echo "::error::Cargo.toml version ($CARGO_VERSION) != tag ($TAG_VERSION)"
             exit 1
           fi
-          
-          echo "Version $CARGO_VERSION matches tag $TAG_VERSION"
+          echo "version=$CARGO_VERSION" >> "$GITHUB_ENV"
 
-      - name: Cargo login
-        run: cargo login ${{ secrets.CRATES_IO_TOKEN }}
+      - name: Skip if version already on crates.io
+        id: check
+        run: |
+          status=$(curl -sf -A "winx-ci/1.0" \
+            "https://crates.io/api/v1/crates/winx-code-agent/${{ env.version }}" \
+            -o /dev/null -w "%{http_code}" || true)
+          if [ "$status" = "200" ]; then
+            echo "winx-code-agent ${{ env.version }} already exists on crates.io — skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Cargo publish
-        run: cargo publish
+        if: steps.check.outputs.skip != 'true'
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: cargo publish --locked
