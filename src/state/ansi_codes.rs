@@ -8,6 +8,13 @@ use lazy_static::lazy_static;
 use regex::Regex;
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::OnceLock;
+
+static ANSI_REGEX: OnceLock<std::result::Result<Regex, regex::Error>> = OnceLock::new();
+
+fn ansi_regex() -> Option<&'static Regex> {
+    ANSI_REGEX.get_or_init(|| Regex::new(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")).as_ref().ok()
+}
 
 /// Basic ANSI control codes
 pub mod control {
@@ -459,8 +466,7 @@ impl TermColor {
         match self {
             TermColor::Basic(n) if *n < 8 => format!("\x1B[{}m", 30 + n),
             TermColor::Basic(n) if *n < 16 => format!("\x1B[{}m", 82 + n),
-            TermColor::Basic(n) => sgr::fg_color_256(*n),
-            TermColor::Color256(n) => sgr::fg_color_256(*n),
+            TermColor::Basic(n) | TermColor::Color256(n) => sgr::fg_color_256(*n),
             TermColor::TrueColor { r, g, b } => sgr::fg_color_rgb(*r, *g, *b),
         }
     }
@@ -470,8 +476,7 @@ impl TermColor {
         match self {
             TermColor::Basic(n) if *n < 8 => format!("\x1B[{}m", 40 + n),
             TermColor::Basic(n) if *n < 16 => format!("\x1B[{}m", 92 + n),
-            TermColor::Basic(n) => sgr::bg_color_256(*n),
-            TermColor::Color256(n) => sgr::bg_color_256(*n),
+            TermColor::Basic(n) | TermColor::Color256(n) => sgr::bg_color_256(*n),
             TermColor::TrueColor { r, g, b } => sgr::bg_color_rgb(*r, *g, *b),
         }
     }
@@ -489,12 +494,9 @@ impl TermColor {
 ///
 /// A vector of (position, sequence) tuples
 pub fn parse_ansi_sequences(text: &str) -> Vec<(usize, String)> {
-    lazy_static! {
-        static ref ANSI_REGEX: Regex =
-            Regex::new(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])").unwrap();
-    }
-
-    ANSI_REGEX.find_iter(text).map(|m| (m.start(), m.as_str().to_string())).collect()
+    ansi_regex().map_or_else(Vec::new, |regex| {
+        regex.find_iter(text).map(|m| (m.start(), m.as_str().to_string())).collect()
+    })
 }
 
 /// Color name to ANSI code mapping
@@ -636,12 +638,7 @@ pub fn format_ansi_text(
 ///
 /// The text with all ANSI sequences removed
 pub fn strip_ansi_codes(text: &str) -> String {
-    lazy_static! {
-        static ref ANSI_REGEX: Regex =
-            Regex::new(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])").unwrap();
-    }
-
-    ANSI_REGEX.replace_all(text, "").to_string()
+    ansi_regex().map_or_else(|| text.to_string(), |regex| regex.replace_all(text, "").to_string())
 }
 
 /// Extract structured style information from ANSI-formatted text
@@ -742,17 +739,12 @@ mod tests {
         assert_eq!(color_name_to_code("brightblue"), Some(TermColor::Basic(12)));
         assert_eq!(color_name_to_code("123"), Some(TermColor::Color256(123)));
 
-        if let Some(TermColor::TrueColor { r, g, b }) = color_name_to_code("#ff00ff") {
-            assert_eq!((r, g, b), (255, 0, 255));
-        } else {
-            panic!("Failed to parse hex color");
-        }
+        assert_eq!(
+            color_name_to_code("#ff00ff"),
+            Some(TermColor::TrueColor { r: 255, g: 0, b: 255 })
+        );
 
-        if let Some(TermColor::TrueColor { r, g, b }) = color_name_to_code("#f0f") {
-            assert_eq!((r, g, b), (255, 0, 255));
-        } else {
-            panic!("Failed to parse short hex color");
-        }
+        assert_eq!(color_name_to_code("#f0f"), Some(TermColor::TrueColor { r: 255, g: 0, b: 255 }));
     }
 
     #[test]

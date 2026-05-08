@@ -20,45 +20,54 @@ pub const MAX_OUTPUT_SIZE: usize = 500_000;
 /// Maximum cache entry lifetime in seconds
 const CACHE_TTL: u64 = 300; // 5 minutes
 
+/// Compact bitset for terminal text styles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CellStyle(u32);
+
+impl CellStyle {
+    pub const BOLD: Self = Self(1 << 0);
+    pub const UNDERLINE: Self = Self(1 << 1);
+    pub const BLINK: Self = Self(1 << 2);
+    pub const REVERSE: Self = Self(1 << 3);
+    pub const ITALIC: Self = Self(1 << 4);
+    pub const STRIKETHROUGH: Self = Self(1 << 5);
+    pub const DIM: Self = Self(1 << 6);
+    pub const DOUBLE_UNDERLINE: Self = Self(1 << 7);
+    pub const FRAMED: Self = Self(1 << 8);
+    pub const ENCIRCLED: Self = Self(1 << 9);
+    pub const OVERLINED: Self = Self(1 << 10);
+    pub const FRAKTUR: Self = Self(1 << 11);
+    pub const CONCEAL: Self = Self(1 << 12);
+    pub const SUPERSCRIPT: Self = Self(1 << 13);
+    pub const SUBSCRIPT: Self = Self(1 << 14);
+    pub const HYPERLINK: Self = Self(1 << 15);
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub const fn contains(self, flag: Self) -> bool {
+        self.0 & flag.0 != 0
+    }
+
+    pub fn set(&mut self, flag: Self, enabled: bool) {
+        if enabled {
+            self.0 |= flag.0;
+        } else {
+            self.0 &= !flag.0;
+        }
+    }
+}
+
 /// Container for all possible character attributes
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScreenCellAttributes {
-    /// Whether the character is bold
-    pub bold: bool,
-    /// Whether the character is underlined
-    pub underline: bool,
-    /// Whether the character is blinking
-    pub blink: bool,
-    /// Whether the character is reversed (foreground/background colors)
-    pub reverse: bool,
+    /// Text style flags such as bold, underline, reverse, and blink.
+    pub style: CellStyle,
     /// Foreground color
     pub fg_color: Option<TerminalColor>,
     /// Background color
     pub bg_color: Option<TerminalColor>,
-    /// Whether the character is italic
-    pub italic: bool,
-    /// Whether the character is strikethrough
-    pub strikethrough: bool,
-    /// Whether the character is faint/dim
-    pub dim: bool,
-    /// Whether the character has double underline
-    pub double_underline: bool,
-    /// Whether the character is framed
-    pub framed: bool,
-    /// Whether the character is encircled
-    pub encircled: bool,
-    /// Whether the character is overlined
-    pub overlined: bool,
-    /// Whether the character uses fraktur font
-    pub fraktur: bool,
-    /// Whether the character is concealed
-    pub conceal: bool,
-    /// Whether the character is superscript
-    pub superscript: bool,
-    /// Whether the character is subscript
-    pub subscript: bool,
-    /// Whether the character is part of a hyperlink
-    pub hyperlink: bool,
     /// URL for hyperlink, if applicable
     pub hyperlink_url: Option<String>,
     /// Font selection (0-9, where 0 is the primary font)
@@ -70,42 +79,12 @@ pub struct ScreenCellAttributes {
 pub struct ScreenCell {
     /// The character to display
     pub character: char,
-    /// Whether the character is bold
-    pub bold: bool,
-    /// Whether the character is underlined
-    pub underline: bool,
-    /// Whether the character is blinking
-    pub blink: bool,
-    /// Whether the character is reversed (foreground/background colors)
-    pub reverse: bool,
+    /// Text style flags such as bold, underline, reverse, and blink.
+    pub style: CellStyle,
     /// Foreground color (0-255 for 8-bit colors, RGB for 24-bit colors)
     pub fg_color: Option<TerminalColor>,
     /// Background color (0-255 for 8-bit colors, RGB for 24-bit colors)
     pub bg_color: Option<TerminalColor>,
-    /// Whether the character is italic
-    pub italic: bool,
-    /// Whether the character is strikethrough
-    pub strikethrough: bool,
-    /// Whether the character is faint/dim
-    pub dim: bool,
-    /// Whether the character has double underline
-    pub double_underline: bool,
-    /// Whether the character is framed
-    pub framed: bool,
-    /// Whether the character is encircled
-    pub encircled: bool,
-    /// Whether the character is overlined
-    pub overlined: bool,
-    /// Whether the character uses fraktur font
-    pub fraktur: bool,
-    /// Whether the character is concealed
-    pub conceal: bool,
-    /// Whether the character is superscript
-    pub superscript: bool,
-    /// Whether the character is subscript
-    pub subscript: bool,
-    /// Whether the character is part of a hyperlink
-    pub hyperlink: bool,
     /// URL for hyperlink, if applicable
     pub hyperlink_url: Option<String>,
     /// Font selection (0-9, where 0 is the primary font)
@@ -125,28 +104,26 @@ pub enum TerminalColor {
     Named(String),
 }
 
+impl ScreenCell {
+    fn new(character: char, attributes: ScreenCellAttributes) -> Self {
+        Self {
+            character,
+            style: attributes.style,
+            fg_color: attributes.fg_color,
+            bg_color: attributes.bg_color,
+            hyperlink_url: attributes.hyperlink_url,
+            font: attributes.font,
+        }
+    }
+}
+
 impl Default for ScreenCell {
     fn default() -> Self {
         Self {
             character: ' ',
-            bold: false,
-            underline: false,
-            blink: false,
-            reverse: false,
+            style: CellStyle::default(),
             fg_color: None,
             bg_color: None,
-            italic: false,
-            strikethrough: false,
-            dim: false,
-            double_underline: false,
-            framed: false,
-            encircled: false,
-            overlined: false,
-            fraktur: false,
-            conceal: false,
-            superscript: false,
-            subscript: false,
-            hyperlink: false,
             hyperlink_url: None,
             font: 0, // Primary font
         }
@@ -260,7 +237,6 @@ impl Screen {
     }
 
     /// Put a character at the current cursor position and advance the cursor
-    #[allow(clippy::too_many_arguments)]
     pub fn put_char(&mut self, c: char, attributes: ScreenCellAttributes) {
         self.ensure_cursor_position();
 
@@ -270,57 +246,13 @@ impl Screen {
 
         // Put the character at the cursor position
         if col < self.lines[row].len() {
-            self.lines[row][col] = ScreenCell {
-                character: c,
-                bold: attributes.bold,
-                underline: attributes.underline,
-                blink: attributes.blink,
-                reverse: attributes.reverse,
-                fg_color: attributes.fg_color,
-                bg_color: attributes.bg_color,
-                italic: attributes.italic,
-                strikethrough: attributes.strikethrough,
-                dim: attributes.dim,
-                double_underline: attributes.double_underline,
-                framed: attributes.framed,
-                encircled: attributes.encircled,
-                overlined: attributes.overlined,
-                fraktur: attributes.fraktur,
-                conceal: attributes.conceal,
-                superscript: attributes.superscript,
-                subscript: attributes.subscript,
-                hyperlink: attributes.hyperlink,
-                hyperlink_url: attributes.hyperlink_url,
-                font: attributes.font,
-            };
+            self.lines[row][col] = ScreenCell::new(c, attributes);
         } else {
             // Add cells if needed
             while self.lines[row].len() <= col {
                 self.lines[row].push(ScreenCell::default());
             }
-            self.lines[row][col] = ScreenCell {
-                character: c,
-                bold: attributes.bold,
-                underline: attributes.underline,
-                blink: attributes.blink,
-                reverse: attributes.reverse,
-                fg_color: attributes.fg_color,
-                bg_color: attributes.bg_color,
-                italic: attributes.italic,
-                strikethrough: attributes.strikethrough,
-                dim: attributes.dim,
-                double_underline: attributes.double_underline,
-                framed: attributes.framed,
-                encircled: attributes.encircled,
-                overlined: attributes.overlined,
-                fraktur: attributes.fraktur,
-                conceal: attributes.conceal,
-                superscript: attributes.superscript,
-                subscript: attributes.subscript,
-                hyperlink: attributes.hyperlink,
-                hyperlink_url: attributes.hyperlink_url,
-                font: attributes.font,
-            };
+            self.lines[row][col] = ScreenCell::new(c, attributes);
         }
 
         // Advance the cursor
@@ -339,26 +271,11 @@ impl Screen {
     pub fn put_char_basic(
         &mut self,
         c: char,
-        bold: bool,
-        underline: bool,
-        blink: bool,
-        reverse: bool,
+        style: CellStyle,
         fg_color: Option<TerminalColor>,
         bg_color: Option<TerminalColor>,
-        italic: bool,
-        strikethrough: bool,
     ) {
-        let attributes = ScreenCellAttributes {
-            bold,
-            underline,
-            blink,
-            reverse,
-            fg_color,
-            bg_color,
-            italic,
-            strikethrough,
-            ..Default::default()
-        };
+        let attributes = ScreenCellAttributes { style, fg_color, bg_color, ..Default::default() };
 
         self.put_char(c, attributes);
     }
@@ -468,8 +385,7 @@ impl Screen {
                 if i < self.columns {
                     marker_line[i] = ScreenCell {
                         character: c,
-                        bold: true,
-                        reverse: true,
+                        style: CellStyle::BOLD.union(CellStyle::REVERSE),
                         ..ScreenCell::default()
                     };
                 }
@@ -563,7 +479,7 @@ impl std::fmt::Debug for TerminalPerformer {
             .field("attributes", &self.attributes)
             .field("hyperlink_id", &self.current_hyperlink_id)
             .field("hyperlink_url", &self.current_hyperlink_url)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -595,7 +511,7 @@ impl TerminalPerformer {
     fn reset_hyperlink(&mut self) {
         self.current_hyperlink_id = None;
         self.current_hyperlink_url = None;
-        self.attributes.hyperlink = false;
+        self.attributes.style.set(CellStyle::HYPERLINK, false);
         self.attributes.hyperlink_url = None;
     }
 
@@ -616,43 +532,43 @@ impl TerminalPerformer {
                 }
                 1 => {
                     // Bold
-                    self.attributes.bold = true;
+                    self.attributes.style.set(CellStyle::BOLD, true);
                     self.sgr_state.insert(1, true);
                 }
                 2 => {
                     // Faint/dim
-                    self.attributes.dim = true;
+                    self.attributes.style.set(CellStyle::DIM, true);
                     self.sgr_state.insert(2, true);
                 }
                 3 => {
                     // Italic
-                    self.attributes.italic = true;
+                    self.attributes.style.set(CellStyle::ITALIC, true);
                     self.sgr_state.insert(3, true);
                 }
                 4 => {
                     // Underline
-                    self.attributes.underline = true;
-                    self.attributes.double_underline = false; // Single underline, not double
+                    self.attributes.style.set(CellStyle::UNDERLINE, true);
+                    self.attributes.style.set(CellStyle::DOUBLE_UNDERLINE, false);
                     self.sgr_state.insert(4, true);
                 }
                 5 | 6 => {
                     // Blink (slow or rapid)
-                    self.attributes.blink = true;
+                    self.attributes.style.set(CellStyle::BLINK, true);
                     self.sgr_state.insert(param, true);
                 }
                 7 => {
                     // Reverse
-                    self.attributes.reverse = true;
+                    self.attributes.style.set(CellStyle::REVERSE, true);
                     self.sgr_state.insert(7, true);
                 }
                 8 => {
                     // Conceal/Hidden
-                    self.attributes.conceal = true;
+                    self.attributes.style.set(CellStyle::CONCEAL, true);
                     self.sgr_state.insert(8, true);
                 }
                 9 => {
                     // Strikethrough
-                    self.attributes.strikethrough = true;
+                    self.attributes.style.set(CellStyle::STRIKETHROUGH, true);
                     self.sgr_state.insert(9, true);
                 }
                 10 => {
@@ -667,68 +583,63 @@ impl TerminalPerformer {
                 }
                 20 => {
                     // Fraktur (Gothic)
-                    self.attributes.fraktur = true;
+                    self.attributes.style.set(CellStyle::FRAKTUR, true);
                     self.sgr_state.insert(20, true);
                 }
                 21 => {
                     // Double underline
-                    self.attributes.underline = true;
-                    self.attributes.double_underline = true;
+                    self.attributes.style.set(CellStyle::UNDERLINE, true);
+                    self.attributes.style.set(CellStyle::DOUBLE_UNDERLINE, true);
                     self.sgr_state.insert(21, true);
                 }
                 22 => {
                     // Normal intensity (not bold and not faint)
-                    self.attributes.bold = false;
-                    self.attributes.dim = false;
+                    self.attributes.style.set(CellStyle::BOLD, false);
+                    self.attributes.style.set(CellStyle::DIM, false);
                     self.sgr_state.remove(&1);
                     self.sgr_state.remove(&2);
                 }
                 23 => {
                     // Not italic, not fraktur
-                    self.attributes.italic = false;
-                    self.attributes.fraktur = false;
+                    self.attributes.style.set(CellStyle::ITALIC, false);
+                    self.attributes.style.set(CellStyle::FRAKTUR, false);
                     self.sgr_state.remove(&3);
                     self.sgr_state.remove(&20);
                 }
                 24 => {
                     // Not underlined (single or double)
-                    self.attributes.underline = false;
-                    self.attributes.double_underline = false;
+                    self.attributes.style.set(CellStyle::UNDERLINE, false);
+                    self.attributes.style.set(CellStyle::DOUBLE_UNDERLINE, false);
                     self.sgr_state.remove(&4);
                     self.sgr_state.remove(&21);
                 }
                 25 => {
                     // Not blinking
-                    self.attributes.blink = false;
+                    self.attributes.style.set(CellStyle::BLINK, false);
                     self.sgr_state.remove(&5);
                     self.sgr_state.remove(&6);
                 }
-                26 => {
-                    // Reserved - Proportional spacing control - not implemented
+                26 | 38 | 48 => {
+                    // Reserved or extended color control handled elsewhere.
                 }
                 27 => {
                     // Not reversed
-                    self.attributes.reverse = false;
+                    self.attributes.style.set(CellStyle::REVERSE, false);
                     self.sgr_state.remove(&7);
                 }
                 28 => {
                     // Reveal (not concealed)
-                    self.attributes.conceal = false;
+                    self.attributes.style.set(CellStyle::CONCEAL, false);
                     self.sgr_state.remove(&8);
                 }
                 29 => {
                     // Not strikethrough
-                    self.attributes.strikethrough = false;
+                    self.attributes.style.set(CellStyle::STRIKETHROUGH, false);
                     self.sgr_state.remove(&9);
                 }
                 30..=37 => {
                     // Basic foreground color
                     self.attributes.fg_color = Some(TerminalColor::Basic(param as u8 - 30));
-                }
-                38 => {
-                    // Extended foreground color - handled in the SGR dispatch
-                    // We can't handle it here with flattened params, as we need access to
-                    // subsequent parameters which will come as separate items
                 }
                 39 => {
                     // Default foreground color
@@ -738,42 +649,37 @@ impl TerminalPerformer {
                     // Basic background color
                     self.attributes.bg_color = Some(TerminalColor::Basic(param as u8 - 40));
                 }
-                48 => {
-                    // Extended background color - handled in the SGR dispatch
-                    // We can't handle it here with flattened params, as we need access to
-                    // subsequent parameters which will come as separate items
-                }
                 49 => {
                     // Default background color
                     self.attributes.bg_color = None;
                 }
                 51 => {
                     // Framed
-                    self.attributes.framed = true;
-                    self.attributes.encircled = false;
+                    self.attributes.style.set(CellStyle::FRAMED, true);
+                    self.attributes.style.set(CellStyle::ENCIRCLED, false);
                     self.sgr_state.insert(51, true);
                 }
                 52 => {
                     // Encircled
-                    self.attributes.framed = false;
-                    self.attributes.encircled = true;
+                    self.attributes.style.set(CellStyle::FRAMED, false);
+                    self.attributes.style.set(CellStyle::ENCIRCLED, true);
                     self.sgr_state.insert(52, true);
                 }
                 53 => {
                     // Overlined
-                    self.attributes.overlined = true;
+                    self.attributes.style.set(CellStyle::OVERLINED, true);
                     self.sgr_state.insert(53, true);
                 }
                 54 => {
                     // Not framed, not encircled
-                    self.attributes.framed = false;
-                    self.attributes.encircled = false;
+                    self.attributes.style.set(CellStyle::FRAMED, false);
+                    self.attributes.style.set(CellStyle::ENCIRCLED, false);
                     self.sgr_state.remove(&51);
                     self.sgr_state.remove(&52);
                 }
                 55 => {
                     // Not overlined
-                    self.attributes.overlined = false;
+                    self.attributes.style.set(CellStyle::OVERLINED, false);
                     self.sgr_state.remove(&53);
                 }
                 60..=65 => {
@@ -782,20 +688,20 @@ impl TerminalPerformer {
                 }
                 73 => {
                     // Superscript
-                    self.attributes.superscript = true;
-                    self.attributes.subscript = false;
+                    self.attributes.style.set(CellStyle::SUPERSCRIPT, true);
+                    self.attributes.style.set(CellStyle::SUBSCRIPT, false);
                     self.sgr_state.insert(73, true);
                 }
                 74 => {
                     // Subscript
-                    self.attributes.subscript = true;
-                    self.attributes.superscript = false;
+                    self.attributes.style.set(CellStyle::SUBSCRIPT, true);
+                    self.attributes.style.set(CellStyle::SUPERSCRIPT, false);
                     self.sgr_state.insert(74, true);
                 }
                 75 => {
                     // Neither superscript nor subscript
-                    self.attributes.superscript = false;
-                    self.attributes.subscript = false;
+                    self.attributes.style.set(CellStyle::SUPERSCRIPT, false);
+                    self.attributes.style.set(CellStyle::SUBSCRIPT, false);
                     self.sgr_state.remove(&73);
                     self.sgr_state.remove(&74);
                 }
@@ -930,7 +836,7 @@ impl TerminalPerformer {
                 self.reset_hyperlink();
             } else {
                 // Start of hyperlink
-                self.attributes.hyperlink = true;
+                self.attributes.style.set(CellStyle::HYPERLINK, true);
                 self.attributes.hyperlink_url = Some(url.clone());
                 self.current_hyperlink_url = Some(url);
 
@@ -1184,12 +1090,8 @@ impl Perform for TerminalPerformer {
                     }
                     self.reset_attributes();
                 }
-                b'7' => {
-                    // DECSC - Save Cursor
-                    // Not implemented yet
-                }
-                b'8' => {
-                    // DECRC - Restore Cursor
+                b'7' | b'8' => {
+                    // DECSC/DECRC - Save/restore cursor
                     // Not implemented yet
                 }
                 _ => debug!("Unhandled ESC dispatch: {:?}", byte),
@@ -1210,7 +1112,9 @@ pub struct TerminalEmulator {
 // Custom debug implementation to avoid issues with Parser
 impl std::fmt::Debug for TerminalEmulator {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TerminalEmulator").field("performer", &self.performer).finish()
+        f.debug_struct("TerminalEmulator")
+            .field("performer", &self.performer)
+            .finish_non_exhaustive()
     }
 }
 
@@ -1651,11 +1555,11 @@ mod tests {
         let _attributes = ScreenCellAttributes::default();
 
         // Test putting characters
-        screen.put_char_basic('H', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('e', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('l', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('l', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('o', false, false, false, false, None, None, false, false);
+        screen.put_char_basic('H', CellStyle::default(), None, None);
+        screen.put_char_basic('e', CellStyle::default(), None, None);
+        screen.put_char_basic('l', CellStyle::default(), None, None);
+        screen.put_char_basic('l', CellStyle::default(), None, None);
+        screen.put_char_basic('o', CellStyle::default(), None, None);
 
         let display = screen.display();
         assert_eq!(display, vec!["Hello"]);
@@ -1664,11 +1568,11 @@ mod tests {
         screen.carriage_return();
         screen.linefeed();
 
-        screen.put_char_basic('W', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('o', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('r', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('l', false, false, false, false, None, None, false, false);
-        screen.put_char_basic('d', false, false, false, false, None, None, false, false);
+        screen.put_char_basic('W', CellStyle::default(), None, None);
+        screen.put_char_basic('o', CellStyle::default(), None, None);
+        screen.put_char_basic('r', CellStyle::default(), None, None);
+        screen.put_char_basic('l', CellStyle::default(), None, None);
+        screen.put_char_basic('d', CellStyle::default(), None, None);
 
         let display = screen.display();
         assert_eq!(display, vec!["Hello", "World"]);
