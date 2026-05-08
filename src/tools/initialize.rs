@@ -190,6 +190,10 @@ pub async fn handle_tool_call(
 
             let _ = writeln!(response, "\nUse thread_id={thread_id} for all winx tool calls.");
 
+            if let Ok((repo_context, _)) = crate::utils::repo::get_repo_context(&folder_to_start) {
+                let _ = writeln!(response, "\n# Workspace structure\n{repo_context}");
+            }
+
             if !initialize.initial_files_to_read.is_empty() {
                 let content =
                     read_initial_files_simple(&initialize.initial_files_to_read, &folder_to_start);
