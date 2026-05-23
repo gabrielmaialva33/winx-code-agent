@@ -1,4 +1,4 @@
-use tree_sitter::Parser;
+use tree_sitter::{Node, Parser};
 
 use crate::errors::{Result, WinxError};
 
@@ -25,10 +25,7 @@ pub fn assert_single_statement(command: &str) -> Result<()> {
         ));
     }
 
-    let statement_count = (0..root.named_child_count())
-        .filter_map(|index| root.named_child(index))
-        .filter(|node| node.kind() != "comment")
-        .count();
+    let statement_count = top_level_statement_count(trimmed, root);
 
     if statement_count > 1 {
         return Err(WinxError::CommandExecutionError(
@@ -37,6 +34,81 @@ pub fn assert_single_statement(command: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone)]
+struct StatementNode {
+    kind: String,
+    start_byte: usize,
+    end_byte: usize,
+}
+
+fn top_level_statement_count(source: &str, root: Node<'_>) -> usize {
+    let mut statements = Vec::new();
+    collect_statement_nodes(root, &mut statements);
+
+    statements
+        .iter()
+        .filter(|stmt| stmt.kind != "comment")
+        .filter(|stmt| !statements.iter().any(|other| is_contained_statement(source, stmt, other)))
+        .count()
+}
+
+fn collect_statement_nodes(node: Node<'_>, statements: &mut Vec<StatementNode>) {
+    if is_statement_node(node.kind()) {
+        statements.push(StatementNode {
+            kind: node.kind().to_string(),
+            start_byte: node.start_byte(),
+            end_byte: node.end_byte(),
+        });
+    }
+
+    for index in 0..node.named_child_count() {
+        if let Some(child) = node.named_child(index) {
+            collect_statement_nodes(child, statements);
+        }
+    }
+}
+
+fn is_statement_node(kind: &str) -> bool {
+    matches!(
+        kind,
+        "command"
+            | "variable_assignment"
+            | "declaration_command"
+            | "unset_command"
+            | "comment"
+            | "for_statement"
+            | "c_style_for_statement"
+            | "while_statement"
+            | "if_statement"
+            | "case_statement"
+            | "function_definition"
+            | "pipeline"
+            | "list"
+            | "compound_statement"
+            | "subshell"
+            | "redirected_statement"
+    )
+}
+
+fn is_contained_statement(source: &str, stmt: &StatementNode, other: &StatementNode) -> bool {
+    if stmt.start_byte == other.start_byte
+        && stmt.end_byte == other.end_byte
+        && stmt.kind == other.kind
+    {
+        return false;
+    }
+
+    let other_text = &source[other.start_byte..other.end_byte];
+    if other.kind == "list" && other_text.contains(';') {
+        return false;
+    }
+
+    other.start_byte <= stmt.start_byte
+        && other.end_byte >= stmt.end_byte
+        && other.end_byte - other.start_byte > stmt.end_byte - stmt.start_byte
+        && other_text.contains(&source[stmt.start_byte..stmt.end_byte])
 }
 
 #[cfg(test)]
@@ -52,6 +124,16 @@ mod tests {
     fn accepts_heredocs_as_single_statement() {
         let command = "cat <<'EOF'\nhello\nEOF";
         assert!(assert_single_statement(command).is_ok());
+    }
+
+    #[test]
+    fn accepts_for_loop_as_single_compound_statement() {
+        assert!(assert_single_statement("for i in 1 2 3; do echo tick; sleep 1; done").is_ok());
+    }
+
+    #[test]
+    fn rejects_semicolon_separated_top_level_statements() {
+        assert!(assert_single_statement("pwd; ls").is_err());
     }
 
     #[test]
