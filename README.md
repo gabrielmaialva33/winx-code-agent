@@ -16,68 +16,70 @@
 </p>
 
 <p align="center">
-  <em>Stateful shell execution, workspace-aware file operations, and agent-friendly editing in one local MCP server.</em>
+  <em>A local MCP server you can hand to a coding agent and stop worrying about the shell.</em>
 </p>
 
-Winx is a specialized Model Context Protocol (MCP) server for LLM code agents that need local shell execution, file reads, file edits, image reads, and task context snapshots.
+Winx is the MCP server I wanted while running Claude, Codex, and friends against real repos: one process that handles
+the shell, file IO, and PTY-backed interactive sessions, written in Rust so it doesn't fight you on stdio.
 
-It is inspired by [WCGW](https://github.com/rusiaaman/wcgw), but it is not a Python wrapper. Winx provides a native Rust MCP server with PTY-backed shell sessions, workspace-aware file access, mode-aware write restrictions, and robust SEARCH/REPLACE editing behavior designed for real coding-agent workflows.
+It started as a Rust port of [WCGW](https://github.com/rusiaaman/wcgw) but isn't a Python wrapper. Everything runs on a
+real PTY (via `portable-pty`), `cd` actually sticks, `Ctrl+C` actually interrupts, and background shells survive
+long-running TUIs without leaking output buffers into your token budget.
 
-## Features
+## What you get
 
-- Stateful shell execution through `BashCommand`, including foreground commands, background commands, status checks, text input, special keys, and ASCII input.
-- Workspace initialization through `Initialize`, with `wcgw`, `architect`, and `code_writer` modes.
-- File reading through `ReadFiles`, including path suffix line ranges such as `/path/file.rs:10-40`, `/path/file.rs:10-`, and `/path/file.rs:-40`.
-- File editing through `FileWriteOrEdit`, including full writes and tolerant SEARCH/REPLACE blocks.
-- Context capture through `ContextSave`.
-- Image reads through `ReadImage` for multimodal MCP clients.
+- A stateful bash session per thread with proper PTY semantics — foreground, background, status checks, text input,
+  Enter/Ctrl-C/Ctrl-D, raw ASCII.
+- Workspaces with three modes: `wcgw` (full access), `architect` (read-only), `code_writer` (allowlist of commands and
+  write globs).
+- File reads with WCGW-style line ranges (`file.rs:10-40`, `file.rs:10-`, `file.rs:-40`).
+- File writes and SEARCH/REPLACE edits that survive ambiguous matches, indentation drift, and the usual unicode
+  quote-mismatches from LLMs.
+- `ContextSave` for handing a task summary plus its files to the next session.
+- `ReadImage` so multimodal clients can pull screenshots, mockups, error PNGs, etc.
 
 ## MCP Tools
 
-| Tool | Purpose |
-| --- | --- |
-| `Initialize` | Initializes the workspace, mode, and thread state. Call this before other tools. |
-| `BashCommand` | Runs shell commands and interacts with running foreground/background commands. |
-| `ReadFiles` | Reads one or more files with line numbers and optional line ranges. |
-| `FileWriteOrEdit` | Writes full files or applies SEARCH/REPLACE edits after the file has been read. |
-| `ContextSave` | Saves a task summary and relevant file contents for handoff/resume. |
-| `ReadImage` | Reads an image file and returns base64 content with MIME metadata. |
+| Tool              | What it does                                                                                                                                                   |
+|-------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Initialize`      | Boots the workspace, picks the mode, hands you a `thread_id`. Call this first or everything else errors out.                                                   |
+| `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, drives TUIs. Supports `is_background`, `status_check`, `send_text`, `send_specials`, `send_ascii`. |
+| `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range.                                                                                   |
+| `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks. Refuses to write a file you haven't read yet.                                                                        |
+| `ContextSave`     | Dumps task description + file globs into a single text file for resume/handoff.                                                                                |
+| `ReadImage`       | Base64 + MIME, for clients that can render images.                                                                                                             |
 
-## Search/Replace Editing
+## Search/Replace editing
 
-`FileWriteOrEdit` supports standard blocks:
+Standard block syntax:
 
 ```text
-  <<<<<<< SEARCH
-  old content
-  =======
-  new content
-  >>>>>>> REPLACE
+<<<<<<< SEARCH
+old content
+=======
+new content
+>>>>>>> REPLACE
 ```
 
-The matcher is intentionally tolerant for common agent mistakes:
+Things the matcher forgives so you don't have to babysit the model:
 
-- preserves atomicity: ambiguous or missing matches fail without writing;
-- handles indentation drift and adjusts replacement indentation;
-- removes `ReadFiles` line numbers when they are accidentally included;
-- normalizes common Unicode quote, dash, and ellipsis mistakes;
-- can use surrounding blocks as context to disambiguate repeated snippets;
-- supports single-line substring edits when the search block is part of a line.
+- atomic: ambiguous or missing matches abort without touching the file
+- adjusts replacement indentation when the LLM gets the leading whitespace wrong
+- strips `ReadFiles` line numbers if they leak into a SEARCH block
+- normalizes the usual "smart quote" / em-dash / ellipsis substitutions
+- uses neighboring blocks to disambiguate when the same snippet appears twice
+- single-line substring edits work — you don't need the whole line in SEARCH
 
-## Installation
-
-Install the binary from crates.io:
+## Install
 
 ```bash
 cargo install winx-code-agent
 ```
 
-This puts `winx-code-agent` on your `$PATH` (usually `~/.cargo/bin`). Every example below assumes the binary is reachable; if it isn't, use the absolute path returned by `which winx-code-agent`.
+Binary lands in `~/.cargo/bin` — every config snippet below assumes that's on `$PATH`. If your MCP client launches with
+a sterile env, swap `winx-code-agent` for the absolute path (`which winx-code-agent`).
 
-Requirements:
-- Rust **1.75+** (`rustc --version`)
-- Linux, macOS, or WSL2
-- A terminal that can host a PTY (any standard terminal works)
+Needs Rust 1.75+, Linux/macOS/WSL2, and a real terminal (any modern one — Winx spawns its own PTY).
 
 <details>
 <summary><b>Claude Code (CLI)</b></summary>
@@ -249,9 +251,11 @@ Add to `~/.gemini/settings.json`:
 <details>
 <summary><b>agy (Google Antigravity CLI)</b></summary>
 
-`agy` is Google's new Gemini-powered Antigravity CLI (Go binary published as `agy` in `~/.local/bin`). It reads MCP servers from a shared JSON config — there's no `mcp add` subcommand yet.
+`agy` is Google's new Gemini-powered CLI (Go binary, usually at `~/.local/bin/agy`). No `mcp add` subcommand yet — it
+reads MCP servers from JSON.
 
-Add to `~/.gemini/config/mcp_config.json` (the CLI also reads `~/.gemini/antigravity/mcp_config.json`; keep both in sync if you also use the Antigravity IDE):
+Edit `~/.gemini/config/mcp_config.json` (also `~/.gemini/antigravity/mcp_config.json` if you run the Antigravity IDE
+alongside):
 
 ```json
 {
@@ -333,7 +337,7 @@ Add to your Roo Code MCP config:
 <details>
 <summary><b>Other clients (generic stdio)</b></summary>
 
-Any MCP client that supports a local stdio process can run Winx with this shape:
+Any client that speaks stdio MCP works with this shape:
 
 ```json
 {
@@ -347,13 +351,14 @@ Any MCP client that supports a local stdio process can run Winx with this shape:
 }
 ```
 
-If the client cannot find `winx-code-agent` on `$PATH`, replace it with the absolute path (`which winx-code-agent` or `~/.cargo/bin/winx-code-agent`).
+If your client launches Winx with an empty `$PATH`, swap `command` for the absolute path (
+`~/.cargo/bin/winx-code-agent`).
 </details>
 
 <details>
-<summary><b>Build from source (optional)</b></summary>
+<summary><b>Build from source</b></summary>
 
-If you want the latest unreleased changes or a custom build:
+For unreleased changes or a custom build:
 
 ```bash
 git clone https://github.com/gabrielmaialva33/winx-code-agent.git
@@ -361,40 +366,40 @@ cd winx-code-agent
 cargo install --path .
 ```
 
-`cargo install --path .` is the same as `cargo install winx-code-agent` but pinned to the working tree. You can also run the binary directly without installing:
+Or run it without installing:
 
 ```bash
-cargo build --release
-./target/release/winx-code-agent
+cargo run --release
 ```
 </details>
 
-### Verify the connection
+### Check it's wired up
 
-After configuring your client, the first tool call should be `Initialize`. From any MCP client you can confirm Winx is reachable by listing available tools — you should see `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`, `ContextSave`, and `ReadImage`.
+List MCP tools in your client. You should see six entries: `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`,
+`ContextSave`, `ReadImage`. The first call always has to be `Initialize` — Winx tracks workspace + mode per thread.
 
-## Development
-
-Useful local checks:
-
-```bash
-cargo fmt --all -- --check
-cargo check --tests
-cargo clippy --all-targets --all-features
-cargo test --all-features
-```
-
-For formatting changes:
+## Hacking on it
 
 ```bash
 cargo fmt --all
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all-features
 ```
 
-## Security Model
+CI runs the same three. If you touch `src/state/pty.rs` or anything in `src/tools/bash_command.rs`, the regression suite
+at `tests/bash_pty_regression_test.rs` is what protects against the usual TUI/PTY foot-guns — run it first.
 
-Winx is a local MCP server with filesystem and shell access. Treat any MCP client connected to it as capable of reading files, editing files, and running commands within the configured workspace and mode.
+## A note on security
 
-Use `architect` mode for read-oriented sessions and `code_writer` mode when you want to restrict writable globs and allowed commands. See [SECURITY.md](SECURITY.md) for reporting and operational guidance.
+This is a local MCP server. Anything connected to it can read files, edit files, and run shell commands inside the
+workspace — same blast radius as letting the model into your terminal.
+
+If you want a tighter leash:
+
+- `architect` mode disables writes and most commands;
+- `code_writer` mode lets you allowlist commands and write globs.
+
+[SECURITY.md](SECURITY.md) has the disclosure process and threat model.
 
 ## License
 
