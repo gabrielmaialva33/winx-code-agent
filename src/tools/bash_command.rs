@@ -117,6 +117,14 @@ impl BackgroundShellManager {
                 continue;
             }
 
+            // Never prune shells that haven't received a command yet.
+            // The global BG_SHELL_MANAGER is shared across parallel tests; a freshly
+            // spawned shell would otherwise be evicted between start_new_shell and
+            // the first send_command, leading to "Failed to get background shell".
+            if shell.last_command.is_empty() {
+                continue;
+            }
+
             if shell.command_running {
                 let _ = shell.read_output(0.1);
             }
