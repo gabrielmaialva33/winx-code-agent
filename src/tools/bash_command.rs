@@ -42,8 +42,48 @@ const COMMAND_CHUNK_SIZE: usize = 64;
 /// Chunk size for sending text input (characters) - matches WCGW Python (128 chars)
 const TEXT_CHUNK_SIZE: usize = 128;
 
-/// Maximum output length to prevent excessive responses
+/// Cheap byte-level safety net. We never even consider token counting if the
+/// raw payload is smaller than this — `tiktoken_rs` is fast but not free, and
+/// the vast majority of responses are tiny status updates.
 const MAX_OUTPUT_LENGTH: usize = 100_000;
+
+/// Token budget reserved for a single PTY response when token-aware truncation
+/// kicks in. Picked to leave plenty of room for the surrounding context — most
+/// frontier models have 128k+ windows, so 25k for one shell payload is generous
+/// without monopolizing the conversation.
+const MAX_OUTPUT_TOKENS: usize = 25_000;
+
+/// Truncate `text` so its `cl100k_base` token count stays under `max_tokens`.
+///
+/// We tokenize the tail of the string only when the raw byte length already
+/// exceeds the byte cap; otherwise we trust the byte budget and return as-is.
+/// When the tail still overshoots, we keep the last `max_tokens - reserve`
+/// tokens and prepend a "(...truncated)" marker — exactly what wcgw does in
+/// `_incremental_text`.
+fn truncate_to_token_budget(text: &str, max_tokens: usize) -> std::borrow::Cow<'_, str> {
+    if text.len() <= MAX_OUTPUT_LENGTH {
+        return std::borrow::Cow::Borrowed(text);
+    }
+
+    let Ok(bpe) = tiktoken_rs::cl100k_base() else {
+        // Fallback to the byte-based truncation we used before tiktoken.
+        return std::borrow::Cow::Owned(format!(
+            "(...truncated)\n{}",
+            &text[text.len() - MAX_OUTPUT_LENGTH..]
+        ));
+    };
+
+    let tokens = bpe.encode_with_special_tokens(text);
+    if tokens.len() <= max_tokens {
+        return std::borrow::Cow::Borrowed(text);
+    }
+
+    // Reserve one token slot for the marker overhead.
+    let keep = max_tokens.saturating_sub(1);
+    let tail = &tokens[tokens.len() - keep..];
+    let decoded = bpe.decode(tail).unwrap_or_default();
+    std::borrow::Cow::Owned(format!("(...truncated)\n{decoded}"))
+}
 
 /// Message when a command is already running - matches WCGW Python `WAITING_INPUT_MESSAGE`
 const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can't run multiple shell commands in main shell, likely a previous program hasn't exited.
@@ -259,8 +299,8 @@ fn get_status(
 
 /// Process output with WCGW-style incremental text handling - matches WCGW Python _`incremental_text`
 fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> String {
-    let text =
-        if text.len() > MAX_OUTPUT_LENGTH { &text[text.len() - MAX_OUTPUT_LENGTH..] } else { text };
+    let truncated = truncate_to_token_budget(text, MAX_OUTPUT_TOKENS);
+    let text = truncated.as_ref();
 
     if last_pending_output.is_empty() {
         let rendered = render_terminal_output(text);
@@ -727,11 +767,7 @@ async fn wait_for_output(
     let rendered = wcgw_incremental_text(&output, &last_pending_output);
 
     // Truncate if needed - matches WCGW Python token truncation
-    let rendered = if rendered.len() > MAX_OUTPUT_LENGTH {
-        format!("(...truncated)\n{}", &rendered[rendered.len() - MAX_OUTPUT_LENGTH..])
-    } else {
-        rendered
-    };
+    let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
 
     // Calculate running duration for status
     let running_for = if complete {
@@ -761,11 +797,7 @@ fn finalize_tombstone(
     match action {
         BashCommandAction::StatusCheck { .. } => {
             let rendered = wcgw_incremental_text(&final_output, "");
-            let rendered = if rendered.len() > MAX_OUTPUT_LENGTH {
-                format!("(...truncated)\n{}", &rendered[rendered.len() - MAX_OUTPUT_LENGTH..])
-            } else {
-                rendered
-            };
+            let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
             // Build a compact status block matching `get_status` for a finished bg shell.
             let mut status = "\n\n---\n\n".to_string();
             let _ = writeln!(status, "bg_command_id = {id}");
@@ -1156,9 +1188,7 @@ async fn execute_simple_command(command: &str, cwd: &Path) -> Result<String> {
         }
     }
 
-    if result.len() > MAX_OUTPUT_LENGTH {
-        result = format!("(...truncated)\n{}", &result[result.len() - MAX_OUTPUT_LENGTH..]);
-    }
+    result = truncate_to_token_budget(&result, MAX_OUTPUT_TOKENS).into_owned();
 
     let exit_status = if output.status.success() {
         "Command completed successfully".to_string()
