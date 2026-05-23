@@ -9,6 +9,9 @@
 
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use std::collections::hash_map::DefaultHasher;
+use std::collections::VecDeque;
+use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, TryRecvError};
@@ -24,6 +27,11 @@ pub const DEFAULT_ROWS: u16 = 50;
 
 /// Maximum output buffer size to prevent memory issues
 const MAX_OUTPUT_SIZE: usize = 1_000_000;
+
+/// How many fully-formed lines to keep in the per-shell ringbuffer. Callers can
+/// ask for at most this many lines of historical context via
+/// `StatusCheck.scrollback_lines`.
+pub const RING_BUFFER_LINES: usize = 2_000;
 
 /// WCGW-style prompt pattern for command completion detection
 const WCGW_PROMPT_PATTERN: &str = "◉";
@@ -54,6 +62,15 @@ pub struct PtyShell {
     max_output_size: usize,
     /// Flag for output truncation
     pub output_truncated: bool,
+    /// Rolling buffer of fully-emitted lines for opt-in scrollback. The newest
+    /// line is at the back; capped at `RING_BUFFER_LINES`.
+    pub line_ring: VecDeque<String>,
+    /// Carries the unterminated tail across reads so partial lines aren't
+    /// double-counted when more bytes arrive.
+    line_ring_partial: String,
+    /// Hash of the last rendered output we shipped to the caller. Used by the
+    /// delta path in `status_check` to elide repeats when the screen is idle.
+    pub last_returned_hash: Option<u64>,
 }
 
 impl std::fmt::Debug for PtyShell {
@@ -160,6 +177,9 @@ impl PtyShell {
             command_running: false,
             max_output_size: MAX_OUTPUT_SIZE,
             output_truncated: false,
+            line_ring: VecDeque::with_capacity(RING_BUFFER_LINES),
+            line_ring_partial: String::new(),
+            last_returned_hash: None,
         };
 
         // Initialize the shell with WCGW-style prompt
@@ -234,11 +254,71 @@ impl PtyShell {
         self.output_truncated = false;
         self.last_command = command.to_string();
         self.command_running = true;
+        // A new command means the next status_check should return whatever
+        // shows up — drop the dedup hash so we don't elide the first response.
+        self.last_returned_hash = None;
 
         // Write the command
         self.write_command(command)?;
 
         Ok(())
+    }
+
+    /// Push freshly-arrived bytes through the line-oriented ringbuffer so
+    /// callers can request bounded scrollback later.
+    fn ingest_into_ring(&mut self, chunk: &str) {
+        let combined = if self.line_ring_partial.is_empty() {
+            chunk.to_string()
+        } else {
+            let mut s = std::mem::take(&mut self.line_ring_partial);
+            s.push_str(chunk);
+            s
+        };
+
+        let mut last_nl_end: Option<usize> = None;
+        for (idx, ch) in combined.char_indices() {
+            if ch == '\n' {
+                let end = idx + ch.len_utf8();
+                let start = last_nl_end.unwrap_or(0);
+                let line = combined[start..idx].trim_end_matches('\r').to_string();
+                if self.line_ring.len() == RING_BUFFER_LINES {
+                    self.line_ring.pop_front();
+                }
+                self.line_ring.push_back(line);
+                last_nl_end = Some(end);
+            }
+        }
+
+        if let Some(end) = last_nl_end {
+            self.line_ring_partial = combined[end..].to_string();
+        } else {
+            self.line_ring_partial = combined;
+        }
+    }
+
+    /// Return up to `lines` recent lines from the ringbuffer, oldest first.
+    /// Includes any in-flight partial line.
+    pub fn collect_scrollback(&self, lines: usize) -> String {
+        if lines == 0 {
+            return String::new();
+        }
+        let start = self.line_ring.len().saturating_sub(lines);
+        let mut out = String::new();
+        for line in self.line_ring.iter().skip(start) {
+            out.push_str(line);
+            out.push('\n');
+        }
+        if !self.line_ring_partial.is_empty() {
+            out.push_str(&self.line_ring_partial);
+        }
+        out
+    }
+
+    /// Hash arbitrary rendered output into a u64 dedup key.
+    pub fn fingerprint(text: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish()
     }
 
     /// Read output from the PTY with timeout
@@ -256,6 +336,7 @@ impl PtyShell {
             match self.output_rx.try_recv() {
                 Ok(chunk) => {
                     self.output_buffer.push_str(&chunk);
+                    self.ingest_into_ring(&chunk);
                     no_data_count = 0;
 
                     // Check for WCGW prompt indicating command completion

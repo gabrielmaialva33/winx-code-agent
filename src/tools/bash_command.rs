@@ -506,8 +506,17 @@ async fn execute_bash_action(
         BashCommandAction::Command { command, is_background } => {
             execute_command(bash_state, command, *is_background, timeout_s).await
         }
-        BashCommandAction::StatusCheck { .. } => {
-            execute_status_check(bash_state, bg_shell, is_bg, bg_id.as_deref(), timeout_s).await
+        BashCommandAction::StatusCheck { scrollback_lines, verbose, .. } => {
+            execute_status_check(
+                bash_state,
+                bg_shell,
+                is_bg,
+                bg_id.as_deref(),
+                timeout_s,
+                *scrollback_lines,
+                *verbose,
+            )
+            .await
         }
         BashCommandAction::SendText { send_text, submit, .. } => {
             execute_send_text(
@@ -777,15 +786,24 @@ fn finalize_tombstone(
     }
 }
 
-/// Execute a status check - matches WCGW Python's `StatusCheck` handling
+/// Execute a status check - matches WCGW Python's `StatusCheck` handling.
+///
+/// New behavior (v0.2.308):
+/// - Deduplicates against the last response by fingerprint; when nothing
+///   changed and `verbose=false`, returns a compact "no new output" payload
+///   instead of resending the same screen.
+/// - Optional `scrollback_lines` pulls bounded history from the `PtyShell`
+///   ringbuffer so agents can reorient after a long pause.
 async fn execute_status_check(
     bash_state: &mut BashState,
     bg_shell: Option<SharedPtyShell>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
+    scrollback_lines: Option<usize>,
+    verbose: bool,
 ) -> Result<String> {
-    debug!("Processing StatusCheck action");
+    debug!("Processing StatusCheck action (verbose={verbose}, scrollback={scrollback_lines:?})");
 
     // Pick the shell we're going to inspect: bg shell when bg_command_id was provided,
     // otherwise fall back to the main interactive shell.
@@ -812,7 +830,47 @@ async fn execute_status_check(
     }
 
     // Read output with patience handling - this IS a status check
-    wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, true).await
+    let response = wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, true).await?;
+
+    // Inter-call dedup: hash only the response *body* (the chunk before the
+    // `\n\n---\n` status footer). The footer contains a live "running for"
+    // counter that would otherwise defeat the comparison.
+    let body = response.split("\n\n---\n").next().unwrap_or(&response);
+    if !verbose && scrollback_lines.is_none() {
+        let mut guard = shell_arc.lock().await;
+        if let Some(bash) = guard.as_mut() {
+            let fingerprint = PtyShell::fingerprint(body);
+            if Some(fingerprint) == bash.last_returned_hash {
+                let status = get_status(bash_state, is_bg, bg_id, is_running, None);
+                return Ok(format!("no new output since last check{status}"));
+            }
+            bash.last_returned_hash = Some(fingerprint);
+        }
+    } else if !verbose {
+        // Still record the hash so subsequent non-scrollback calls can dedup.
+        let mut guard = shell_arc.lock().await;
+        if let Some(bash) = guard.as_mut() {
+            bash.last_returned_hash = Some(PtyShell::fingerprint(body));
+        }
+    }
+
+    // Optional scrollback prefix — only ever pulled when the caller asks for it.
+    if let Some(lines) = scrollback_lines {
+        if lines > 0 {
+            let scrollback = {
+                let guard = shell_arc.lock().await;
+                guard.as_ref().map(|s| s.collect_scrollback(lines)).unwrap_or_default()
+            };
+            if !scrollback.is_empty() {
+                let count = scrollback.lines().count();
+                return Ok(format!(
+                    "--- scrollback ({count} lines) ---\n{scrollback}\n--- latest ---\n{response}"
+                ));
+            }
+        }
+    }
+
+    Ok(response)
 }
 
 /// Execute `send_text` - matches WCGW Python's `SendText` handling

@@ -118,7 +118,12 @@ async fn test_03_status_check() -> Result<()> {
     // Now do a status check - this should return an error since no command is running
     // after the previous one completed
     let status_cmd = BashCommand {
-        action_json: BashCommandAction::StatusCheck { status_check: true, bg_command_id: None },
+        action_json: BashCommandAction::StatusCheck {
+            status_check: true,
+            bg_command_id: None,
+            scrollback_lines: None,
+            verbose: false,
+        },
         wait_for_seconds: Some(2.0),
         thread_id: "i2238-status".to_string(),
     };
@@ -422,7 +427,12 @@ async fn test_full_workflow_i2238() -> Result<()> {
     // Status check
     sleep(Duration::from_millis(500)).await;
     let status_cmd = BashCommand {
-        action_json: BashCommandAction::StatusCheck { status_check: true, bg_command_id: None },
+        action_json: BashCommandAction::StatusCheck {
+            status_check: true,
+            bg_command_id: None,
+            scrollback_lines: None,
+            verbose: false,
+        },
         wait_for_seconds: Some(2.0),
         thread_id: "i2238".to_string(),
     };

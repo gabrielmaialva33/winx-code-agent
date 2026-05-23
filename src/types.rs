@@ -479,11 +479,21 @@ pub enum BashCommandAction {
         is_background: bool,
     },
 
-    /// Check the status of a running command
+    /// Check the status of a running command.
+    ///
+    /// By default returns only what changed since the previous call — agents
+    /// driving long-lived TUIs do not need the cumulative buffer on every poll.
+    /// Set `verbose: true` to receive a fresh snapshot regardless of the dedup
+    /// hash, or `scrollback_lines: Some(N)` to also pull the last N lines from
+    /// the PTY ringbuffer.
     StatusCheck {
         #[serde(default = "default_true")]
         status_check: bool,
         bg_command_id: Option<String>,
+        #[serde(default)]
+        scrollback_lines: Option<usize>,
+        #[serde(default)]
+        verbose: bool,
     },
 
     /// Send text to a running command. Set `submit` to true to append a carriage

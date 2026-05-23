@@ -264,6 +264,91 @@ async fn exited_bg_shell_status_check_returns_cached_output() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn idle_status_check_returns_compact_dedup_marker() -> Result<()> {
+    let thread_id = "pty-status-dedup";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+
+    let bg_response = run_command(&bash_state_arc, thread_id, "bash -c 'sleep 30'", true).await?;
+    let bg_id = bg_command_id(&bg_response).ok_or_else(|| {
+        WinxError::CommandExecutionError("background response should include id".to_string())
+    })?;
+
+    sleep(Duration::from_millis(400)).await;
+
+    // Two status_checks with no new output between them: the second one should
+    // hit the dedup path (body fingerprint matches the first response).
+    let first: String = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": { "type": "status_check", "bg_command_id": bg_id },
+            "wait_for_seconds": 0.3,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+
+    let second: String = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": { "type": "status_check", "bg_command_id": bg_id },
+            "wait_for_seconds": 0.3,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+
+    assert!(
+        second.contains("no new output since last check"),
+        "idle status_check should hit the dedup path. first=<{first}> second=<{second}>"
+    );
+    assert!(
+        second.len() <= first.len() + 64, // dedup marker is shorter than a typical body+status
+        "dedup response should not balloon"
+    );
+
+    // verbose=true must bypass dedup even when nothing changed.
+    let verbose: String = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": {
+                "type": "status_check",
+                "bg_command_id": bg_id,
+                "verbose": true
+            },
+            "wait_for_seconds": 0.3,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+
+    assert!(
+        !verbose.contains("no new output since last check"),
+        "verbose=true must not return the compact dedup marker: {verbose}"
+    );
+
+    // Clean up the sleep by sending Ctrl+C to the bg shell.
+    let _ = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": {
+                "type": "send_specials",
+                "send_specials": ["Ctrl-c"],
+                "bg_command_id": bg_id
+            },
+            "wait_for_seconds": 0.2,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cd_updates_status_and_persisted_cwd() -> Result<()> {
     let thread_id = "pty-cwd-regression";
     let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
