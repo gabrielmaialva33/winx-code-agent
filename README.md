@@ -64,46 +64,293 @@ The matcher is intentionally tolerant for common agent mistakes:
 - can use surrounding blocks as context to disambiguate repeated snippets;
 - supports single-line substring edits when the search block is part of a line.
 
-## Quick Start
+## Installation
 
-### Requirements
+Install the binary from crates.io:
 
-- Rust 1.75 or newer
+```bash
+cargo install winx-code-agent
+```
+
+This puts `winx-code-agent` on your `$PATH` (usually `~/.cargo/bin`). Every example below assumes the binary is reachable; if it isn't, use the absolute path returned by `which winx-code-agent`.
+
+Requirements:
+- Rust **1.75+** (`rustc --version`)
 - Linux, macOS, or WSL2
+- A terminal that can host a PTY (any standard terminal works)
 
-### Build
+<details>
+<summary><b>Claude Code (CLI)</b></summary>
 
-```bash
-git clone https://github.com/gabrielmaialva33/winx-code-agent.git
-cd winx-code-agent
-cargo build --release
-```
-
-### Run
+One-liner via the CLI (stdio is the default transport):
 
 ```bash
-./target/release/winx-code-agent serve
+claude mcp add winx -- winx-code-agent
 ```
 
-The server uses MCP over stdio.
-
-### MCP Client Configuration
-
-Example configuration:
+Or drop a `.mcp.json` in your project root:
 
 ```json
 {
   "mcpServers": {
     "winx": {
-      "command": "/absolute/path/to/winx-code-agent/target/release/winx-code-agent",
-      "args": ["serve"],
-      "env": {
-        "RUST_LOG": "warn"
-      }
+      "command": "winx-code-agent",
+      "env": { "RUST_LOG": "winx_code_agent=info" }
     }
   }
 }
 ```
+</details>
+
+<details>
+<summary><b>Claude Desktop</b></summary>
+
+Add to your config file (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS, `%APPDATA%\Claude\claude_desktop_config.json` on Windows):
+
+```json
+{
+  "mcpServers": {
+    "winx": {
+      "command": "winx-code-agent",
+      "env": { "RUST_LOG": "winx_code_agent=info" }
+    }
+  }
+}
+```
+
+Restart Claude Desktop after saving.
+</details>
+
+<details>
+<summary><b>Codex (OpenAI CLI)</b></summary>
+
+One-liner:
+
+```bash
+codex mcp add winx -- winx-code-agent
+```
+
+Or edit `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.winx]
+command = "winx-code-agent"
+env = { RUST_LOG = "winx_code_agent=info" }
+```
+</details>
+
+<details>
+<summary><b>Cursor</b></summary>
+
+Add to `~/.cursor/mcp.json` (or `.cursor/mcp.json` for project-local):
+
+```json
+{
+  "mcpServers": {
+    "winx": {
+      "command": "winx-code-agent",
+      "env": { "RUST_LOG": "winx_code_agent=info" }
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>VS Code (Copilot Chat / MCP)</b></summary>
+
+Add to `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "winx": {
+      "type": "stdio",
+      "command": "winx-code-agent"
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Zed</b></summary>
+
+Add to your Zed settings (`~/.config/zed/settings.json`):
+
+```json
+{
+  "context_servers": {
+    "winx": {
+      "source": "custom",
+      "command": "winx-code-agent",
+      "args": [],
+      "env": { "RUST_LOG": "winx_code_agent=info" }
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Windsurf</b></summary>
+
+Add to `~/.codeium/windsurf/mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "winx": {
+      "command": "winx-code-agent",
+      "env": { "RUST_LOG": "winx_code_agent=info" }
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>OpenCode</b></summary>
+
+Add to `opencode.json`:
+
+```json
+{
+  "mcp": {
+    "winx": {
+      "type": "local",
+      "command": ["winx-code-agent"],
+      "enabled": true,
+      "environment": { "RUST_LOG": "winx_code_agent=info" }
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Gemini CLI</b></summary>
+
+Add to `~/.gemini/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "winx": {
+      "command": "winx-code-agent",
+      "args": [],
+      "env": { "RUST_LOG": "winx_code_agent=info" }
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Continue.dev</b></summary>
+
+Add to your `~/.continue/config.yaml`:
+
+```yaml
+mcpServers:
+  - name: winx
+    command: winx-code-agent
+    env:
+      RUST_LOG: winx_code_agent=info
+```
+</details>
+
+<details>
+<summary><b>Kiro</b></summary>
+
+Add to `~/.kiro/settings/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "winx": {
+      "command": "winx-code-agent",
+      "env": { "RUST_LOG": "winx_code_agent=info" }
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Warp</b></summary>
+
+**Settings → MCP Servers → Add MCP Server**:
+
+```json
+{
+  "winx": {
+    "command": "winx-code-agent",
+    "env": { "RUST_LOG": "winx_code_agent=info" }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Roo Code</b></summary>
+
+Add to your Roo Code MCP config:
+
+```json
+{
+  "mcpServers": {
+    "winx": {
+      "type": "stdio",
+      "command": "winx-code-agent"
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Other clients (generic stdio)</b></summary>
+
+Any MCP client that supports a local stdio process can run Winx with this shape:
+
+```json
+{
+  "mcpServers": {
+    "winx": {
+      "command": "winx-code-agent",
+      "args": [],
+      "env": { "RUST_LOG": "winx_code_agent=info" }
+    }
+  }
+}
+```
+
+If the client cannot find `winx-code-agent` on `$PATH`, replace it with the absolute path (`which winx-code-agent` or `~/.cargo/bin/winx-code-agent`).
+</details>
+
+<details>
+<summary><b>Build from source (optional)</b></summary>
+
+If you want the latest unreleased changes or a custom build:
+
+```bash
+git clone https://github.com/gabrielmaialva33/winx-code-agent.git
+cd winx-code-agent
+cargo install --path .
+```
+
+`cargo install --path .` is the same as `cargo install winx-code-agent` but pinned to the working tree. You can also run the binary directly without installing:
+
+```bash
+cargo build --release
+./target/release/winx-code-agent
+```
+</details>
+
+### Verify the connection
+
+After configuring your client, the first tool call should be `Initialize`. From any MCP client you can confirm Winx is reachable by listing available tools — you should see `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`, `ContextSave`, and `ReadImage`.
 
 ## Development
 
