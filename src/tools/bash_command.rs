@@ -55,16 +55,32 @@ const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can
 
 // ==================== Background Shell Manager ====================
 
+/// Snapshot of a background shell that has exited but whose final output has not
+/// yet been consumed by the caller. We keep it around so the next call (typically
+/// a `status_check`) can return the trailing output before the entry is gone.
+#[derive(Debug, Clone)]
+pub struct ExitedShellInfo {
+    pub last_command: String,
+    pub final_output: String,
+    pub exited_at: Instant,
+}
+
 /// Manages background shell sessions - matches WCGW Python's `background_shells` dict
 #[derive(Debug, Default)]
 pub struct BackgroundShellManager {
     shells: HashMap<String, SharedPtyShell>,
+    /// Recently exited shells that still owe their final output to the caller.
+    /// Entries are consumed the first time the caller queries the id, then dropped.
+    tombstones: HashMap<String, ExitedShellInfo>,
 }
 
 impl BackgroundShellManager {
+    /// Tombstones older than this are garbage-collected on the next prune pass.
+    const TOMBSTONE_TTL: Duration = Duration::from_secs(300);
+
     /// Create a new background shell manager
     pub fn new() -> Self {
-        Self { shells: HashMap::new() }
+        Self { shells: HashMap::new(), tombstones: HashMap::new() }
     }
 
     /// Start a new background shell and return its command ID
@@ -100,7 +116,11 @@ impl BackgroundShellManager {
     }
 
     fn prune_finished_shells(&mut self) {
-        let mut finished = Vec::new();
+        // GC old tombstones first.
+        let now = Instant::now();
+        self.tombstones.retain(|_, info| now.duration_since(info.exited_at) < Self::TOMBSTONE_TTL);
+
+        let mut finished: Vec<(String, Option<ExitedShellInfo>)> = Vec::new();
 
         for (id, shell_arc) in &self.shells {
             let Ok(mut guard) = shell_arc.try_lock() else {
@@ -108,12 +128,17 @@ impl BackgroundShellManager {
             };
 
             let Some(shell) = guard.as_mut() else {
-                finished.push(id.clone());
+                finished.push((id.clone(), None));
                 continue;
             };
 
             if !shell.is_alive() {
-                finished.push(id.clone());
+                let tombstone = ExitedShellInfo {
+                    last_command: shell.last_command.clone(),
+                    final_output: shell.output_buffer.clone(),
+                    exited_at: now,
+                };
+                finished.push((id.clone(), Some(tombstone)));
                 continue;
             }
 
@@ -130,13 +155,27 @@ impl BackgroundShellManager {
             }
 
             if !shell.command_running {
-                finished.push(id.clone());
+                let tombstone = ExitedShellInfo {
+                    last_command: shell.last_command.clone(),
+                    final_output: shell.output_buffer.clone(),
+                    exited_at: now,
+                };
+                finished.push((id.clone(), Some(tombstone)));
             }
         }
 
-        for id in finished {
+        for (id, tombstone) in finished {
             self.remove_shell(&id);
+            if let Some(info) = tombstone {
+                self.tombstones.insert(id, info);
+            }
         }
+    }
+
+    /// Pop the tombstone for a recently-exited shell, if any. The caller takes
+    /// ownership of the final output; subsequent queries will return None.
+    pub fn take_tombstone(&mut self, bg_command_id: &str) -> Option<ExitedShellInfo> {
+        self.tombstones.remove(bg_command_id)
     }
 
     /// Get info about all running background shells - matches WCGW Python `get_bg_running_commandsinfo`
@@ -436,6 +475,13 @@ async fn execute_bash_action(
                     is_bg = true;
                     bg_id = Some(id.clone());
                     Some(shell)
+                } else if let Some(tombstone) = manager.take_tombstone(id) {
+                    // Shell already exited. For a status check we can hand back the
+                    // final cached output exactly once. For anything else (send_text,
+                    // send_specials, send_ascii) tell the caller the shell is gone
+                    // and include the captured output so they can recover state.
+                    drop(manager);
+                    return finalize_tombstone(&bash_state.cwd, id, tombstone, action);
                 } else {
                     // Error message matches WCGW Python
                     let error = format!(
@@ -459,14 +505,11 @@ async fn execute_bash_action(
         BashCommandAction::StatusCheck { .. } => {
             execute_status_check(bash_state, bg_shell, is_bg, bg_id.as_deref(), timeout_s).await
         }
-        BashCommandAction::SendText { send_text, .. } => {
-            execute_send_text(bash_state, send_text, bg_shell, is_bg, bg_id.as_deref(), timeout_s)
-                .await
-        }
-        BashCommandAction::SendSpecials { send_specials, .. } => {
-            execute_send_specials(
+        BashCommandAction::SendText { send_text, submit, .. } => {
+            execute_send_text(
                 bash_state,
-                send_specials,
+                send_text,
+                *submit,
                 bg_shell,
                 is_bg,
                 bg_id.as_deref(),
@@ -474,9 +517,29 @@ async fn execute_bash_action(
             )
             .await
         }
-        BashCommandAction::SendAscii { send_ascii, .. } => {
-            execute_send_ascii(bash_state, send_ascii, bg_shell, is_bg, bg_id.as_deref(), timeout_s)
-                .await
+        BashCommandAction::SendSpecials { send_specials, submit, .. } => {
+            execute_send_specials(
+                bash_state,
+                send_specials,
+                *submit,
+                bg_shell,
+                is_bg,
+                bg_id.as_deref(),
+                timeout_s,
+            )
+            .await
+        }
+        BashCommandAction::SendAscii { send_ascii, submit, .. } => {
+            execute_send_ascii(
+                bash_state,
+                send_ascii,
+                *submit,
+                bg_shell,
+                is_bg,
+                bg_id.as_deref(),
+                timeout_s,
+            )
+            .await
         }
     }
 }
@@ -669,6 +732,47 @@ async fn wait_for_output(
     Ok(format!("{rendered}{status}"))
 }
 
+/// Render the final cached output of an exited background shell.
+///
+/// `status_check` is allowed to "consume" the tombstone and return the trailing
+/// output exactly once. Send-style actions (`send_text`, `send_specials`,
+/// `send_ascii`) cannot interact with a dead shell, so we return an explicit
+/// error that still includes the captured output so the agent can recover state.
+fn finalize_tombstone(
+    cwd: &Path,
+    id: &str,
+    tombstone: ExitedShellInfo,
+    action: &BashCommandAction,
+) -> Result<String> {
+    let ExitedShellInfo { last_command, final_output, .. } = tombstone;
+    match action {
+        BashCommandAction::StatusCheck { .. } => {
+            let rendered = wcgw_incremental_text(&final_output, "");
+            let rendered = if rendered.len() > MAX_OUTPUT_LENGTH {
+                format!("(...truncated)\n{}", &rendered[rendered.len() - MAX_OUTPUT_LENGTH..])
+            } else {
+                rendered
+            };
+            // Build a compact status block matching `get_status` for a finished bg shell.
+            let mut status = "\n\n---\n\n".to_string();
+            let _ = writeln!(status, "bg_command_id = {id}");
+            status.push_str("status = process exited\n");
+            let _ = writeln!(status, "cwd = {}", cwd.display());
+            Ok(format!("{rendered}{}", status.trim_end()))
+        }
+        BashCommandAction::SendText { .. }
+        | BashCommandAction::SendSpecials { .. }
+        | BashCommandAction::SendAscii { .. } => Err(WinxError::CommandExecutionError(format!(
+            "Background shell {id} already exited (last command: {last_command}).\nFinal captured output:\n{final_output}"
+        ))),
+        BashCommandAction::Command { .. } => {
+            // We only enter `finalize_tombstone` from the bg routing path, which
+            // never matches Command. Treat this as a programmer error.
+            unreachable!("finalize_tombstone called for non-bg action")
+        }
+    }
+}
+
 /// Execute a status check - matches WCGW Python's `StatusCheck` handling
 async fn execute_status_check(
     bash_state: &mut BashState,
@@ -711,12 +815,13 @@ async fn execute_status_check(
 async fn execute_send_text(
     bash_state: &mut BashState,
     text: &str,
+    submit: bool,
     bg_shell: Option<SharedPtyShell>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
 ) -> Result<String> {
-    debug!("Processing SendText action: {}", text);
+    debug!("Processing SendText action: {text:?} (submit={submit})");
 
     // Validate - matches WCGW Python
     if text.is_empty() {
@@ -737,10 +842,14 @@ async fn execute_send_text(
         // Send in chunks - matches WCGW Python: for i in range(0, len(command_data.send_text), 128)
         send_utf8_in_byte_chunks(bash, text, TEXT_CHUNK_SIZE)?;
 
-        // Send linesep - matches WCGW Python bash_state.send(bash_state.linesep, ...)
-        bash.send_special_key("Enter").map_err(|e| {
-            WinxError::CommandExecutionError(format!("Failed to send newline: {e}"))
-        })?;
+        // Only append Enter when the caller explicitly asks to submit. Many TUIs
+        // (e.g., Claude Code) treat a bare CR as a soft newline inside the input
+        // box, so blindly auto-Entering interferes with multi-step interaction.
+        if submit {
+            bash.send_special_key("Enter").map_err(|e| {
+                WinxError::CommandExecutionError(format!("Failed to send newline: {e}"))
+            })?;
+        }
     }
 
     // Wait for output
@@ -751,12 +860,13 @@ async fn execute_send_text(
 async fn execute_send_specials(
     bash_state: &mut BashState,
     keys: &[SpecialKey],
+    submit: bool,
     bg_shell: Option<SharedPtyShell>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
 ) -> Result<String> {
-    debug!("Processing SendSpecials action: {:?}", keys);
+    debug!("Processing SendSpecials action: {keys:?} (submit={submit})");
 
     // Validate - matches WCGW Python
     if keys.is_empty() {
@@ -828,6 +938,11 @@ async fn execute_send_specials(
                 }
             }
         }
+        // Submit (append Enter) only when explicitly requested by the caller.
+        if submit {
+            bash.send_special_key("Enter")
+                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to submit: {e}")))?;
+        }
     }
 
     // Wait for output
@@ -846,12 +961,13 @@ async fn execute_send_specials(
 async fn execute_send_ascii(
     bash_state: &mut BashState,
     ascii_codes: &[u8],
+    submit: bool,
     bg_shell: Option<SharedPtyShell>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
 ) -> Result<String> {
-    debug!("Processing SendAscii action: {:?}", ascii_codes);
+    debug!("Processing SendAscii action: {ascii_codes:?} (submit={submit})");
 
     // Validate - matches WCGW Python
     if ascii_codes.is_empty() {
@@ -879,6 +995,11 @@ async fn execute_send_ascii(
             if code == 3 {
                 is_interrupt = true;
             }
+        }
+        // Submit (append Enter) only when explicitly requested by the caller.
+        if submit {
+            bash.send_special_key("Enter")
+                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to submit: {e}")))?;
         }
     }
 

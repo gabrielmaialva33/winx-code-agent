@@ -133,6 +133,128 @@ async fn completed_background_shell_is_pruned_from_main_status() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn send_text_does_not_submit_by_default() -> Result<()> {
+    let thread_id = "pty-send-text-no-submit";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+
+    let bg_response = run_command(
+        &bash_state_arc,
+        thread_id,
+        "bash -c 'read -p \"name? \" answer && echo got=\"$answer\"'",
+        true,
+    )
+    .await?;
+    let bg_id = bg_command_id(&bg_response).ok_or_else(|| {
+        WinxError::CommandExecutionError("background response should include id".to_string())
+    })?;
+
+    sleep(Duration::from_millis(200)).await;
+
+    // submit=false (default): text is typed but the command keeps waiting on read.
+    let send_response: String = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": {
+                "type": "send_text",
+                "send_text": "gabriel",
+                "bg_command_id": bg_id
+            },
+            "wait_for_seconds": 0.4,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+
+    assert!(
+        send_response.contains("status = still running"),
+        "send_text without submit should leave the read waiting: {send_response}"
+    );
+
+    // Now submit via send_specials Enter and verify the command completes.
+    let submit_response: String = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": {
+                "type": "send_specials",
+                "send_specials": ["Enter"],
+                "bg_command_id": bg_id
+            },
+            "wait_for_seconds": 0.6,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+
+    assert!(
+        submit_response.contains("got=gabriel"),
+        "submit=true should deliver the buffered text: {submit_response}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn exited_bg_shell_status_check_returns_cached_output() -> Result<()> {
+    let thread_id = "pty-tombstone";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+
+    let bg_response =
+        run_command(&bash_state_arc, thread_id, "printf 'tombstone-output\\n'", true).await?;
+    let bg_id = bg_command_id(&bg_response).ok_or_else(|| {
+        WinxError::CommandExecutionError("background response should include id".to_string())
+    })?;
+
+    sleep(Duration::from_millis(400)).await;
+
+    // First, run a foreground command to trigger pruning of the finished bg shell.
+    let _ = run_command(&bash_state_arc, thread_id, "true", false).await?;
+
+    // Tombstone should still let one status_check pull the cached output.
+    let status_response: String = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": {
+                "type": "status_check",
+                "bg_command_id": bg_id
+            },
+            "wait_for_seconds": 0.2,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+
+    assert!(
+        status_response.contains("tombstone-output"),
+        "tombstoned status_check should return cached output: {status_response}"
+    );
+    assert!(
+        status_response.contains("status = process exited"),
+        "tombstoned status_check should report process exited: {status_response}"
+    );
+
+    // After consumption, subsequent status_check on the same id must fail again.
+    let after = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": {
+                "type": "status_check",
+                "bg_command_id": bg_id
+            },
+            "wait_for_seconds": 0.2,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await;
+    assert!(after.is_err(), "tombstone should only be consumable once");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn cd_updates_status_and_persisted_cwd() -> Result<()> {
     let thread_id = "pty-cwd-regression";
     let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;

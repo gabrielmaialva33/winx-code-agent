@@ -172,6 +172,7 @@ async fn test_04_send_text() -> Result<()> {
         action_json: BashCommandAction::SendText {
             send_text: "hello from send_text".to_string(),
             bg_command_id: None,
+            submit: false,
         },
         wait_for_seconds: Some(2.0),
         thread_id: "i2238-sendtext".to_string(),
@@ -199,6 +200,7 @@ async fn test_04_send_text() -> Result<()> {
         action_json: BashCommandAction::SendSpecials {
             send_specials: vec![SpecialKey::CtrlD],
             bg_command_id: None,
+            submit: false,
         },
         wait_for_seconds: Some(2.0),
         thread_id: "i2238-sendtext".to_string(),
@@ -242,6 +244,7 @@ async fn test_05_send_specials_ctrl_c() -> Result<()> {
         action_json: BashCommandAction::SendSpecials {
             send_specials: vec![SpecialKey::CtrlC],
             bg_command_id: None,
+            submit: false,
         },
         wait_for_seconds: Some(3.0),
         thread_id: "i2238-ctrlc".to_string(),
@@ -359,6 +362,7 @@ async fn test_08_arrow_keys() -> Result<()> {
         action_json: BashCommandAction::SendSpecials {
             send_specials: vec![SpecialKey::KeyUp],
             bg_command_id: None,
+            submit: false,
         },
         wait_for_seconds: Some(2.0),
         thread_id: "i2238-arrows".to_string(),
@@ -429,6 +433,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         action_json: BashCommandAction::SendSpecials {
             send_specials: vec![SpecialKey::CtrlC],
             bg_command_id: None,
+            submit: false,
         },
         wait_for_seconds: Some(3.0),
         thread_id: "i2238".to_string(),
@@ -452,6 +457,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         action_json: BashCommandAction::SendText {
             send_text: "hello".to_string(),
             bg_command_id: None,
+            submit: false,
         },
         wait_for_seconds: Some(3.0),
         thread_id: "i2238".to_string(),

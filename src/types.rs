@@ -486,14 +486,33 @@ pub enum BashCommandAction {
         bg_command_id: Option<String>,
     },
 
-    /// Send text to a running command
-    SendText { send_text: String, bg_command_id: Option<String> },
+    /// Send text to a running command. Set `submit` to true to append a carriage
+    /// return after the bytes so the target program receives the input as a
+    /// completed line (matches what hitting Enter would do in a TUI).
+    SendText {
+        send_text: String,
+        bg_command_id: Option<String>,
+        #[serde(default)]
+        submit: bool,
+    },
 
-    /// Send special keys to a running command
-    SendSpecials { send_specials: Vec<SpecialKey>, bg_command_id: Option<String> },
+    /// Send special keys to a running command. `submit` works the same as in
+    /// `SendText`.
+    SendSpecials {
+        send_specials: Vec<SpecialKey>,
+        bg_command_id: Option<String>,
+        #[serde(default)]
+        submit: bool,
+    },
 
-    /// Send ASCII characters to a running command
-    SendAscii { send_ascii: Vec<u8>, bg_command_id: Option<String> },
+    /// Send ASCII characters to a running command. `submit` works the same as in
+    /// `SendText`.
+    SendAscii {
+        send_ascii: Vec<u8>,
+        bg_command_id: Option<String>,
+        #[serde(default)]
+        submit: bool,
+    },
 }
 
 /// Parameters for the `BashCommand` tool
