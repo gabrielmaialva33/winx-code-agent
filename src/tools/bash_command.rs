@@ -845,6 +845,7 @@ async fn execute_send_ascii(
 }
 
 /// Execute command in background - matches WCGW Python's `is_background` handling
+#[allow(clippy::unused_async)]
 async fn execute_in_background(
     bash_state: &mut BashState,
     command: &str,
@@ -907,43 +908,12 @@ async fn execute_in_background(
         };
     }
 
-    // Wait briefly and get initial output
-    sleep(Duration::from_secs_f64(timeout_s.min(DEFAULT_TIMEOUT))).await;
-
-    let (output, complete) = {
-        let mut guard = shell_arc
-            .lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg shell: {e}")))?;
-
-        if let Some(bash) = guard.as_mut() {
-            bash.read_output(0.5).map_err(|e| {
-                WinxError::CommandExecutionError(format!("Failed to read output: {e}"))
-            })?
-        } else {
-            (String::new(), true)
-        }
-    };
-
-    // Process output
-    let rendered = wcgw_incremental_text(&output, "");
-    let rendered = if rendered.len() > MAX_OUTPUT_LENGTH {
-        format!("(...truncated)\n{}", &rendered[rendered.len() - MAX_OUTPUT_LENGTH..])
-    } else {
-        rendered
-    };
-
-    // Build status with bg_command_id - matches WCGW Python
-    let status = get_status(bash_state, true, Some(&bg_id), !complete, None);
-
-    // Cleanup if complete - matches WCGW Python
-    if complete {
-        let mut manager = BG_SHELL_MANAGER.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}"))
-        })?;
-        manager.remove_shell(&bg_id);
-    }
-
-    Ok(format!("{rendered}{status}"))
+    // With Stdio::piped() shells, read_output is sync and stalls the Tokio worker,
+    // preventing the JSON-RPC response from being sent. Return the bg_command_id
+    // immediately so the client can poll via StatusCheck without blocking.
+    let _ = timeout_s;
+    let _ = shell_arc;
+    Ok(get_status(bash_state, true, Some(&bg_id), true, None))
 }
 
 // ==================== Legacy Screen-based Functions (kept for backward compatibility) ====================
