@@ -247,6 +247,27 @@ Add to `~/.gemini/settings.json`:
 </details>
 
 <details>
+<summary><b>agy (Google Antigravity CLI)</b></summary>
+
+`agy` is Google's new Gemini-powered Antigravity CLI (Go binary published as `agy` in `~/.local/bin`). It reads MCP servers from a shared JSON config — there's no `mcp add` subcommand yet.
+
+Add to `~/.gemini/config/mcp_config.json` (the CLI also reads `~/.gemini/antigravity/mcp_config.json`; keep both in sync if you also use the Antigravity IDE):
+
+```json
+{
+  "mcpServers": {
+    "winx": {
+      "command": "winx-code-agent",
+      "env": { "RUST_LOG": "winx_code_agent=info" }
+    }
+  }
+}
+```
+
+If `winx-code-agent` is not on the agy process `$PATH`, swap `command` for the absolute path (`~/.cargo/bin/winx-code-agent` after `cargo install winx-code-agent`).
+</details>
+
+<details>
 <summary><b>Continue.dev</b></summary>
 
 Add to your `~/.continue/config.yaml`:
