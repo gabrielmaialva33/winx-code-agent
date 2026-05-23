@@ -258,7 +258,7 @@ fn test_read_files_deserializes_wcgw_line_ranges(
 }
 
 #[test]
-fn test_bash_command_deserializer_normalizes_thread_id_and_strips_tail(
+fn test_bash_command_deserializer_normalizes_thread_id_and_preserves_tail(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let bash_command: BashCommand = serde_json::from_value(json!({
         "action_json": {
@@ -270,7 +270,7 @@ fn test_bash_command_deserializer_normalizes_thread_id_and_strips_tail(
 
     assert_eq!(bash_command.thread_id, "thread123_");
     if let BashCommandAction::Command { command, .. } = bash_command.action_json {
-        assert_eq!(command, "rg TODO src");
+        assert_eq!(command, "rg TODO src | tail -n 20");
     } else {
         return Err("expected command action".into());
     }

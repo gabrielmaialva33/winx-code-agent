@@ -6,9 +6,10 @@
 
 use anyhow::Context as AnyhowContext;
 use rand::RngExt;
+use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
@@ -98,8 +99,42 @@ impl BackgroundShellManager {
         }
     }
 
+    fn prune_finished_shells(&mut self) {
+        let mut finished = Vec::new();
+
+        for (id, shell_arc) in &self.shells {
+            let Ok(mut guard) = shell_arc.try_lock() else {
+                continue;
+            };
+
+            let Some(shell) = guard.as_mut() else {
+                finished.push(id.clone());
+                continue;
+            };
+
+            if !shell.is_alive() {
+                finished.push(id.clone());
+                continue;
+            }
+
+            if shell.command_running {
+                let _ = shell.read_output(0.1);
+            }
+
+            if !shell.command_running {
+                finished.push(id.clone());
+            }
+        }
+
+        for id in finished {
+            self.remove_shell(&id);
+        }
+    }
+
     /// Get info about all running background shells - matches WCGW Python `get_bg_running_commandsinfo`
-    pub fn get_running_info(&self) -> String {
+    pub fn get_running_info(&mut self) -> String {
+        self.prune_finished_shells();
+
         if self.shells.is_empty() {
             return "No command running in background.\n".to_string();
         }
@@ -108,7 +143,10 @@ impl BackgroundShellManager {
         for (id, shell_arc) in &self.shells {
             if let Ok(guard) = shell_arc.try_lock() {
                 if let Some(bash) = guard.as_ref() {
-                    running.push(format!("Command: {}, bg_command_id: {}", bash.last_command, id));
+                    if bash.command_running {
+                        running
+                            .push(format!("Command: {}, bg_command_id: {}", bash.last_command, id));
+                    }
                 }
             } else {
                 running.push(format!("Command: <busy>, bg_command_id: {id}"));
@@ -159,7 +197,7 @@ fn get_status(
 
     if !is_bg {
         // Add background shell info for main shell - matches WCGW Python
-        if let Ok(manager) = BG_SHELL_MANAGER.lock() {
+        if let Ok(mut manager) = BG_SHELL_MANAGER.lock() {
             status.push_str("This is the main shell. ");
             status.push_str(&manager.get_running_info());
         }
@@ -196,6 +234,18 @@ fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> String {
     // Get incremental part - matches WCGW Python get_incremental_output
     let incremental = get_incremental_output(&last_rendered, &new_rendered);
     rstrip_lines(&incremental)
+}
+
+fn extract_prompt_cwd(output: &str) -> Option<PathBuf> {
+    let stripped = strip_ansi_codes(output);
+    let prompt_regex = Regex::new(r"◉ (?P<cwd>[^\r\n]*?)──➤").ok()?;
+
+    prompt_regex
+        .captures_iter(&stripped)
+        .filter_map(|captures| captures.name("cwd").map(|cwd| cwd.as_str().trim()))
+        .filter(|cwd| !cwd.is_empty())
+        .last()
+        .map(PathBuf::from)
 }
 
 /// Right-strip each line and join - matches WCGW Python rstrip
@@ -330,6 +380,13 @@ pub async fn handle_tool_call(
     // Execute the action based on type - matches WCGW Python's _execute_bash()
     let result = execute_bash_action(&mut bash_state, &bash_command.action_json, timeout_s).await;
 
+    {
+        let mut bash_state_guard = bash_state_arc.lock().await;
+        if let Some(state) = bash_state_guard.as_mut() {
+            state.cwd.clone_from(&bash_state.cwd);
+        }
+    }
+
     // Remove echo if it's a command - matches WCGW Python
     match result {
         Ok(mut output) => {
@@ -362,9 +419,10 @@ async fn execute_bash_action(
         | BashCommandAction::SendSpecials { bg_command_id, .. }
         | BashCommandAction::SendAscii { bg_command_id, .. } => {
             if let Some(id) = bg_command_id {
-                let manager = BG_SHELL_MANAGER.lock().map_err(|e| {
+                let mut manager = BG_SHELL_MANAGER.lock().map_err(|e| {
                     WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}"))
                 })?;
+                manager.prune_finished_shells();
 
                 if let Some(shell) = manager.get_shell(id) {
                     is_bg = true;
@@ -492,7 +550,7 @@ async fn execute_command(
 ///
 /// `shell_arc` selects which shell to read from (main shell or a bg shell handle).
 async fn wait_for_output(
-    bash_state: &BashState,
+    bash_state: &mut BashState,
     shell_arc: &SharedPtyShell,
     timeout_s: f64,
     is_bg: bool,
@@ -575,6 +633,12 @@ async fn wait_for_output(
         }
     }
 
+    if complete {
+        if let Some(cwd) = extract_prompt_cwd(&output) {
+            bash_state.cwd = cwd;
+        }
+    }
+
     // Process output through terminal emulation - matches WCGW Python _incremental_text
     let rendered = wcgw_incremental_text(&output, &last_pending_output);
 
@@ -623,7 +687,7 @@ async fn execute_status_check(
 
     // If no command running and not background, return error - matches WCGW Python
     if !is_running && !is_bg {
-        let manager = BG_SHELL_MANAGER.lock().map_err(|e| {
+        let mut manager = BG_SHELL_MANAGER.lock().map_err(|e| {
             WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}"))
         })?;
         let error =

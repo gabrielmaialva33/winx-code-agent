@@ -463,41 +463,6 @@ impl ReadFiles {
     }
 }
 
-fn strip_tail_pipe(command: &str) -> String {
-    let trimmed = command.trim_end();
-    let Some((prefix, tail_part)) = trimmed.rsplit_once('|') else {
-        return command.to_string();
-    };
-
-    if is_tail_invocation(tail_part.trim()) {
-        prefix.trim_end().to_string()
-    } else {
-        command.to_string()
-    }
-}
-
-fn is_tail_invocation(tail_part: &str) -> bool {
-    let mut parts = tail_part.split_whitespace();
-    if parts.next() != Some("tail") {
-        return false;
-    }
-
-    match (parts.next(), parts.next(), parts.next()) {
-        (None, None, None) => true,
-        (Some(count), None, None) => tail_count_arg(count),
-        (Some("-n"), Some(count), None) => count.chars().all(|c| c.is_ascii_digit()),
-        _ => false,
-    }
-}
-
-fn tail_count_arg(arg: &str) -> bool {
-    if arg.chars().all(|c| c.is_ascii_digit()) {
-        return true;
-    }
-
-    arg.strip_prefix('-').is_some_and(|count| count.chars().all(|c| c.is_ascii_digit()))
-}
-
 /// Default true value for `status_check`
 fn default_true() -> bool {
     true
@@ -648,10 +613,6 @@ if err_str.contains("unexpected token") || err_str.contains("Unexpected token") 
 
 serde::de::Error::custom(format!("Invalid action_json: {e}. Please ensure your JSON is properly formatted."))
         })?;
-
-        if let BashCommandAction::Command { command, .. } = &mut action {
-            *command = strip_tail_pipe(command);
-        }
 
         // Return the properly constructed BashCommand
         Ok(BashCommand {

@@ -8,7 +8,7 @@
 //! - Job control signals (Ctrl+C, Ctrl+Z, etc.)
 
 use anyhow::{anyhow, Context, Result};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::mpsc::{self, TryRecvError};
@@ -36,6 +36,8 @@ const WCGW_PROMPT_END: &str = "──➤";
 pub struct PtyShell {
     /// The PTY master handle for resize operations
     master: Box<dyn MasterPty + Send>,
+    /// Child process running the shell
+    child: Box<dyn Child + Send + Sync>,
     /// Writer for PTY input (taken from master)
     writer: Box<dyn Write + Send>,
     /// Channel receiver for output from reader thread
@@ -111,7 +113,7 @@ impl PtyShell {
         cmd.cwd(initial_dir);
 
         // Spawn bash in the PTY slave
-        let _child = pair.slave.spawn_command(cmd).context("Failed to spawn bash in PTY")?;
+        let child = pair.slave.spawn_command(cmd).context("Failed to spawn bash in PTY")?;
 
         // Get reader and writer from master
         let mut reader = pair.master.try_clone_reader().context("Failed to clone PTY reader")?;
@@ -149,6 +151,7 @@ impl PtyShell {
         // Create the shell instance
         let mut shell = Self {
             master: pair.master,
+            child,
             writer,
             output_rx,
             size,
@@ -410,10 +413,8 @@ impl PtyShell {
     }
 
     /// Check if the shell is still alive
-    pub fn is_alive(&self) -> bool {
-        // Try a non-blocking read to check if PTY is still valid
-        // If we get an error that's not WouldBlock, the PTY is dead
-        true // PTY handles this internally
+    pub fn is_alive(&mut self) -> bool {
+        self.child.try_wait().is_ok_and(|status| status.is_none())
     }
 }
 
