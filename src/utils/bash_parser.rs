@@ -63,7 +63,7 @@ fn collect_statement_nodes(node: Node<'_>, statements: &mut Vec<StatementNode>) 
         });
     }
 
-    for index in 0..node.named_child_count() {
+    for index in 0..node.named_child_count() as u32 {
         if let Some(child) = node.named_child(index) {
             collect_statement_nodes(child, statements);
         }
