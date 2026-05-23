@@ -107,7 +107,7 @@ impl PtyShell {
         cmd.env("ROWS", DEFAULT_ROWS.to_string());
         // WCGW-style prompt for command completion detection
         // Note: removed \r\e[2K which was erasing the prompt before it could be detected
-        cmd.env("PROMPT_COMMAND", r#"printf '◉ '"$(pwd)"'──➤ '"#);
+        cmd.env("PROMPT_COMMAND", r#"printf "◉ %s──➤ " "$PWD""#);
         cmd.cwd(initial_dir);
 
         // Spawn bash in the PTY slave
@@ -171,7 +171,7 @@ impl PtyShell {
         // Set up the dynamic prompt - matches WCGW Python PROMPT_STATEMENT
         // Note: removed \r\e[2K which was erasing the prompt before it could be detected
         let prompt_statement =
-            r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ $(pwd)──➤ '"'"#;
+            r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ %s──➤ " "$PWD"'"#;
 
         self.write_command(prompt_statement)?;
 
@@ -352,7 +352,13 @@ impl PtyShell {
     /// Send text directly to the PTY (for interactive input)
     pub fn send_text(&mut self, text: &str) -> Result<()> {
         debug!("PTY sending text: {:?}", text);
-        self.writer.write_all(text.as_bytes()).context("Failed to send text")?;
+        self.send_bytes(text.as_bytes()).context("Failed to send text")?;
+        Ok(())
+    }
+
+    /// Send raw bytes directly to the PTY.
+    pub fn send_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        self.writer.write_all(bytes).context("Failed to send bytes")?;
         self.writer.flush()?;
         Ok(())
     }
@@ -382,8 +388,7 @@ impl PtyShell {
         };
 
         debug!("PTY sending special key: {} ({:?})", key, bytes);
-        self.writer.write_all(bytes)?;
-        self.writer.flush()?;
+        self.send_bytes(bytes)?;
         Ok(())
     }
 

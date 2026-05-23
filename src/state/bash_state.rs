@@ -1,21 +1,13 @@
 #![allow(clippy::unwrap_used)]
-#![allow(clippy::expect_used)]
-use anyhow::{anyhow, Context as AnyhowContext, Result};
-use glob;
-use lazy_static::lazy_static;
+use anyhow::Result;
 use rand::RngExt;
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{BufReader, ErrorKind, Read, Write};
-#[cfg(unix)]
-use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tracing::{debug, info, warn};
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::Mutex;
+use tracing::info;
 
 use crate::state::persistence::{
     delete_bash_state as delete_state_file, load_bash_state as load_state_file,
@@ -113,7 +105,7 @@ pub struct TerminalState {
     pub last_command: String,
     pub last_pending_output: String,
     pub command_running: bool,
-    pub terminal_emulator: Arc<Mutex<TerminalEmulator>>,
+    pub terminal_emulator: Arc<StdMutex<TerminalEmulator>>,
     pub diff_detector: Option<TerminalOutputDiff>,
     pub limit_buffer: bool,
     pub max_buffer_lines: usize,
@@ -131,7 +123,7 @@ impl TerminalState {
             last_command: String::new(),
             last_pending_output: String::new(),
             command_running: false,
-            terminal_emulator: Arc::new(Mutex::new(TerminalEmulator::new(160))),
+            terminal_emulator: Arc::new(StdMutex::new(TerminalEmulator::new(160))),
             diff_detector: Some(TerminalOutputDiff::new()),
             limit_buffer: false,
             max_buffer_lines: DEFAULT_MAX_SCREEN_LINES,
@@ -163,29 +155,6 @@ impl TerminalState {
     }
 }
 
-const WCGW_PROMPT_PATTERN: &str = r"◉ ([^\n]*)──➤";
-const WCGW_PROMPT_COMMAND: &str = r#"printf '◉ "$(pwd)"──➤ '"#;
-const BASH_PROMPT_STATEMENT: &str =
-    r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf \"◉ $(pwd)──➤ \"'"#;
-
-lazy_static! {
-    static ref PROMPT_REGEX: Regex = Regex::new(WCGW_PROMPT_PATTERN).expect("Invalid prompt regex");
-}
-
-fn contains_wcgw_prompt(text: &str) -> bool {
-    PROMPT_REGEX.is_match(text)
-}
-
-const MAX_OUTPUT_SIZE: usize = 1_000_000;
-const MAX_COMMAND_TIMEOUT: f32 = 60.0;
-const DEFAULT_BUFFER_SIZE: usize = 8192;
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum CommandState {
-    Idle,
-    Running { start_time: std::time::SystemTime, command: String },
-}
-
 #[derive(Debug, Clone)]
 pub struct BashState {
     pub cwd: PathBuf,
@@ -197,190 +166,8 @@ pub struct BashState {
     pub write_if_empty_mode: WriteIfEmptyMode,
     pub whitelist_for_overwrite: HashMap<String, FileWhitelistData>,
     pub terminal_state: TerminalState,
-    pub interactive_bash: Arc<Mutex<Option<InteractiveBash>>>,
     pub pty_shell: Arc<Mutex<Option<PtyShell>>>,
     pub initialized: bool,
-}
-
-#[derive(Debug)]
-pub struct InteractiveBash {
-    pub process: Child,
-    pub last_command: String,
-    pub last_output: String,
-    pub output_buffer: String,
-    pub command_state: CommandState,
-    pub max_output_size: usize,
-    pub output_truncated: bool,
-    pub output_chunks: Vec<String>,
-    initial_dir: PathBuf,
-    restricted_mode: bool,
-}
-
-/// Mark the child's stdout pipe non-blocking so `read_output` can honor its timeout
-/// instead of blocking forever when bash produces no output.
-#[cfg(unix)]
-fn set_stdout_nonblocking(process: &Child) -> Result<()> {
-    if let Some(stdout) = process.stdout.as_ref() {
-        let fd = stdout.as_raw_fd();
-        // SAFETY: fd is owned by `process.stdout` for the lifetime of the Child;
-        // fcntl with F_GETFL/F_SETFL is sound on a valid pipe fd.
-        unsafe {
-            let flags = libc::fcntl(fd, libc::F_GETFL);
-            if flags < 0 {
-                return Err(anyhow!("fcntl F_GETFL failed on bash stdout"));
-            }
-            if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
-                return Err(anyhow!("fcntl F_SETFL O_NONBLOCK failed on bash stdout"));
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_stdout_nonblocking(_process: &Child) -> Result<()> {
-    Ok(())
-}
-
-impl InteractiveBash {
-    pub fn is_alive(&mut self) -> bool {
-        matches!(self.process.try_wait(), Ok(None))
-    }
-
-    pub fn reinit(&mut self) -> Result<()> {
-        let mut cmd = Command::new("bash");
-        cmd.arg("-i");
-        if self.restricted_mode {
-            cmd.arg("-r");
-        }
-        let mut process = cmd
-            .env("PAGER", "cat")
-            .env("GIT_PAGER", "cat")
-            .env("PROMPT_COMMAND", WCGW_PROMPT_COMMAND)
-            .env("TERM", "xterm-256color")
-            .current_dir(&self.initial_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let mut stdin = process.stdin.take().ok_or_else(|| anyhow!("No stdin"))?;
-        writeln!(stdin, "{BASH_PROMPT_STATEMENT}")?;
-        stdin.flush()?;
-        process.stdin = Some(stdin);
-        set_stdout_nonblocking(&process)?;
-        self.process = process;
-        self.command_state = CommandState::Idle;
-        Ok(())
-    }
-
-    pub fn ensure_alive(&mut self) -> Result<()> {
-        if !self.is_alive() {
-            self.reinit()?;
-        }
-        Ok(())
-    }
-
-    pub fn new(initial_dir: &Path, restricted_mode: bool) -> Result<Self> {
-        let mut cmd = Command::new("bash");
-        cmd.arg("-i");
-        if restricted_mode {
-            cmd.arg("-r");
-        }
-        let mut process = cmd
-            .env("PAGER", "cat")
-            .env("GIT_PAGER", "cat")
-            .env("PROMPT_COMMAND", WCGW_PROMPT_COMMAND)
-            .env("TERM", "xterm-256color")
-            .current_dir(initial_dir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let mut stdin = process.stdin.take().ok_or_else(|| anyhow!("No stdin"))?;
-        writeln!(stdin, "{BASH_PROMPT_STATEMENT}")?;
-        stdin.flush()?;
-        process.stdin = Some(stdin);
-        set_stdout_nonblocking(&process)?;
-        Ok(Self {
-            process,
-            last_command: String::new(),
-            last_output: String::new(),
-            output_buffer: String::new(),
-            command_state: CommandState::Idle,
-            max_output_size: MAX_OUTPUT_SIZE,
-            output_truncated: false,
-            output_chunks: Vec::new(),
-            initial_dir: initial_dir.to_path_buf(),
-            restricted_mode,
-        })
-    }
-
-    pub fn send_command(&mut self, command: &str) -> Result<()> {
-        self.ensure_alive()?;
-        let mut stdin = self.process.stdin.take().ok_or_else(|| anyhow!("No stdin"))?;
-        writeln!(stdin, "{command}")?;
-        stdin.flush()?;
-        self.process.stdin = Some(stdin);
-        self.last_command = command.to_string();
-        self.command_state = CommandState::Running {
-            start_time: std::time::SystemTime::now(),
-            command: command.to_string(),
-        };
-        Ok(())
-    }
-
-    pub fn read_output(&mut self, timeout_secs: f32) -> Result<(String, bool)> {
-        let timeout = Duration::from_secs_f32(timeout_secs.clamp(0.1, MAX_COMMAND_TIMEOUT));
-        let start = Instant::now();
-        let mut new_output = String::new();
-        let mut complete = false;
-        let mut full_output = self.last_output.clone();
-
-        while start.elapsed() < timeout {
-            let mut buf = vec![0; DEFAULT_BUFFER_SIZE];
-            if let Some(stdout) = self.process.stdout.as_mut() {
-                match stdout.read(&mut buf) {
-                    Ok(0) => break, // EOF — child closed stdout
-                    Ok(n) => {
-                        let chunk = String::from_utf8_lossy(&buf[..n]);
-                        full_output.push_str(&chunk);
-                        new_output.push_str(&chunk);
-                        if contains_wcgw_prompt(&full_output) {
-                            complete = true;
-                            break;
-                        }
-                        continue; // try reading more without sleeping
-                    }
-                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                        // No data available right now; fall through to sleep + retry.
-                    }
-                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-                    Err(e) => {
-                        warn!("read_output: stdout read error: {e}");
-                        break;
-                    }
-                }
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-
-        if complete {
-            self.command_state = CommandState::Idle;
-        }
-        self.last_output.clone_from(&full_output);
-        Ok((full_output, complete))
-    }
-
-    pub fn send_interrupt(&mut self) -> Result<()> {
-        #[cfg(unix)]
-        {
-            let pid = self.process.id() as i32;
-            unsafe {
-                libc::kill(pid, libc::SIGINT);
-            }
-        }
-        Ok(())
-    }
 }
 
 impl Default for BashState {
@@ -407,18 +194,15 @@ impl BashState {
             },
             whitelist_for_overwrite: HashMap::new(),
             terminal_state: TerminalState::new(),
-            interactive_bash: Arc::new(Mutex::new(None)),
             pty_shell: Arc::new(Mutex::new(None)),
             initialized: false,
         }
     }
 
-    pub fn init_interactive_bash(&mut self) -> Result<()> {
-        let bash = InteractiveBash::new(
-            &self.cwd,
-            self.bash_command_mode.bash_mode == BashMode::RestrictedMode,
-        )?;
-        *self.interactive_bash.lock().unwrap() = Some(bash);
+    pub async fn init_pty_shell(&mut self) -> Result<()> {
+        let shell =
+            PtyShell::new(&self.cwd, self.bash_command_mode.bash_mode == BashMode::RestrictedMode)?;
+        *self.pty_shell.lock().await = Some(shell);
         Ok(())
     }
 
