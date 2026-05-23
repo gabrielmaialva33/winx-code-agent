@@ -8,7 +8,6 @@ use anyhow::Context as AnyhowContext;
 use rand::RngExt;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
-use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -18,9 +17,12 @@ use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
 use crate::errors::{Result, WinxError};
-use crate::state::bash_state::{BashState, CommandState, InteractiveBash};
+use crate::state::bash_state::BashState;
+use crate::state::pty::PtyShell;
 use crate::state::terminal::{render_terminal_output, strip_ansi_codes};
 use crate::types::{normalize_thread_id, BashCommand, BashCommandAction, SpecialKey};
+
+type SharedPtyShell = Arc<Mutex<Option<PtyShell>>>;
 
 // ==================== WCGW-Style Constants ====================
 
@@ -55,7 +57,7 @@ const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can
 /// Manages background shell sessions - matches WCGW Python's `background_shells` dict
 #[derive(Debug, Default)]
 pub struct BackgroundShellManager {
-    shells: HashMap<String, Arc<StdMutex<Option<InteractiveBash>>>>,
+    shells: HashMap<String, SharedPtyShell>,
 }
 
 impl BackgroundShellManager {
@@ -68,26 +70,26 @@ impl BackgroundShellManager {
     pub fn start_new_shell(&mut self, working_dir: &Path, restricted_mode: bool) -> Result<String> {
         let cid = format!("{:010x}", rand::rng().random::<u32>());
 
-        let bash = InteractiveBash::new(working_dir, restricted_mode).map_err(|e| {
+        let shell = PtyShell::new(working_dir, restricted_mode).map_err(|e| {
             WinxError::CommandExecutionError(format!("Failed to start background shell: {e}"))
         })?;
 
-        self.shells.insert(cid.clone(), Arc::new(StdMutex::new(Some(bash))));
+        self.shells.insert(cid.clone(), Arc::new(Mutex::new(Some(shell))));
 
         info!("Started background shell with id: {}", cid);
         Ok(cid)
     }
 
     /// Get a background shell by its command ID
-    pub fn get_shell(&self, bg_command_id: &str) -> Option<Arc<StdMutex<Option<InteractiveBash>>>> {
+    pub fn get_shell(&self, bg_command_id: &str) -> Option<SharedPtyShell> {
         self.shells.get(bg_command_id).cloned()
     }
 
     /// Remove and cleanup a background shell
     pub fn remove_shell(&mut self, bg_command_id: &str) -> bool {
         if let Some(shell_arc) = self.shells.remove(bg_command_id) {
-            if let Ok(mut guard) = shell_arc.lock() {
-                *guard = None; // Drop the shell
+            if let Ok(mut guard) = shell_arc.try_lock() {
+                *guard = None;
             }
             info!("Removed background shell: {}", bg_command_id);
             true
@@ -104,10 +106,12 @@ impl BackgroundShellManager {
 
         let mut running = Vec::new();
         for (id, shell_arc) in &self.shells {
-            if let Ok(guard) = shell_arc.lock() {
+            if let Ok(guard) = shell_arc.try_lock() {
                 if let Some(bash) = guard.as_ref() {
                     running.push(format!("Command: {}, bg_command_id: {}", bash.last_command, id));
                 }
+            } else {
+                running.push(format!("Command: <busy>, bg_command_id: {id}"));
             }
         }
 
@@ -234,6 +238,27 @@ fn get_incremental_output(old_output: &[String], new_output: &[String]) -> Vec<S
     new_output.to_vec()
 }
 
+fn send_utf8_in_byte_chunks(shell: &mut PtyShell, text: &str, chunk_size: usize) -> Result<()> {
+    let mut start = 0;
+
+    while start < text.len() {
+        let mut end = (start + chunk_size).min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == start {
+            end = text[start..].char_indices().nth(1).map_or(text.len(), |(idx, _)| start + idx);
+        }
+
+        shell.send_text(&text[start..end]).map_err(|e| {
+            WinxError::CommandExecutionError(format!("Failed to write PTY input: {e}"))
+        })?;
+        start = end;
+    }
+
+    Ok(())
+}
+
 /// Check if action is effectively a status check - matches WCGW Python `is_status_check`
 #[allow(dead_code)]
 fn is_status_check_action(action: &BashCommandAction) -> bool {
@@ -330,7 +355,7 @@ async fn execute_bash_action(
     let mut bg_id: Option<String> = None;
 
     // Handle bg_command_id routing - matches WCGW Python
-    let bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>> = match action {
+    let bg_shell: Option<SharedPtyShell> = match action {
         BashCommandAction::Command { .. } => None, // Commands don't use bg_command_id for routing
         BashCommandAction::StatusCheck { bg_command_id, .. }
         | BashCommandAction::SendText { bg_command_id, .. }
@@ -418,26 +443,20 @@ async fn execute_command(
 
     // Check if a command is already running - matches WCGW Python state check
     {
-        let bash_guard = bash_state.interactive_bash.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
-        })?;
+        let bash_guard = bash_state.pty_shell.lock().await;
 
         if let Some(ref bash) = *bash_guard {
-            if let CommandState::Running { .. } = bash.command_state {
+            if bash.command_running {
                 return Err(WinxError::CommandExecutionError(WAITING_INPUT_MESSAGE.to_string()));
             }
         }
     }
 
     // Initialize bash if needed
-    if bash_state
-        .interactive_bash
-        .lock()
-        .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bash state: {e}")))?
-        .is_none()
-    {
+    if bash_state.pty_shell.lock().await.is_none() {
         bash_state
-            .init_interactive_bash()
+            .init_pty_shell()
+            .await
             .map_err(|e| WinxError::CommandExecutionError(format!("Failed to init bash: {e}")))?;
     }
 
@@ -446,42 +465,26 @@ async fn execute_command(
 
     // Send command in chunks of 64 characters - matches WCGW Python exactly
     {
-        let mut bash_guard = bash_state.interactive_bash.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
-        })?;
+        let mut bash_guard = bash_state.pty_shell.lock().await;
 
         let bash = bash_guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
 
+        bash.output_buffer.clear();
+        bash.output_truncated = false;
         // Send in chunks - matches WCGW Python: for i in range(0, len(command), 64)
-        for chunk in command.as_bytes().chunks(COMMAND_CHUNK_SIZE) {
-            if let Some(mut stdin) = bash.process.stdin.take() {
-                stdin.write_all(chunk).map_err(|e| {
-                    WinxError::CommandExecutionError(format!("Failed to write chunk: {e}"))
-                })?;
-                bash.process.stdin = Some(stdin);
-            }
-        }
+        send_utf8_in_byte_chunks(bash, command, COMMAND_CHUNK_SIZE)?;
 
         // Send linesep to execute - matches WCGW Python bash_state.send(bash_state.linesep, ...)
-        if let Some(mut stdin) = bash.process.stdin.take() {
-            stdin.write_all(b"\n").map_err(|e| {
-                WinxError::CommandExecutionError(format!("Failed to write newline: {e}"))
-            })?;
-            stdin
-                .flush()
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {e}")))?;
-            bash.process.stdin = Some(stdin);
-        }
+        bash.send_special_key("Enter").map_err(|e| {
+            WinxError::CommandExecutionError(format!("Failed to send newline: {e}"))
+        })?;
 
         bash.last_command = command.to_string();
-        bash.command_state = CommandState::Running {
-            start_time: std::time::SystemTime::now(),
-            command: command.to_string(),
-        };
+        bash.command_running = true;
     }
 
     // Wait for output with WCGW-style patience handling
-    let shell_arc = bash_state.interactive_bash.clone();
+    let shell_arc = bash_state.pty_shell.clone();
     wait_for_output(bash_state, &shell_arc, timeout_s, false, None, false).await
 }
 
@@ -490,7 +493,7 @@ async fn execute_command(
 /// `shell_arc` selects which shell to read from (main shell or a bg shell handle).
 async fn wait_for_output(
     bash_state: &BashState,
-    shell_arc: &Arc<StdMutex<Option<InteractiveBash>>>,
+    shell_arc: &SharedPtyShell,
     timeout_s: f64,
     is_bg: bool,
     bg_id: Option<&str>,
@@ -506,9 +509,7 @@ async fn wait_for_output(
 
     // Read initial output
     let mut output = {
-        let mut bash_guard = shell_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
-        })?;
+        let mut bash_guard = shell_arc.lock().await;
 
         if let Some(bash) = bash_guard.as_mut() {
             let (out, done) = bash.read_output(0.5).map_err(|e| {
@@ -538,9 +539,7 @@ async fn wait_for_output(
             sleep(Duration::from_secs_f64(wait.min(remaining))).await;
 
             let (new_output, done) = {
-                let mut bash_guard = shell_arc.lock().map_err(|e| {
-                    WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
-                })?;
+                let mut bash_guard = shell_arc.lock().await;
 
                 if let Some(bash) = bash_guard.as_mut() {
                     bash.read_output(0.5).map_err(|e| {
@@ -601,7 +600,7 @@ async fn wait_for_output(
 /// Execute a status check - matches WCGW Python's `StatusCheck` handling
 async fn execute_status_check(
     bash_state: &mut BashState,
-    bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>>,
+    bg_shell: Option<SharedPtyShell>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
@@ -610,15 +609,13 @@ async fn execute_status_check(
 
     // Pick the shell we're going to inspect: bg shell when bg_command_id was provided,
     // otherwise fall back to the main interactive shell.
-    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.interactive_bash.clone());
+    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
 
     // Check if there's a running command - matches WCGW Python state check
     let is_running = {
-        let guard = shell_arc.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
-        })?;
+        let guard = shell_arc.lock().await;
         if let Some(ref bash) = *guard {
-            matches!(bash.command_state, CommandState::Running { .. })
+            bash.command_running
         } else {
             false
         }
@@ -642,7 +639,7 @@ async fn execute_status_check(
 async fn execute_send_text(
     bash_state: &mut BashState,
     text: &str,
-    bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>>,
+    bg_shell: Option<SharedPtyShell>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
@@ -657,36 +654,21 @@ async fn execute_send_text(
     }
 
     // Get the target shell
-    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.interactive_bash.clone());
+    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
 
     // Send text in chunks of 128 characters - matches WCGW Python exactly
     {
-        let mut guard = shell_arc
-            .lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock shell: {e}")))?;
+        let mut guard = shell_arc.lock().await;
 
         let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
 
         // Send in chunks - matches WCGW Python: for i in range(0, len(command_data.send_text), 128)
-        for chunk in text.as_bytes().chunks(TEXT_CHUNK_SIZE) {
-            if let Some(mut stdin) = bash.process.stdin.take() {
-                stdin.write_all(chunk).map_err(|e| {
-                    WinxError::CommandExecutionError(format!("Failed to write text chunk: {e}"))
-                })?;
-                bash.process.stdin = Some(stdin);
-            }
-        }
+        send_utf8_in_byte_chunks(bash, text, TEXT_CHUNK_SIZE)?;
 
         // Send linesep - matches WCGW Python bash_state.send(bash_state.linesep, ...)
-        if let Some(mut stdin) = bash.process.stdin.take() {
-            stdin.write_all(b"\n").map_err(|e| {
-                WinxError::CommandExecutionError(format!("Failed to write newline: {e}"))
-            })?;
-            stdin
-                .flush()
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {e}")))?;
-            bash.process.stdin = Some(stdin);
-        }
+        bash.send_special_key("Enter").map_err(|e| {
+            WinxError::CommandExecutionError(format!("Failed to send newline: {e}"))
+        })?;
     }
 
     // Wait for output
@@ -697,7 +679,7 @@ async fn execute_send_text(
 async fn execute_send_specials(
     bash_state: &mut BashState,
     keys: &[SpecialKey],
-    bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>>,
+    bg_shell: Option<SharedPtyShell>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
@@ -711,13 +693,11 @@ async fn execute_send_specials(
         ));
     }
 
-    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.interactive_bash.clone());
+    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
     let mut is_interrupt = false;
 
     {
-        let mut guard = shell_arc
-            .lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock shell: {e}")))?;
+        let mut guard = shell_arc.lock().await;
 
         let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
 
@@ -726,23 +706,33 @@ async fn execute_send_specials(
             match key {
                 SpecialKey::KeyUp => {
                     // matches WCGW Python: bash_state.send("\033[A", ...)
-                    send_bytes_to_bash(bash, b"\x1b[A")?;
+                    bash.send_special_key("KeyUp").map_err(|e| {
+                        WinxError::CommandExecutionError(format!("Failed to send KeyUp: {e}"))
+                    })?;
                 }
                 SpecialKey::KeyDown => {
                     // matches WCGW Python: bash_state.send("\033[B", ...)
-                    send_bytes_to_bash(bash, b"\x1b[B")?;
+                    bash.send_special_key("KeyDown").map_err(|e| {
+                        WinxError::CommandExecutionError(format!("Failed to send KeyDown: {e}"))
+                    })?;
                 }
                 SpecialKey::KeyLeft => {
                     // matches WCGW Python: bash_state.send("\033[D", ...)
-                    send_bytes_to_bash(bash, b"\x1b[D")?;
+                    bash.send_special_key("KeyLeft").map_err(|e| {
+                        WinxError::CommandExecutionError(format!("Failed to send KeyLeft: {e}"))
+                    })?;
                 }
                 SpecialKey::KeyRight => {
                     // matches WCGW Python: bash_state.send("\033[C", ...)
-                    send_bytes_to_bash(bash, b"\x1b[C")?;
+                    bash.send_special_key("KeyRight").map_err(|e| {
+                        WinxError::CommandExecutionError(format!("Failed to send KeyRight: {e}"))
+                    })?;
                 }
                 SpecialKey::Enter => {
                     // matches WCGW Python: bash_state.send("\x0d", ...) - carriage return
-                    send_bytes_to_bash(bash, b"\x0d")?;
+                    bash.send_special_key("Enter").map_err(|e| {
+                        WinxError::CommandExecutionError(format!("Failed to send Enter: {e}"))
+                    })?;
                 }
                 SpecialKey::CtrlC => {
                     // matches WCGW Python: bash_state.sendintr()
@@ -753,21 +743,24 @@ async fn execute_send_specials(
                 }
                 SpecialKey::CtrlD => {
                     // matches WCGW Python: bash_state.sendintr() - same as Ctrl+C in WCGW
-                    bash.send_interrupt().map_err(|e| {
+                    bash.send_eof().map_err(|e| {
                         WinxError::CommandExecutionError(format!("Failed to send Ctrl+D: {e}"))
                     })?;
                     is_interrupt = true;
                 }
                 SpecialKey::CtrlZ => {
                     // Ctrl+Z = SIGTSTP (suspend) - ASCII 0x1a
-                    send_bytes_to_bash(bash, b"\x1a")?;
+                    bash.send_suspend().map_err(|e| {
+                        WinxError::CommandExecutionError(format!("Failed to send Ctrl+Z: {e}"))
+                    })?;
                 }
             }
         }
     }
 
     // Wait for output
-    let mut output = wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
+    let mut output =
+        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
 
     // Add interrupt failure message if still running - matches WCGW Python exactly
     if is_interrupt && output.contains("status = still running") {
@@ -777,27 +770,11 @@ async fn execute_send_specials(
     Ok(output)
 }
 
-/// Helper to send bytes to bash stdin
-fn send_bytes_to_bash(bash: &mut InteractiveBash, bytes: &[u8]) -> Result<()> {
-    if let Some(mut stdin) = bash.process.stdin.take() {
-        stdin
-            .write_all(bytes)
-            .map_err(|e| WinxError::CommandExecutionError(format!("Failed to write bytes: {e}")))?;
-        stdin
-            .flush()
-            .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {e}")))?;
-        bash.process.stdin = Some(stdin);
-        Ok(())
-    } else {
-        Err(WinxError::CommandExecutionError("Failed to get stdin".to_string()))
-    }
-}
-
 /// Execute `send_ascii` - matches WCGW Python's `SendAscii` handling
 async fn execute_send_ascii(
     bash_state: &mut BashState,
     ascii_codes: &[u8],
-    bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>>,
+    bg_shell: Option<SharedPtyShell>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
@@ -811,28 +788,20 @@ async fn execute_send_ascii(
         ));
     }
 
-    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.interactive_bash.clone());
+    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
     let mut is_interrupt = false;
 
     {
-        let mut guard = shell_arc
-            .lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock shell: {e}")))?;
+        let mut guard = shell_arc.lock().await;
 
         let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
 
         // Send each ASCII code - matches WCGW Python
         for &code in ascii_codes {
             // matches WCGW Python: bash_state.send(chr(ascii_char), ...)
-            if let Some(mut stdin) = bash.process.stdin.take() {
-                stdin.write_all(&[code]).map_err(|e| {
-                    WinxError::CommandExecutionError(format!("Failed to write ASCII code: {e}"))
-                })?;
-                stdin.flush().map_err(|e| {
-                    WinxError::CommandExecutionError(format!("Failed to flush: {e}"))
-                })?;
-                bash.process.stdin = Some(stdin);
-            }
+            bash.send_bytes(&[code]).map_err(|e| {
+                WinxError::CommandExecutionError(format!("Failed to write ASCII code: {e}"))
+            })?;
 
             // Check for interrupt - matches WCGW Python: if ascii_char == 3: is_interrupt = True
             if code == 3 {
@@ -842,7 +811,8 @@ async fn execute_send_ascii(
     }
 
     // Wait for output
-    let mut output = wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
+    let mut output =
+        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
 
     // Add interrupt failure message if still running - matches WCGW Python
     if is_interrupt && output.contains("status = still running") {
@@ -853,7 +823,6 @@ async fn execute_send_ascii(
 }
 
 /// Execute command in background - matches WCGW Python's `is_background` handling
-#[allow(clippy::unused_async)]
 async fn execute_in_background(
     bash_state: &mut BashState,
     command: &str,
@@ -882,24 +851,14 @@ async fn execute_in_background(
         })?
     };
 
-    // Send command via send_command (same path used by foreground execute_command).
-    // Offload to a blocking thread so the sync std::sync::Mutex + sync write_all/flush
-    // don't stall the Tokio worker and prevent the JSON-RPC response from being sent.
-    let cmd_owned = command.to_string();
-    let shell_arc_clone = std::sync::Arc::clone(&shell_arc);
-    debug!("bg[{}]: spawning blocking send_command", bg_id);
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        let mut guard = shell_arc_clone.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bg shell: {e}"))
-        })?;
+    // Send command via the same PTY path used by foreground execute_command.
+    {
+        let mut guard = shell_arc.lock().await;
         let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
-        bash.send_command(&cmd_owned).map_err(|e| {
+        bash.send_command(command).map_err(|e| {
             WinxError::CommandExecutionError(format!("Failed to send bg command: {e}"))
         })?;
-        Ok(())
-    })
-    .await
-    .map_err(|e| WinxError::CommandExecutionError(format!("bg send join error: {e}")))??;
+    }
     debug!("bg[{}]: send_command returned, replying with bg_command_id", bg_id);
 
     let _ = timeout_s;

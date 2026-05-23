@@ -184,7 +184,7 @@ pub async fn handle_tool_call(
             if folder_to_start.exists() {
                 new_bash_state.update_cwd(&folder_to_start)?;
                 new_bash_state.update_workspace_root(&folder_to_start)?;
-                new_bash_state.init_interactive_bash()?;
+                new_bash_state.init_pty_shell().await?;
             }
 
             *bash_state_guard = Some(new_bash_state);
@@ -228,7 +228,7 @@ pub async fn handle_tool_call(
                 state.bash_command_mode = bash_command_mode;
                 state.file_edit_mode = file_edit_mode;
                 state.write_if_empty_mode = write_if_empty_mode;
-                state.init_interactive_bash()?;
+                state.init_pty_shell().await?;
                 response.push_str("Reset shell (new PTY created)\n");
             } else {
                 return Err(WinxError::BashStateNotInitialized);
