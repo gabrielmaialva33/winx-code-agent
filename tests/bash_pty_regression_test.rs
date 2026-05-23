@@ -235,8 +235,10 @@ async fn exited_bg_shell_status_check_returns_cached_output() -> Result<()> {
         "tombstoned status_check should report process exited: {status_response}"
     );
 
-    // After consumption, subsequent status_check on the same id must fail again.
-    let after = tools::bash_command::handle_tool_call(
+    // Tombstones are kept until the TTL expires, so repeated reads must still
+    // return the same cached output — no surprise "no shell found" after the
+    // first call.
+    let second_response: String = tools::bash_command::handle_tool_call(
         &bash_state_arc,
         serde_json::from_value(json!({
             "action_json": {
@@ -248,8 +250,15 @@ async fn exited_bg_shell_status_check_returns_cached_output() -> Result<()> {
         }))
         .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
     )
-    .await;
-    assert!(after.is_err(), "tombstone should only be consumable once");
+    .await?;
+    assert!(
+        second_response.contains("tombstone-output"),
+        "tombstone should be readable multiple times until TTL: {second_response}"
+    );
+    assert!(
+        second_response.contains("status = process exited"),
+        "repeated read should still report process exited: {second_response}"
+    );
 
     Ok(())
 }

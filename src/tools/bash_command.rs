@@ -172,10 +172,14 @@ impl BackgroundShellManager {
         }
     }
 
-    /// Pop the tombstone for a recently-exited shell, if any. The caller takes
-    /// ownership of the final output; subsequent queries will return None.
-    pub fn take_tombstone(&mut self, bg_command_id: &str) -> Option<ExitedShellInfo> {
-        self.tombstones.remove(bg_command_id)
+    /// Look up the tombstone for a recently-exited shell, if any.
+    ///
+    /// The entry stays in the map until the TTL expires (see
+    /// `prune_finished_shells`), so repeated `status_check` calls on the same
+    /// `bg_command_id` keep returning the cached final output instead of
+    /// flipping to "shell not found" after the first read.
+    pub fn peek_tombstone(&self, bg_command_id: &str) -> Option<ExitedShellInfo> {
+        self.tombstones.get(bg_command_id).cloned()
     }
 
     /// Get info about all running background shells - matches WCGW Python `get_bg_running_commandsinfo`
@@ -475,7 +479,7 @@ async fn execute_bash_action(
                     is_bg = true;
                     bg_id = Some(id.clone());
                     Some(shell)
-                } else if let Some(tombstone) = manager.take_tombstone(id) {
+                } else if let Some(tombstone) = manager.peek_tombstone(id) {
                     // Shell already exited. For a status check we can hand back the
                     // final cached output exactly once. For anything else (send_text,
                     // send_specials, send_ascii) tell the caller the shell is gone
