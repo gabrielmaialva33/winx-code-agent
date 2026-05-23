@@ -8,7 +8,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, ErrorKind, Read, Write};
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -214,6 +216,32 @@ pub struct InteractiveBash {
     restricted_mode: bool,
 }
 
+/// Mark the child's stdout pipe non-blocking so `read_output` can honor its timeout
+/// instead of blocking forever when bash produces no output.
+#[cfg(unix)]
+fn set_stdout_nonblocking(process: &Child) -> Result<()> {
+    if let Some(stdout) = process.stdout.as_ref() {
+        let fd = stdout.as_raw_fd();
+        // SAFETY: fd is owned by `process.stdout` for the lifetime of the Child;
+        // fcntl with F_GETFL/F_SETFL is sound on a valid pipe fd.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags < 0 {
+                return Err(anyhow!("fcntl F_GETFL failed on bash stdout"));
+            }
+            if libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) < 0 {
+                return Err(anyhow!("fcntl F_SETFL O_NONBLOCK failed on bash stdout"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_stdout_nonblocking(_process: &Child) -> Result<()> {
+    Ok(())
+}
+
 impl InteractiveBash {
     pub fn is_alive(&mut self) -> bool {
         matches!(self.process.try_wait(), Ok(None))
@@ -239,6 +267,7 @@ impl InteractiveBash {
         writeln!(stdin, "{BASH_PROMPT_STATEMENT}")?;
         stdin.flush()?;
         process.stdin = Some(stdin);
+        set_stdout_nonblocking(&process)?;
         self.process = process;
         self.command_state = CommandState::Idle;
         Ok(())
@@ -271,6 +300,7 @@ impl InteractiveBash {
         writeln!(stdin, "{BASH_PROMPT_STATEMENT}")?;
         stdin.flush()?;
         process.stdin = Some(stdin);
+        set_stdout_nonblocking(&process)?;
         Ok(Self {
             process,
             last_command: String::new(),
@@ -309,8 +339,9 @@ impl InteractiveBash {
         while start.elapsed() < timeout {
             let mut buf = vec![0; DEFAULT_BUFFER_SIZE];
             if let Some(stdout) = self.process.stdout.as_mut() {
-                if let Ok(n) = stdout.read(&mut buf) {
-                    if n > 0 {
+                match stdout.read(&mut buf) {
+                    Ok(0) => break, // EOF — child closed stdout
+                    Ok(n) => {
                         let chunk = String::from_utf8_lossy(&buf[..n]);
                         full_output.push_str(&chunk);
                         new_output.push_str(&chunk);
@@ -318,6 +349,15 @@ impl InteractiveBash {
                             complete = true;
                             break;
                         }
+                        continue; // try reading more without sleeping
+                    }
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                        // No data available right now; fall through to sleep + retry.
+                    }
+                    Err(e) if e.kind() == ErrorKind::Interrupted => continue,
+                    Err(e) => {
+                        warn!("read_output: stdout read error: {e}");
+                        break;
                     }
                 }
             }

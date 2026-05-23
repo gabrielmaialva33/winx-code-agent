@@ -481,12 +481,16 @@ async fn execute_command(
     }
 
     // Wait for output with WCGW-style patience handling
-    wait_for_output(bash_state, timeout_s, false, None, false).await
+    let shell_arc = bash_state.interactive_bash.clone();
+    wait_for_output(bash_state, &shell_arc, timeout_s, false, None, false).await
 }
 
-/// Wait for command output with WCGW-style patience handling - matches WCGW Python expect/wait logic
+/// Wait for command output with WCGW-style patience handling - matches WCGW Python expect/wait logic.
+///
+/// `shell_arc` selects which shell to read from (main shell or a bg shell handle).
 async fn wait_for_output(
-    bash_state: &mut BashState,
+    bash_state: &BashState,
+    shell_arc: &Arc<StdMutex<Option<InteractiveBash>>>,
     timeout_s: f64,
     is_bg: bool,
     bg_id: Option<&str>,
@@ -502,7 +506,7 @@ async fn wait_for_output(
 
     // Read initial output
     let mut output = {
-        let mut bash_guard = bash_state.interactive_bash.lock().map_err(|e| {
+        let mut bash_guard = shell_arc.lock().map_err(|e| {
             WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
         })?;
 
@@ -534,7 +538,7 @@ async fn wait_for_output(
             sleep(Duration::from_secs_f64(wait.min(remaining))).await;
 
             let (new_output, done) = {
-                let mut bash_guard = bash_state.interactive_bash.lock().map_err(|e| {
+                let mut bash_guard = shell_arc.lock().map_err(|e| {
                     WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
                 })?;
 
@@ -597,16 +601,20 @@ async fn wait_for_output(
 /// Execute a status check - matches WCGW Python's `StatusCheck` handling
 async fn execute_status_check(
     bash_state: &mut BashState,
-    _bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>>,
+    bg_shell: Option<Arc<StdMutex<Option<InteractiveBash>>>>,
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
 ) -> Result<String> {
     debug!("Processing StatusCheck action");
 
+    // Pick the shell we're going to inspect: bg shell when bg_command_id was provided,
+    // otherwise fall back to the main interactive shell.
+    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.interactive_bash.clone());
+
     // Check if there's a running command - matches WCGW Python state check
     let is_running = {
-        let guard = bash_state.interactive_bash.lock().map_err(|e| {
+        let guard = shell_arc.lock().map_err(|e| {
             WinxError::BashStateLockError(format!("Failed to lock bash state: {e}"))
         })?;
         if let Some(ref bash) = *guard {
@@ -627,7 +635,7 @@ async fn execute_status_check(
     }
 
     // Read output with patience handling - this IS a status check
-    wait_for_output(bash_state, timeout_s, is_bg, bg_id, true).await
+    wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, true).await
 }
 
 /// Execute `send_text` - matches WCGW Python's `SendText` handling
@@ -682,7 +690,7 @@ async fn execute_send_text(
     }
 
     // Wait for output
-    wait_for_output(bash_state, timeout_s, is_bg, bg_id, false).await
+    wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await
 }
 
 /// Execute `send_specials` - matches WCGW Python's `SendSpecials` handling exactly
@@ -759,7 +767,7 @@ async fn execute_send_specials(
     }
 
     // Wait for output
-    let mut output = wait_for_output(bash_state, timeout_s, is_bg, bg_id, false).await?;
+    let mut output = wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
 
     // Add interrupt failure message if still running - matches WCGW Python exactly
     if is_interrupt && output.contains("status = still running") {
@@ -834,7 +842,7 @@ async fn execute_send_ascii(
     }
 
     // Wait for output
-    let mut output = wait_for_output(bash_state, timeout_s, is_bg, bg_id, false).await?;
+    let mut output = wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
 
     // Add interrupt failure message if still running - matches WCGW Python
     if is_interrupt && output.contains("status = still running") {
@@ -874,43 +882,26 @@ async fn execute_in_background(
         })?
     };
 
-    // Send command in chunks - same as regular command
-    {
-        let mut guard = shell_arc
-            .lock()
-            .map_err(|e| WinxError::BashStateLockError(format!("Failed to lock bg shell: {e}")))?;
-
+    // Send command via send_command (same path used by foreground execute_command).
+    // Offload to a blocking thread so the sync std::sync::Mutex + sync write_all/flush
+    // don't stall the Tokio worker and prevent the JSON-RPC response from being sent.
+    let cmd_owned = command.to_string();
+    let shell_arc_clone = std::sync::Arc::clone(&shell_arc);
+    debug!("bg[{}]: spawning blocking send_command", bg_id);
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let mut guard = shell_arc_clone.lock().map_err(|e| {
+            WinxError::BashStateLockError(format!("Failed to lock bg shell: {e}"))
+        })?;
         let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
+        bash.send_command(&cmd_owned).map_err(|e| {
+            WinxError::CommandExecutionError(format!("Failed to send bg command: {e}"))
+        })?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| WinxError::CommandExecutionError(format!("bg send join error: {e}")))??;
+    debug!("bg[{}]: send_command returned, replying with bg_command_id", bg_id);
 
-        for chunk in command.as_bytes().chunks(COMMAND_CHUNK_SIZE) {
-            if let Some(mut stdin) = bash.process.stdin.take() {
-                stdin.write_all(chunk).map_err(|e| {
-                    WinxError::CommandExecutionError(format!("Failed to write chunk: {e}"))
-                })?;
-                bash.process.stdin = Some(stdin);
-            }
-        }
-
-        if let Some(mut stdin) = bash.process.stdin.take() {
-            stdin.write_all(b"\n").map_err(|e| {
-                WinxError::CommandExecutionError(format!("Failed to write newline: {e}"))
-            })?;
-            stdin
-                .flush()
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to flush: {e}")))?;
-            bash.process.stdin = Some(stdin);
-        }
-
-        bash.last_command = command.to_string();
-        bash.command_state = CommandState::Running {
-            start_time: std::time::SystemTime::now(),
-            command: command.to_string(),
-        };
-    }
-
-    // With Stdio::piped() shells, read_output is sync and stalls the Tokio worker,
-    // preventing the JSON-RPC response from being sent. Return the bg_command_id
-    // immediately so the client can poll via StatusCheck without blocking.
     let _ = timeout_s;
     let _ = shell_arc;
     Ok(get_status(bash_state, true, Some(&bg_id), true, None))
