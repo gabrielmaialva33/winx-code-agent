@@ -245,6 +245,29 @@ impl PtyShell {
         output
     }
 
+    /// Drain any pending output and, if a previous command still seems to be
+    /// running, send a Ctrl-C to flush it. Mirrors wcgw's `clear_to_run` so a
+    /// new command never inherits stale prompt fragments or a half-typed line.
+    ///
+    /// Returns `true` if the shell looks idle (prompt seen), `false` if it
+    /// still wouldn't yield after the Ctrl-C — caller may want to reset.
+    pub fn clear_to_run(&mut self, max_wait_secs: f32) -> Result<bool> {
+        // Drain whatever is in the channel without blocking. Use the existing
+        // read_output to also catch the prompt fingerprint.
+        let (_, complete) = self.read_output(max_wait_secs.min(0.5))?;
+        if complete {
+            return Ok(true);
+        }
+
+        // Something is still running — interrupt it.
+        debug!("clear_to_run: prompt not seen, sending Ctrl+C");
+        self.send_interrupt()?;
+
+        // Re-drain after the interrupt so the next command starts on a clean prompt.
+        let (_, drained) = self.read_output(max_wait_secs)?;
+        Ok(drained)
+    }
+
     /// Send a command to the shell and start reading output
     pub fn send_command(&mut self, command: &str) -> Result<()> {
         debug!("PTY sending command: {}", command);

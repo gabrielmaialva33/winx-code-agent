@@ -1779,7 +1779,7 @@ dependencies = [
 
 [[package]]
 name = "winx-code-agent"
-version = "0.2.309"
+version = "0.2.310"
 dependencies = [
  "anyhow",
  "base64",

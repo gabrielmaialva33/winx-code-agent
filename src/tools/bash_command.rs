@@ -642,8 +642,18 @@ async fn execute_command(
             .map_err(|e| WinxError::CommandExecutionError(format!("Failed to init bash: {e}")))?;
     }
 
-    // Clear prompt before sending - matches WCGW Python clear_to_run
-    // (simplified version - WCGW does more complex clearing)
+    // Clear prompt before sending - matches WCGW Python clear_to_run.
+    // Drain any leftover output and, if the shell still looks busy, send
+    // Ctrl-C so the new command lands on a fresh prompt instead of being
+    // appended to whatever was hanging on stdin.
+    {
+        let mut bash_guard = bash_state.pty_shell.lock().await;
+        if let Some(bash) = bash_guard.as_mut() {
+            if let Err(e) = bash.clear_to_run(DEFAULT_TIMEOUT as f32) {
+                warn!("clear_to_run failed before send: {e}");
+            }
+        }
+    }
 
     // Send command in chunks of 64 characters - matches WCGW Python exactly
     {
@@ -1039,9 +1049,15 @@ async fn execute_send_specials(
         }
     }
 
+    // Sending a bare Enter is semantically a status check (the agent is just
+    // poking the shell for the latest output without sending real input).
+    // Route it through the patience-aware path so we don't bail after the
+    // first read with stale "still running" noise.
+    let is_status_like = keys.len() == 1 && matches!(keys[0], SpecialKey::Enter);
+
     // Wait for output
     let mut output =
-        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
+        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, is_status_like).await?;
 
     // Add interrupt failure message if still running - matches WCGW Python exactly
     if is_interrupt && output.contains("status = still running") {
@@ -1097,9 +1113,14 @@ async fn execute_send_ascii(
         }
     }
 
+    // Same logic as `execute_send_specials`: a bare newline (ASCII 10) is the
+    // raw-byte equivalent of pressing Enter and should be treated as a status
+    // check.
+    let is_status_like = ascii_codes.len() == 1 && ascii_codes[0] == 10;
+
     // Wait for output
     let mut output =
-        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
+        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, is_status_like).await?;
 
     // Add interrupt failure message if still running - matches WCGW Python
     if is_interrupt && output.contains("status = still running") {
