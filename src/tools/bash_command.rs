@@ -1049,15 +1049,15 @@ async fn execute_send_specials(
         }
     }
 
-    // Sending a bare Enter is semantically a status check (the agent is just
-    // poking the shell for the latest output without sending real input).
-    // Route it through the patience-aware path so we don't bail after the
-    // first read with stale "still running" noise.
-    let is_status_like = keys.len() == 1 && matches!(keys[0], SpecialKey::Enter);
+    // NOTE: wcgw treats a bare Enter as a status check and applies its
+    // patience loop. We deliberately diverge: for a driving agent (e.g.,
+    // pushing Enter to submit text in a TUI) the patience loop swallows the
+    // immediate response. Callers that want patience semantics should use the
+    // explicit `status_check` action instead.
 
     // Wait for output
     let mut output =
-        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, is_status_like).await?;
+        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
 
     // Add interrupt failure message if still running - matches WCGW Python exactly
     if is_interrupt && output.contains("status = still running") {
@@ -1113,14 +1113,13 @@ async fn execute_send_ascii(
         }
     }
 
-    // Same logic as `execute_send_specials`: a bare newline (ASCII 10) is the
-    // raw-byte equivalent of pressing Enter and should be treated as a status
-    // check.
-    let is_status_like = ascii_codes.len() == 1 && ascii_codes[0] == 10;
+    // Same divergence from wcgw as in `execute_send_specials`: send_ascii [10]
+    // or [13] is treated as a direct write, not a status check. Callers that
+    // need patience-aware reads should use `status_check`.
 
     // Wait for output
     let mut output =
-        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, is_status_like).await?;
+        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
 
     // Add interrupt failure message if still running - matches WCGW Python
     if is_interrupt && output.contains("status = still running") {
