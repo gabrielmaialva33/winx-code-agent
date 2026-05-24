@@ -714,10 +714,17 @@ async fn wait_for_output(
         }
     };
 
-    // If not complete and this is a status check, use WCGW-style patience waiting
-    // Matches WCGW Python: if is_status_check(bash_arg) block
+    // If not complete and this is a status check, use WCGW-style patience waiting.
+    //
+    // Treat `timeout_s` (== caller's `wait_for_seconds`, capped at
+    // `TIMEOUT_WHILE_OUTPUT`) as the hard upper bound on the TOTAL wall-clock
+    // spent inside this call. wcgw computes `remaining = TIMEOUT_WHILE_OUTPUT
+    // - wait`, which makes a 2-second `wait_for_seconds` block for almost 20s
+    // on a TUI that keeps emitting spinner frames. We diverge from wcgw here
+    // because driving agents expect their wait budget to be respected.
     if !complete && is_status_check {
-        let mut remaining = TIMEOUT_WHILE_OUTPUT - wait;
+        let budget_secs = timeout_s.min(TIMEOUT_WHILE_OUTPUT);
+        let iter_wait_secs = 0.5_f64;
         let mut patience = OUTPUT_WAIT_PATIENCE;
 
         let incremental = wcgw_incremental_text(&output, &last_pending_output);
@@ -727,8 +734,12 @@ async fn wait_for_output(
 
         let mut last_incremental = incremental;
 
-        while remaining > 0.0 && patience > 0 {
-            sleep(Duration::from_secs_f64(wait.min(remaining))).await;
+        while start.elapsed().as_secs_f64() < budget_secs && patience > 0 {
+            let remaining = (budget_secs - start.elapsed().as_secs_f64()).max(0.0);
+            if remaining < 0.1 {
+                break;
+            }
+            sleep(Duration::from_secs_f64(iter_wait_secs.min(remaining))).await;
 
             let (new_output, done) = {
                 let mut bash_guard = shell_arc.lock().await;
@@ -758,7 +769,6 @@ async fn wait_for_output(
             last_incremental = new_incremental;
 
             output = new_output;
-            remaining -= wait;
         }
 
         if !complete {
