@@ -543,8 +543,8 @@ async fn execute_bash_action(
 
     // Process based on action type - matches WCGW Python _execute_bash dispatch
     match action {
-        BashCommandAction::Command { command, is_background } => {
-            execute_command(bash_state, command, *is_background, timeout_s).await
+        BashCommandAction::Command { command, is_background, allow_multi } => {
+            execute_command(bash_state, command, *is_background, *allow_multi, timeout_s).await
         }
         BashCommandAction::StatusCheck { scrollback_lines, verbose, .. } => {
             execute_status_check(
@@ -602,9 +602,10 @@ async fn execute_command(
     bash_state: &mut BashState,
     command: &str,
     is_background: bool,
+    allow_multi: bool,
     timeout_s: f64,
 ) -> Result<String> {
-    debug!("Processing Command action: {}", command);
+    debug!("Processing Command action: {command:?} (allow_multi={allow_multi})");
 
     // Check mode permissions - matches WCGW Python bash_command_mode check
     if !bash_state.is_command_allowed(command) {
@@ -614,9 +615,13 @@ async fn execute_command(
         ));
     }
 
-    // Validate single statement - matches WCGW Python assert_single_statement
+    // Single-statement guard (wcgw parity). Callers can opt out via
+    // `allow_multi: true` when they knowingly want to chain commands
+    // without wrapping in `bash -lc '...'`.
     let command = command.trim();
-    crate::utils::bash_parser::assert_single_statement(command)?;
+    if !allow_multi {
+        crate::utils::bash_parser::assert_single_statement(command)?;
+    }
 
     // If background execution requested, start new shell - matches WCGW Python is_background handling
     if is_background {

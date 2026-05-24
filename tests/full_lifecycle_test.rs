@@ -46,6 +46,7 @@ async fn test_full_lifecycle_workflow() -> Result<()> {
             action_json: BashCommandAction::Command {
                 command: "mkdir -p src/data".to_string(),
                 is_background: false,
+                allow_multi: false,
             },
             wait_for_seconds: None,
             thread_id: TEST_THREAD_ID.to_string(),
@@ -59,6 +60,7 @@ async fn test_full_lifecycle_workflow() -> Result<()> {
             action_json: BashCommandAction::Command {
                 command: "ls -R src".to_string(),
                 is_background: false,
+                allow_multi: false,
             },
             wait_for_seconds: None, // Wait until done
             thread_id: TEST_THREAD_ID.to_string(),
@@ -109,6 +111,7 @@ async fn test_full_lifecycle_workflow() -> Result<()> {
             action_json: BashCommandAction::Command {
                 command: format!("grep 'production' {}", data_file.to_string_lossy()),
                 is_background: false,
+                allow_multi: false,
             },
             wait_for_seconds: None,
             thread_id: TEST_THREAD_ID.to_string(),

@@ -50,6 +50,7 @@ async fn test_01_simple_command_echo() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "echo \"test\"".to_string(),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(5.0),
         thread_id: "i2238".to_string(),
@@ -80,6 +81,7 @@ async fn test_02_command_with_pipe() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "ls -la | head -5".to_string(),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(5.0),
         thread_id: "i2238-pipe".to_string(),
@@ -108,6 +110,7 @@ async fn test_03_status_check() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "echo 'running command'".to_string(),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(5.0),
         thread_id: "i2238-status".to_string(),
@@ -162,6 +165,7 @@ async fn test_04_send_text() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "cat".to_string(),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(1.0), // Short timeout - cat will be running
         thread_id: "i2238-sendtext".to_string(),
@@ -228,6 +232,7 @@ async fn test_05_send_specials_ctrl_c() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "sleep 30".to_string(),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(1.0), // Short timeout - sleep will be running
         thread_id: "i2238-ctrlc".to_string(),
@@ -276,6 +281,7 @@ async fn test_06_background_command() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "sleep 5 && echo 'bg_done'".to_string(),
             is_background: true,
+            allow_multi: false,
         },
         wait_for_seconds: Some(2.0),
         thread_id: "i2238-bg".to_string(),
@@ -304,6 +310,7 @@ async fn test_07_multiple_commands_sequence() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: format!("echo 'content' > {}/testfile.txt", temp_dir.path().display()),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(5.0),
         thread_id: "i2238-seq".to_string(),
@@ -316,6 +323,7 @@ async fn test_07_multiple_commands_sequence() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: format!("cat {}/testfile.txt", temp_dir.path().display()),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(5.0),
         thread_id: "i2238-seq".to_string(),
@@ -331,6 +339,7 @@ async fn test_07_multiple_commands_sequence() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: format!("rm {}/testfile.txt && echo 'deleted'", temp_dir.path().display()),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(5.0),
         thread_id: "i2238-seq".to_string(),
@@ -355,6 +364,7 @@ async fn test_08_arrow_keys() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "echo 'first command'".to_string(),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(5.0),
         thread_id: "i2238-arrows".to_string(),
@@ -387,6 +397,7 @@ async fn test_08_arrow_keys() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires real PTY, fails in CI"]
+#[allow(clippy::too_many_lines)]
 async fn test_full_workflow_i2238() -> Result<()> {
     let (bash_state_arc, temp_dir) = setup_bash_state("i2238").await?;
 
@@ -395,6 +406,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "echo \"test\"".to_string(),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(5.0),
         thread_id: "i2238".to_string(),
@@ -407,6 +419,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "ls -la | head -5".to_string(),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(5.0),
         thread_id: "i2238".to_string(),
@@ -418,6 +431,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "sleep 60".to_string(),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(1.0),
         thread_id: "i2238".to_string(),
@@ -455,6 +469,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "read -p 'Enter: ' x && echo \"Got: $x\"".to_string(),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(1.0),
         thread_id: "i2238".to_string(),
@@ -479,6 +494,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         action_json: BashCommandAction::Command {
             command: "sleep 2 && echo 'bg_completed'".to_string(),
             is_background: true,
+            allow_multi: false,
         },
         wait_for_seconds: Some(1.0),
         thread_id: "i2238".to_string(),
@@ -496,6 +512,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
                 file_path.display()
             ),
             is_background: false,
+            allow_multi: false,
         },
         wait_for_seconds: Some(5.0),
         thread_id: "i2238".to_string(),

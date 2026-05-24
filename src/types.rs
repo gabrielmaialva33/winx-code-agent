@@ -477,6 +477,13 @@ pub enum BashCommandAction {
         command: String,
         #[serde(default)]
         is_background: bool,
+        /// Opt out of the single-top-level-statement guard. By default winx
+        /// rejects multi-statement commands (`a; b`, `a && b; c`, etc.) so the
+        /// agent has to be explicit about what it's running. Set this to true
+        /// when you knowingly want to run a composite command without
+        /// wrapping it in `bash -lc '...'`.
+        #[serde(default)]
+        allow_multi: bool,
     },
 
     /// Check the status of a running command.

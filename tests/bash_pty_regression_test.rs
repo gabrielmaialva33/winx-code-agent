@@ -39,7 +39,11 @@ async fn run_command(
     is_background: bool,
 ) -> Result<String> {
     let bash_cmd = BashCommand {
-        action_json: BashCommandAction::Command { command: command.to_string(), is_background },
+        action_json: BashCommandAction::Command {
+            command: command.to_string(),
+            is_background,
+            allow_multi: false,
+        },
         wait_for_seconds: Some(0.2),
         thread_id: thread_id.to_string(),
     };
