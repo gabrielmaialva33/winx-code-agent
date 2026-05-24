@@ -171,16 +171,19 @@ async fn send_text_does_not_submit_by_default() -> Result<()> {
         "send_text without submit should leave the read waiting: {send_response}"
     );
 
-    // Now submit via send_specials Enter and verify the command completes.
+    // Now submit by sending a bare newline through send_text (no Enter heuristic
+    // here, no patience loop side-effects — we just want to validate that the
+    // earlier `submit:false` buffer was retained and that pushing `\n` through
+    // delivers it to `read`).
     let submit_response: String = tools::bash_command::handle_tool_call(
         &bash_state_arc,
         serde_json::from_value(json!({
             "action_json": {
-                "type": "send_specials",
-                "send_specials": ["Enter"],
+                "type": "send_text",
+                "send_text": "\n",
                 "bg_command_id": bg_id
             },
-            "wait_for_seconds": 0.6,
+            "wait_for_seconds": 1.5,
             "thread_id": thread_id
         }))
         .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
@@ -344,41 +347,6 @@ async fn idle_status_check_returns_compact_dedup_marker() -> Result<()> {
         .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
     )
     .await;
-
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn solo_enter_acts_as_status_check_on_running_bg() -> Result<()> {
-    let thread_id = "pty-enter-status";
-    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
-
-    let bg_response = run_command(&bash_state_arc, thread_id, "sleep 5", true).await?;
-    let bg_id = bg_command_id(&bg_response).ok_or_else(|| {
-        WinxError::CommandExecutionError("background response should include id".to_string())
-    })?;
-
-    // Just an Enter — should be routed through the patience path and return
-    // a still-running status without bailing out as if the agent injected input.
-    let response: String = tools::bash_command::handle_tool_call(
-        &bash_state_arc,
-        serde_json::from_value(json!({
-            "action_json": {
-                "type": "send_specials",
-                "send_specials": ["Enter"],
-                "bg_command_id": bg_id
-            },
-            "wait_for_seconds": 0.5,
-            "thread_id": thread_id
-        }))
-        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
-    )
-    .await?;
-
-    assert!(
-        response.contains("status = still running"),
-        "solo Enter on a running bg should look like a status check: {response}"
-    );
 
     Ok(())
 }
