@@ -40,10 +40,10 @@ pub async fn handle_tool_call(
     // Process the ContextSave request
     let result = save_context(bash_state, args)?;
 
-    // Try to open the file with the default application if possible
-    if let Err(e) = try_open_file(&result) {
-        debug!("Failed to open the context file: {}", e);
-        // This is non-fatal, just log it
+    if should_open_context_file(&result) {
+        if let Err(e) = try_open_file(&result) {
+            debug!("Failed to open the context file: {}", e);
+        }
     }
 
     Ok(result)
@@ -448,8 +448,12 @@ fn try_open_file(file_path: &str) -> Result<()> {
             if let Ok(status) = status {
                 if status.success() {
                     // Found an available command, use it
-                    let _ =
-                        std::process::Command::new(cmd).arg(file_path).spawn().map_err(|e| {
+                    let _ = std::process::Command::new(cmd)
+                        .arg(file_path)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .spawn()
+                        .map_err(|e| {
                             WinxError::CommandExecutionError(format!(
                                 "Failed to spawn open command: {e}"
                             ))
@@ -466,15 +470,26 @@ fn try_open_file(file_path: &str) -> Result<()> {
     };
 
     // Try to open the file
-    let _ = std::process::Command::new(cmd).arg(file_path).spawn().map_err(|e| {
-        WinxError::CommandExecutionError(format!("Failed to spawn open command: {e}"))
-    })?;
+    let _ = std::process::Command::new(cmd)
+        .arg(file_path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| {
+            WinxError::CommandExecutionError(format!("Failed to spawn open command: {e}"))
+        })?;
 
     // We don't actually need to wait for the command to complete
     // Just let it run in the background
     // (This mimics the Python implementation)
 
     Ok(())
+}
+
+fn should_open_context_file(file_path: &str) -> bool {
+    std::env::var("WINX_OPEN_CONTEXT").is_ok_and(|value| value == "1" || value == "true")
+        && Path::new(file_path).is_file()
+        && !cfg!(test)
 }
 
 /// Save context data to a temporary file as a last resort
