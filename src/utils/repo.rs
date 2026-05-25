@@ -22,7 +22,7 @@ const IMPORTANT_NAMES: &[&str] = &[
 ];
 
 const SKIP_DIRS: &[&str] =
-    &[".git", "target", "node_modules", ".next", "dist", "build", ".venv", "__pycache__"];
+    &[".git", ".winx", "target", "node_modules", ".next", "dist", "build", ".venv", "__pycache__"];
 
 #[derive(Debug, Clone)]
 pub struct RepoContext {
@@ -30,6 +30,7 @@ pub struct RepoContext {
     pub is_git_repo: bool,
     pub project_summary: String,
     pub recent_files: Vec<String>,
+    pub active_files: Vec<String>,
     pub important_files: Vec<String>,
     pub project_files: Vec<String>,
 }
@@ -41,7 +42,8 @@ impl RepoContextAnalyzer {
         let root = workspace_root(path);
         let is_git_repo = root.join(".git").exists();
         let mut project_files = collect_project_files(&root)?;
-        project_files.sort_by_key(|path| (path_score(path), path.clone()));
+        let active_files = crate::utils::workspace_stats::active_files(&root);
+        project_files.sort_by_key(|path| (path_score(path, &active_files), path.clone()));
         project_files.truncate(MAX_CONTEXT_FILES);
 
         let recent_files = if is_git_repo { recent_git_files(&root) } else { Vec::new() };
@@ -53,6 +55,7 @@ impl RepoContextAnalyzer {
             is_git_repo,
             project_summary,
             recent_files,
+            active_files,
             important_files,
             project_files,
         })
@@ -77,6 +80,13 @@ pub fn get_repo_context(path: &Path) -> Result<(String, Vec<String>)> {
     if !context.recent_files.is_empty() {
         output.push_str("\nRecent git files:\n");
         for file in &context.recent_files {
+            let _ = writeln!(output, "- {file}");
+        }
+    }
+
+    if !context.active_files.is_empty() {
+        output.push_str("\nActive winx files:\n");
+        for file in &context.active_files {
             let _ = writeln!(output, "- {file}");
         }
     }
@@ -172,11 +182,12 @@ fn project_summary(root: &Path, is_git_repo: bool, file_count: usize) -> String 
     format!("Detected {manifest} workspace with {file_count} indexed files; git={is_git_repo}.")
 }
 
-fn path_score(path: &str) -> usize {
+fn path_score(path: &str, active_files: &[String]) -> usize {
     let important = usize::from(!IMPORTANT_NAMES.contains(&path));
+    let active_bonus = if active_files.iter().any(|active| active == path) { 0 } else { 8 };
     let depth = path.matches('/').count();
     let test_penalty = usize::from(path.contains("test") || path.contains("spec"));
-    important * 10 + depth + test_penalty
+    active_bonus + important * 10 + depth + test_penalty
 }
 
 #[cfg(test)]

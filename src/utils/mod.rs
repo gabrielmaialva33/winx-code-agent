@@ -10,6 +10,7 @@ pub mod mmap;
 pub mod path;
 pub mod repo;
 pub mod syntax;
+pub mod workspace_stats;
 
 use crate::types::Initialize;
 use serde_json::Value;
