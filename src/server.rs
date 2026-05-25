@@ -15,6 +15,9 @@ use rmcp::{
 };
 use schemars::schema_for;
 use serde_json::Value;
+use std::fmt::Write as FmtWrite;
+use std::path::Path;
+use std::process::Command;
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -57,6 +60,7 @@ const INITIALIZE_DESCRIPTION: &str =
 
 const BASH_COMMAND_DESCRIPTION: &str =
     "- Execute a bash command. This is stateful (beware with subsequent calls). \
+     - Accepted payloads include action_json with an explicit type, action_json shorthand such as {\"command\":\"pwd\"}, or top-level shorthand such as {\"command\":\"pwd\"}. \
      - Status of the command and the current working directory will always be returned at the end. \
      - The first or the last line might be `(...truncated)` if the output is too long. \
      - Always run `pwd` if you get any file or directory not found error to make sure you're not lost. \
@@ -204,6 +208,27 @@ fn winx_prompts() -> Vec<Prompt> {
         .clone()
 }
 
+fn append_command_section<const N: usize>(
+    output: &mut String,
+    title: &str,
+    cwd: &Path,
+    args: [&str; N],
+) {
+    let Ok(command_output) = Command::new("git").args(["-C"]).arg(cwd).args(args).output() else {
+        return;
+    };
+    if !command_output.status.success() {
+        return;
+    }
+
+    let content = String::from_utf8_lossy(&command_output.stdout);
+    if content.trim().is_empty() {
+        return;
+    }
+
+    let _ = writeln!(output, "\n# {title}\n{}", content.trim_end());
+}
+
 /// Winx service with shared bash state
 #[derive(Clone)]
 pub struct WinxService {
@@ -302,25 +327,7 @@ impl ServerHandler for WinxService {
             ));
         }
 
-        let state_summary = {
-            let guard = self.bash_state.lock().await;
-            guard.as_ref().map_or_else(
-                || "Winx is not initialized.".to_string(),
-                |state| {
-                    format!(
-                        "Thread: {}\nWorkspace: {}\nCwd: {}\nMode: {}\nWhitelisted files: {}",
-                        state.current_thread_id,
-                        state.workspace_root.display(),
-                        state.cwd.display(),
-                        state.mode,
-                        state.whitelist_for_overwrite.len()
-                    )
-                },
-            )
-        };
-        let text = format!(
-            "Prepare a concise handoff for another agent. Include active objective, current state, important files, changed files, blockers, and exact next commands.\n\nCurrent Winx state:\n{state_summary}"
-        );
+        let text = self.knowledge_transfer_prompt_text().await;
 
         Ok(GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, text)])
             .with_description("Knowledge transfer handoff prompt"))
@@ -369,6 +376,86 @@ impl ServerHandler for WinxService {
 }
 
 impl WinxService {
+    async fn knowledge_transfer_prompt_text(&self) -> String {
+        let mut text = String::from(
+            "Prepare a concise handoff for another agent. Include active objective, current state, important files, changed files, blockers, validation already run, and exact next commands.\n",
+        );
+
+        let state_snapshot = {
+            let guard = self.bash_state.lock().await;
+            guard.as_ref().map(|state| {
+                let whitelist = state
+                    .whitelist_for_overwrite
+                    .iter()
+                    .take(12)
+                    .map(|(path, data)| {
+                        format!(
+                            "- {} ({:.1}% read, {} lines)",
+                            path,
+                            data.get_percentage_read(),
+                            data.total_lines
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    state.current_thread_id.clone(),
+                    state.workspace_root.clone(),
+                    state.cwd.clone(),
+                    state.mode.to_string(),
+                    whitelist,
+                    state.whitelist_for_overwrite.len(),
+                )
+            })
+        };
+
+        let Some((thread_id, workspace_root, cwd, mode, whitelist, whitelist_count)) =
+            state_snapshot
+        else {
+            text.push_str("\n# Current Winx state\nWinx is not initialized.\n");
+            return text;
+        };
+
+        let _ = writeln!(
+            text,
+            "\n# Current Winx state\nThread: {thread_id}\nWorkspace: {}\nCwd: {}\nMode: {mode}\nWhitelisted files: {whitelist_count}",
+            workspace_root.display(),
+            cwd.display()
+        );
+
+        if !whitelist.is_empty() {
+            text.push_str("\n# Recently readable files\n");
+            text.push_str(&whitelist.join("\n"));
+            text.push('\n');
+        }
+
+        let active_files = crate::utils::workspace_stats::active_files(&workspace_root);
+        if !active_files.is_empty() {
+            text.push_str("\n# Active files by Winx usage\n");
+            for file in active_files.iter().take(12) {
+                let _ = writeln!(text, "- {file}");
+            }
+        }
+
+        if let Ok((repo_context, _)) = crate::utils::repo::get_repo_context(&workspace_root) {
+            let repo_excerpt = repo_context.lines().take(80).collect::<Vec<_>>().join("\n");
+            let _ = writeln!(text, "\n# Workspace context\n{repo_excerpt}");
+        }
+
+        append_command_section(&mut text, "Git status", &workspace_root, ["status", "--short"]);
+        append_command_section(
+            &mut text,
+            "Git diff stat",
+            &workspace_root,
+            ["diff", "--stat", "HEAD"],
+        );
+
+        text.push_str(
+            "\n# Handoff checklist\n- State what changed and why.\n- Include files touched and any user-owned dirty work to preserve.\n- Include validation commands already run and their result.\n- Include the next safest command to continue.\n",
+        );
+
+        text
+    }
+
     async fn persist_state(&self) {
         let guard = self.bash_state.lock().await;
         if let Some(state) = guard.as_ref() {
