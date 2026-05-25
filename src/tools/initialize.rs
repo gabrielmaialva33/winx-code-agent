@@ -1,6 +1,7 @@
 //! Implementation of the Initialize tool.
 
 use std::fmt::Write as FmtWrite;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -153,7 +154,30 @@ fn validate_thread_id(initialize: &Initialize) -> Result<()> {
     Ok(())
 }
 
+fn load_guidelines(workspace: &Path) -> String {
+    let mut output = String::new();
+    let mut candidates = Vec::new();
+    if let Some(home) = home::home_dir() {
+        candidates.push(home.join(".winx").join("AGENTS.md"));
+        candidates.push(home.join(".winx").join("CLAUDE.md"));
+        candidates.push(home.join(".wcgw").join("AGENTS.md"));
+        candidates.push(home.join(".wcgw").join("CLAUDE.md"));
+    }
+    candidates.push(workspace.join("AGENTS.md"));
+    candidates.push(workspace.join("CLAUDE.md"));
+
+    for path in candidates {
+        if path.is_file() {
+            if let Ok(content) = fs::read_to_string(&path) {
+                let _ = writeln!(output, "\n## {}\n{}", path.display(), content);
+            }
+        }
+    }
+    output
+}
+
 #[instrument(level = "info", skip(bash_state_arc, initialize))]
+#[allow(clippy::too_many_lines)]
 pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     initialize: Initialize,
@@ -181,11 +205,38 @@ pub async fn handle_tool_call(
             new_bash_state.write_if_empty_mode = write_if_empty_mode;
             new_bash_state.initialized = true;
 
-            if folder_to_start.exists() {
+            let resumed_context = if initialize.task_id_to_resume.is_empty() {
+                None
+            } else {
+                crate::tools::context_save::load_saved_context(&initialize.task_id_to_resume)?
+            };
+
+            if let Some((memory_data, snapshot)) = &resumed_context {
+                if let Some(snapshot) = snapshot {
+                    new_bash_state.apply_snapshot(snapshot);
+                    new_bash_state.current_thread_id.clone_from(&thread_id);
+                }
+                let _ = writeln!(
+                    response,
+                    "\n# Resumed task {}\nFollowing is the retrieved task context:\n{}",
+                    initialize.task_id_to_resume, memory_data
+                );
+            }
+
+            if resumed_context.as_ref().and_then(|(_, snapshot)| snapshot.as_ref()).is_none()
+                && folder_to_start.exists()
+            {
                 new_bash_state.update_cwd(&folder_to_start)?;
                 new_bash_state.update_workspace_root(&folder_to_start)?;
+            }
+            if new_bash_state.cwd.exists() {
                 new_bash_state.init_pty_shell().await?;
             }
+
+            let attach_hint = {
+                let pty_guard = new_bash_state.pty_shell.lock().await;
+                pty_guard.as_ref().and_then(|shell| shell.attach_hint.clone())
+            };
 
             *bash_state_guard = Some(new_bash_state);
 
@@ -194,18 +245,33 @@ pub async fn handle_tool_call(
                 "\n# Environment\nSystem: {}\nMachine: {}\nInitialized in directory: {}\n",
                 std::env::consts::OS,
                 std::env::consts::ARCH,
-                folder_to_start.display()
+                bash_state_guard
+                    .as_ref()
+                    .map_or(folder_to_start.as_path(), |state| state.cwd.as_path())
+                    .display()
             );
 
             let _ = writeln!(response, "\nUse thread_id={thread_id} for all winx tool calls.");
+            if let Some(attach_hint) = attach_hint {
+                let _ = writeln!(response, "\nAttach terminal: {attach_hint}");
+            }
 
-            if let Ok((repo_context, _)) = crate::utils::repo::get_repo_context(&folder_to_start) {
+            let active_workspace = bash_state_guard
+                .as_ref()
+                .map_or(folder_to_start.as_path(), |state| state.workspace_root.as_path());
+
+            let guidelines = load_guidelines(active_workspace);
+            if !guidelines.is_empty() {
+                let _ = writeln!(response, "\n# Agent guidelines\n{guidelines}");
+            }
+
+            if let Ok((repo_context, _)) = crate::utils::repo::get_repo_context(active_workspace) {
                 let _ = writeln!(response, "\n# Workspace structure\n{repo_context}");
             }
 
             if !initialize.initial_files_to_read.is_empty() {
                 let content =
-                    read_initial_files_simple(&initialize.initial_files_to_read, &folder_to_start);
+                    read_initial_files_simple(&initialize.initial_files_to_read, active_workspace);
                 if !content.is_empty() {
                     let _ = writeln!(response, "\n# Requested files\n{content}");
                 }

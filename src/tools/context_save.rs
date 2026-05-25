@@ -9,6 +9,9 @@ use tracing::{debug, warn};
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
+use crate::state::persistence::{
+    load_bash_state_from_path, save_bash_state_to_path, BashStateSnapshot,
+};
 use crate::types::ContextSave;
 use crate::utils::path::expand_user;
 
@@ -65,13 +68,12 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
     let memory_data = format_memory(&context, &relevant_files_data);
     let safe_id = sanitize_filename(&context.id);
 
-    let memory_file_path = memory_dir.join(format!("{safe_id}.txt"));
+    let (memory_file_path, state_file_path) = context_paths_from_dir(&memory_dir, &safe_id);
     if let Some(response) = write_memory_file(&memory_file_path, &memory_data, &context)? {
         return Ok(response);
     }
 
-    let state_file_path = memory_dir.join(format!("{safe_id}_bash_state.json"));
-    write_bash_state_file(&state_file_path, bash_state)?;
+    write_bash_state_file(&state_file_path, bash_state);
 
     Ok(context_save_response(&relevant_files, &warnings, &context, &memory_file_path))
 }
@@ -175,6 +177,41 @@ fn resolve_memory_dir() -> Result<PathBuf> {
     Ok(memory_dir)
 }
 
+pub(crate) fn context_paths(id: &str) -> Result<(PathBuf, PathBuf)> {
+    let safe_id = sanitize_filename(id);
+    let memory_dir = resolve_memory_dir()?;
+    Ok(context_paths_from_dir(&memory_dir, &safe_id))
+}
+
+fn context_paths_from_dir(memory_dir: &Path, safe_id: &str) -> (PathBuf, PathBuf) {
+    (
+        memory_dir.join(format!("{safe_id}.txt")),
+        memory_dir.join(format!("{safe_id}_bash_state.json")),
+    )
+}
+
+pub(crate) fn load_saved_context(id: &str) -> Result<Option<(String, Option<BashStateSnapshot>)>> {
+    if id.is_empty() {
+        return Ok(None);
+    }
+
+    let (memory_file_path, state_file_path) = context_paths(id)?;
+    if !memory_file_path.exists() {
+        return Ok(None);
+    }
+
+    let memory_data =
+        fs::read_to_string(&memory_file_path).map_err(|e| WinxError::FileAccessError {
+            path: memory_file_path.clone(),
+            message: format!("Failed to read saved context: {e}"),
+        })?;
+    let state = load_bash_state_from_path(&state_file_path).map_err(|e| {
+        WinxError::SerializationError(format!("Failed to load saved bash state: {e}"))
+    })?;
+
+    Ok(Some((memory_data, state)))
+}
+
 fn write_memory_file(
     memory_file_path: &Path,
     memory_data: &str,
@@ -196,36 +233,11 @@ fn write_memory_file(
     Ok(None)
 }
 
-fn write_bash_state_file(state_file_path: &Path, bash_state: &BashState) -> Result<()> {
-    let bash_state_dict = serde_json::json!({
-        "cwd": bash_state.cwd.to_string_lossy().to_string(),
-        "workspace_root": bash_state.workspace_root.to_string_lossy().to_string(),
-        "mode": match bash_state.mode {
-            crate::types::Modes::Wcgw => "wcgw",
-            crate::types::Modes::Architect => "architect",
-            crate::types::Modes::CodeWriter => "code_writer",
-        }
-    });
-
-    let state_json = serde_json::to_string_pretty(&bash_state_dict).map_err(|e| {
-        WinxError::SerializationError(format!("Failed to serialize bash state: {e}"))
-    })?;
-
+fn write_bash_state_file(state_file_path: &Path, bash_state: &BashState) {
     // Try to create and write state file, but don't fail if it doesn't work
-    match File::create(state_file_path) {
-        Ok(mut state_file) => {
-            if let Err(e) = state_file.write_all(state_json.as_bytes()) {
-                warn!("Failed to write bash state data: {}", e);
-                // Non-fatal, continue
-            }
-        }
-        Err(e) => {
-            warn!("Failed to create bash state file: {}", e);
-            // Non-fatal, continue
-        }
+    if let Err(e) = save_bash_state_to_path(state_file_path, &bash_state.snapshot()) {
+        warn!("Failed to write bash state data: {}", e);
     }
-
-    Ok(())
 }
 
 fn context_save_response(

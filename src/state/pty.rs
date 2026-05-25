@@ -14,6 +14,7 @@ use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::Arc;
 use std::thread;
@@ -36,6 +37,50 @@ pub const RING_BUFFER_LINES: usize = 2_000;
 /// WCGW-style prompt pattern for command completion detection
 const WCGW_PROMPT_PATTERN: &str = "◉";
 const WCGW_PROMPT_END: &str = "──➤";
+
+fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>) {
+    let requested = std::env::var("WINX_ATTACH_TERMINAL")
+        .or_else(|_| std::env::var("WINX_USE_SCREEN"))
+        .unwrap_or_default();
+    if !requested.is_empty() && requested != "0" && requested != "false" {
+        let session = format!("winx-{}-{}", std::process::id(), timestamp_millis());
+        if requested == "tmux" && command_available("tmux") {
+            let mut cmd = CommandBuilder::new("tmux");
+            cmd.args(["new-session", "-A", "-s", &session, "bash"]);
+            if restricted_mode {
+                cmd.arg("-r");
+            }
+            return (cmd, Some(format!("tmux attach -t {session}")));
+        }
+        if command_available("screen") {
+            let mut cmd = CommandBuilder::new("screen");
+            cmd.args(["-q", "-S", &session, "bash"]);
+            if restricted_mode {
+                cmd.arg("-r");
+            }
+            return (cmd, Some(format!("screen -x {session}")));
+        }
+    }
+
+    let mut cmd = CommandBuilder::new("bash");
+    if restricted_mode {
+        cmd.arg("-r");
+    }
+    (cmd, None)
+}
+
+fn command_available(command: &str) -> bool {
+    Command::new("sh")
+        .args(["-c", &format!("command -v {command}")])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn timestamp_millis() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis())
+}
 
 /// Real PTY-based interactive shell
 ///
@@ -71,6 +116,8 @@ pub struct PtyShell {
     /// Hash of the last rendered output we shipped to the caller. Used by the
     /// delta path in `status_check` to elide repeats when the screen is idle.
     pub last_returned_hash: Option<u64>,
+    /// Optional command a human can run to attach to the same terminal session.
+    pub attach_hint: Option<String>,
 }
 
 impl std::fmt::Debug for PtyShell {
@@ -81,6 +128,7 @@ impl std::fmt::Debug for PtyShell {
             .field("command_running", &self.command_running)
             .field("output_truncated", &self.output_truncated)
             .field("output_buffer_len", &self.output_buffer.len())
+            .field("attach_hint", &self.attach_hint)
             .finish_non_exhaustive()
     }
 }
@@ -112,10 +160,7 @@ impl PtyShell {
         let pair = pty_system.openpty(size).context("Failed to open PTY pair")?;
 
         // Build the command
-        let mut cmd = CommandBuilder::new("bash");
-        if restricted_mode {
-            cmd.arg("-r");
-        }
+        let (mut cmd, attach_hint) = attachable_command(restricted_mode);
 
         // Set up environment for proper terminal behavior
         cmd.env("TERM", "xterm-256color");
@@ -180,6 +225,7 @@ impl PtyShell {
             line_ring: VecDeque::with_capacity(RING_BUFFER_LINES),
             line_ring_partial: String::new(),
             last_returned_hash: None,
+            attach_hint,
         };
 
         // Initialize the shell with WCGW-style prompt

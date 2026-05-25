@@ -3,10 +3,11 @@
 
 use rmcp::{
     model::{
-        Annotated, CallToolRequestParams, CallToolResult, Content, Implementation,
-        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProtocolVersion, RawResource,
-        ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
-        ServerInfo, Tool, ToolAnnotations,
+        Annotated, CallToolRequestParams, CallToolResult, Content, GetPromptRequestParams,
+        GetPromptResult, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
+        PaginatedRequestParams, Prompt, PromptMessage, PromptMessageRole, ProtocolVersion,
+        RawResource, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
+        ServerCapabilities, ServerInfo, Tool, ToolAnnotations,
     },
     service::{RequestContext, RoleServer},
     transport::stdio,
@@ -150,6 +151,7 @@ const CONTEXT_SAVE_DESCRIPTION: &str =
      - Leave project path as empty string if no project path";
 
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
+static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();
 
 fn winx_tools() -> Vec<Tool> {
     WINX_TOOLS.get_or_init(build_winx_tools).clone()
@@ -190,6 +192,18 @@ fn build_winx_tools() -> Vec<Tool> {
     ]
 }
 
+fn winx_prompts() -> Vec<Prompt> {
+    WINX_PROMPTS
+        .get_or_init(|| {
+            vec![Prompt::new(
+                "KnowledgeTransfer",
+                Some("Summarize current Winx state, workspace context, and handoff notes."),
+                None,
+            )]
+        })
+        .clone()
+}
+
 /// Winx service with shared bash state
 #[derive(Clone)]
 pub struct WinxService {
@@ -223,6 +237,7 @@ impl ServerHandler for WinxService {
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+                .enable_prompts()
                 .build(),
         )
         .with_server_info(
@@ -265,6 +280,50 @@ impl ServerHandler for WinxService {
             next_cursor: None,
             meta: None,
         })
+    }
+
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        Ok(ListPromptsResult { prompts: winx_prompts(), next_cursor: None, meta: None })
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        if request.name != "KnowledgeTransfer" {
+            return Err(McpError::invalid_request(
+                format!("Unknown prompt: {}", request.name),
+                None,
+            ));
+        }
+
+        let state_summary = {
+            let guard = self.bash_state.lock().await;
+            guard.as_ref().map_or_else(
+                || "Winx is not initialized.".to_string(),
+                |state| {
+                    format!(
+                        "Thread: {}\nWorkspace: {}\nCwd: {}\nMode: {}\nWhitelisted files: {}",
+                        state.current_thread_id,
+                        state.workspace_root.display(),
+                        state.cwd.display(),
+                        state.mode,
+                        state.whitelist_for_overwrite.len()
+                    )
+                },
+            )
+        };
+        let text = format!(
+            "Prepare a concise handoff for another agent. Include active objective, current state, important files, changed files, blockers, and exact next commands.\n\nCurrent Winx state:\n{state_summary}"
+        );
+
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, text)])
+            .with_description("Knowledge transfer handoff prompt"))
     }
 
     async fn read_resource(
@@ -310,6 +369,15 @@ impl ServerHandler for WinxService {
 }
 
 impl WinxService {
+    async fn persist_state(&self) {
+        let guard = self.bash_state.lock().await;
+        if let Some(state) = guard.as_ref() {
+            if let Err(error) = state.save_state_to_disk() {
+                warn!("Failed to persist bash state: {}", error);
+            }
+        }
+    }
+
     async fn handle_initialize(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
         let initialize: Initialize = serde_json::from_value(args).map_err(|e| {
@@ -317,7 +385,10 @@ impl WinxService {
         })?;
 
         match crate::tools::initialize::handle_tool_call(&self.bash_state, initialize).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
+            Ok(result) => {
+                self.persist_state().await;
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
             Err(e) => Err(McpError::internal_error(format!("Initialize failed: {e}"), None)),
         }
     }
@@ -329,7 +400,10 @@ impl WinxService {
         })?;
 
         match crate::tools::bash_command::handle_tool_call(&self.bash_state, bash_command).await {
-            Ok(output) => Ok(CallToolResult::success(vec![Content::text(output)])),
+            Ok(output) => {
+                self.persist_state().await;
+                Ok(CallToolResult::success(vec![Content::text(output)]))
+            }
             Err(e) => Err(McpError::internal_error(format!("BashCommand failed: {e}"), None)),
         }
     }
@@ -341,7 +415,10 @@ impl WinxService {
         })?;
 
         match crate::tools::read_files::handle_tool_call(&self.bash_state, read_files).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
+            Ok(result) => {
+                self.persist_state().await;
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
             Err(e) => Err(McpError::internal_error(format!("ReadFiles failed: {e}"), None)),
         }
     }
@@ -361,7 +438,10 @@ impl WinxService {
         )
         .await
         {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
+            Ok(result) => {
+                self.persist_state().await;
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
             Err(e) => Err(McpError::internal_error(format!("FileWriteOrEdit failed: {e}"), None)),
         }
     }
@@ -373,7 +453,10 @@ impl WinxService {
         })?;
 
         match crate::tools::context_save::handle_tool_call(&self.bash_state, context_save).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
+            Ok(result) => {
+                self.persist_state().await;
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
             Err(e) => Err(McpError::internal_error(format!("ContextSave failed: {e}"), None)),
         }
     }
@@ -387,6 +470,7 @@ impl WinxService {
         match crate::tools::read_image::handle_tool_call(&self.bash_state, read_image).await {
             Ok((mime_type, base64_data)) => {
                 let result_text = format!("MIME: {mime_type}\nData: {base64_data}");
+                self.persist_state().await;
                 Ok(CallToolResult::success(vec![Content::text(result_text)]))
             }
             Err(e) => Err(McpError::internal_error(format!("ReadImage failed: {e}"), None)),

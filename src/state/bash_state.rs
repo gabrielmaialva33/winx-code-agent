@@ -232,7 +232,13 @@ impl BashState {
     }
 
     pub fn save_state_to_disk(&self) -> Result<()> {
-        let snapshot = BashStateSnapshot::from_state(
+        let snapshot = self.snapshot();
+        save_state_file(&self.current_thread_id, &snapshot)?;
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> BashStateSnapshot {
+        BashStateSnapshot::from_state(
             &self.cwd.to_string_lossy(),
             &self.workspace_root.to_string_lossy(),
             &self.mode,
@@ -241,34 +247,26 @@ impl BashState {
             &self.write_if_empty_mode,
             &self.whitelist_for_overwrite,
             &self.current_thread_id,
-        );
-        save_state_file(&self.current_thread_id, &snapshot)?;
-        Ok(())
+        )
+    }
+
+    pub fn apply_snapshot(&mut self, snapshot: &BashStateSnapshot) {
+        let (cwd, root, mode, bmode, emode, wmode, whitelist, tid) = snapshot.to_state_components();
+
+        self.cwd = PathBuf::from(cwd);
+        self.workspace_root = PathBuf::from(root);
+        self.mode = mode;
+        self.bash_command_mode = bmode;
+        self.file_edit_mode = emode;
+        self.write_if_empty_mode = wmode;
+        self.whitelist_for_overwrite = whitelist;
+        self.current_thread_id = tid;
+        self.initialized = true;
     }
 
     pub fn load_state_from_disk(&mut self, thread_id: &str) -> Result<bool> {
         if let Some(snapshot) = load_state_file(thread_id)? {
-            let (cwd, root, mode, bmode, emode, wmode, whitelist, tid) =
-                snapshot.to_state_components();
-
-            self.cwd = PathBuf::from(cwd);
-
-            self.workspace_root = PathBuf::from(root);
-
-            self.mode = mode;
-
-            self.bash_command_mode = bmode;
-
-            self.file_edit_mode = emode;
-
-            self.write_if_empty_mode = wmode;
-
-            self.whitelist_for_overwrite = whitelist;
-
-            self.current_thread_id = tid;
-
-            self.initialized = true;
-
+            self.apply_snapshot(&snapshot);
             Ok(true)
         } else {
             Ok(false)

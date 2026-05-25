@@ -12,8 +12,8 @@ use winx_code_agent::errors::{Result, WinxError};
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::tools::WinxService;
 use winx_code_agent::types::{
-    BashCommand, BashCommandAction, FileWriteOrEdit, Initialize, InitializeType, ModeName,
-    ReadFiles,
+    BashCommand, BashCommandAction, ContextSave, FileWriteOrEdit, Initialize, InitializeType,
+    ModeName, ReadFiles,
 };
 
 // ==================== WinxService Tests ====================
@@ -63,6 +63,78 @@ async fn test_initialize_first_call_wcgw_mode() -> Result<()> {
     assert!(bash_state.initialized);
     assert!(!bash_state.current_thread_id.is_empty());
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_initialize_loads_agent_guidelines() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    std::fs::write(temp_dir.path().join("AGENTS.md"), "Use repo-specific instructions.\n")?;
+    let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+
+    let init = Initialize {
+        init_type: InitializeType::FirstCall,
+        mode_name: ModeName::Wcgw,
+        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        thread_id: "guidelines-test".to_string(),
+        code_writer_config: None,
+        initial_files_to_read: vec![],
+        task_id_to_resume: String::new(),
+    };
+
+    let response =
+        winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+
+    assert!(response.contains("# Agent guidelines"));
+    assert!(response.contains("Use repo-specific instructions."));
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_context_save_resume_restores_task_context() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+    let task_id = format!("resume-test-{}", std::process::id());
+
+    let init = Initialize {
+        init_type: InitializeType::FirstCall,
+        mode_name: ModeName::Wcgw,
+        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        thread_id: "resume-source".to_string(),
+        code_writer_config: None,
+        initial_files_to_read: vec![],
+        task_id_to_resume: String::new(),
+    };
+    winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+
+    let context = ContextSave {
+        id: task_id.clone(),
+        project_root_path: temp_dir.path().to_string_lossy().to_string(),
+        description: "resume payload marker".to_string(),
+        relevant_file_globs: vec![],
+    };
+    winx_code_agent::tools::context_save::handle_tool_call(&bash_state_arc, context).await?;
+
+    let resumed_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+    let resume_init = Initialize {
+        init_type: InitializeType::FirstCall,
+        mode_name: ModeName::Wcgw,
+        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        thread_id: "resume-target".to_string(),
+        code_writer_config: None,
+        initial_files_to_read: vec![],
+        task_id_to_resume: task_id,
+    };
+    let response =
+        winx_code_agent::tools::initialize::handle_tool_call(&resumed_state_arc, resume_init)
+            .await?;
+
+    assert!(response.contains("# Resumed task"));
+    assert!(response.contains("resume payload marker"));
+    let state = resumed_state_arc.lock().await;
+    let state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+    assert_eq!(state.current_thread_id, "resumetarget");
+    assert_eq!(state.workspace_root, std::fs::canonicalize(temp_dir.path())?);
     Ok(())
 }
 

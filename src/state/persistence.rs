@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{debug, info, warn};
 
 use crate::types::{
@@ -89,11 +89,25 @@ pub fn save_bash_state(thread_id: &str, state: &BashStateSnapshot) -> Result<()>
     Ok(())
 }
 
+pub fn save_bash_state_to_path(path: &Path, state: &BashStateSnapshot) -> Result<()> {
+    let json = serde_json::to_string_pretty(state)?;
+    fs::write(path, json)?;
+    Ok(())
+}
+
 pub fn load_bash_state(thread_id: &str) -> Result<Option<BashStateSnapshot>> {
     if thread_id.is_empty() {
         return Ok(None);
     }
     let path = get_state_file_path(thread_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let json = fs::read_to_string(path)?;
+    Ok(Some(serde_json::from_str(&json)?))
+}
+
+pub fn load_bash_state_from_path(path: &Path) -> Result<Option<BashStateSnapshot>> {
     if !path.exists() {
         return Ok(None);
     }
