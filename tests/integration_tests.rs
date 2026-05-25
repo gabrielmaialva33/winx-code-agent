@@ -414,6 +414,37 @@ fn test_bash_command_deserializer_sanitizes_json_nul_escape(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_bash_command_top_level_multiline_payload_executes() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+
+    let init = Initialize {
+        init_type: InitializeType::FirstCall,
+        mode_name: ModeName::Wcgw,
+        any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
+        thread_id: "dogfood-bash".to_string(),
+        code_writer_config: None,
+        initial_files_to_read: vec![],
+        task_id_to_resume: String::new(),
+    };
+    winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+
+    let command: BashCommand = serde_json::from_value(json!({
+        "thread_id": "dogfoodbash",
+        "wait_for_seconds": 2,
+        "command": "printf 'winx-one\\n'\nprintf 'winx-two\\n'"
+    }))
+    .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?;
+
+    let response =
+        winx_code_agent::tools::bash_command::handle_tool_call(&bash_state_arc, command).await?;
+    assert!(response.contains("winx-one"), "{response}");
+    assert!(response.contains("winx-two"), "{response}");
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_read_files_single_file() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let file_path = temp_dir.path().join("test.rs");
