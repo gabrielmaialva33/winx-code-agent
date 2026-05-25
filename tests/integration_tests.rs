@@ -278,6 +278,28 @@ fn test_bash_command_deserializer_normalizes_thread_id_and_preserves_tail(
     Ok(())
 }
 
+#[test]
+fn test_bash_command_deserializer_accepts_command_shorthand(
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let bash_command: BashCommand = serde_json::from_value(json!({
+        "action_json": {
+            "command": "pwd",
+            "cwd": "/tmp"
+        },
+        "thread_id": "thread-123_$"
+    }))?;
+
+    assert_eq!(bash_command.thread_id, "thread123_");
+    if let BashCommandAction::Command { command, allow_multi, .. } = bash_command.action_json {
+        assert_eq!(command, "pwd");
+        assert!(!allow_multi);
+    } else {
+        return Err("expected command action".into());
+    }
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_read_files_single_file() -> Result<()> {
     let temp_dir = TempDir::new()?;

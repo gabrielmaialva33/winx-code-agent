@@ -575,7 +575,7 @@ impl<'de> Deserialize<'de> for BashCommand {
                 // Replace literal newlines with space to avoid JSON parsing errors
                 let sanitized = s.replace('\n', " ");
                 match serde_json::from_str(&sanitized) {
-                    Ok(json) => json,
+                    Ok(json) => normalize_action_json(json),
                     Err(e) => {
                         // If strict JSON parsing fails, try to be more lenient
                         // For commands containing literal newlines, just wrap the string in a command object
@@ -607,7 +607,7 @@ impl<'de> Deserialize<'de> for BashCommand {
                             };
 
                             match serde_json::from_str(&re_sanitized) {
-                                Ok(json) => json,
+                                Ok(json) => normalize_action_json(json),
                                 Err(err) => {
                                     // Log the specific parsing error for debugging
                                     tracing::error!("Secondary JSON parse error: {}", err);
@@ -625,8 +625,9 @@ impl<'de> Deserialize<'de> for BashCommand {
                     }
                 }
             }
-            // If it's already an object or other JSON value, use it directly
-            value => value,
+            // If it's already an object or other JSON value, normalize legacy
+            // WCGW-style shorthand such as {"command": "..."}.
+            value => normalize_action_json(value),
         };
 
         // Now deserialize the action_json to our BashCommandAction enum
@@ -657,6 +658,36 @@ serde::de::Error::custom(format!("Invalid action_json: {e}. Please ensure your J
             thread_id: normalize_thread_id(&helper.thread_id),
         })
     }
+}
+
+fn normalize_action_json(mut value: serde_json::Value) -> serde_json::Value {
+    let serde_json::Value::Object(map) = &mut value else {
+        return value;
+    };
+
+    if map.contains_key("type") {
+        return value;
+    }
+
+    let inferred_type = if map.contains_key("command") {
+        Some("command")
+    } else if map.contains_key("status_check") {
+        Some("status_check")
+    } else if map.contains_key("send_text") {
+        Some("send_text")
+    } else if map.contains_key("send_specials") {
+        Some("send_specials")
+    } else if map.contains_key("send_ascii") {
+        Some("send_ascii")
+    } else {
+        None
+    };
+
+    if let Some(action_type) = inferred_type {
+        map.insert("type".to_string(), serde_json::Value::String(action_type.to_string()));
+    }
+
+    value
 }
 
 // Bash command mode
