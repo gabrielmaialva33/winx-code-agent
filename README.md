@@ -29,25 +29,28 @@ long-running TUIs without leaking output buffers into your token budget.
 ## What you get
 
 - A stateful bash session per thread with proper PTY semantics — foreground, background, status checks, text input,
-  Enter/Ctrl-C/Ctrl-D, raw ASCII.
+  Enter/Ctrl-C/Ctrl-D, raw ASCII. Multiline scripts and top-level `command` shorthand both work; NUL bytes are
+  rejected before they reach the shell.
 - Workspaces with three modes: `wcgw` (full access), `architect` (read-only), `code_writer` (allowlist of commands and
   write globs).
-- File reads with WCGW-style line ranges (`file.rs:10-40`, `file.rs:10-`, `file.rs:-40`).
+- File reads with WCGW-style line ranges (`file.rs:10-40`, `file.rs:10-`, `file.rs:-40`). Active files are tracked
+  and prioritized in the repository context across calls.
 - File writes and SEARCH/REPLACE edits that survive ambiguous matches, indentation drift, and the usual unicode
-  quote-mismatches from LLMs.
-- `ContextSave` for handing a task summary plus its files to the next session.
+  quote-mismatches from LLMs. Writes are blocked when the file hasn't been read or the cached content is stale.
+- `ContextSave` for handing a task summary plus its files to the next session — including workspace context, active
+  files, git status/diff, and terminal sharing for proper resumption.
 - `ReadImage` so multimodal clients can pull screenshots, mockups, error PNGs, etc.
 
 ## MCP Tools
 
-| Tool              | What it does                                                                                                                                                   |
-|-------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Initialize`      | Boots the workspace, picks the mode, hands you a `thread_id`. Call this first or everything else errors out.                                                   |
-| `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, drives TUIs. Supports `is_background`, `status_check`, `send_text`, `send_specials`, `send_ascii`. |
-| `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range.                                                                                   |
-| `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks. Refuses to write a file you haven't read yet.                                                                        |
-| `ContextSave`     | Dumps task description + file globs into a single text file for resume/handoff.                                                                                |
-| `ReadImage`       | Base64 + MIME, for clients that can render images.                                                                                                             |
+| Tool              | What it does                                                                                                                                                                                              |
+|-------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Initialize`      | Boots the workspace, picks the mode, hands you a `thread_id`. Call this first or everything else errors out.                                                                                              |
+| `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, drives TUIs. Supports `is_background`, `status_check`, `send_text`, `send_specials`, `send_ascii`, `allow_multi` for multi-statement scripts. |
+| `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range.                                                                                                                              |
+| `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks. Validates file read coverage and freshness before writing.                                                                                                      |
+| `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                              |
+| `ReadImage`       | Base64 + MIME, for clients that can render images.                                                                                                                                                        |
 
 ## Search/Replace editing
 

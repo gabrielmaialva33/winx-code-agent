@@ -1,6 +1,6 @@
 [package]
 name = "winx-code-agent"
-version = "0.2.315"
+version = "0.2.316"
 edition = "2021"
 rust-version = "1.75"
 description = "High-performance Rust implementation of WCGW for LLM code agents"
