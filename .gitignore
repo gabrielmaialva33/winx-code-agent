@@ -8,8 +8,8 @@
 .cargo/
 /debug/
 /release/
-
 **/.claude/settings.local.json
 tmp
 .claude
 .mcp.json
+.antigravitycli
