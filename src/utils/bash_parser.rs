@@ -7,6 +7,11 @@ pub fn assert_single_statement(command: &str) -> Result<()> {
     if trimmed.is_empty() {
         return Ok(());
     }
+    if trimmed.contains('\0') {
+        return Err(WinxError::CommandExecutionError(
+            "Command contains a NUL byte. JSON escape \\u0000 becomes an actual NUL before bash sees it; write \\\\0 or \\\\x00 in the command string instead.".to_string(),
+        ));
+    }
 
     let mut parser = Parser::new();
     let language: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
@@ -158,5 +163,15 @@ mod tests {
     fn accepts_bash_lc_script_when_tree_sitter_reports_error() {
         let command = "bash -lc 'printf \"%s\\n\" \"-- drm connectors --\"; for s in /sys/class/drm/card*-*/status; do [ -e \"$s\" ] || continue; c=${s%/status}; printf \"%s: %s\" \"${c##*/}\" \"$(cat \"$s\")\"; done'";
         assert!(assert_single_statement(command).is_ok());
+    }
+
+    #[test]
+    fn rejects_nul_with_actionable_message() {
+        let error = match assert_single_statement("printf '\0'") {
+            Ok(()) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("NUL byte"));
+        assert!(error.contains("\\\\x00"));
     }
 }
