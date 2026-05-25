@@ -20,20 +20,33 @@ pub fn assert_single_statement(command: &str) -> Result<()> {
     let root = tree.root_node();
 
     if root.has_error() {
+        if bash_accepts_syntax(trimmed) {
+            return Ok(());
+        }
+
         return Err(WinxError::CommandExecutionError(
-            "Command contains invalid bash syntax.".to_string(),
+            "Command contains invalid bash syntax. If this is a complex script, pass it as multiline bash, avoid NUL bytes, or set allow_multi=true after verifying the quoting.".to_string(),
         ));
     }
 
     let statement_count = top_level_statement_count(trimmed, root);
 
-    if statement_count > 1 {
+    if statement_count > 1 && !trimmed.contains('\n') {
         return Err(WinxError::CommandExecutionError(
-            "Command should contain a single top-level bash statement.".to_string(),
+            "Command should contain a single top-level bash statement. For deliberate scripts, split statements across lines or set allow_multi=true.".to_string(),
         ));
     }
 
     Ok(())
+}
+
+fn bash_accepts_syntax(command: &str) -> bool {
+    std::process::Command::new("bash")
+        .arg("-n")
+        .arg("-c")
+        .arg(command)
+        .status()
+        .is_ok_and(|status| status.success())
 }
 
 #[derive(Debug, Clone)]
@@ -137,7 +150,13 @@ mod tests {
     }
 
     #[test]
-    fn rejects_multiple_top_level_statements() {
-        assert!(assert_single_statement("pwd\nls").is_err());
+    fn accepts_multiline_scripts() {
+        assert!(assert_single_statement("pwd\nls").is_ok());
+    }
+
+    #[test]
+    fn accepts_bash_lc_script_when_tree_sitter_reports_error() {
+        let command = "bash -lc 'printf \"%s\\n\" \"-- drm connectors --\"; for s in /sys/class/drm/card*-*/status; do [ -e \"$s\" ] || continue; c=${s%/status}; printf \"%s: %s\" \"${c##*/}\" \"$(cat \"$s\")\"; done'";
+        assert!(assert_single_statement(command).is_ok());
     }
 }
