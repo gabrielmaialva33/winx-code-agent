@@ -7,7 +7,6 @@
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use tokio::sync::Mutex;
@@ -25,7 +24,8 @@ const CODING_MAX_TOKENS: usize = 24_000;
 const NONCODING_MAX_TOKENS: usize = 8_000;
 
 /// Type alias for file reading result
-type FileReadResult = (String, bool, usize, String, (usize, usize));
+type FileReadResult = (String, bool, usize, String, (usize, usize), String, usize);
+type ReadCoverage = (Vec<(usize, usize)>, String, usize);
 
 /// Maximum amount of data to read from a file
 const MAX_FILE_SIZE: u64 = 50_000_000;
@@ -83,8 +83,9 @@ async fn read_file(
     }
 
     let content = read_file_to_string(&path, MAX_FILE_SIZE)?;
+    let file_hash = hash_content(&content);
     let lines: Vec<&str> = content.lines().collect();
-    let total_lines = lines.len() + usize::from(content.ends_with('\n'));
+    let total_lines = lines.len();
 
     let start_idx = start_line_num.map_or(0, |n| n.saturating_sub(1).min(lines.len()));
     let end_idx = end_line_num.map_or(lines.len(), |n| n.min(lines.len()));
@@ -130,7 +131,23 @@ async fn read_file(
 
     let canon_path = path.to_string_lossy().to_string();
 
-    Ok((result_content, truncated, tokens_count, canon_path, (effective_start, effective_end)))
+    Ok((
+        result_content,
+        truncated,
+        tokens_count,
+        canon_path,
+        (effective_start, effective_end.min(total_lines.max(1))),
+        file_hash,
+        total_lines,
+    ))
+}
+
+fn hash_content(content: &str) -> String {
+    let digest = Sha256::digest(content.as_bytes());
+    digest.iter().fold(String::with_capacity(digest.len() * 2), |mut hash, byte| {
+        let _ = write!(hash, "{byte:02x}");
+        hash
+    })
 }
 
 fn count_tokens(content: &str) -> usize {
@@ -238,7 +255,7 @@ pub async fn handle_tool_call(
 
     let mut message = String::new();
     let cache = FileCache::global();
-    let mut file_ranges_dict: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    let mut file_ranges_dict: HashMap<String, ReadCoverage> = HashMap::new();
 
     for (index, file_path) in read_files.file_paths.iter().enumerate() {
         let clean_path = read_files.get_clean_path(index);
@@ -256,8 +273,13 @@ pub async fn handle_tool_call(
         )
         .await
         {
-            Ok((content, truncated, _, canon_path, line_range)) => {
-                file_ranges_dict.entry(canon_path.clone()).or_default().push(line_range);
+            Ok((content, truncated, _, canon_path, line_range, file_hash, total_lines)) => {
+                let entry = file_ranges_dict
+                    .entry(canon_path.clone())
+                    .or_insert_with(|| (Vec::new(), file_hash.clone(), total_lines));
+                entry.0.push(line_range);
+                entry.1 = file_hash;
+                entry.2 = total_lines;
                 let _ = write!(
                     message,
                     "\n{}{}\n```\n{content}\n```",
@@ -266,6 +288,11 @@ pub async fn handle_tool_call(
                 );
 
                 let _ = cache.record_read_range(Path::new(&canon_path), line_range.0, line_range.1);
+                let _ = cache.record_file_hash(Path::new(&canon_path), &entry.1);
+                let _ = crate::utils::workspace_stats::record_read(
+                    &workspace_root,
+                    Path::new(&canon_path),
+                );
 
                 if truncated {
                     break;
@@ -279,19 +306,18 @@ pub async fn handle_tool_call(
 
     let mut bash_state_guard = bash_state_arc.lock().await;
     if let Some(bash_state) = bash_state_guard.as_mut() {
-        for (path, ranges) in file_ranges_dict {
-            let file_hash = cache.get_cached_hash(Path::new(&path)).unwrap_or_default();
-            let total_lines = cache
-                .get_unread_ranges(Path::new(&path))
-                .iter()
-                .map(|&(_, end)| end)
-                .max()
-                .unwrap_or(0);
-
-            bash_state.whitelist_for_overwrite.insert(
-                path.clone(),
-                crate::state::bash_state::FileWhitelistData::new(file_hash, ranges, total_lines),
-            );
+        for (path, (ranges, file_hash, total_lines)) in file_ranges_dict {
+            bash_state
+                .whitelist_for_overwrite
+                .entry(path)
+                .and_modify(|existing| {
+                    existing.file_hash.clone_from(&file_hash);
+                    existing.total_lines = total_lines;
+                    existing.line_ranges_read.extend(ranges.iter().copied());
+                })
+                .or_insert_with(|| {
+                    crate::state::bash_state::FileWhitelistData::new(file_hash, ranges, total_lines)
+                });
         }
     }
 

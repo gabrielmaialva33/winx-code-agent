@@ -33,6 +33,12 @@ impl FileCache {
         inner.file_hashes.get(path).cloned()
     }
 
+    pub fn record_file_hash(&self, path: &Path, hash: &str) -> Result<()> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.file_hashes.insert(path.to_path_buf(), hash.to_string());
+        Ok(())
+    }
+
     pub fn get_unread_ranges(&self, _path: &Path) -> Vec<(usize, usize)> {
         // Simple placeholder for now
         vec![]

@@ -620,6 +620,23 @@ fn uses_search_replace(file_write_or_edit: &FileWriteOrEdit) -> bool {
     first_content_line.is_some_and(|line| search_marker().is_ok_and(|marker| marker.is_match(line)))
 }
 
+fn hash_content(content: &str) -> String {
+    let digest = Sha256::digest(content.as_bytes());
+    digest.iter().fold(String::with_capacity(digest.len() * 2), |mut hash, byte| {
+        let _ = write!(hash, "{byte:02x}");
+        hash
+    })
+}
+
+fn format_unread_ranges(whitelist: &FileWhitelistData) -> String {
+    whitelist
+        .get_unread_ranges()
+        .into_iter()
+        .map(|(start, end)| if start == end { start.to_string() } else { format!("{start}-{end}") })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[instrument(level = "info", skip(bash_state_arc, file_write_or_edit))]
 pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
@@ -659,12 +676,31 @@ pub async fn handle_tool_call(
         });
     }
 
-    // Whitelist check (WCGW style)
-    if path.exists() && !bash_state.whitelist_for_overwrite.contains_key(&file_path_str) {
-        return Err(WinxError::FileAccessError {
-            path: path.clone(),
-            message: "Read file first before editing.".to_string(),
-        });
+    if path.exists() {
+        let whitelist =
+            bash_state.whitelist_for_overwrite.get(&file_path_str).ok_or_else(|| {
+                WinxError::FileAccessError {
+                    path: path.clone(),
+                    message: "Read file first before editing.".to_string(),
+                }
+            })?;
+        let original_content = fs::read_to_string(&path)?;
+        let current_hash = hash_content(&original_content);
+        if whitelist.file_hash != current_hash {
+            return Err(WinxError::FileAccessError {
+                path: path.clone(),
+                message: "File changed since last read. Re-read before editing.".to_string(),
+            });
+        }
+        if !uses_search_replace && !whitelist.is_read_enough() {
+            return Err(WinxError::FileAccessError {
+                path: path.clone(),
+                message: format!(
+                    "Read more of the file before overwriting. Unread line ranges: {}",
+                    format_unread_ranges(whitelist)
+                ),
+            });
+        }
     }
 
     let result = if uses_search_replace {
@@ -686,16 +722,17 @@ pub async fn handle_tool_call(
 
     // Update whitelist
     let final_content = fs::read_to_string(&path)?;
-    let digest = Sha256::digest(final_content.as_bytes());
-    let hash = digest.iter().fold(String::with_capacity(digest.len() * 2), |mut hash, byte| {
-        let _ = write!(hash, "{byte:02x}");
-        hash
-    });
+    let hash = hash_content(&final_content);
     let total_lines = final_content.lines().count();
 
     bash_state
         .whitelist_for_overwrite
         .insert(file_path_str, FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines));
+    if uses_search_replace {
+        let _ = crate::utils::workspace_stats::record_edit(&bash_state.workspace_root, &path);
+    } else {
+        let _ = crate::utils::workspace_stats::record_write(&bash_state.workspace_root, &path);
+    }
 
     Ok(result)
 }

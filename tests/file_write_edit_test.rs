@@ -52,6 +52,22 @@ async fn read_file_before_edit(
     Ok(())
 }
 
+async fn read_file_range_before_edit(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    file_path: &std::path::Path,
+    start: usize,
+    end: usize,
+) -> Result<()> {
+    let read_files = ReadFiles {
+        file_paths: vec![format!("{}:{start}-{end}", file_path.to_string_lossy())],
+        start_line_nums: vec![Some(start)],
+        end_line_nums: vec![Some(end)],
+    };
+
+    winx_code_agent::tools::read_files::handle_tool_call(bash_state_arc, read_files).await?;
+    Ok(())
+}
+
 // ==================== Test 1: Create New File (percentage > 50) ====================
 
 #[tokio::test(flavor = "multi_thread")]
@@ -315,6 +331,75 @@ Modified content here.
         }
     }
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_full_overwrite_requires_full_read_coverage() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "test-partial-read").await?;
+    let file_path = temp_dir.path().join("partial.txt");
+    std::fs::write(&file_path, "one\ntwo\nthree\n")?;
+
+    read_file_range_before_edit(&bash_state_arc, &file_path, 1, 1).await?;
+
+    let file_write = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 100,
+        text_or_search_replace_blocks: "replacement\n".to_string(),
+        thread_id: "test-partial-read".to_string(),
+    };
+    let error = match winx_code_agent::tools::file_write_or_edit::handle_tool_call(
+        &bash_state_arc,
+        file_write,
+    )
+    .await
+    {
+        Ok(response) => {
+            return Err(WinxError::ArgumentParseError(format!(
+                "partial read should block full overwrite, got: {response}"
+            )));
+        }
+        Err(error) => error,
+    };
+
+    let error_msg = error.to_string();
+    assert!(error_msg.contains("Read more of the file"));
+    assert!(error_msg.contains("2-3"));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_edit_rejects_stale_file_hash() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "test-stale-hash").await?;
+    let file_path = temp_dir.path().join("stale.txt");
+    std::fs::write(&file_path, "old\n")?;
+    read_file_before_edit(&bash_state_arc, &file_path).await?;
+    std::fs::write(&file_path, "changed outside winx\n")?;
+
+    let file_edit = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 30,
+        text_or_search_replace_blocks:
+            "<<<<<<< SEARCH\nchanged outside winx\n=======\nnew\n>>>>>>> REPLACE".to_string(),
+        thread_id: "test-stale-hash".to_string(),
+    };
+    let error = match winx_code_agent::tools::file_write_or_edit::handle_tool_call(
+        &bash_state_arc,
+        file_edit,
+    )
+    .await
+    {
+        Ok(response) => {
+            return Err(WinxError::ArgumentParseError(format!(
+                "stale hash should block edit, got: {response}"
+            )));
+        }
+        Err(error) => error,
+    };
+
+    assert!(error.to_string().contains("File changed since last read"));
     Ok(())
 }
 
