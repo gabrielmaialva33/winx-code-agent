@@ -372,6 +372,47 @@ fn test_bash_command_deserializer_accepts_command_shorthand(
     Ok(())
 }
 
+#[test]
+fn test_bash_command_deserializer_accepts_top_level_command_shorthand(
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let bash_command: BashCommand = serde_json::from_value(json!({
+        "command": "pwd\nls",
+        "wait_for_seconds": 2,
+        "thread_id": "thread-123_$"
+    }))?;
+
+    assert_eq!(bash_command.thread_id, "thread123_");
+    assert_eq!(bash_command.wait_for_seconds, Some(2.0));
+    if let BashCommandAction::Command { command, allow_multi, .. } = bash_command.action_json {
+        assert_eq!(command, "pwd\nls");
+        assert!(!allow_multi);
+    } else {
+        return Err("expected command action".into());
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_bash_command_deserializer_sanitizes_json_nul_escape(
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let command_with_nul = format!("printf '{}'", '\0');
+    let bash_command: BashCommand = serde_json::from_value(json!({
+        "action_json": {
+            "command": command_with_nul
+        },
+        "thread_id": "thread-123_$"
+    }))?;
+
+    if let BashCommandAction::Command { command, .. } = bash_command.action_json {
+        assert_eq!(command, "printf '\\x00'");
+    } else {
+        return Err("expected command action".into());
+    }
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn test_read_files_single_file() -> Result<()> {
     let temp_dir = TempDir::new()?;

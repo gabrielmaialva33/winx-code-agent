@@ -396,7 +396,12 @@ impl WinxService {
     async fn handle_bash_command(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
         let bash_command: BashCommand = serde_json::from_value(args).map_err(|e| {
-            McpError::invalid_request(format!("Invalid BashCommand parameters: {e}"), None)
+            McpError::invalid_request(
+                format!(
+                    "Invalid BashCommand parameters: {e}. Accepted forms include {{\"action_json\": {{\"command\": \"pwd\"}}}}, {{\"command\": \"pwd\"}}, or {{\"action_json\": {{\"type\": \"status_check\", \"status_check\": true}}}}."
+                ),
+                None,
+            )
         })?;
 
         match crate::tools::bash_command::handle_tool_call(&self.bash_state, bash_command).await {

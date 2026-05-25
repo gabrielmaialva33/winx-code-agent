@@ -554,22 +554,26 @@ impl<'de> Deserialize<'de> for BashCommand {
     where
         D: serde::Deserializer<'de>,
     {
-        // Define an intermediate struct with the same fields but different types
-        #[derive(Deserialize)]
-        struct BashCommandHelper {
-            action_json: serde_json::Value,
-            #[serde(default)]
-            wait_for_seconds: Option<f32>,
-            #[serde(default)]
-            #[serde(deserialize_with = "deserialize_string_or_null")]
-            thread_id: String,
-        }
+        let input = serde_json::Value::deserialize(deserializer)?;
+        let serde_json::Value::Object(mut map) = input else {
+            return Err(serde::de::Error::custom("BashCommand parameters must be an object."));
+        };
 
-        // Deserialize to the helper struct first
-        let helper = BashCommandHelper::deserialize(deserializer)?;
+        let wait_for_seconds = map
+            .remove("wait_for_seconds")
+            .map(serde_json::from_value)
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        let thread_id = map
+            .remove("thread_id")
+            .map(thread_id_from_value)
+            .transpose()
+            .map_err(serde::de::Error::custom)?
+            .unwrap_or_default();
+        let action_json_value = map.remove("action_json").unwrap_or(serde_json::Value::Object(map));
 
         // Process action_json which could be a string or an object
-        let action_json = match helper.action_json {
+        let action_json = match action_json_value {
             serde_json::Value::String(s) => {
                 // If it's a string, normalize newlines and try to parse it as JSON
                 // Replace literal newlines with space to avoid JSON parsing errors
@@ -613,14 +617,14 @@ impl<'de> Deserialize<'de> for BashCommand {
                                     tracing::error!("Secondary JSON parse error: {}", err);
                                     // Last resort fallback - assume it's a command string
                                     // MUST include "type": "command" for serde tagged enum
-                                    serde_json::json!({"type": "command", "command": s})
+                                    serde_json::json!({"type": "command", "command": sanitize_shell_string(&s)})
                                 }
                             }
                         } else {
                             // Assume it's a simple command string
                             // MUST include "type": "command" for serde tagged enum
                             tracing::info!("Treating as simple command: {}", s);
-                            serde_json::json!({"type": "command", "command": s})
+                            serde_json::json!({"type": "command", "command": sanitize_shell_string(&s)})
                         }
                     }
                 }
@@ -654,9 +658,17 @@ serde::de::Error::custom(format!("Invalid action_json: {e}. Please ensure your J
         // Return the properly constructed BashCommand
         Ok(BashCommand {
             action_json: action,
-            wait_for_seconds: helper.wait_for_seconds,
-            thread_id: normalize_thread_id(&helper.thread_id),
+            wait_for_seconds,
+            thread_id: normalize_thread_id(&thread_id),
         })
+    }
+}
+
+fn thread_id_from_value(value: serde_json::Value) -> std::result::Result<String, String> {
+    match value {
+        serde_json::Value::Null => Ok(String::new()),
+        serde_json::Value::String(value) => Ok(value),
+        other => Err(format!("thread_id must be a string or null, got {other}")),
     }
 }
 
@@ -664,6 +676,10 @@ fn normalize_action_json(mut value: serde_json::Value) -> serde_json::Value {
     let serde_json::Value::Object(map) = &mut value else {
         return value;
     };
+
+    if let Some(serde_json::Value::String(command)) = map.get_mut("command") {
+        *command = sanitize_shell_string(command);
+    }
 
     if map.contains_key("type") {
         return value;
@@ -688,6 +704,10 @@ fn normalize_action_json(mut value: serde_json::Value) -> serde_json::Value {
     }
 
     value
+}
+
+fn sanitize_shell_string(value: &str) -> String {
+    value.replace('\0', "\\x00")
 }
 
 // Bash command mode
