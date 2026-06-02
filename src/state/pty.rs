@@ -406,6 +406,8 @@ impl PtyShell {
             if ch == '\n' {
                 let end = idx + ch.len_utf8();
                 let start = last_nl_end.unwrap_or(0);
+                // Keep the raw line (CR/cursor moves intact); the emulator in
+                // collect_scrollback replays them. Only drop a trailing CR (CRLF).
                 let line = combined[start..idx].trim_end_matches('\r').to_string();
                 if self.line_ring.len() == RING_BUFFER_LINES {
                     self.line_ring.pop_front();
@@ -437,7 +439,12 @@ impl PtyShell {
         if !self.line_ring_partial.is_empty() {
             out.push_str(&self.line_ring_partial);
         }
-        out
+        // The ring holds raw PTY lines. Replay them through the terminal emulator
+        // so cursor movements (readline echo, in-place redraws) are *applied* —
+        // not merely stripped — yielding what the screen actually showed. A plain
+        // strip can't undo a `\x1b[D`, so it would leave `>>> p>>> pr>>> pri...`
+        // echo noise behind; the emulator collapses it to the final line.
+        crate::state::terminal::render_terminal_output(&out).join("\n")
     }
 
     /// Hash arbitrary rendered output into a u64 dedup key.

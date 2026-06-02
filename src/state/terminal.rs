@@ -1462,20 +1462,64 @@ pub fn incremental_text(text: &str, last_pending_output: &str) -> String {
 
 /// Strip ANSI escape codes from a string using a robust regex
 pub fn strip_ansi_codes(input: &str) -> String {
-    // Regex to match ANSI escape codes
-    // Matches most common CSI and other sequences
-    let pattern = r"[\u001b\u009b]\[[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]";
-    // Regex compilation is expensive for single use, but this effectively sanitizes output
-    // preventing JSON RPC crashes.
-    match Regex::new(pattern) {
-        Ok(re) => re.replace_all(input, "").to_string(),
-        Err(_) => input.replace('\x1b', ""), // Fallback
+    static RE: std::sync::OnceLock<Option<Regex>> = std::sync::OnceLock::new();
+
+    // Fast path: no ESC byte means nothing to strip.
+    if !input.contains('\u{1b}') {
+        return input.to_string();
     }
+
+    // Cover the full escape grammar, not just SGR colors. Interactive programs
+    // (python/node REPLs, psql, readline) emit far more than colors:
+    //   - CSI: ESC [ <params> <intermediates> <final> (cursor moves, `?2004h`
+    //          bracketed-paste, `2K` erase, `0m` reset, ...)
+    //   - OSC: ESC ] ... (BEL | ST)                    (window-title sets)
+    //   - 2-byte ESC sequences (ESC =, ESC >, ESC M, ...)
+    // Without OSC/CSI-cursor coverage the scrollback leaked raw bracketed-paste
+    // and `]0;user@host` noise into the model's view. Cached so we don't
+    // recompile the pattern on every rendered line.
+    let re = RE.get_or_init(|| {
+        Regex::new(
+            r"\x1b\[[0-9;:?<>=!]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[=>MNcD78]",
+        )
+        .ok()
+    });
+    let cleaned = match re {
+        Some(re) => re.replace_all(input, "").into_owned(),
+        None => input.to_string(),
+    };
+    // Defensive: drop any stray ESC the pattern didn't consume (partial seqs).
+    cleaned.replace('\u{1b}', "")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_applies_cursor_left_overwrite() {
+        // 10 Z's, move cursor 5 left, write 5 Q's -> the emulator must OVERWRITE
+        // the last 5 Z's (this is what collapses readline echo in scrollback).
+        let rendered = render_terminal_output("ZZZZZZZZZZ\u{1b}[5DQQQQQ").join("\n");
+        assert!(rendered.contains("ZZZZZQQQQQ"), "cursor-left not applied; got {rendered:?}");
+        // and crucially NOT the naive-strip result (escape removed, bytes kept)
+        assert!(
+            !rendered.contains("ZZZZZZZZZZQQQQQ"),
+            "looks like a plain strip; got {rendered:?}"
+        );
+    }
+
+    #[test]
+    fn strips_csi_osc_and_cursor_sequences() {
+        // SGR colors
+        assert_eq!(strip_ansi_codes("\u{1b}[1;35mhi\u{1b}[0m"), "hi");
+        // bracketed-paste + cursor move (the REPL noise we saw leak through)
+        assert_eq!(strip_ansi_codes("\u{1b}[?2004h>>> \u{1b}[?2004l\u{1b}[4D42"), ">>> 42");
+        // OSC window-title, BEL-terminated
+        assert_eq!(strip_ansi_codes("\u{1b}]0;user@host\u{7}prompt$ "), "prompt$ ");
+        // plain text is returned untouched (fast path)
+        assert_eq!(strip_ansi_codes("no escapes here"), "no escapes here");
+    }
 
     #[test]
     fn test_screen_basic_operations() {
