@@ -36,6 +36,10 @@ const TIMEOUT_WHILE_OUTPUT: f64 = 20.0;
 /// Number of iterations to wait without new output before giving up - matches WCGW Python `Config.output_wait_patience`
 const OUTPUT_WAIT_PATIENCE: i32 = 3;
 
+/// Polling slice for adaptive output reads. We read in chunks this long and
+/// return as soon as the prompt returns, instead of sleeping the full budget.
+const POLL_SLICE_SECS: f64 = 0.5;
+
 /// Chunk size for sending commands (characters) - matches WCGW Python (64 chars)
 const COMMAND_CHUNK_SIZE: usize = 64;
 
@@ -741,23 +745,35 @@ async fn wait_for_output(
     let mut last_pending_output = String::new();
     let mut complete = false;
 
-    // Initial wait - matches WCGW Python wait = min(timeout_s or CONFIG.timeout, CONFIG.timeout_while_output)
-    sleep(Duration::from_secs_f64(wait.min(DEFAULT_TIMEOUT))).await;
-
-    // Read initial output
-    let mut output = {
-        let mut bash_guard = shell_arc.lock().await;
-
-        if let Some(bash) = bash_guard.as_mut() {
-            let (out, done) = bash.read_output(0.5).map_err(|e| {
-                WinxError::CommandExecutionError(format!("Failed to read output: {e}"))
-            })?;
-            complete = done;
-            out
-        } else {
-            String::new()
+    // Adaptive polling instead of a blind sleep. wcgw sleeps the full `wait`
+    // budget before reading even once, so a `pwd` that finishes in 10ms still
+    // costs ~5s. Instead we read in short slices and return the moment the
+    // prompt comes back (`read_output` already exits early on prompt + drain),
+    // dropping fast-command latency from seconds to ~100ms. Long-running
+    // commands still consume the whole budget, since we loop until `complete`
+    // or `wait` elapses — identical upper-bound behavior, far snappier floor.
+    let mut output = String::new();
+    loop {
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed >= wait {
+            break;
         }
-    };
+        let slice = (wait - elapsed).clamp(0.1, POLL_SLICE_SECS);
+        let (out, done) = {
+            let mut bash_guard = shell_arc.lock().await;
+            match bash_guard.as_mut() {
+                Some(bash) => bash.read_output(slice as f32).map_err(|e| {
+                    WinxError::CommandExecutionError(format!("Failed to read output: {e}"))
+                })?,
+                None => (String::new(), true),
+            }
+        };
+        output = out;
+        complete = done;
+        if complete {
+            break;
+        }
+    }
 
     // If not complete and this is a status check, use WCGW-style patience waiting.
     //
@@ -921,8 +937,12 @@ async fn execute_status_check(
         let mut manager = BG_SHELL_MANAGER.lock().map_err(|e| {
             WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}"))
         })?;
-        let error =
-            format!("No running command to check status of.\n{}", manager.get_running_info());
+        let error = format!(
+            "No command is currently running, so there's nothing to check. The previous \
+             command already finished and its output was returned when it completed. Start a \
+             new command, or pass a bg_command_id if you launched one in the background.\n{}",
+            manager.get_running_info()
+        );
         return Err(WinxError::CommandExecutionError(error));
     }
 
