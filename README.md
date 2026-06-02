@@ -40,6 +40,10 @@ long-running TUIs without leaking output buffers into your token budget.
 - `ContextSave` for handing a task summary plus its files to the next session — including workspace context, active
   files, git status/diff, and terminal sharing for proper resumption.
 - `ReadImage` so multimodal clients can pull screenshots, mockups, error PNGs, etc.
+- Clean, token-aware shell output: cursor/ANSI noise from interactive programs (REPLs, progress
+  bars) is rendered away through a terminal emulator, and mechanical repetition is collapsed
+  losslessly (`line  [winx: ×N]`) so build/install logs don't blow your context budget. Toggle the
+  collapsing with `WINX_NO_COMPRESS`.
 - Two transports: **stdio** for local clients, plus an optional token-gated **Streamable HTTP** server
   (`winx serve --http`) for remote MCP clients like ChatGPT — see
   [Remote access](#remote-access-chatgpt--other-remote-mcp-clients).
@@ -433,6 +437,19 @@ the server, and later `BashCommand` calls find it. Reuse the same `thread_id` ac
 > on your machine as your user — and not just inside the workspace, since `BashCommand` in `wcgw` mode isn't
 > path-restricted. Bind to loopback, keep it behind an authenticated tunnel, prefer `architect`/`code_writer` mode or a
 > container, and shut it down when you're done.
+
+## Environment variables
+
+All optional — Winx works out of the box without any of these.
+
+| Variable | Effect |
+|----------|--------|
+| `RUST_LOG` | Log verbosity, e.g. `winx_code_agent=info`. At `info` you get the per-call **audit trail** (tool name, arg summary, duration, ok/error). |
+| `WINX_HTTP_TOKEN` | Shared secret for the HTTP transport, used if `--token` isn't passed (see [Remote access](#remote-access-chatgpt--other-remote-mcp-clients)). |
+| `WINX_NO_COMPRESS` | Set to `1` to disable output compression and see raw, uncollapsed shell output (the `[winx: ×N]` collapsing is on by default). |
+| `WINX_KEEP_TAIL_PIPE` | Set to `1` to keep a trailing `\| tail …` instead of stripping it. Winx truncates output server-side, so by default it drops a redundant trailing `tail` (wcgw parity). |
+| `WINX_USE_SCREEN` / `WINX_ATTACH_TERMINAL` | Run the shell inside `screen`/`tmux` so you can attach to the live session. Set to `screen`, `tmux`, or any truthy value; Winx prints an attach hint on `Initialize`. |
+| `WINX_OPEN_CONTEXT` | Set to `1` to open the saved context file in your default app after `ContextSave`. |
 
 ## Hacking on it
 
