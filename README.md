@@ -40,6 +40,9 @@ long-running TUIs without leaking output buffers into your token budget.
 - `ContextSave` for handing a task summary plus its files to the next session — including workspace context, active
   files, git status/diff, and terminal sharing for proper resumption.
 - `ReadImage` so multimodal clients can pull screenshots, mockups, error PNGs, etc.
+- Two transports: **stdio** for local clients, plus an optional token-gated **Streamable HTTP** server
+  (`winx serve --http`) for remote MCP clients like ChatGPT — see
+  [Remote access](#remote-access-chatgpt--other-remote-mcp-clients).
 
 ## MCP Tools
 
@@ -381,6 +384,56 @@ cargo run --release
 List MCP tools in your client. You should see six entries: `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`,
 `ContextSave`, `ReadImage`. The first call always has to be `Initialize` — Winx tracks workspace + mode per thread.
 
+## Remote access (ChatGPT & other remote MCP clients)
+
+By default Winx speaks MCP over **stdio** — the local transport every desktop client (Claude Desktop, Cursor, VS Code)
+uses. For clients that live in the cloud and can't reach your machine over stdio — like ChatGPT's developer-mode custom
+connectors — Winx can also serve MCP over **Streamable HTTP**:
+
+```bash
+winx serve --http --bind 127.0.0.1:8000 --token "$(openssl rand -hex 24)"
+```
+
+The MCP protocol is served at `/mcp`. Every request must carry the token, either as `Authorization: Bearer <token>` or a
+`?token=<token>` query parameter. Without a token the server refuses to start — serving a shell over the network without
+auth is remote code execution waiting to happen.
+
+| Flag             | Purpose                                                                                          |
+|------------------|-------------------------------------------------------------------------------------------------|
+| `--http`         | Serve over Streamable HTTP instead of stdio.                                                     |
+| `--bind`         | Listen address. Defaults to `127.0.0.1:8000`. Keep it on loopback.                               |
+| `--token`        | Shared secret required on every request. Falls back to the `WINX_HTTP_TOKEN` env var.            |
+| `--allowed-host` | Extra `Host` authority to accept (your tunnel hostname). Repeatable. Loopback is always allowed. |
+
+Remote clients run in the cloud, so the endpoint has to be reachable over HTTPS — put a tunnel in front of the loopback
+listener and allow its hostname through the built-in DNS-rebinding guard:
+
+```bash
+# 1. tunnel first, to learn the public hostname
+cloudflared tunnel --url http://localhost:8000
+#    -> https://<random>.trycloudflare.com
+
+# 2. start Winx, allowing that host
+winx serve --http --bind 127.0.0.1:8000 \
+     --token "$(openssl rand -hex 24)" \
+     --allowed-host <random>.trycloudflare.com
+```
+
+In ChatGPT (Settings → Apps → Advanced → **Developer mode**), add a connector with:
+
+- **URL**: `https://<random>.trycloudflare.com/mcp?token=<your-token>`
+- **Authentication**: **None** (the secret rides in the URL)
+
+Remote clients are effectively **stateless** — they don't reuse the MCP session between tool calls — so the HTTP
+transport shares one shell session across all requests: the shell `Initialize` creates stays alive for the lifetime of
+the server, and later `BashCommand` calls find it. Reuse the same `thread_id` across calls.
+
+> [!WARNING]
+> The HTTP transport puts arbitrary shell and file access on the network. Anyone with the token (and URL) gets a shell
+> on your machine as your user — and not just inside the workspace, since `BashCommand` in `wcgw` mode isn't
+> path-restricted. Bind to loopback, keep it behind an authenticated tunnel, prefer `architect`/`code_writer` mode or a
+> container, and shut it down when you're done.
+
 ## Hacking on it
 
 ```bash
@@ -394,8 +447,10 @@ at `tests/bash_pty_regression_test.rs` is what protects against the usual TUI/PT
 
 ## A note on security
 
-This is a local MCP server. Anything connected to it can read files, edit files, and run shell commands inside the
-workspace — same blast radius as letting the model into your terminal.
+By default this is a local (stdio) MCP server. Anything connected to it can read files, edit files, and run shell
+commands inside the workspace — same blast radius as letting the model into your terminal. The optional HTTP transport
+(`--http`) extends that reach to the network; see
+[Remote access](#remote-access-chatgpt--other-remote-mcp-clients) for the extra precautions it demands.
 
 If you want a tighter leash:
 
