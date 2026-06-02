@@ -21,6 +21,7 @@
 //! It provides core tools for shell execution and file management with extreme efficiency.
 
 pub mod errors;
+pub mod http_server;
 pub mod server;
 pub mod state;
 pub mod tools;

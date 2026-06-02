@@ -12,7 +12,14 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 # MCP SDK - Official Rust SDK for Model Context Protocol
-rmcp = { version = "1.7.0", features = ["transport-io", "server"] }
+rmcp = { version = "1.7.0", features = [
+    "transport-io",
+    "transport-streamable-http-server",
+    "server",
+] }
+
+# HTTP server for the optional remote MCP transport (ChatGPT custom connector etc.)
+axum = "0.8"
 
 # Schema generation for MCP tools
 schemars = "1.2"
