@@ -571,10 +571,15 @@ fn trim_empty_edge_lines(lines: &[String]) -> Vec<String> {
     lines[first..=last].to_vec()
 }
 
+/// Lines of surrounding context shown around the closest match (wcgw parity:
+/// `find_least_edit_distance_substring` returns the match ± 10 lines).
+const SNIPPET_CONTEXT_LINES: usize = 10;
+
 fn not_found_error(block: &SearchReplaceBlock, lines: &[String], offset: usize) -> WinxError {
     let snippet = closest_snippet(lines, offset, &block.search);
     WinxError::SearchBlockNotFound(format!(
-        "Block not found: {}\nClosest snippet:\n{}",
+        "Block not found in file. The SEARCH block below didn't match anywhere:\n{}\n\n\
+         Closest matching context in the file (with surrounding lines):\n{}",
         block.search.join("\n"),
         snippet
     ))
@@ -596,7 +601,17 @@ fn closest_snippet(lines: &[String], offset: usize, search: &[String]) -> String
             best_start = start;
         }
     }
-    lines[best_start..(best_start + window).min(lines.len())].join("\n")
+
+    // Widen to ±10 lines around the best match so the model can locate it, with
+    // 1-based line numbers (the file is shown numbered elsewhere too).
+    let context_start = best_start.saturating_sub(SNIPPET_CONTEXT_LINES);
+    let context_end = (best_start + window + SNIPPET_CONTEXT_LINES).min(lines.len());
+    lines[context_start..context_end]
+        .iter()
+        .enumerate()
+        .map(|(index, line)| format!("{:>6}  {}", context_start + index + 1, line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn snippet_similarity(candidate: &[String], search: &[String]) -> f64 {
