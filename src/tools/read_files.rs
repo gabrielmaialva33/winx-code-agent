@@ -151,16 +151,7 @@ fn hash_content(content: &str) -> String {
 }
 
 fn count_tokens(content: &str) -> usize {
-    static TOKENIZER: OnceLock<Option<tiktoken_rs::CoreBPE>> = OnceLock::new();
-
-    TOKENIZER.get_or_init(|| tiktoken_rs::cl100k_base().ok()).as_ref().map_or_else(
-        || estimate_tokens(content),
-        |encoder| encoder.encode_with_special_tokens(content).len(),
-    )
-}
-
-fn estimate_tokens(content: &str) -> usize {
-    content.chars().count().div_ceil(4).max(content.split_whitespace().count())
+    crate::utils::encoder::count_tokens(content)
 }
 
 fn truncate_to_token_budget(content: &mut String, max_tokens: usize) {

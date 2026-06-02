@@ -54,7 +54,13 @@ libc = "0.2"
 # Terminal emulation and text processing
 vte = "0.15"
 strsim = "0.11"
-tiktoken-rs = "0.11.0"
+
+# Hugging Face tokenizers - Claude-compatible token counting + path-ranking model.
+# default-features=false drops onig/esaxx (C/C++) and falls back to pure-Rust fancy-regex.
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+
+# gitignore-aware repo walking (ripgrep's engine) for repo context parity with pygit2
+ignore = "0.4"
 tree-sitter = "0.26.9"
 tree-sitter-bash = "0.25.1"
 tree-sitter-json = "0.24.8"

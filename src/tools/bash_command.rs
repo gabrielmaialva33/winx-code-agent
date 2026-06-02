@@ -43,7 +43,7 @@ const COMMAND_CHUNK_SIZE: usize = 64;
 const TEXT_CHUNK_SIZE: usize = 128;
 
 /// Cheap byte-level safety net. We never even consider token counting if the
-/// raw payload is smaller than this — `tiktoken_rs` is fast but not free, and
+/// raw payload is smaller than this — tokenizing is fast but not free, and
 /// the vast majority of responses are tiny status updates.
 const MAX_OUTPUT_LENGTH: usize = 100_000;
 
@@ -53,7 +53,7 @@ const MAX_OUTPUT_LENGTH: usize = 100_000;
 /// without monopolizing the conversation.
 const MAX_OUTPUT_TOKENS: usize = 25_000;
 
-/// Truncate `text` so its `cl100k_base` token count stays under `max_tokens`.
+/// Truncate `text` so its Claude token count stays under `max_tokens`.
 ///
 /// We tokenize the tail of the string only when the raw byte length already
 /// exceeds the byte cap; otherwise we trust the byte budget and return as-is.
@@ -65,15 +65,14 @@ fn truncate_to_token_budget(text: &str, max_tokens: usize) -> std::borrow::Cow<'
         return std::borrow::Cow::Borrowed(text);
     }
 
-    let Ok(bpe) = tiktoken_rs::cl100k_base() else {
-        // Fallback to the byte-based truncation we used before tiktoken.
+    let Some(tokens) = crate::utils::encoder::encode_ids(text) else {
+        // Fallback to the byte-based truncation we used before the tokenizer.
         return std::borrow::Cow::Owned(format!(
             "(...truncated)\n{}",
             &text[text.len() - MAX_OUTPUT_LENGTH..]
         ));
     };
 
-    let tokens = bpe.encode_with_special_tokens(text);
     if tokens.len() <= max_tokens {
         return std::borrow::Cow::Borrowed(text);
     }
@@ -81,7 +80,10 @@ fn truncate_to_token_budget(text: &str, max_tokens: usize) -> std::borrow::Cow<'
     // Reserve one token slot for the marker overhead.
     let keep = max_tokens.saturating_sub(1);
     let tail = &tokens[tokens.len() - keep..];
-    let decoded = bpe.decode(tail).unwrap_or_default();
+    let decoded = crate::utils::encoder::decode_ids(tail).unwrap_or_else(|| {
+        // Tokenizer present but decode failed: fall back to a byte tail.
+        text[text.len() - MAX_OUTPUT_LENGTH.min(text.len())..].to_string()
+    });
     std::borrow::Cow::Owned(format!("(...truncated)\n{decoded}"))
 }
 
@@ -597,6 +599,41 @@ async fn execute_bash_action(
     }
 }
 
+/// Strip a trailing `| tail ...` from a command (wcgw parity, `strip_tail_pipe`).
+///
+/// LLMs habitually pipe output through `tail`, but we already truncate output
+/// server-side — stripping the pipe avoids hiding the earlier output the model
+/// usually wants. Only a `tail` at the very end of the command is removed.
+///
+/// This matches wcgw by default. Set `WINX_KEEP_TAIL_PIPE=1` to preserve the
+/// pipe instead (winx's original behavior), e.g. when you deliberately want only
+/// the tail of a huge log rather than the server-side truncation.
+fn strip_tail_pipe(command: &str) -> String {
+    strip_tail_pipe_impl(command, keep_tail_pipe())
+}
+
+/// Pure core of [`strip_tail_pipe`], split out so both modes are unit-testable
+/// without touching process-wide env vars (tests run concurrently).
+fn strip_tail_pipe_impl(command: &str, keep: bool) -> String {
+    static RE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+    if keep {
+        return command.to_string();
+    }
+    let re = RE.get_or_init(|| regex::Regex::new(r"\|\s*tail(?:\s+(?:-n\s*|-)?(\d+))?\s*$").ok());
+    match re.as_ref().and_then(|re| re.find(command)) {
+        Some(matched) => command[..matched.start()].trim_end().to_string(),
+        None => command.to_string(),
+    }
+}
+
+/// Whether the user opted out of `| tail` stripping via `WINX_KEEP_TAIL_PIPE`.
+fn keep_tail_pipe() -> bool {
+    std::env::var("WINX_KEEP_TAIL_PIPE").is_ok_and(|value| {
+        let value = value.trim();
+        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
+    })
+}
+
 /// Execute a command - matches WCGW Python's Command handling in _`execute_bash`
 async fn execute_command(
     bash_state: &mut BashState,
@@ -605,6 +642,9 @@ async fn execute_command(
     allow_multi: bool,
     timeout_s: f64,
 ) -> Result<String> {
+    // wcgw strips a trailing `| tail` before anything else (model_validator).
+    let stripped_command = strip_tail_pipe(command);
+    let command = stripped_command.as_str();
     debug!("Processing Command action: {command:?} (allow_multi={allow_multi})");
 
     // Check mode permissions - matches WCGW Python bash_command_mode check
@@ -1309,5 +1349,36 @@ fn special_key_to_screen_input(key: SpecialKey) -> String {
         SpecialKey::CtrlC => String::from("\x03"),
         SpecialKey::CtrlD => String::from("\x04"),
         SpecialKey::CtrlZ => String::from("\x1a"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_tail_pipe_impl;
+
+    #[test]
+    fn strips_trailing_tail_by_default() {
+        assert_eq!(strip_tail_pipe_impl("seq 1 5 | tail -2", false), "seq 1 5");
+        assert_eq!(strip_tail_pipe_impl("cat log | tail -n 20", false), "cat log");
+        assert_eq!(strip_tail_pipe_impl("cat log | tail", false), "cat log");
+        assert_eq!(strip_tail_pipe_impl("ls -la|tail -5", false), "ls -la");
+    }
+
+    #[test]
+    fn keeps_command_without_trailing_tail() {
+        // tail not at the end, or piped further, must be left alone.
+        assert_eq!(strip_tail_pipe_impl("tail -f log | grep err", false), "tail -f log | grep err");
+        assert_eq!(strip_tail_pipe_impl("echo hi", false), "echo hi");
+        assert_eq!(
+            strip_tail_pipe_impl("cat a | tail -5 | wc -l", false),
+            "cat a | tail -5 | wc -l"
+        );
+    }
+
+    #[test]
+    fn keep_mode_preserves_tail_pipe() {
+        // WINX_KEEP_TAIL_PIPE behavior: command passes through untouched.
+        assert_eq!(strip_tail_pipe_impl("seq 1 5 | tail -2", true), "seq 1 5 | tail -2");
+        assert_eq!(strip_tail_pipe_impl("cat log | tail -n 20", true), "cat log | tail -n 20");
     }
 }

@@ -5,9 +5,12 @@
 
 pub mod bash_parser;
 pub mod command_safety;
+pub mod display_tree;
+pub mod encoder;
 pub mod file_cache;
 pub mod mmap;
 pub mod path;
+pub mod path_prob;
 pub mod repo;
 pub mod syntax;
 pub mod workspace_stats;

@@ -88,27 +88,32 @@ fn bg_command_id(response: &str) -> Option<String> {
     })
 }
 
+// wcgw parity: a trailing `| tail` is stripped by default (output is truncated
+// server-side anyway), so the full command output reaches the model. The opt-out
+// (`WINX_KEEP_TAIL_PIPE`) and the regex itself are covered by unit tests in
+// `bash_command::tests` — kept out of here to avoid mutating process-wide env in
+// concurrent integration tests.
 #[tokio::test(flavor = "multi_thread")]
-async fn tail_pipeline_returns_only_tail_output() -> Result<()> {
+async fn tail_pipe_stripped_by_default() -> Result<()> {
     let thread_id = "pty-tail-regression";
     let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
 
-    let response = run_command(&bash_state_arc, thread_id, "seq 1 10000 | tail -5", false).await?;
+    let response = run_command(&bash_state_arc, thread_id, "seq 1 5 | tail -2", false).await?;
 
-    assert_eq!(numeric_output_lines(&response), vec!["9996", "9997", "9998", "9999", "10000"]);
+    // Stripped → `seq 1 5`, so all five lines show, not just the last two.
+    assert_eq!(numeric_output_lines(&response), vec!["1", "2", "3", "4", "5"]);
 
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn tail_pipeline_from_json_reaches_bash_intact() -> Result<()> {
+async fn tail_pipe_stripped_from_json() -> Result<()> {
     let thread_id = "pty-tail-json-regression";
     let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
 
-    let response =
-        run_command_from_json(&bash_state_arc, thread_id, "seq 1 10000 | tail -5").await?;
+    let response = run_command_from_json(&bash_state_arc, thread_id, "seq 1 5 | tail -2").await?;
 
-    assert_eq!(numeric_output_lines(&response), vec!["9996", "9997", "9998", "9999", "10000"]);
+    assert_eq!(numeric_output_lines(&response), vec!["1", "2", "3", "4", "5"]);
 
     Ok(())
 }

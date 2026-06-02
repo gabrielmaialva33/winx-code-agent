@@ -53,6 +53,10 @@ fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>)
             return (cmd, Some(format!("tmux attach -t {session}")));
         }
         if command_available("screen") {
+            // Parity with wcgw: ensure a sane ~/.screenrc and reap sessions whose
+            // creating winx process has died before spawning a fresh one.
+            ensure_screenrc();
+            cleanup_orphaned_screens();
             let mut cmd = CommandBuilder::new("screen");
             cmd.args(["-q", "-S", &session, "bash"]);
             if restricted_mode {
@@ -74,6 +78,59 @@ fn command_available(command: &str) -> bool {
         .args(["-c", &format!("command -v {command}")])
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+/// Create `~/.screenrc` with a large scrollback if the user has none, matching
+/// wcgw's `check_if_screen_command_available`. Never overwrites an existing file.
+fn ensure_screenrc() {
+    let Some(home) = home::home_dir() else {
+        return;
+    };
+    let screenrc = home.join(".screenrc");
+    if screenrc.exists() {
+        return;
+    }
+    let _ = std::fs::write(
+        &screenrc,
+        "defscrollback 10000\ntermcapinfo xterm* ti@:te@\nstartup_message off\n",
+    );
+}
+
+/// Reap detached `winx-*` screen sessions whose creating process is gone.
+///
+/// The session name embeds the creator PID (`winx-<pid>-<ts>`), so an orphan is
+/// simply a session whose `<pid>` no longer exists — the wcgw equivalent of
+/// detecting `parent_pid == 1`. Best-effort: any failure is silently ignored.
+fn cleanup_orphaned_screens() {
+    let Ok(output) = Command::new("screen").arg("-ls").output() else {
+        return;
+    };
+    // `screen -ls` exits non-zero when sessions exist, so we parse stdout regardless.
+    let listing = String::from_utf8_lossy(&output.stdout);
+    for line in listing.lines() {
+        let Some(session) = line.split_whitespace().next() else {
+            continue;
+        };
+        // session token looks like "<screen_pid>.winx-<creator_pid>-<ts>"
+        let Some((_, name)) = session.split_once('.') else {
+            continue;
+        };
+        if let Some(creator_pid) = winx_creator_pid(name) {
+            if !process_exists(creator_pid) {
+                let _ = Command::new("screen").args(["-S", session, "-X", "quit"]).output();
+            }
+        }
+    }
+}
+
+/// Extract the creator PID from a `winx-<pid>-<ts>` screen session name.
+fn winx_creator_pid(name: &str) -> Option<u32> {
+    name.strip_prefix("winx-")?.split('-').next()?.parse::<u32>().ok()
+}
+
+/// Whether a process with `pid` is currently alive (Linux `/proc` check).
+fn process_exists(pid: u32) -> bool {
+    std::path::Path::new("/proc").join(pid.to_string()).exists()
 }
 
 fn timestamp_millis() -> u128 {
