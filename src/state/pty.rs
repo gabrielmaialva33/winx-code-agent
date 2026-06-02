@@ -532,8 +532,17 @@ impl PtyShell {
 
     /// Check if the output contains the WCGW-style prompt
     fn check_prompt_complete(text: &str) -> bool {
-        // Look for the WCGW prompt pattern: ◉ /path──➤
-        text.contains(WCGW_PROMPT_PATTERN) && text.contains(WCGW_PROMPT_END)
+        // The real shell prompt is the LAST non-empty line: "◉ <pwd>──➤ ".
+        // Anchor on that line instead of a global `contains()`: command output
+        // that happens to print ◉ / ──➤ mid-stream must not be mistaken for the
+        // prompt, which would truncate output or end the command early.
+        text.lines().rev().find(|line| !line.trim().is_empty()).is_some_and(|last| {
+            // Strip ANSI so a trailing erase/cursor sequence after the arrow
+            // (e.g. "──➤ \x1b[K") doesn't defeat the suffix check.
+            let clean = crate::state::terminal::strip_ansi_codes(last);
+            let clean = clean.trim_end();
+            clean.contains(WCGW_PROMPT_PATTERN) && clean.ends_with(WCGW_PROMPT_END)
+        })
     }
 
     /// Send Ctrl+C (interrupt) to the PTY
@@ -645,6 +654,20 @@ pub fn create_shared_pty(initial_dir: &Path, restricted_mode: bool) -> Result<Sh
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn prompt_detection_is_suffix_anchored() {
+        // real prompt on the last line -> complete
+        assert!(PtyShell::check_prompt_complete("out\nmore\n◉ /home/x──➤ "));
+        // prompt with trailing ANSI erase -> still complete
+        assert!(PtyShell::check_prompt_complete("◉ /home/x──➤ \u{1b}[K"));
+        // the bug: ◉ and ──➤ appear MID-output, last line is normal -> NOT complete
+        assert!(!PtyShell::check_prompt_complete("menu: ◉ start ──➤ stop\nstill running"));
+        // command echoed after the arrow (not the waiting prompt) -> not complete
+        assert!(!PtyShell::check_prompt_complete("◉ /home/x──➤ ls -la"));
+        // no prompt at all
+        assert!(!PtyShell::check_prompt_complete("just some output\n"));
+    }
 
     #[test]
     fn test_pty_shell_creation() -> Result<()> {
