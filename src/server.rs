@@ -362,16 +362,65 @@ impl ServerHandler for WinxService {
         param: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        let tool = param.name.to_string();
         let args_value = param.arguments.map(Value::Object);
-        match param.name.as_ref() {
+        // Audit trail: one structured line per tool call, including the outcome
+        // and wall-clock. Successes were previously silent — only errors logged —
+        // which made debugging remote (ChatGPT) sessions guesswork.
+        let summary = audit_summary(&tool, args_value.as_ref());
+        let started = std::time::Instant::now();
+
+        let result = match tool.as_str() {
             "Initialize" => self.handle_initialize(args_value).await,
             "BashCommand" => self.handle_bash_command(args_value).await,
             "ReadFiles" => self.handle_read_files(args_value).await,
             "FileWriteOrEdit" => self.handle_file_write_or_edit(args_value).await,
             "ContextSave" => self.handle_context_save(args_value).await,
             "ReadImage" => self.handle_read_image(args_value).await,
-            _ => Err(McpError::invalid_request(format!("Unknown tool: {}", param.name), None)),
+            _ => Err(McpError::invalid_request(format!("Unknown tool: {tool}"), None)),
+        };
+
+        let ms = started.elapsed().as_millis();
+        match &result {
+            Ok(_) => info!(tool = %tool, ms, "tool call ok — {summary}"),
+            Err(error) => warn!(tool = %tool, ms, "tool call error — {summary}: {}", error.message),
         }
+        result
+    }
+}
+
+/// Build a short, non-sensitive audit summary of a tool call's arguments.
+fn audit_summary(tool: &str, args: Option<&Value>) -> String {
+    let Some(args) = args else {
+        return "(no args)".to_string();
+    };
+    let s = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let clip = |text: String| text.chars().take(100).collect::<String>();
+    match tool {
+        "BashCommand" => {
+            let action = args.get("action_json");
+            let cmd = action
+                .and_then(|a| a.get("command"))
+                .and_then(Value::as_str)
+                .or_else(|| args.get("command").and_then(Value::as_str));
+            if let Some(cmd) = cmd {
+                format!("cmd={:?}", clip(cmd.to_string()))
+            } else {
+                let kind =
+                    action.and_then(|a| a.get("type")).and_then(Value::as_str).unwrap_or("?");
+                format!("action={kind}")
+            }
+        }
+        "FileWriteOrEdit" | "ReadImage" => format!("path={}", s("file_path")),
+        "ReadFiles" => {
+            format!(
+                "files={}",
+                args.get("file_paths").and_then(Value::as_array).map_or(0, Vec::len)
+            )
+        }
+        "Initialize" => format!("ws={} mode={}", s("any_workspace_path"), s("mode_name")),
+        "ContextSave" => format!("id={}", s("id")),
+        _ => String::new(),
     }
 }
 
