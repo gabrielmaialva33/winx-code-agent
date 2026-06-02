@@ -44,6 +44,24 @@ pub fn active_files(root: &Path) -> Vec<String> {
     files.into_iter().map(|(path, _)| path).collect()
 }
 
+/// Most-active files for repo context, using wcgw's scoring: `reads*2 + edits +
+/// writes`, top 5 (see `repo_context.py:222-238`). Kept separate from
+/// [`active_files`] so the standalone status view can use its own weighting.
+pub fn active_files_for_context(root: &Path) -> Vec<String> {
+    const CONTEXT_ACTIVE_FILES: usize = 5;
+    let Ok(stats) = load(root) else {
+        return Vec::new();
+    };
+
+    let mut files = stats.files.into_iter().collect::<Vec<_>>();
+    files.sort_by_key(|(path, stats)| {
+        let score = (stats.reads * 2) + stats.edits + stats.writes;
+        (std::cmp::Reverse(score), path.clone())
+    });
+    files.truncate(CONTEXT_ACTIVE_FILES);
+    files.into_iter().map(|(path, _)| path).collect()
+}
+
 fn record(root: &Path, path: &Path, update: impl FnOnce(&mut FileStats)) -> Result<()> {
     let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string();
     let mut stats = load(root).unwrap_or_default();
