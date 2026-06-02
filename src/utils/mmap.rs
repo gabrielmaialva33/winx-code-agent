@@ -197,7 +197,7 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
 /// Returns an error if the file cannot be mapped
 fn read_mmap(file: &File, path: &Path) -> Result<Vec<u8>> {
     // Check for empty file to avoid mmap error
-    if file.metadata().map(|m| m.len()).unwrap_or(0) == 0 {
+    if file.metadata().map_or(0, |m| m.len()) == 0 {
         return Ok(Vec::new());
     }
 

@@ -178,7 +178,7 @@ pub fn validate_path_in_workspace(
 
 /// Check if a path is a symlink without following it
 pub fn is_symlink(path: &Path) -> bool {
-    std::fs::symlink_metadata(path).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_symlink())
 }
 
 /// Expands a path that starts with ~ to the user's home directory
