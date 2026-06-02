@@ -256,6 +256,18 @@ pub async fn handle_tool_call(
                 let _ = writeln!(response, "\nAttach terminal: {attach_hint}");
             }
 
+            // Inject the behavioral prompt for the active mode so the agent knows
+            // how to behave (read-only / allowed globs / etc.) before its first
+            // action, instead of discovering the rules by hitting enforcement errors.
+            let _ = writeln!(
+                response,
+                "\n{}",
+                crate::utils::mode_prompts::mode_prompt(
+                    mode,
+                    initialize.code_writer_config.as_ref()
+                )
+            );
+
             let active_workspace = bash_state_guard
                 .as_ref()
                 .map_or(folder_to_start.as_path(), |state| state.workspace_root.as_path());
@@ -284,6 +296,14 @@ pub async fn handle_tool_call(
                 state.file_edit_mode = file_edit_mode;
                 state.write_if_empty_mode = write_if_empty_mode;
                 let _ = writeln!(response, "Changed mode to: {mode:?}");
+                let _ = writeln!(
+                    response,
+                    "\n{}",
+                    crate::utils::mode_prompts::mode_prompt(
+                        mode,
+                        initialize.code_writer_config.as_ref()
+                    )
+                );
             } else {
                 return Err(WinxError::BashStateNotInitialized);
             }

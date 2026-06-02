@@ -9,6 +9,7 @@ pub mod display_tree;
 pub mod encoder;
 pub mod file_cache;
 pub mod mmap;
+pub mod mode_prompts;
 pub mod output_compress;
 pub mod path;
 pub mod path_prob;
