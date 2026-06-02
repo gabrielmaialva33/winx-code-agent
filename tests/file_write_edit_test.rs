@@ -399,7 +399,7 @@ async fn test_edit_rejects_stale_file_hash() -> Result<()> {
         Err(error) => error,
     };
 
-    assert!(error.to_string().contains("File changed since last read"));
+    assert!(error.to_string().contains("changed on disk since you last read"));
     Ok(())
 }
 

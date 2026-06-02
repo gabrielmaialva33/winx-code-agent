@@ -696,7 +696,11 @@ pub async fn handle_tool_call(
             bash_state.whitelist_for_overwrite.get(&file_path_str).ok_or_else(|| {
                 WinxError::FileAccessError {
                     path: path.clone(),
-                    message: "Read file first before editing.".to_string(),
+                    message: format!(
+                        "This file exists but hasn't been read in this session. \
+                         Call ReadFiles on {file_path_str} first, then retry the edit \
+                         (winx requires a fresh read so edits are never applied blind)."
+                    ),
                 }
             })?;
         let original_content = fs::read_to_string(&path)?;
@@ -704,7 +708,10 @@ pub async fn handle_tool_call(
         if whitelist.file_hash != current_hash {
             return Err(WinxError::FileAccessError {
                 path: path.clone(),
-                message: "File changed since last read. Re-read before editing.".to_string(),
+                message: format!(
+                    "{file_path_str} changed on disk since you last read it. \
+                     Call ReadFiles again to get the current content, then retry the edit."
+                ),
             });
         }
         if !uses_search_replace && !whitelist.is_read_enough() {
