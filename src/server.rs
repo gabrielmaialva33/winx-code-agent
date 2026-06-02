@@ -75,12 +75,16 @@ const BASH_COMMAND_DESCRIPTION: &str =
 
 const READ_FILES_DESCRIPTION: &str =
     "- Read full file content of one or more files. \
+     - Prefer this over reading files with BashCommand (cat/head/tail): the output is token-budgeted and the read is recorded so FileWriteOrEdit can edit the file afterward. \
+     - Do NOT use this for binary files or images — use ReadImage for images. \
      - Provide absolute paths only (~ allowed) \
      - Only if the task requires line numbers understanding: \
      - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10`";
 
 const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
     "- Writes or edits a file based on the percentage of changes. \
+     - Prefer this over writing/editing files with BashCommand (echo/sed/redirects/heredocs). \
+     - For an edit, the file must have been read first with ReadFiles, otherwise the edit is rejected. \
      - Use absolute path only (~ allowed). \
      - First write down percentage of lines that need to be replaced in the file (between 0-100) in percentage_to_change \
      - percentage_to_change should be low if mostly new code is to be added. It should be high if a lot of things are to be replaced. \
@@ -497,6 +501,26 @@ impl WinxService {
             &workspace_root,
             ["diff", "--stat", "HEAD"],
         );
+
+        // Sections the ContextSave `description` should contain, tailored to the
+        // mode: architect produces a plan (no edits), the others produce a status
+        // + pending-issues handoff (wcgw parity: WCGW_KT vs ARCHITECT_KT).
+        let sections = if mode == "architect" {
+            "\n# Sections for the ContextSave description (architect mode)\n\
+             - `# Objective` — project and task objective.\n\
+             - `# All user instructions` — everything the user asked, verbatim.\n\
+             - `# Designed plan` — the plan you designed, in detail.\n\
+             - Provide all relevant file paths so the next agent can resume; err toward more.\n"
+        } else {
+            "\n# Sections for the ContextSave description\n\
+             - `# Objective` — project and task objective.\n\
+             - `# All user instructions` — everything the user asked, verbatim.\n\
+             - `# Current status` — what's already done (not what's left).\n\
+             - `# Pending issues with snippets` — verbatim errors/tracebacks/commands; be verbose.\n\
+             - `# Build and development instructions` — how to build/run/test; leave empty if unknown.\n\
+             - Provide all relevant file paths so the next agent can resume; err toward more.\n"
+        };
+        text.push_str(sections);
 
         text.push_str(
             "\n# Handoff checklist\n- State what changed and why.\n- Include files touched and any user-owned dirty work to preserve.\n- Include validation commands already run and their result.\n- Include the next safest command to continue.\n",
