@@ -25,11 +25,34 @@ fn convert_mode_name(mode_name: &ModeName) -> Modes {
     }
 }
 
+/// Create a unique scratch workspace under the system temp dir, used when the
+/// caller initializes without a workspace path.
+fn create_playground_dir() -> Result<PathBuf> {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let dir =
+        std::env::temp_dir().join(format!("winx-playground-{}-{:x}", std::process::id(), stamp));
+    ensure_directory_exists(&dir)?;
+    Ok(dir)
+}
+
+/// Whether `cmd` is on PATH (best-effort, used only for advisory hints).
+fn command_exists(cmd: &str) -> bool {
+    std::process::Command::new("sh")
+        .args(["-c", &format!("command -v {cmd}")])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 fn code_writer_state(
     config: &CodeWriterConfig,
     workspace_root: &Path,
 ) -> (BashCommandMode, FileEditMode, WriteIfEmptyMode) {
     let mut config = config.clone();
+    // Forgive the common `["all"]` mistake before turning relative globs absolute.
+    config.allowed_globs.normalize();
+    config.allowed_commands.normalize();
     config.update_relative_globs(&workspace_root.to_string_lossy());
 
     (
@@ -99,7 +122,15 @@ fn read_initial_files_simple(files: &[String], workspace: &std::path::Path) -> S
 fn prepare_workspace(initialize: &Initialize, response: &mut String) -> Result<PathBuf> {
     let workspace_path_str = expand_user(&initialize.any_workspace_path);
     if workspace_path_str.is_empty() {
-        return Err(WinxError::WorkspacePathError("Workspace path cannot be empty.".to_string()));
+        // wcgw parity: no path given → spin up a scratch playground instead of
+        // forcing the agent to always supply a workspace.
+        let playground = create_playground_dir()?;
+        let _ = writeln!(
+            response,
+            "No workspace path provided; created a playground at {}",
+            playground.display()
+        );
+        return Ok(playground);
     }
 
     let workspace_path = PathBuf::from(&workspace_path_str);
@@ -223,11 +254,21 @@ pub async fn handle_tool_call(
                 );
             }
 
-            if resumed_context.as_ref().and_then(|(_, snapshot)| snapshot.as_ref()).is_none()
-                && folder_to_start.exists()
-            {
-                new_bash_state.update_cwd(&folder_to_start)?;
-                new_bash_state.update_workspace_root(&folder_to_start)?;
+            // A bash snapshot already carries cwd/workspace. Without one, prefer
+            // the project root recorded in the resumed memory (so the agent lands
+            // back in the right repo), then fall back to the provided folder.
+            if resumed_context.as_ref().and_then(|(_, snapshot)| snapshot.as_ref()).is_none() {
+                let resumed_root = resumed_context
+                    .as_ref()
+                    .and_then(|(memory, _)| {
+                        crate::tools::context_save::extract_project_root(memory)
+                    })
+                    .filter(|root| root.exists());
+                let target = resumed_root.as_deref().unwrap_or(folder_to_start.as_path());
+                if target.exists() {
+                    new_bash_state.update_cwd(target)?;
+                    new_bash_state.update_workspace_root(target)?;
+                }
             }
             if new_bash_state.cwd.exists() {
                 new_bash_state.init_pty_shell().await?;
@@ -250,6 +291,14 @@ pub async fn handle_tool_call(
                     .map_or(folder_to_start.as_path(), |state| state.cwd.as_path())
                     .display()
             );
+
+            if command_exists("rg") {
+                let _ = writeln!(
+                    response,
+                    "\n# Available commands\nUse ripgrep `rg` instead of `grep`/`find -name` — \
+                     it's much faster and respects .gitignore."
+                );
+            }
 
             let _ = writeln!(response, "\nUse thread_id={thread_id} for all winx tool calls.");
             if let Some(attach_hint) = attach_hint {
@@ -340,5 +389,22 @@ pub async fn handle_tool_call(
         }
     }
 
+    append_server_instructions(&mut response);
+
     Ok(response)
+}
+
+/// Append the standard "disallow" note plus any operator-provided instructions
+/// from `WINX_SERVER_INSTRUCTIONS`, mirroring wcgw's Initialize output.
+fn append_server_instructions(response: &mut String) {
+    response.push_str(
+        "\nAs soon as you encounter \"The user has chosen to disallow the tool call.\", \
+         immediately stop doing everything and ask the user for the reason.\n",
+    );
+    if let Ok(extra) = std::env::var("WINX_SERVER_INSTRUCTIONS") {
+        let extra = extra.trim();
+        if !extra.is_empty() {
+            let _ = write!(response, "\n# Additional instructions\n{extra}\n");
+        }
+    }
 }
