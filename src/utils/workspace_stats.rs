@@ -99,5 +99,27 @@ fn save(root: &Path, stats: &WorkspaceStats) -> Result<()> {
 }
 
 fn stats_path(root: &Path) -> PathBuf {
-    root.join(".winx").join("workspace_stats.json")
+    // Stored outside the repo (XDG data dir), keyed by a hash of the absolute
+    // workspace path — survives wiping the repo and never pollutes it. Mirrors
+    // wcgw's `~/.local/share/wcgw/workspace_stats/<name>_<hash>.json`.
+    data_base().join("winx").join("workspace_stats").join(format!("{}.json", stats_key(root)))
+}
+
+/// XDG data base dir (`$XDG_DATA_HOME` or `~/.local/share`).
+fn data_base() -> PathBuf {
+    match std::env::var("XDG_DATA_HOME") {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home::home_dir()
+            .map_or_else(|| PathBuf::from("."), |home| home.join(".local").join("share")),
+    }
+}
+
+/// Stable per-workspace filename: `<dir-name>_<hash-of-absolute-path>`.
+fn stats_key(root: &Path) -> String {
+    use std::hash::{Hash, Hasher};
+    let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let name = abs.file_name().and_then(|n| n.to_str()).unwrap_or("workspace");
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    abs.to_string_lossy().hash(&mut hasher);
+    format!("{name}_{:016x}", hasher.finish())
 }
