@@ -42,7 +42,8 @@ long-running TUIs without leaking output buffers into your token budget.
 - File writes and SEARCH/REPLACE edits that survive ambiguous matches, indentation drift, and the usual unicode
   quote-mismatches from LLMs. Writes are blocked when the file hasn't been read or the cached content is stale.
 - `ContextSave` for handing a task summary plus its files to the next session — including workspace context, active
-  files, git status/diff, and terminal sharing for proper resumption.
+  files, git status/diff, and terminal sharing for proper resumption. Resuming reopens the saved project root and
+  token-caps the restored memory so it never overflows the context window.
 - `ReadImage` so multimodal clients can pull screenshots, mockups, error PNGs, etc.
 - Clean, token-aware shell output: cursor/ANSI noise from interactive programs (REPLs, progress
   bars) is rendered away through a terminal emulator, and mechanical repetition is collapsed
@@ -56,7 +57,7 @@ long-running TUIs without leaking output buffers into your token budget.
 
 | Tool              | What it does                                                                                                                                                                                              |
 |-------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Initialize`      | Boots the workspace, picks the mode, hands you a `thread_id`. Call this first or everything else errors out.                                                                                              |
+| `Initialize`      | Boots the workspace, picks the mode, hands you a `thread_id`. Call this first or everything else errors out. With no workspace path it spins up a scratch playground; resuming a task (`task_id_to_resume`) reopens its saved project root. |
 | `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, drives TUIs. Supports `is_background`, `status_check`, `send_text`, `send_specials`, `send_ascii`, `allow_multi` for multi-statement scripts. |
 | `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range. When the token budget is hit it tells you the exact line + `file:N-M` syntax to resume from instead of silently dropping the tail. |
 | `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks. Validates file read coverage and freshness before writing, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet.  |
