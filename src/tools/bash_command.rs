@@ -57,6 +57,19 @@ const MAX_OUTPUT_LENGTH: usize = 100_000;
 /// without monopolizing the conversation.
 const MAX_OUTPUT_TOKENS: usize = 25_000;
 
+/// Tail of `text` at most `max_len` bytes long, snapped up to a char boundary so
+/// we never slice through a multibyte UTF-8 sequence (which would panic).
+fn char_safe_tail(text: &str, max_len: usize) -> &str {
+    if text.len() <= max_len {
+        return text;
+    }
+    let mut start = text.len() - max_len;
+    while start < text.len() && !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
+}
+
 /// Truncate `text` so its Claude token count stays under `max_tokens`.
 ///
 /// We tokenize the tail of the string only when the raw byte length already
@@ -73,7 +86,7 @@ fn truncate_to_token_budget(text: &str, max_tokens: usize) -> std::borrow::Cow<'
         // Fallback to the byte-based truncation we used before the tokenizer.
         return std::borrow::Cow::Owned(format!(
             "(...truncated)\n{}",
-            &text[text.len() - MAX_OUTPUT_LENGTH..]
+            char_safe_tail(text, MAX_OUTPUT_LENGTH)
         ));
     };
 
@@ -86,7 +99,7 @@ fn truncate_to_token_budget(text: &str, max_tokens: usize) -> std::borrow::Cow<'
     let tail = &tokens[tokens.len() - keep..];
     let decoded = crate::utils::encoder::decode_ids(tail).unwrap_or_else(|| {
         // Tokenizer present but decode failed: fall back to a byte tail.
-        text[text.len() - MAX_OUTPUT_LENGTH.min(text.len())..].to_string()
+        char_safe_tail(text, MAX_OUTPUT_LENGTH).to_string()
     });
     std::borrow::Cow::Owned(format!("(...truncated)\n{decoded}"))
 }
@@ -263,6 +276,16 @@ lazy_static::lazy_static! {
     static ref BG_SHELL_MANAGER: StdMutex<BackgroundShellManager> = StdMutex::new(BackgroundShellManager::new());
 }
 
+/// Lock the global background-shell manager, recovering from poisoning.
+///
+/// A panic while holding this lock (e.g. in the rendering path during a prune)
+/// must NOT permanently brick all background-shell functionality for the rest of
+/// the server's lifetime. The manager's data stays consistent across a panic, so
+/// recovering the inner guard is safe.
+fn lock_bg_manager() -> std::sync::MutexGuard<'static, BackgroundShellManager> {
+    BG_SHELL_MANAGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 // ==================== WCGW-Style Helper Functions ====================
 
 /// Get WCGW-style status string - matches WCGW Python's `get_status()`
@@ -294,7 +317,8 @@ fn get_status(
 
     if !is_bg {
         // Add background shell info for main shell - matches WCGW Python
-        if let Ok(mut manager) = BG_SHELL_MANAGER.lock() {
+        {
+            let mut manager = lock_bg_manager();
             status.push_str("This is the main shell. ");
             status.push_str(&manager.get_running_info());
         }
@@ -334,8 +358,10 @@ fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> String {
 }
 
 fn extract_prompt_cwd(output: &str) -> Option<PathBuf> {
+    static PROMPT_RE: std::sync::OnceLock<Option<Regex>> = std::sync::OnceLock::new();
+    let prompt_regex =
+        PROMPT_RE.get_or_init(|| Regex::new(r"◉ (?P<cwd>[^\r\n]*?)──➤").ok()).as_ref()?;
     let stripped = strip_ansi_codes(output);
-    let prompt_regex = Regex::new(r"◉ (?P<cwd>[^\r\n]*?)──➤").ok()?;
 
     prompt_regex
         .captures_iter(&stripped)
@@ -696,10 +722,29 @@ async fn execute_command(
     // Ctrl-C so the new command lands on a fresh prompt instead of being
     // appended to whatever was hanging on stdin.
     {
-        let mut bash_guard = bash_state.pty_shell.lock().await;
-        if let Some(bash) = bash_guard.as_mut() {
-            if let Err(e) = bash.clear_to_run(DEFAULT_TIMEOUT as f32) {
-                warn!("clear_to_run failed before send: {e}");
+        let needs_reset = {
+            let mut bash_guard = bash_state.pty_shell.lock().await;
+            match bash_guard.as_mut() {
+                Some(bash) => match bash.clear_to_run(DEFAULT_TIMEOUT as f32) {
+                    Ok(true) => false,
+                    Ok(false) => {
+                        warn!("clear_to_run: shell still busy after Ctrl-C, resetting it");
+                        true
+                    }
+                    Err(e) => {
+                        warn!("clear_to_run failed ({e}), resetting shell");
+                        true
+                    }
+                },
+                None => false,
+            }
+        };
+        // wcgw parity: a shell that won't return to a prompt even after Ctrl-C is
+        // recreated, so the new command lands on a fresh prompt instead of being
+        // appended to a hung shell. init_pty_shell rebuilds at the same cwd/mode.
+        if needs_reset {
+            if let Err(e) = bash_state.init_pty_shell().await {
+                warn!("Failed to reset shell after clear_to_run: {e}");
             }
         }
     }
@@ -856,11 +901,8 @@ async fn wait_for_output(
     let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
 
     // Calculate running duration for status
-    let running_for = if complete {
-        None
-    } else {
-        Some(format!("{} seconds", (start.elapsed().as_secs() + timeout_s as u64)))
-    };
+    let running_for =
+        if complete { None } else { Some(format!("{} seconds", start.elapsed().as_secs())) };
 
     // Add status - matches WCGW Python get_status
     let status = get_status(bash_state, is_bg, bg_id, !complete, running_for.as_deref());
@@ -939,9 +981,7 @@ async fn execute_status_check(
 
     // If no command running and not background, return error - matches WCGW Python
     if !is_running && !is_bg {
-        let mut manager = BG_SHELL_MANAGER.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}"))
-        })?;
+        let mut manager = lock_bg_manager();
         let error = format!(
             "No command is currently running, so there's nothing to check. The previous \
              command already finished and its output was returned when it completed. Start a \
@@ -1222,17 +1262,13 @@ async fn execute_in_background(
         matches!(bash_state.bash_command_mode.bash_mode, crate::types::BashMode::RestrictedMode);
 
     let bg_id = {
-        let mut manager = BG_SHELL_MANAGER.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}"))
-        })?;
+        let mut manager = lock_bg_manager();
         manager.start_new_shell(&bash_state.cwd, restricted_mode)?
     };
 
     // Get the shell
     let shell_arc = {
-        let manager = BG_SHELL_MANAGER.lock().map_err(|e| {
-            WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}"))
-        })?;
+        let manager = lock_bg_manager();
         manager.get_shell(&bg_id).ok_or_else(|| {
             WinxError::CommandExecutionError("Failed to get background shell".to_string())
         })?
