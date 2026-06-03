@@ -32,7 +32,11 @@ long-running TUIs without leaking output buffers into your token budget.
   Enter/Ctrl-C/Ctrl-D, raw ASCII. Multiline scripts and top-level `command` shorthand both work; NUL bytes are
   rejected before they reach the shell.
 - Workspaces with three modes: `wcgw` (full access), `architect` (read-only), `code_writer` (allowlist of commands and
-  write globs).
+  write globs). The command allowlist is parsed with tree-sitter, so it checks **every** command on the line —
+  pipelines, `&&`/`||`/`;`, command substitution, subshells — not just the first word, and can't be bypassed with
+  `ls && curl … | sh` or `ls $(rm …)`.
+- A resilient PTY: a shell that won't return to a prompt (even after Ctrl-C) is auto-reset at the same cwd/mode, child
+  processes are reaped on drop, and prompt detection is robust to a custom `PS1`. Opt into `zsh` with `WINX_SHELL=zsh`.
 - File reads with WCGW-style line ranges (`file.rs:10-40`, `file.rs:10-`, `file.rs:-40`). Active files are tracked
   and prioritized in the repository context across calls.
 - File writes and SEARCH/REPLACE edits that survive ambiguous matches, indentation drift, and the usual unicode
@@ -54,10 +58,10 @@ long-running TUIs without leaking output buffers into your token budget.
 |-------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `Initialize`      | Boots the workspace, picks the mode, hands you a `thread_id`. Call this first or everything else errors out.                                                                                              |
 | `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, drives TUIs. Supports `is_background`, `status_check`, `send_text`, `send_specials`, `send_ascii`, `allow_multi` for multi-statement scripts. |
-| `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range.                                                                                                                              |
-| `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks. Validates file read coverage and freshness before writing.                                                                                                      |
+| `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range. When the token budget is hit it tells you the exact line + `file:N-M` syntax to resume from instead of silently dropping the tail. |
+| `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks. Validates file read coverage and freshness before writing, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet.  |
 | `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                              |
-| `ReadImage`       | Base64 + MIME, for clients that can render images.                                                                                                                                                        |
+| `ReadImage`       | Returns a native MCP image content block (not base64 as text), so multimodal models actually see the image.                                                                                               |
 
 ## Search/Replace editing
 
@@ -79,6 +83,9 @@ Things the matcher forgives so you don't have to babysit the model:
 - normalizes the usual "smart quote" / em-dash / ellipsis substitutions
 - uses neighboring blocks to disambiguate when the same snippet appears twice
 - single-line substring edits work — you don't need the whole line in SEARCH
+- retries once with `\"` unescaped when the model over-escapes quotes in SEARCH
+- refuses edits that only matched after too much fuzzy fixup, and rejects blocks
+  that match in too many places — so you re-read instead of corrupting the file
 
 ## Install
 
@@ -450,6 +457,8 @@ All optional — Winx works out of the box without any of these.
 | `WINX_KEEP_TAIL_PIPE` | Set to `1` to keep a trailing `\| tail …` instead of stripping it. Winx truncates output server-side, so by default it drops a redundant trailing `tail` (wcgw parity). |
 | `WINX_USE_SCREEN` / `WINX_ATTACH_TERMINAL` | Run the shell inside `screen`/`tmux` so you can attach to the live session. Set to `screen`, `tmux`, or any truthy value; Winx prints an attach hint on `Initialize`. |
 | `WINX_OPEN_CONTEXT` | Set to `1` to open the saved context file in your default app after `ContextSave`. |
+| `WINX_SHELL` | Set to `zsh` to run the session under zsh instead of bash (opt-in; bash stays the default). Falls back to bash if zsh isn't on `PATH` or the mode is restricted. |
+| `WINX_SERVER_INSTRUCTIONS` | Extra operator instructions appended to every `Initialize` response (e.g. house rules for the agent). |
 
 ## Hacking on it
 
