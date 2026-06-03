@@ -13,8 +13,11 @@ use crate::state::ansi_codes;
 pub const MAX_SCREEN_LINES: usize = 10000;
 /// Default maximum number of lines to keep in the screen buffer
 pub const DEFAULT_MAX_SCREEN_LINES: usize = 500;
-/// Maximum number of columns for the screen
-const DEFAULT_COLUMNS: usize = 160;
+/// Maximum number of columns for the screen. Must match the PTY width
+/// (`pty::DEFAULT_COLS`) so emulator-rendered scrollback wraps exactly where the
+/// real terminal did, instead of silently re-wrapping long lines at a narrower
+/// width.
+const DEFAULT_COLUMNS: usize = 200;
 /// Maximum output size in bytes to prevent excessive memory usage
 pub const MAX_OUTPUT_SIZE: usize = 500_000;
 /// Maximum cache entry lifetime in seconds
@@ -1130,14 +1133,35 @@ impl TerminalEmulator {
     }
 }
 
-/// Type definition for cache entries to simplify complex types
-type CacheEntryMap = HashMap<String, (Vec<String>, Instant)>;
+/// Map from a 64-bit text hash to (rendered output, insertion time).
+///
+/// Keyed by a hash of the source text rather than the text itself: a terminal
+/// dump can be hundreds of KB, and storing it as the map key (plus cloning it
+/// on every eviction) was the dominant cost. A hash collision only causes a
+/// stale render to be recomputed, never corruption.
+type CacheEntryMap = HashMap<u64, (Vec<String>, Instant)>;
+
+/// Hash a chunk of terminal text into the cache key space.
+fn hash_terminal_text(text: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Inner cache state behind a single lock so the map and the eviction queue can
+/// never drift out of sync.
+#[derive(Debug, Default)]
+struct CacheInner {
+    map: CacheEntryMap,
+    /// Keys in insertion order, for O(1) FIFO eviction (no O(n log n) sort).
+    order: VecDeque<u64>,
+}
 
 /// Caching system for terminal output rendering
 #[derive(Debug, Clone)]
 struct TerminalCache {
-    /// Cache entries mapping text content to rendered output
-    entries: Arc<RwLock<CacheEntryMap>>,
+    inner: Arc<RwLock<CacheInner>>,
     /// Maximum number of entries in the cache
     max_entries: usize,
     /// Time-to-live for cache entries in seconds
@@ -1147,54 +1171,47 @@ struct TerminalCache {
 impl TerminalCache {
     /// Create a new terminal cache
     fn new(max_entries: usize, ttl: u64) -> Self {
-        Self { entries: Arc::new(RwLock::new(HashMap::new())), max_entries, ttl }
+        Self { inner: Arc::new(RwLock::new(CacheInner::default())), max_entries, ttl }
     }
 
     /// Get a cached value if available and not expired
-    fn get(&self, key: &str) -> Option<Vec<String>> {
-        if let Ok(entries) = self.entries.read() {
-            if let Some((value, timestamp)) = entries.get(key) {
-                if timestamp.elapsed().as_secs() < self.ttl {
-                    return Some(value.clone());
-                }
-            }
+    fn get(&self, text: &str) -> Option<Vec<String>> {
+        let key = hash_terminal_text(text);
+        let inner = self.inner.read().ok()?;
+        let (value, timestamp) = inner.map.get(&key)?;
+        if timestamp.elapsed().as_secs() < self.ttl {
+            Some(value.clone())
+        } else {
+            None
         }
-        None
     }
 
-    /// Insert a value into the cache
-    fn insert(&self, key: String, value: Vec<String>) {
-        if let Ok(mut entries) = self.entries.write() {
-            // Insert the new entry
-            entries.insert(key, (value, Instant::now()));
-
-            // Clean up old entries if cache is too large
-            if entries.len() > self.max_entries {
-                // Remove expired entries first
-                entries.retain(|_, (_, timestamp)| timestamp.elapsed().as_secs() < self.ttl);
-
-                // If still too many entries, remove oldest
-                if entries.len() > self.max_entries {
-                    let mut entries_vec: Vec<_> = entries.iter().collect();
-                    entries_vec.sort_by_key(|(_, (_, timestamp))| *timestamp);
-
-                    let to_remove = entries_vec.len() - self.max_entries;
-                    let keys_to_remove: Vec<String> =
-                        entries_vec.iter().take(to_remove).map(|(k, _)| (*k).clone()).collect();
-
-                    for key in keys_to_remove {
-                        entries.remove(&key);
-                    }
-                }
-            }
+    /// Insert a value into the cache, evicting the oldest entries if over cap.
+    fn insert(&self, text: &str, value: Vec<String>) {
+        let key = hash_terminal_text(text);
+        let Ok(mut inner) = self.inner.write() else {
+            return;
+        };
+        if inner.map.insert(key, (value, Instant::now())).is_none() {
+            inner.order.push_back(key);
+        }
+        while inner.order.len() > self.max_entries {
+            let Some(old) = inner.order.pop_front() else {
+                break;
+            };
+            inner.map.remove(&old);
         }
     }
 
     /// Clear expired entries from the cache
     fn cleanup(&self) {
-        if let Ok(mut entries) = self.entries.write() {
-            entries.retain(|_, (_, timestamp)| timestamp.elapsed().as_secs() < self.ttl);
-        }
+        let Ok(mut inner) = self.inner.write() else {
+            return;
+        };
+        let ttl = self.ttl;
+        let CacheInner { map, order } = &mut *inner;
+        map.retain(|_, (_, timestamp)| timestamp.elapsed().as_secs() < ttl);
+        order.retain(|key| map.contains_key(key));
     }
 }
 
@@ -1366,7 +1383,7 @@ pub fn render_terminal_output(text: &str) -> Vec<String> {
 
     // Cache the result for future use (only if reasonably sized)
     if text.len() < MAX_OUTPUT_SIZE {
-        TERMINAL_CACHE.insert(text.to_string(), result.clone());
+        TERMINAL_CACHE.insert(text, result.clone());
     }
 
     // Periodically clean up expired cache entries
@@ -1645,7 +1662,7 @@ mod tests {
         let cache = TerminalCache::new(10, 60);
 
         // Insert a value
-        cache.insert("test".to_string(), vec!["line1".to_string(), "line2".to_string()]);
+        cache.insert("test", vec!["line1".to_string(), "line2".to_string()]);
 
         // Should be able to retrieve it
         let retrieved = cache.get("test");
