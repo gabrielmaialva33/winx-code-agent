@@ -4,7 +4,6 @@
 //! the application, such as file and path handling, repository analysis, etc.
 
 pub mod bash_parser;
-pub mod command_safety;
 pub mod display_tree;
 pub mod encoder;
 pub mod file_cache;

