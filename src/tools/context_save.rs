@@ -205,11 +205,45 @@ pub(crate) fn load_saved_context(id: &str) -> Result<Option<(String, Option<Bash
             path: memory_file_path.clone(),
             message: format!("Failed to read saved context: {e}"),
         })?;
+    // Cap the injected context so a large saved memory can't blow the Initialize
+    // response past the model's window. Keep the head (project root + plan).
+    let memory_data = truncate_memory_to_tokens(memory_data, MEMORY_MAX_TOKENS);
     let state = load_bash_state_from_path(&state_file_path).map_err(|e| {
         WinxError::SerializationError(format!("Failed to load saved bash state: {e}"))
     })?;
 
     Ok(Some((memory_data, state)))
+}
+
+/// Saved memory is treated as non-code prose; cap it like wcgw's
+/// `noncoding_max_tokens` so resuming a task never floods the context window.
+const MEMORY_MAX_TOKENS: usize = 8_000;
+
+/// Truncate saved memory to `max_tokens`, keeping the head (where the project
+/// root and the plan/status live) and appending a marker. Falls back to the
+/// untouched text if the tokenizer is unavailable.
+fn truncate_memory_to_tokens(text: String, max_tokens: usize) -> String {
+    let Some(ids) = crate::utils::encoder::encode_ids(&text) else {
+        return text;
+    };
+    if ids.len() <= max_tokens {
+        return text;
+    }
+    let keep = max_tokens.saturating_sub(8);
+    match crate::utils::encoder::decode_ids(&ids[..keep]) {
+        Some(decoded) => format!("{decoded}\n(...truncated saved context)"),
+        None => text,
+    }
+}
+
+/// Extract the project root recorded at the top of a saved memory file, if any.
+/// Matches the `Project root path: <path>` header written by `format_memory`.
+pub(crate) fn extract_project_root(memory: &str) -> Option<PathBuf> {
+    memory
+        .lines()
+        .find_map(|line| line.strip_prefix("Project root path:").map(str::trim))
+        .filter(|root| !root.is_empty())
+        .map(PathBuf::from)
 }
 
 fn write_memory_file(
