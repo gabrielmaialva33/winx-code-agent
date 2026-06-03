@@ -90,7 +90,7 @@ async fn read_file(
     let start_idx = start_line_num.map_or(0, |n| n.saturating_sub(1).min(lines.len()));
     let end_idx = end_line_num.map_or(lines.len(), |n| n.min(lines.len()));
 
-    if start_idx > lines.len() || (end_idx > 0 && start_idx > end_idx) {
+    if start_idx > lines.len() || start_idx > end_idx {
         return Err(ErrorRecovery::param_error(
             "line_range",
             &format!("Invalid line range for file with {} lines", lines.len()),
@@ -122,9 +122,15 @@ async fn read_file(
 
     if tokens_count > max_tokens {
         truncate_to_token_budget(&mut result_content, max_tokens);
+        // Tell the agent exactly where to resume so the tail isn't silently lost.
+        let kept_lines = result_content.lines().count();
+        let last_shown = (start_idx + kept_lines).min(total_lines);
+        let resume_from = last_shown + 1;
         let _ = write!(
             result_content,
-            "\n(...truncated) {tokens_count} tokens exceeded limit {max_tokens}."
+            "\n(...truncated) Showing up to line {last_shown} of {total_lines} total lines \
+             ({tokens_count} tokens exceeded limit {max_tokens}). Continue reading from line \
+             {resume_from} using the syntax {file_path}:{resume_from}-{total_lines}"
         );
         truncated = true;
     }
@@ -155,22 +161,26 @@ fn count_tokens(content: &str) -> usize {
 }
 
 fn truncate_to_token_budget(content: &mut String, max_tokens: usize) {
-    let mut low = 0;
-    let mut high = content.chars().count();
+    // Tokenize once, keep the first `max_tokens` ids and decode them back. The
+    // old binary search re-tokenized the whole (large) string O(log n) times and
+    // walked char_indices on every step — both O(n) — for no benefit.
+    let Some(ids) = crate::utils::encoder::encode_ids(content) else {
+        // No tokenizer available: fall back to a char-count cut.
+        let byte_idx = byte_index_for_char_count(content, max_tokens);
+        content.truncate(byte_idx);
+        return;
+    };
 
-    while low < high {
-        let mid = (low + high).div_ceil(2);
-        let byte_idx = byte_index_for_char_count(content, mid);
-
-        if count_tokens(&content[..byte_idx]) <= max_tokens {
-            low = mid;
-        } else {
-            high = mid.saturating_sub(1);
-        }
+    if ids.len() <= max_tokens {
+        return;
     }
 
-    let byte_idx = byte_index_for_char_count(content, low);
-    content.truncate(byte_idx);
+    if let Some(decoded) = crate::utils::encoder::decode_ids(&ids[..max_tokens]) {
+        *content = decoded;
+    } else {
+        let byte_idx = byte_index_for_char_count(content, max_tokens);
+        content.truncate(byte_idx);
+    }
 }
 
 fn byte_index_for_char_count(content: &str, char_count: usize) -> usize {
@@ -286,6 +296,14 @@ pub async fn handle_tool_call(
                 );
 
                 if truncated {
+                    let remaining = read_files.file_paths.len().saturating_sub(index + 1);
+                    if remaining > 0 {
+                        let _ = write!(
+                            message,
+                            "\n\n(Not reading the remaining {remaining} file(s) due to the token \
+                             limit. Call ReadFiles again for them.)"
+                        );
+                    }
                     break;
                 }
             }
