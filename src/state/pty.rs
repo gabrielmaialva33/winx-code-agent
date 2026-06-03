@@ -334,7 +334,10 @@ impl PtyShell {
         // trailing `──➤` — only fires when the chunk happens to fragment right
         // before the PS1, making command-completion detection flaky.
         let prompt_statement = if is_zsh {
-            r#"export GIT_PAGER=cat PAGER=cat; PROMPT=''; RPROMPT=''; precmd() { printf "◉ %s──➤ " "$PWD" }"#
+            // Clear precmd_functions too: frameworks (oh-my-zsh/p10k) register the
+            // prompt via that array, so redefining `precmd` alone leaves their
+            // prompt in place and our `──➤` marker never ends the line.
+            r#"export GIT_PAGER=cat PAGER=cat; precmd_functions=(); preexec_functions=(); PROMPT=''; RPROMPT=''; precmd() { printf "◉ %s──➤ " "$PWD" }"#
         } else {
             r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ %s──➤ " "$PWD"'; PS1=''"#
         };
