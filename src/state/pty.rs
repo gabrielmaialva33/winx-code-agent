@@ -38,7 +38,7 @@ pub const RING_BUFFER_LINES: usize = 2_000;
 const WCGW_PROMPT_PATTERN: &str = "◉";
 const WCGW_PROMPT_END: &str = "──➤";
 
-fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>) {
+fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>, bool) {
     let requested = std::env::var("WINX_ATTACH_TERMINAL")
         .or_else(|_| std::env::var("WINX_USE_SCREEN"))
         .unwrap_or_default();
@@ -50,7 +50,7 @@ fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>)
             if restricted_mode {
                 cmd.arg("-r");
             }
-            return (cmd, Some(format!("tmux attach -t {session}")));
+            return (cmd, Some(format!("tmux attach -t {session}")), false);
         }
         if command_available("screen") {
             // Parity with wcgw: ensure a sane ~/.screenrc and reap sessions whose
@@ -62,15 +62,32 @@ fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>)
             if restricted_mode {
                 cmd.arg("-r");
             }
-            return (cmd, Some(format!("screen -x {session}")));
+            return (cmd, Some(format!("screen -x {session}")), false);
         }
     }
 
-    let mut cmd = CommandBuilder::new("bash");
-    if restricted_mode {
+    let shell = preferred_shell(restricted_mode);
+    let is_zsh = shell == "zsh";
+    let mut cmd = CommandBuilder::new(&shell);
+    // zsh's restricted mode isn't the `-r` flag, so restricted always uses bash -r.
+    if restricted_mode && !is_zsh {
         cmd.arg("-r");
     }
-    (cmd, None)
+    (cmd, None, is_zsh)
+}
+
+/// Shell to spawn directly. Defaults to bash; honors `WINX_SHELL=zsh` when zsh is
+/// on PATH and we're not in restricted mode (zsh's restricted mode differs from
+/// `bash -r`, so restricted falls back to bash).
+fn preferred_shell(restricted_mode: bool) -> String {
+    if !restricted_mode {
+        if let Ok(requested) = std::env::var("WINX_SHELL") {
+            if requested == "zsh" && command_available("zsh") {
+                return "zsh".to_string();
+            }
+        }
+    }
+    "bash".to_string()
 }
 
 fn command_available(command: &str) -> bool {
@@ -190,6 +207,20 @@ impl std::fmt::Debug for PtyShell {
     }
 }
 
+impl Drop for PtyShell {
+    /// Kill and reap the shell child so it doesn't leak.
+    ///
+    /// `std::process::Child::drop` neither kills nor waits, so without this every
+    /// dropped shell (`reset_shell`, background-shell prune/remove) would leak a
+    /// live bash process — soon a zombie — plus the reader thread blocked in
+    /// `read()`. Killing the child closes the PTY slave, which makes the reader's
+    /// `read()` return EOF so the thread terminates on its own. Best-effort.
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl PtyShell {
     /// Create a new PTY shell session
     ///
@@ -217,7 +248,7 @@ impl PtyShell {
         let pair = pty_system.openpty(size).context("Failed to open PTY pair")?;
 
         // Build the command
-        let (mut cmd, attach_hint) = attachable_command(restricted_mode);
+        let (mut cmd, attach_hint, is_zsh) = attachable_command(restricted_mode);
 
         // Set up environment for proper terminal behavior
         cmd.env("TERM", "xterm-256color");
@@ -286,18 +317,27 @@ impl PtyShell {
         };
 
         // Initialize the shell with WCGW-style prompt
-        shell.initialize_prompt()?;
+        shell.initialize_prompt(is_zsh)?;
 
         debug!("PTY shell created successfully");
         Ok(shell)
     }
 
     /// Initialize the shell prompt for WCGW compatibility
-    fn initialize_prompt(&mut self) -> Result<()> {
-        // Set up the dynamic prompt - matches WCGW Python PROMPT_STATEMENT
-        // Note: removed \r\e[2K which was erasing the prompt before it could be detected
-        let prompt_statement =
-            r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ %s──➤ " "$PWD"'"#;
+    fn initialize_prompt(&mut self, is_zsh: bool) -> Result<()> {
+        // Set up the dynamic prompt - matches WCGW Python PROMPT_STATEMENT.
+        // zsh ignores PROMPT_COMMAND, so it gets a precmd hook with a blanked
+        // default prompt instead.
+        // Blank the shell's own PS1/PROMPT so the line ends exactly at our `──➤`
+        // marker. Otherwise a user's ~/.bashrc/~/.zshrc PS1 (e.g. `[user@host]$`)
+        // is appended after the marker, and prompt detection — which anchors on a
+        // trailing `──➤` — only fires when the chunk happens to fragment right
+        // before the PS1, making command-completion detection flaky.
+        let prompt_statement = if is_zsh {
+            r#"export GIT_PAGER=cat PAGER=cat; PROMPT=''; RPROMPT=''; precmd() { printf "◉ %s──➤ " "$PWD" }"#
+        } else {
+            r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ %s──➤ " "$PWD"'; PS1=''"#
+        };
 
         self.write_command(prompt_statement)?;
 
@@ -486,11 +526,17 @@ impl PtyShell {
                         self.output_truncated = true;
                         let truncate_msg = "\n(...output truncated...)\n";
                         let keep_size = self.max_output_size / 2;
-                        self.output_buffer = format!(
-                            "{}{}",
-                            truncate_msg,
-                            &self.output_buffer[self.output_buffer.len() - keep_size..]
-                        );
+                        // Snap the cut up to a char boundary: a raw byte offset can
+                        // land mid-UTF-8 (CJK/emoji/box-drawing/the prompt glyphs)
+                        // and slicing there would panic on this hot read path.
+                        let mut cut = self.output_buffer.len() - keep_size;
+                        while cut < self.output_buffer.len()
+                            && !self.output_buffer.is_char_boundary(cut)
+                        {
+                            cut += 1;
+                        }
+                        self.output_buffer =
+                            format!("{truncate_msg}{}", &self.output_buffer[cut..]);
                     }
                 }
                 Err(TryRecvError::Empty) => {
