@@ -165,6 +165,24 @@ fn parse_blocks(content: &str) -> Result<Vec<SearchReplaceBlock>> {
     Ok(blocks)
 }
 
+/// Apply search/replace blocks, retrying once with `\"` unescaped if the first
+/// attempt fails to match. LLMs frequently over-escape quotes in SEARCH text;
+/// wcgw does the same fallback in `do_diff_edit`.
+fn apply_blocks_with_unescape_retry(original: &str, raw: &str) -> Result<String> {
+    let blocks = parse_blocks(raw)?;
+    match apply_blocks(original, &blocks) {
+        Ok(content) => Ok(content),
+        Err(first_err) => {
+            let unescaped = raw.replace("\\\"", "\"");
+            if unescaped == raw {
+                return Err(first_err);
+            }
+            let retry_blocks = parse_blocks(&unescaped).map_err(|_| first_err)?;
+            apply_blocks(original, &retry_blocks)
+        }
+    }
+}
+
 fn apply_blocks(content: &str, blocks: &[SearchReplaceBlock]) -> Result<String> {
     let original_lines = split_lines(content);
     let edited = apply_blocks_ordered(&original_lines, blocks).or_else(|ordered_error| {
@@ -182,8 +200,54 @@ fn split_lines(content: &str) -> Vec<String> {
     content.split('\n').map(str::to_string).collect()
 }
 
+/// Write `content` to `path`, refusing to follow a symlink at the final path
+/// component.
+///
+/// `validate_path_in_workspace` canonicalizes the parent and confirms it is
+/// inside the workspace, but there is a TOCTOU window between that check and the
+/// write: anyone able to create files in the parent could drop a symlink in
+/// place of the target and redirect the write outside the workspace. `O_NOFOLLOW`
+/// closes that window — the open fails with `ELOOP` if the final component is a
+/// symlink. Non-Unix targets fall back to a plain write.
+fn write_no_follow(path: &Path, content: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)?;
+        file.write_all(content)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, content)
+    }
+}
+
+/// A single SEARCH block matching more than this many locations is rejected as
+/// too ambiguous, instead of fanning the matcher out exponentially.
+const MAX_CANDIDATES_PER_BLOCK: usize = 64;
+/// Global cap on nodes explored by the ordered matcher — a backstop against the
+/// O(C^B) blow-up when several blocks each match in many places.
+const MAX_SEARCH_NODES: u32 = 50_000;
+/// Refuse to apply an edit whose accumulated tolerance score exceeds this — the
+/// match was forced through too many fuzzy fixups to trust. Mirrors wcgw's
+/// `replace_or_throw` "Too many warnings, not applying" guard.
+const MAX_TOTAL_TOLERANCE_SCORE: usize = 1000;
+
 fn apply_blocks_ordered(lines: &[String], blocks: &[SearchReplaceBlock]) -> Result<Vec<String>> {
-    let (_, replacements) = best_ordered_replacements(lines, blocks, 0, 0)?;
+    let mut budget = MAX_SEARCH_NODES;
+    let (score, replacements) = best_ordered_replacements(lines, blocks, 0, 0, &mut budget)?;
+    if score > MAX_TOTAL_TOLERANCE_SCORE {
+        return Err(WinxError::SearchBlockNotFound(format!(
+            "SEARCH blocks only matched very loosely (tolerance score {score} over limit \
+             {MAX_TOTAL_TOLERANCE_SCORE}). The file likely changed since you read it — re-read it \
+             and make the SEARCH text match the current content exactly."
+        )));
+    }
     Ok(apply_replacements(lines, &replacements))
 }
 
@@ -192,21 +256,38 @@ fn best_ordered_replacements(
     blocks: &[SearchReplaceBlock],
     block_index: usize,
     offset: usize,
+    budget: &mut u32,
 ) -> Result<(usize, Vec<Replacement>)> {
     if block_index >= blocks.len() {
         return Ok((0, Vec::new()));
     }
+    if *budget == 0 {
+        return Err(WinxError::SearchBlockNotFound(
+            "Search/replace is too ambiguous (too many candidate combinations). Add more \
+             surrounding context so each SEARCH block matches a unique location."
+                .to_string(),
+        ));
+    }
+    *budget -= 1;
 
     let block = &blocks[block_index];
     let candidates = find_candidates(lines, block, offset);
     if candidates.is_empty() {
         return Err(not_found_error(block, lines, offset));
     }
+    if candidates.len() > MAX_CANDIDATES_PER_BLOCK {
+        return Err(WinxError::SearchBlockNotFound(format!(
+            "A SEARCH block matches {} locations (limit {MAX_CANDIDATES_PER_BLOCK}); add more \
+             surrounding context to make it unique:\n{}",
+            candidates.len(),
+            block.search.join("\n")
+        )));
+    }
 
     let mut valid_paths = Vec::new();
     for candidate in candidates {
         if let Ok((tail_score, mut tail)) =
-            best_ordered_replacements(lines, blocks, block_index + 1, candidate.end)
+            best_ordered_replacements(lines, blocks, block_index + 1, candidate.end, budget)
         {
             let mut path = vec![Replacement {
                 start: candidate.start,
@@ -727,13 +808,15 @@ pub async fn handle_tool_call(
 
     let result = if uses_search_replace {
         let original_content = fs::read_to_string(&path)?;
-        let blocks = parse_blocks(&file_write_or_edit.text_or_search_replace_blocks)?;
-        let new_content = apply_blocks(&original_content, &blocks)?;
+        let new_content = apply_blocks_with_unescape_retry(
+            &original_content,
+            &file_write_or_edit.text_or_search_replace_blocks,
+        )?;
 
-        fs::write(&path, &new_content)?;
+        write_no_follow(&path, new_content.as_bytes())?;
         operation_result("edited", &file_path_str, &path, &new_content)
     } else {
-        fs::write(&path, &file_write_or_edit.text_or_search_replace_blocks)?;
+        write_no_follow(&path, file_write_or_edit.text_or_search_replace_blocks.as_bytes())?;
         operation_result(
             "wrote",
             &file_path_str,
