@@ -538,9 +538,42 @@ impl WinxService {
         }
     }
 
+    /// Deserialize `args` into `T`, retrying once after JSON-decoding any string
+    /// field that is itself an encoded object/array. LLMs sometimes send a nested
+    /// param (e.g. `code_writer_config`) as a JSON string instead of an object;
+    /// wcgw applies the same leniency in its tool dispatch.
+    fn lenient_from_value<T: serde::de::DeserializeOwned>(
+        args: Value,
+    ) -> Result<T, serde_json::Error> {
+        match serde_json::from_value::<T>(args.clone()) {
+            Ok(value) => Ok(value),
+            Err(first_err) => {
+                let Value::Object(mut map) = args else {
+                    return Err(first_err);
+                };
+                let mut changed = false;
+                for value in map.values_mut() {
+                    if let Value::String(text) = value {
+                        if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+                            if parsed.is_object() || parsed.is_array() {
+                                *value = parsed;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                if changed {
+                    serde_json::from_value::<T>(Value::Object(map))
+                } else {
+                    Err(first_err)
+                }
+            }
+        }
+    }
+
     async fn handle_initialize(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let initialize: Initialize = serde_json::from_value(args).map_err(|e| {
+        let initialize: Initialize = Self::lenient_from_value(args).map_err(|e| {
             McpError::invalid_request(format!("Invalid Initialize parameters: {e}"), None)
         })?;
 
@@ -575,7 +608,7 @@ impl WinxService {
 
     async fn handle_read_files(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let read_files: ReadFiles = serde_json::from_value(args).map_err(|e| {
+        let read_files: ReadFiles = Self::lenient_from_value(args).map_err(|e| {
             McpError::invalid_request(format!("Invalid ReadFiles parameters: {e}"), None)
         })?;
 
@@ -593,7 +626,7 @@ impl WinxService {
         args: Option<Value>,
     ) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let file_write_or_edit: FileWriteOrEdit = serde_json::from_value(args).map_err(|e| {
+        let file_write_or_edit: FileWriteOrEdit = Self::lenient_from_value(args).map_err(|e| {
             McpError::invalid_request(format!("Invalid FileWriteOrEdit parameters: {e}"), None)
         })?;
 
@@ -613,7 +646,7 @@ impl WinxService {
 
     async fn handle_context_save(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let context_save: ContextSave = serde_json::from_value(args).map_err(|e| {
+        let context_save: ContextSave = Self::lenient_from_value(args).map_err(|e| {
             McpError::invalid_request(format!("Invalid ContextSave parameters: {e}"), None)
         })?;
 
@@ -628,15 +661,17 @@ impl WinxService {
 
     async fn handle_read_image(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let read_image: ReadImage = serde_json::from_value(args).map_err(|e| {
+        let read_image: ReadImage = Self::lenient_from_value(args).map_err(|e| {
             McpError::invalid_request(format!("Invalid ReadImage parameters: {e}"), None)
         })?;
 
         match crate::tools::read_image::handle_tool_call(&self.bash_state, read_image).await {
             Ok((mime_type, base64_data)) => {
-                let result_text = format!("MIME: {mime_type}\nData: {base64_data}");
                 self.persist_state().await;
-                Ok(CallToolResult::success(vec![Content::text(result_text)]))
+                // Return a real image content block (not base64 as text) so the
+                // model can actually see the image. rmcp's `Content::image`
+                // takes (data, mime_type).
+                Ok(CallToolResult::success(vec![Content::image(base64_data, mime_type)]))
             }
             Err(e) => Err(McpError::internal_error(format!("ReadImage failed: {e}"), None)),
         }
