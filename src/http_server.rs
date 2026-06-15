@@ -50,17 +50,18 @@ pub async fn start_http_server(
         return Err("refusing to start HTTP transport without a token (RCE exposure)".into());
     }
 
-    // Each MCP session gets its own WinxService (its own shell state).
     let mut config = StreamableHttpServerConfig::default();
     config.stateful_mode = true;
     config.allowed_hosts.extend(extra_hosts);
 
-    // One shared WinxService — and thus one shared bash_state / live PTY — across
-    // every request. Remote clients like ChatGPT are effectively stateless: they
-    // don't reuse the MCP session between tool calls, so a per-session service
-    // would throw away the shell that `Initialize` created before `BashCommand`
-    // ever runs ("Bash state not initialized"). Sharing one instance keeps the
-    // initialized shell alive for the whole lifetime of the server.
+    // One shared WinxService across every request. Remote clients like ChatGPT
+    // are effectively stateless — they don't reuse the MCP session between tool
+    // calls — so a per-session service would throw away the shell that
+    // `Initialize` created before `BashCommand` runs ("Bash state not
+    // initialized"). Sharing one instance keeps shells alive for the server's
+    // lifetime; isolation between logical sessions is provided per `thread_id`
+    // by the service's internal session registry, so concurrent clients no
+    // longer share a single shell.
     let shared = WinxService::new();
     let mcp_service = StreamableHttpService::new(
         move || Ok(shared.clone()),

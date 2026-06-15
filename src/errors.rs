@@ -170,7 +170,10 @@ pub type Result<T> = std::result::Result<T, WinxError>;
 /// Conversion from `anyhow::Error` to `WinxError`
 impl From<anyhow::Error> for WinxError {
     fn from(error: anyhow::Error) -> Self {
-        WinxError::CommandExecutionError(format!("{error}"))
+        // `{:#}` renders the full anyhow context chain inline ("failed X: caused
+        // by Y: root Z") instead of just the outermost message, so a PTY-spawn or
+        // persistence failure keeps its real cause instead of a bare one-liner.
+        WinxError::CommandExecutionError(format!("{error:#}"))
     }
 }
 

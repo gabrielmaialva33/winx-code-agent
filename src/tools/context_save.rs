@@ -13,7 +13,7 @@ use crate::state::persistence::{
     load_bash_state_from_path, save_bash_state_to_path, BashStateSnapshot,
 };
 use crate::types::ContextSave;
-use crate::utils::path::expand_user;
+use crate::utils::path::{expand_user, validate_path_in_workspace};
 
 /// Handle a call to the `ContextSave` tool
 ///
@@ -62,7 +62,7 @@ pub async fn handle_tool_call(
 fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<String> {
     normalize_context(&mut context)?;
 
-    let (relevant_files, warnings) = collect_relevant_files(&context)?;
+    let (relevant_files, warnings) = collect_relevant_files(&context, &bash_state.workspace_root)?;
     let memory_dir = resolve_memory_dir()?;
     let relevant_files_data = read_files_content(&relevant_files, 10_000)?;
     let memory_data = format_memory(&context, &relevant_files_data);
@@ -90,9 +90,13 @@ fn normalize_context(context: &mut ContextSave) -> Result<()> {
     Ok(())
 }
 
-fn collect_relevant_files(context: &ContextSave) -> Result<(Vec<PathBuf>, Vec<String>)> {
+fn collect_relevant_files(
+    context: &ContextSave,
+    workspace_root: &Path,
+) -> Result<(Vec<PathBuf>, Vec<String>)> {
     let mut relevant_files = Vec::new();
     let mut warnings = Vec::new();
+    let mut skipped_outside = 0usize;
 
     for glob_pattern in &context.relevant_file_globs {
         // Expand the glob pattern if it contains a tilde
@@ -121,6 +125,16 @@ fn collect_relevant_files(context: &ContextSave) -> Result<(Vec<PathBuf>, Vec<St
             match entry {
                 Ok(path) => {
                     if path.is_file() {
+                        // Confine reads to the workspace. ContextSave inlines file
+                        // contents into the saved memory, so without this an
+                        // absolute glob (`/etc/**`, `~/.ssh/*`) or a `..`-escaping
+                        // pattern would exfiltrate arbitrary files — over HTTP that
+                        // is an authenticated read primitive. The other file tools
+                        // already gate on this; ContextSave was the gap.
+                        if validate_path_in_workspace(&path, workspace_root).is_err() {
+                            skipped_outside += 1;
+                            continue;
+                        }
                         relevant_files.push(path);
                         found_files = true;
                         // Limit to 1000 files per glob to avoid excessive processing
@@ -139,6 +153,12 @@ fn collect_relevant_files(context: &ContextSave) -> Result<(Vec<PathBuf>, Vec<St
         if !found_files {
             warnings.push(format!("Warning: No files found for the glob: {glob_pattern}"));
         }
+    }
+
+    if skipped_outside > 0 {
+        warnings.push(format!(
+            "Warning: skipped {skipped_outside} file(s) that resolved outside the workspace root."
+        ));
     }
 
     debug!("Found {} relevant files", relevant_files.len());
@@ -558,10 +578,12 @@ fn sanitize_filename(input: &str) -> String {
         result = result.replace(c, "_");
     }
 
-    // Limit length to avoid issues
-    if result.len() > 50 {
+    // Limit length to avoid issues. Slice by chars, not bytes: a multibyte
+    // task id whose 45th byte lands mid-code-point would panic on `&result[0..45]`.
+    if result.chars().count() > 50 {
         use rand::RngExt;
-        result = format!("{}-{}", &result[0..45], rand::rng().random_range(1000..9999));
+        let head: String = result.chars().take(45).collect();
+        result = format!("{head}-{}", rand::rng().random_range(1000..9999));
     }
 
     result

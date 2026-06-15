@@ -342,9 +342,12 @@ fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> String {
         return rstrip_lines(&render_terminal_output(text));
     }
 
-    // Get text after last pending output
+    // Get text after last pending output. Snap the offset down to a char
+    // boundary: `last_pending_output.len()` is a byte count and may land inside
+    // a multibyte code point of `text`, which would panic on the slice.
     let text_after_last = if text.len() > last_pending_output.len() {
-        &text[last_pending_output.len()..]
+        let cut = crate::utils::floor_char_boundary(text, last_pending_output.len());
+        &text[cut..]
     } else {
         text
     };

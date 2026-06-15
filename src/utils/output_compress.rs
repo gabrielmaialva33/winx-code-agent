@@ -47,16 +47,21 @@ pub fn compress_output(output: &str) -> Option<String> {
         }
         let run = j - i;
 
-        if line.trim().is_empty() {
-            // Collapse a run of blank lines to a single blank.
-            out.push(String::new());
-            saved += run - 1;
-        } else if run >= RUN_MIN {
-            // Collapse identical non-blank lines, keeping the count (reversible).
-            out.push(format!("{line}  [winx: ×{run}]"));
+        if run >= RUN_MIN {
+            if line.is_empty() {
+                // Collapse a run of 3+ truly-empty lines to a single blank.
+                out.push(String::new());
+            } else {
+                // Collapse identical lines, keeping the count (reversible). Note
+                // `line.is_empty()`, not `trim().is_empty()`: a whitespace-only
+                // line ("   ", "\t") carries content (diffs, `cat -A`, YAML) and
+                // must round-trip exactly, so it takes the marker path instead of
+                // being flattened to empty.
+                out.push(format!("{line}  [winx: ×{run}]"));
+            }
             saved += run - 1;
         } else {
-            // Distinct content — keep verbatim.
+            // Distinct content or a short run — keep verbatim.
             for keep in &lines[i..j] {
                 out.push((*keep).to_string());
             }
@@ -108,6 +113,25 @@ mod tests {
         assert!(compressed.contains("done"));
         // the 50 repeats became 1 line + footer
         assert!(compressed.lines().count() < 10);
+        Ok(())
+    }
+
+    #[test]
+    fn preserves_whitespace_only_lines() -> Result<(), String> {
+        // A run of identical whitespace-only lines carries content (diffs,
+        // `cat -A`, YAML indentation) and must round-trip via the [×N] marker —
+        // never be flattened to empty like a truly-blank run.
+        let mut text = String::from("start\n");
+        for _ in 0..40 {
+            text.push_str("   \n"); // three spaces — NOT empty
+        }
+        text.push_str("done\n");
+        let compressed = compress_output(&text).ok_or("should compress")?;
+        assert!(
+            compressed.contains("   "),
+            "whitespace content must survive compression: {compressed:?}"
+        );
+        assert!(compressed.contains("[winx: ×40]"), "got: {compressed:?}");
         Ok(())
     }
 

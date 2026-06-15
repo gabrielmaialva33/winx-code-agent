@@ -184,7 +184,21 @@ fn apply_blocks_with_unescape_retry(original: &str, raw: &str) -> Result<String>
 }
 
 fn apply_blocks(content: &str, blocks: &[SearchReplaceBlock]) -> Result<String> {
-    let original_lines = split_lines(content);
+    // `parse_blocks` reads the LLM's SEARCH/REPLACE via `.lines()`, which strips
+    // `\r`, so blocks are always LF. Normalize the file to LF too: otherwise a
+    // CRLF line matches only via the TrimEnd tolerance (inflating the score) and
+    // untouched lines keep `\r\n` while replacement lines come back as bare `\n`,
+    // silently turning the file into mixed line endings. Re-apply CRLF on join.
+    let uses_crlf = content.contains("\r\n");
+    let normalized;
+    let content_lf: &str = if uses_crlf {
+        normalized = content.replace("\r\n", "\n");
+        &normalized
+    } else {
+        content
+    };
+
+    let original_lines = split_lines(content_lf);
     let edited = apply_blocks_ordered(&original_lines, blocks).or_else(|ordered_error| {
         if blocks.len() == 1 {
             Err(ordered_error)
@@ -193,38 +207,58 @@ fn apply_blocks(content: &str, blocks: &[SearchReplaceBlock]) -> Result<String> 
         }
     })?;
 
-    Ok(edited.join("\n"))
+    let joined = edited.join("\n");
+    Ok(if uses_crlf { joined.replace('\n', "\r\n") } else { joined })
 }
 
 fn split_lines(content: &str) -> Vec<String> {
     content.split('\n').map(str::to_string).collect()
 }
 
-/// Write `content` to `path`, refusing to follow a symlink at the final path
-/// component.
+/// Atomically write `content` to `path`: write a sibling temp file, fsync it,
+/// then `rename` it over the target.
 ///
-/// `validate_path_in_workspace` canonicalizes the parent and confirms it is
-/// inside the workspace, but there is a TOCTOU window between that check and the
-/// write: anyone able to create files in the parent could drop a symlink in
-/// place of the target and redirect the write outside the workspace. `O_NOFOLLOW`
-/// closes that window — the open fails with `ELOOP` if the final component is a
-/// symlink. Non-Unix targets fall back to a plain write.
+/// Two properties this buys us over a plain `truncate`+`write`:
+/// - **Atomicity / crash safety.** The old path truncated the target first and
+///   streamed bytes in; a mid-write failure (ENOSPC, EIO, the process dying)
+///   left the file corrupted or empty. `rename(2)` is atomic within a
+///   filesystem, so a reader sees either the old file or the complete new one,
+///   never a half-written file.
+/// - **Symlink safety.** `validate_path_in_workspace` checks the parent, but a
+///   TOCTOU window lets someone swap the target for a symlink before the write.
+///   `rename` replaces the target entry without following it, so it can't be
+///   redirected outside the workspace — the same guarantee the old `O_NOFOLLOW`
+///   gave, kept here.
+///
+/// The temp file inherits the target's permissions when it already exists, so an
+/// edit doesn't silently flip a 0644 file to the temp's default mode. Non-Unix
+/// targets fall back to `tempfile`'s cross-platform persist.
 fn write_no_follow(path: &Path, content: &[u8]) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .custom_flags(libc::O_NOFOLLOW)
-            .open(path)?;
-        file.write_all(content)
+    use std::io::Error;
+
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    // Random-named temp in the SAME directory so `persist` is a same-filesystem
+    // rename (cross-fs rename would fail with EXDEV). A fresh random name can't
+    // be a pre-planted symlink, so no O_NOFOLLOW is needed on the temp itself.
+    let mut tmp =
+        tempfile::Builder::new().prefix(".winx-tmp-").tempfile_in(parent).map_err(|e| {
+            Error::new(e.kind(), format!("create temp file in {}: {e}", parent.display()))
+        })?;
+
+    // Preserve the existing file's permissions (use symlink_metadata so we read
+    // the target itself, not a symlink's destination).
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_file() {
+            let _ = tmp.as_file().set_permissions(meta.permissions());
+        }
     }
-    #[cfg(not(unix))]
-    {
-        fs::write(path, content)
-    }
+
+    tmp.write_all(content)?;
+    tmp.as_file().sync_all()?;
+    // Atomic replace. `persist` maps to `rename`; on conflict it returns the
+    // temp back inside the error, which we drop (the temp is cleaned up).
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
 }
 
 /// A single SEARCH block matching more than this many locations is rejected as
@@ -334,8 +368,20 @@ fn apply_blocks_individually(
     blocks: &[SearchReplaceBlock],
 ) -> Result<Vec<String>> {
     let mut running_lines = lines.to_vec();
+    let mut total_score = 0usize;
     for block in blocks {
         let candidate = select_unique_candidate(block, find_candidates(&running_lines, block, 0))?;
+        // Enforce the same fuzzy-fixup ceiling as `apply_blocks_ordered`. Without
+        // this, a multi-block edit that fell back to per-block matching could
+        // apply very loosely-matched blocks the ordered path would have rejected.
+        total_score = total_score.saturating_add(candidate.score);
+        if total_score > MAX_TOTAL_TOLERANCE_SCORE {
+            return Err(WinxError::SearchBlockNotFound(format!(
+                "SEARCH blocks only matched very loosely (tolerance score {total_score} over \
+                 limit {MAX_TOTAL_TOLERANCE_SCORE}). The file likely changed since you read it — \
+                 re-read it and make the SEARCH text match the current content exactly."
+            )));
+        }
         running_lines = apply_replacements(
             &running_lines,
             &[Replacement {
@@ -601,10 +647,14 @@ fn fix_indentation(
         return replaced_lines.to_vec();
     }
 
+    // Count by chars, not bytes: indentation can contain multibyte whitespace
+    // (NBSP, ideographic space). A byte-based delta would later slice mid-code-point.
     let diffs: Vec<isize> = matched_indents
         .iter()
         .zip(&searched_indents)
-        .map(|(matched, searched)| searched.len() as isize - matched.len() as isize)
+        .map(|(matched, searched)| {
+            searched.chars().count() as isize - matched.chars().count() as isize
+        })
         .collect();
     let first_diff = diffs[0];
     if first_diff == 0 || !diffs.iter().all(|diff| *diff == first_diff) {
@@ -627,9 +677,12 @@ fn adjust_replacement_indentation(
     matched_indent: &str,
     diff: isize,
 ) -> Vec<String> {
+    // `diff`/`prefix_len`/`remove_len` are CHAR counts (see `diffs` in
+    // `fix_indentation`), so all slicing here goes through char iterators —
+    // never raw byte indices that could split a multibyte whitespace char.
     if diff < 0 {
-        let prefix_len = usize::try_from(-diff).unwrap_or(0).min(matched_indent.len());
-        let prefix = &matched_indent[..prefix_len];
+        let prefix_len = usize::try_from(-diff).unwrap_or(0);
+        let prefix: String = matched_indent.chars().take(prefix_len).collect();
         return replaced_lines.iter().map(|line| format!("{prefix}{line}")).collect();
     }
 
@@ -637,11 +690,11 @@ fn adjust_replacement_indentation(
     if !replaced_lines.iter().all(|line| removable_indent(line, remove_len)) {
         return replaced_lines.to_vec();
     }
-    replaced_lines.iter().map(|line| line[remove_len..].to_string()).collect()
+    replaced_lines.iter().map(|line| line.chars().skip(remove_len).collect()).collect()
 }
 
 fn removable_indent(line: &str, remove_len: usize) -> bool {
-    line.len() >= remove_len && line[..remove_len].chars().all(char::is_whitespace)
+    line.chars().take(remove_len).filter(|c| c.is_whitespace()).count() == remove_len
 }
 
 fn trim_empty_edge_lines(lines: &[String]) -> Vec<String> {
@@ -848,4 +901,58 @@ fn operation_result(action: &str, file_path: &str, path: &Path, content: &str) -
         let _ = write!(result, "\n\n{warning}");
     }
     result
+}
+
+#[cfg(test)]
+mod indentation_tests {
+    use super::*;
+
+    // The indent fixer used to byte-slice over indentation that can contain
+    // multibyte whitespace (ideographic space U+3000, NBSP) — a guaranteed
+    // panic. These pin the char-based behavior.
+
+    #[test]
+    fn fix_indentation_adds_multibyte_indent_without_panic() {
+        // matched has 2 ideographic spaces, searched has 1 -> diff = -1 (add 1).
+        let matched = vec!["\u{3000}\u{3000}x".to_string()];
+        let searched = vec!["\u{3000}x".to_string()];
+        let replaced = vec!["y".to_string()];
+        let out = fix_indentation(&matched, &searched, &replaced);
+        assert_eq!(out, vec!["\u{3000}y".to_string()]);
+    }
+
+    #[test]
+    fn fix_indentation_removes_multibyte_indent_without_panic() {
+        // matched has 1 ideographic space, searched has 2 -> diff = +1 (remove 1).
+        let matched = vec!["\u{3000}x".to_string()];
+        let searched = vec!["\u{3000}\u{3000}x".to_string()];
+        let replaced = vec!["\u{3000}y".to_string()];
+        let out = fix_indentation(&matched, &searched, &replaced);
+        assert_eq!(out, vec!["y".to_string()]);
+    }
+
+    #[test]
+    fn apply_blocks_preserves_crlf_endings() -> Result<()> {
+        // A CRLF file must round-trip as CRLF — not turn into mixed endings where
+        // the edited line is bare LF while untouched lines keep CRLF.
+        let content = "line one\r\nline two\r\nline three\r\n";
+        let block = SearchReplaceBlock {
+            search: vec!["line two".to_string()],
+            replace: vec!["line TWO".to_string()],
+        };
+        let out = apply_blocks(content, &[block])?;
+        assert_eq!(out, "line one\r\nline TWO\r\nline three\r\n");
+        Ok(())
+    }
+
+    #[test]
+    fn apply_blocks_leaves_lf_files_as_lf() -> Result<()> {
+        let content = "a\nb\nc\n";
+        let block =
+            SearchReplaceBlock { search: vec!["b".to_string()], replace: vec!["B".to_string()] };
+        let out = apply_blocks(content, &[block])?;
+        assert_eq!(out, "a\nB\nc\n");
+        assert!(!out.contains('\r'));
+        Ok(())
+    }
 }

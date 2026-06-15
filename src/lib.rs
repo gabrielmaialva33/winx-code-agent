@@ -30,4 +30,3 @@ pub mod utils;
 
 pub use errors::{Result, WinxError};
 pub use server::{start_winx_server, SharedBashState, WinxService};
-pub use tools::WinxService as WinxToolsService;

@@ -34,6 +34,11 @@ const MAX_OUTPUT_SIZE: usize = 1_000_000;
 /// `StatusCheck.scrollback_lines`.
 pub const RING_BUFFER_LINES: usize = 2_000;
 
+/// Cap on the unterminated tail held in `line_ring_partial`. Bounds memory when
+/// a program emits megabytes without ever printing a newline (a `\r`-redrawn
+/// progress bar, a binary blob). Generous enough to hold any real terminal line.
+const MAX_PARTIAL_LINE_BYTES: usize = 64 * 1024;
+
 /// WCGW-style prompt pattern for command completion detection
 const WCGW_PROMPT_PATTERN: &str = "◉";
 const WCGW_PROMPT_END: &str = "──➤";
@@ -192,6 +197,12 @@ pub struct PtyShell {
     pub last_returned_hash: Option<u64>,
     /// Optional command a human can run to attach to the same terminal session.
     pub attach_hint: Option<String>,
+    /// The exact suffix that ends this shell's prompt: `──➤<nonce>`. The nonce is
+    /// a per-shell random value embedded in `PROMPT_COMMAND`, so command output
+    /// can't impersonate the prompt (printing `◉ x──➤` no longer ends a command
+    /// early). Anchoring completion on this instead of the bare glyphs removes
+    /// the false-positive that truncated output when a program echoed them.
+    prompt_end_marker: String,
 }
 
 impl std::fmt::Debug for PtyShell {
@@ -257,9 +268,12 @@ impl PtyShell {
         cmd.env("GIT_PAGER", "cat");
         cmd.env("COLUMNS", DEFAULT_COLS.to_string());
         cmd.env("ROWS", DEFAULT_ROWS.to_string());
+        // Per-shell random nonce embedded in the prompt so command output can't
+        // forge the completion marker. 64 bits of entropy in hex.
+        let nonce = format!("{:016x}", rand::random::<u64>());
         // WCGW-style prompt for command completion detection
         // Note: removed \r\e[2K which was erasing the prompt before it could be detected
-        cmd.env("PROMPT_COMMAND", r#"printf "◉ %s──➤ " "$PWD""#);
+        cmd.env("PROMPT_COMMAND", format!(r#"printf "◉ %s──➤{nonce} " "$PWD""#));
         cmd.cwd(initial_dir);
 
         // Spawn bash in the PTY slave
@@ -314,17 +328,18 @@ impl PtyShell {
             line_ring_partial: String::new(),
             last_returned_hash: None,
             attach_hint,
+            prompt_end_marker: format!("{WCGW_PROMPT_END}{nonce}"),
         };
 
         // Initialize the shell with WCGW-style prompt
-        shell.initialize_prompt(is_zsh)?;
+        shell.initialize_prompt(is_zsh, &nonce)?;
 
         debug!("PTY shell created successfully");
         Ok(shell)
     }
 
     /// Initialize the shell prompt for WCGW compatibility
-    fn initialize_prompt(&mut self, is_zsh: bool) -> Result<()> {
+    fn initialize_prompt(&mut self, is_zsh: bool, nonce: &str) -> Result<()> {
         // Set up the dynamic prompt - matches WCGW Python PROMPT_STATEMENT.
         // zsh ignores PROMPT_COMMAND, so it gets a precmd hook with a blanked
         // default prompt instead.
@@ -337,12 +352,16 @@ impl PtyShell {
             // Clear precmd_functions too: frameworks (oh-my-zsh/p10k) register the
             // prompt via that array, so redefining `precmd` alone leaves their
             // prompt in place and our `──➤` marker never ends the line.
-            r#"export GIT_PAGER=cat PAGER=cat; precmd_functions=(); preexec_functions=(); PROMPT=''; RPROMPT=''; precmd() { printf "◉ %s──➤ " "$PWD" }"#
+            format!(
+                r#"export GIT_PAGER=cat PAGER=cat; precmd_functions=(); preexec_functions=(); PROMPT=''; RPROMPT=''; precmd() {{ printf "◉ %s──➤{nonce} " "$PWD" }}"#
+            )
         } else {
-            r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ %s──➤ " "$PWD"'; PS1=''"#
+            format!(
+                r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ %s──➤{nonce} " "$PWD"'; PS1=''"#
+            )
         };
 
-        self.write_command(prompt_statement)?;
+        self.write_command(&prompt_statement)?;
 
         // Wait for prompt to be ready
         std::thread::sleep(Duration::from_millis(100));
@@ -351,10 +370,14 @@ impl PtyShell {
         Ok(())
     }
 
-    /// Write a command to the PTY
+    /// Write a command to the PTY, submitting it with a carriage return.
     fn write_command(&mut self, command: &str) -> Result<()> {
-        // Commands in PTY need \r\n for proper terminal behavior
-        let cmd_with_newline = format!("{command}\n");
+        // Submit with `\r`, matching the foreground path (`send_special_key("Enter")`
+        // also sends `\r`) and a real terminal's Enter key. The two paths used to
+        // disagree — background sent `\n` here, foreground sent `\r` — which is a
+        // real difference for readline-based TUIs. bash's canonical line discipline
+        // maps CR to NL (ICRNL), so plain commands behave identically.
+        let cmd_with_newline = format!("{command}\r");
         self.writer.write_all(cmd_with_newline.as_bytes()).context("Failed to write to PTY")?;
         self.writer.flush().context("Failed to flush PTY")?;
         Ok(())
@@ -465,6 +488,16 @@ impl PtyShell {
         } else {
             self.line_ring_partial = combined;
         }
+
+        // A stream that never emits a newline (a `\r`-only progress bar, a binary
+        // blob, `yes | tr -d '\n'`) would grow the partial without bound. Keep
+        // only the tail; older bytes of an unterminated line aren't useful as
+        // scrollback. Snap to a char boundary so we never split a code point.
+        if self.line_ring_partial.len() > MAX_PARTIAL_LINE_BYTES {
+            let cut = self.line_ring_partial.len() - MAX_PARTIAL_LINE_BYTES;
+            let cut = crate::utils::floor_char_boundary(&self.line_ring_partial, cut);
+            self.line_ring_partial.drain(..cut);
+        }
     }
 
     /// Return up to `lines` recent lines from the ringbuffer, oldest first.
@@ -517,8 +550,11 @@ impl PtyShell {
 
                     // Check for WCGW prompt indicating command completion
                     if prompt_detected_at.is_none()
-                        && (Self::check_prompt_complete(&chunk)
-                            || Self::check_prompt_complete(&self.output_buffer))
+                        && (Self::check_prompt_complete(&chunk, &self.prompt_end_marker)
+                            || Self::check_prompt_complete(
+                                &self.output_buffer,
+                                &self.prompt_end_marker,
+                            ))
                     {
                         prompt_detected_at = Some(Instant::now());
                         debug!("Prompt detected, draining remaining output...");
@@ -555,7 +591,8 @@ impl PtyShell {
                             debug!("Command completed - prompt detected and drained");
                             break;
                         }
-                    } else if no_data_count > 10 && Self::check_prompt_complete(&self.output_buffer)
+                    } else if no_data_count > 10
+                        && Self::check_prompt_complete(&self.output_buffer, &self.prompt_end_marker)
                     {
                         // Prompt detected during empty reads
                         prompt_detected_at = Some(Instant::now());
@@ -579,18 +616,20 @@ impl PtyShell {
         Ok((self.output_buffer.clone(), complete))
     }
 
-    /// Check if the output contains the WCGW-style prompt
-    fn check_prompt_complete(text: &str) -> bool {
-        // The real shell prompt is the LAST non-empty line: "◉ <pwd>──➤ ".
-        // Anchor on that line instead of a global `contains()`: command output
-        // that happens to print ◉ / ──➤ mid-stream must not be mistaken for the
-        // prompt, which would truncate output or end the command early.
+    /// Check if the output ends with this shell's prompt.
+    ///
+    /// `prompt_end` is the per-shell `──➤<nonce>` suffix. Anchoring on the LAST
+    /// non-empty line (not a global `contains`) plus the random nonce means
+    /// command output that happens to print the prompt glyphs mid-stream — or
+    /// even a forged `◉ x──➤ ` at end of line — can't be mistaken for the prompt
+    /// and truncate output or end the command early.
+    fn check_prompt_complete(text: &str, prompt_end: &str) -> bool {
         text.lines().rev().find(|line| !line.trim().is_empty()).is_some_and(|last| {
             // Strip ANSI so a trailing erase/cursor sequence after the arrow
             // (e.g. "──➤ \x1b[K") doesn't defeat the suffix check.
             let clean = crate::state::terminal::strip_ansi_codes(last);
             let clean = clean.trim_end();
-            clean.contains(WCGW_PROMPT_PATTERN) && clean.ends_with(WCGW_PROMPT_END)
+            clean.contains(WCGW_PROMPT_PATTERN) && clean.ends_with(prompt_end)
         })
     }
 
@@ -706,16 +745,25 @@ mod tests {
 
     #[test]
     fn prompt_detection_is_suffix_anchored() {
+        // Per-shell nonce appended after the arrow.
+        let end = "──➤deadbeefcafe0001";
         // real prompt on the last line -> complete
-        assert!(PtyShell::check_prompt_complete("out\nmore\n◉ /home/x──➤ "));
+        assert!(PtyShell::check_prompt_complete("out\nmore\n◉ /home/x──➤deadbeefcafe0001 ", end));
         // prompt with trailing ANSI erase -> still complete
-        assert!(PtyShell::check_prompt_complete("◉ /home/x──➤ \u{1b}[K"));
+        assert!(PtyShell::check_prompt_complete("◉ /home/x──➤deadbeefcafe0001 \u{1b}[K", end));
         // the bug: ◉ and ──➤ appear MID-output, last line is normal -> NOT complete
-        assert!(!PtyShell::check_prompt_complete("menu: ◉ start ──➤ stop\nstill running"));
+        assert!(!PtyShell::check_prompt_complete(
+            "menu: ◉ start ──➤deadbeefcafe0001 stop\nstill running",
+            end
+        ));
         // command echoed after the arrow (not the waiting prompt) -> not complete
-        assert!(!PtyShell::check_prompt_complete("◉ /home/x──➤ ls -la"));
+        assert!(!PtyShell::check_prompt_complete("◉ /home/x──➤deadbeefcafe0001 ls -la", end));
         // no prompt at all
-        assert!(!PtyShell::check_prompt_complete("just some output\n"));
+        assert!(!PtyShell::check_prompt_complete("just some output\n", end));
+        // the nonce's payoff: output that forges the bare glyphs but NOT the
+        // nonce must not be mistaken for the prompt.
+        assert!(!PtyShell::check_prompt_complete("◉ /fake──➤ ", end));
+        assert!(!PtyShell::check_prompt_complete("◉ /fake──➤wrongnonce ", end));
     }
 
     #[test]

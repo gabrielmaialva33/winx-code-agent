@@ -401,6 +401,11 @@ pub struct ReadFiles {
     /// "file.rs:10-" for line 10 onwards, "file.rs:-20" for first 20 lines.
     pub file_paths: Vec<String>,
 
+    /// Optional thread ID identifying the shell session to operate on. When
+    /// omitted, the most recently active session is used.
+    #[serde(default)]
+    pub thread_id: String,
+
     // Internal fields - not part of MCP schema (parsed from file_paths)
     #[serde(skip)]
     #[schemars(skip)]
@@ -420,6 +425,8 @@ impl<'de> Deserialize<'de> for ReadFiles {
         #[derive(Deserialize)]
         struct ReadFilesHelper {
             file_paths: Option<Vec<String>>,
+            #[serde(default)]
+            thread_id: Option<String>,
         }
 
         let input = serde_json::Value::deserialize(deserializer)?;
@@ -434,6 +441,7 @@ impl<'de> Deserialize<'de> for ReadFiles {
         let helper: ReadFilesHelper = serde_json::from_value(input.clone())
             .map_err(|e| serde::de::Error::custom(format!("Failed to parse ReadFiles: {e}")))?;
 
+        let thread_id = helper.thread_id.unwrap_or_default();
         let file_paths = match helper.file_paths {
             Some(paths) if !paths.is_empty() => paths,
             Some(_) => return Err(serde::de::Error::custom("file_paths must not be empty.")),
@@ -452,7 +460,7 @@ impl<'de> Deserialize<'de> for ReadFiles {
             end_line_nums.push(end);
         }
 
-        Ok(ReadFiles { file_paths: clean_file_paths, start_line_nums, end_line_nums })
+        Ok(ReadFiles { file_paths: clean_file_paths, thread_id, start_line_nums, end_line_nums })
     }
 }
 
@@ -839,6 +847,11 @@ pub struct ContextSave {
     /// These glob patterns identify the files that should be included in
     /// the saved context. Patterns can be absolute or relative to the project root.
     pub relevant_file_globs: Vec<String>,
+
+    /// Optional thread ID identifying the shell session to operate on. When
+    /// omitted, the most recently active session is used.
+    #[serde(default)]
+    pub thread_id: String,
 }
 
 /// Parameters for the `ReadImage` tool
@@ -850,6 +863,11 @@ pub struct ReadImage {
     ///
     /// This can be an absolute path or a path relative to the current working directory.
     pub file_path: String,
+
+    /// Optional thread ID identifying the shell session to operate on. When
+    /// omitted, the most recently active session is used.
+    #[serde(default)]
+    pub thread_id: String,
 }
 
 #[cfg(test)]

@@ -171,6 +171,9 @@ impl Default for Screen {
 impl Screen {
     /// Creates a new screen with specified dimensions
     pub fn new(columns: usize) -> Self {
+        // A 0-width screen makes `ensure_cursor_position` compute `columns - 1`,
+        // which underflows (panic in debug, `usize::MAX` in release). Floor at 1.
+        let columns = columns.max(1);
         let mut lines = VecDeque::with_capacity(DEFAULT_MAX_SCREEN_LINES);
         lines.push_back(vec![ScreenCell::default(); columns]);
 
@@ -186,6 +189,8 @@ impl Screen {
 
     /// Creates a new screen with specified dimensions and maximum lines
     pub fn new_with_max_lines(columns: usize, max_lines: usize) -> Self {
+        // See `new`: a 0-width screen underflows in `ensure_cursor_position`.
+        let columns = columns.max(1);
         let mut lines = VecDeque::with_capacity(max_lines.min(MAX_SCREEN_LINES));
         lines.push_back(vec![ScreenCell::default(); columns]);
 
@@ -1417,10 +1422,15 @@ pub fn incremental_text(text: &str, last_pending_output: &str) -> String {
         // Incremental case - only process the new part
         let new_part = &text[last_pending_output.len()..];
 
-        // Ensure we have enough context by including a bit more than just the new part
+        // Ensure we have enough context by including a bit more than just the new
+        // part. Snap the start down to a char boundary: a raw `len - 200` offset
+        // can land inside a multibyte code point and panic on the slice.
         let context_len = 200.min(last_pending_output.len());
         let full_context = if context_len > 0 {
-            let start_pos = last_pending_output.len() - context_len;
+            let start_pos = crate::utils::floor_char_boundary(
+                last_pending_output,
+                last_pending_output.len() - context_len,
+            );
             format!("{}{}", &last_pending_output[start_pos..], new_part)
         } else {
             new_part.to_string()

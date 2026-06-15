@@ -82,6 +82,7 @@ async fn test_full_lifecycle_workflow() -> Result<()> {
         // 5. ReadFiles: Verify content
         let read_cmd = ReadFiles {
             file_paths: vec![data_file.to_string_lossy().to_string()],
+            thread_id: String::new(),
             start_line_nums: vec![],
             end_line_nums: vec![],
         };
@@ -126,6 +127,7 @@ async fn test_full_lifecycle_workflow() -> Result<()> {
             project_root_path: workspace.to_string_lossy().to_string(),
             description: "Lifecycle test".to_string(),
             relevant_file_globs: vec!["**/*.json".to_string()],
+            thread_id: String::new(),
         };
         let save_output =
             winx_code_agent::tools::context_save::handle_tool_call(&state, save_cmd).await?;

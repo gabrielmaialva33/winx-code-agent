@@ -1,9 +1,8 @@
 //! Tools module for the Winx application.
 //!
-//! This module contains all the tools that are exposed to the MCP client,
-//! including shell initialization, command execution, file operations, etc.
-//!
-//! The `WinxService` struct is the main entry point for all tool calls.
+//! This module hosts the individual MCP tool implementations (shell, file IO,
+//! image, context save). The live service that wires them to the MCP protocol
+//! is [`crate::server::WinxService`].
 
 pub mod bash_command;
 pub mod context_save;
@@ -11,82 +10,3 @@ pub mod file_write_or_edit;
 pub mod initialize;
 pub mod read_files;
 pub mod read_image;
-
-use std::sync::Arc;
-use tokio::sync::Mutex; // Changed from std::sync::Mutex for async safety
-use tracing::info;
-
-use crate::state::bash_state::BashState;
-
-/// Type alias for shared bash state with async-safe mutex
-pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
-
-/// Version of the MCP protocol implemented by this service
-#[allow(dead_code)]
-const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
-
-/// Main service implementation for Winx
-///
-/// This struct maintains the state of the shell environment and provides
-/// methods for interacting with it through the MCP protocol.
-///
-/// Uses `tokio::sync::Mutex` for thread-safe async access.
-#[derive(Debug, Clone)]
-pub struct WinxService {
-    /// Shared state for the bash shell environment (async-safe)
-    bash_state: SharedBashState,
-    /// Version information for the service
-    version: String,
-    /// Startup timestamp
-    start_time: std::time::Instant,
-}
-
-impl Default for WinxService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl WinxService {
-    /// Create a new instance of the `WinxService`
-    ///
-    /// # Returns
-    ///
-    /// A new `WinxService` instance with an uninitialized bash state
-    pub fn new() -> Self {
-        info!("Creating new WinxService instance");
-        Self {
-            bash_state: Arc::new(Mutex::new(None)),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-            start_time: std::time::Instant::now(),
-        }
-    }
-
-    /// Get the uptime of the service
-    ///
-    /// # Returns
-    ///
-    /// The duration since the service was started
-    pub fn uptime(&self) -> std::time::Duration {
-        self.start_time.elapsed()
-    }
-
-    /// Get the version of the service
-    ///
-    /// # Returns
-    ///
-    /// The version string of the service
-    pub fn version(&self) -> &str {
-        &self.version
-    }
-
-    /// Get a reference to the bash state, locking the mutex
-    ///
-    /// # Returns
-    ///
-    /// A `MutexGuard` for the bash state
-    #[allow(dead_code)]
-    async fn lock_bash_state(&self) -> tokio::sync::MutexGuard<'_, Option<BashState>> {
-        self.bash_state.lock().await
-    }
-}

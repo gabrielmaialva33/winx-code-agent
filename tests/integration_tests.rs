@@ -10,25 +10,24 @@ use tokio::sync::Mutex;
 
 use winx_code_agent::errors::{Result, WinxError};
 use winx_code_agent::state::bash_state::BashState;
-use winx_code_agent::tools::WinxService;
 use winx_code_agent::types::{
     BashCommand, BashCommandAction, ContextSave, FileWriteOrEdit, Initialize, InitializeType,
     ModeName, ReadFiles,
 };
+use winx_code_agent::WinxService;
 
 // ==================== WinxService Tests ====================
 
 #[test]
 fn test_winx_service_creation() {
     let service = WinxService::new();
-    assert!(!service.version().is_empty());
-    assert!(service.uptime().as_secs() < 1);
+    assert!(!service.version.is_empty());
 }
 
 #[test]
 fn test_winx_service_default() {
     let service = WinxService::default();
-    assert!(!service.version().is_empty());
+    assert!(!service.version.is_empty());
 }
 
 // ==================== Initialize Tool Tests ====================
@@ -112,6 +111,7 @@ async fn test_context_save_resume_restores_task_context() -> Result<()> {
         project_root_path: temp_dir.path().to_string_lossy().to_string(),
         description: "resume payload marker".to_string(),
         relevant_file_globs: vec![],
+        thread_id: String::new(),
     };
     winx_code_agent::tools::context_save::handle_tool_call(&bash_state_arc, context).await?;
 
@@ -465,6 +465,7 @@ async fn test_read_files_single_file() -> Result<()> {
 
     let read = ReadFiles {
         file_paths: vec![file_path.to_string_lossy().to_string()],
+        thread_id: String::new(),
         start_line_nums: vec![None],
         end_line_nums: vec![None],
     };
@@ -502,6 +503,7 @@ async fn test_read_files_multiple_files() -> Result<()> {
 
     let read = ReadFiles {
         file_paths: vec![file1.to_string_lossy().to_string(), file2.to_string_lossy().to_string()],
+        thread_id: String::new(),
         start_line_nums: vec![None, None],
         end_line_nums: vec![None, None],
     };
@@ -537,6 +539,7 @@ async fn test_read_files_with_line_range() -> Result<()> {
     // Test with explicit line range
     let read = ReadFiles {
         file_paths: vec![file_path.to_string_lossy().to_string()],
+        thread_id: String::new(),
         start_line_nums: vec![Some(2)],
         end_line_nums: vec![Some(4)],
     };
@@ -607,6 +610,7 @@ async fn test_file_write_or_edit_treats_search_marker_as_edit_even_with_high_per
 
     let read = ReadFiles {
         file_paths: vec![file_path.to_string_lossy().to_string()],
+        thread_id: String::new(),
         start_line_nums: vec![None],
         end_line_nums: vec![None],
     };
@@ -652,6 +656,7 @@ async fn test_read_files_nonexistent() -> Result<()> {
 
     let read = ReadFiles {
         file_paths: vec![temp_dir.path().join("nonexistent.txt").to_string_lossy().to_string()],
+        thread_id: String::new(),
         start_line_nums: vec![None],
         end_line_nums: vec![None],
     };
@@ -897,6 +902,7 @@ async fn test_context_save_basic() -> Result<()> {
         project_root_path: temp_dir.path().to_string_lossy().to_string(),
         description: "Test context save for integration tests".to_string(),
         relevant_file_globs: vec!["src/*.rs".to_string()],
+        thread_id: String::new(),
     };
 
     let response =
@@ -942,6 +948,7 @@ async fn test_context_save_empty_globs() -> Result<()> {
         project_root_path: temp_dir.path().to_string_lossy().to_string(),
         description: "Test with empty globs".to_string(),
         relevant_file_globs: vec![],
+        thread_id: String::new(),
     };
 
     let response =
@@ -985,6 +992,7 @@ async fn test_context_save_no_matching_files() -> Result<()> {
         project_root_path: temp_dir.path().to_string_lossy().to_string(),
         description: "Test with non-matching glob".to_string(),
         relevant_file_globs: vec!["*.nonexistent".to_string()],
+        thread_id: String::new(),
     };
 
     let response =
@@ -1047,7 +1055,8 @@ async fn test_read_image_png() -> Result<()> {
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
-    let read_image = ReadImage { file_path: image_path.to_string_lossy().to_string() };
+    let read_image =
+        ReadImage { file_path: image_path.to_string_lossy().to_string(), thread_id: String::new() };
 
     let (mime_type, base64_data) =
         winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await?;
@@ -1103,7 +1112,8 @@ async fn test_read_image_jpeg() -> Result<()> {
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
-    let read_image = ReadImage { file_path: image_path.to_string_lossy().to_string() };
+    let read_image =
+        ReadImage { file_path: image_path.to_string_lossy().to_string(), thread_id: String::new() };
 
     let (mime_type, _base64_data) =
         winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await?;
@@ -1135,6 +1145,7 @@ async fn test_read_image_nonexistent() -> Result<()> {
 
     let read_image = ReadImage {
         file_path: temp_dir.path().join("nonexistent.png").to_string_lossy().to_string(),
+        thread_id: String::new(),
     };
 
     let result =
@@ -1169,7 +1180,8 @@ async fn test_read_image_non_image_file() -> Result<()> {
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
-    let read_image = ReadImage { file_path: text_path.to_string_lossy().to_string() };
+    let read_image =
+        ReadImage { file_path: text_path.to_string_lossy().to_string(), thread_id: String::new() };
 
     // ReadImage should still work (returns base64 of any file with guessed MIME type)
     // It falls back to image/jpeg for unknown types per the implementation

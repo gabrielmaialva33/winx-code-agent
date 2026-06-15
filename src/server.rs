@@ -15,15 +15,55 @@ use rmcp::{
 };
 use schemars::schema_for;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
 
+use crate::errors::WinxError;
+use crate::state::bash_state::generate_thread_id;
 use crate::state::BashState;
-use crate::types::{BashCommand, ContextSave, FileWriteOrEdit, Initialize, ReadFiles, ReadImage};
+use crate::types::{
+    normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, Initialize, ReadFiles,
+    ReadImage,
+};
+
+/// Map a domain [`WinxError`] to the right JSON-RPC error kind.
+///
+/// Client-caused failures (bad params, security violations, mode restrictions,
+/// state-not-initialized, ambiguous/not-found edits) become `invalid_request`
+/// so the model knows the fix is on its side; genuine server-side failures
+/// (PTY spawn, IO, lock poisoning, persistence) stay `internal_error`.
+fn to_mcp_error(tool: &str, err: &WinxError) -> McpError {
+    let msg = format!("{tool} failed: {err}");
+    match err {
+        WinxError::BashStateNotInitialized
+        | WinxError::CommandNotAllowed(_)
+        | WinxError::PathSecurityError { .. }
+        | WinxError::ThreadIdMismatch(_)
+        | WinxError::ParameterValidationError { .. }
+        | WinxError::MissingParameterError { .. }
+        | WinxError::NullValueError { .. }
+        | WinxError::ArgumentParseError(_)
+        | WinxError::JsonParseError(_)
+        | WinxError::DeserializationError(_)
+        | WinxError::WorkspacePathError(_)
+        | WinxError::InvalidInput(_)
+        | WinxError::SearchReplaceSyntaxError(_)
+        | WinxError::SearchReplaceSyntaxErrorDetailed { .. }
+        | WinxError::SearchBlockNotFound(_)
+        | WinxError::SearchBlockAmbiguous { .. }
+        | WinxError::SearchBlockConflict { .. }
+        | WinxError::FileTooLarge { .. }
+        | WinxError::InteractiveCommandDetected { .. }
+        | WinxError::CommandAlreadyRunning { .. } => McpError::invalid_request(msg, None),
+        _ => McpError::internal_error(msg, None),
+    }
+}
 
 /// Type alias for the shared bash state - uses `tokio::sync::Mutex` for async safety
 pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
@@ -233,11 +273,29 @@ fn append_command_section<const N: usize>(
     let _ = writeln!(output, "\n# {title}\n{}", content.trim_end());
 }
 
-/// Winx service with shared bash state
+/// Upper bound on concurrently-live sessions. Each session owns a PTY (a real
+/// bash process), so we evict the least-recently-used one past this to avoid
+/// leaking shells across many short-lived `thread_id`s.
+const MAX_SESSIONS: usize = 32;
+
+/// Per-`thread_id` shell sessions. Each `thread_id` gets its own
+/// `BashState`/PTY, so concurrent threads (or HTTP clients sharing the service)
+/// never execute in each other's shell. Tools that don't carry a `thread_id`
+/// (legacy clients) fall back to the most recently active session.
+#[derive(Default)]
+struct SessionRegistry {
+    slots: HashMap<String, SharedBashState>,
+    /// Last-use timestamps for LRU eviction.
+    last_used: HashMap<String, Instant>,
+    /// Most recently addressed session, used as the fallback for tool calls
+    /// that omit a `thread_id`.
+    last_active: Option<String>,
+}
+
+/// Winx service. Holds the per-thread session registry.
 #[derive(Clone)]
 pub struct WinxService {
-    /// Shared state for the bash shell environment (async-safe)
-    pub bash_state: SharedBashState,
+    sessions: Arc<Mutex<SessionRegistry>>,
     /// Version information for the service
     pub version: String,
 }
@@ -253,9 +311,57 @@ impl WinxService {
     pub fn new() -> Self {
         info!("Creating new WinxService instance");
         Self {
-            bash_state: Arc::new(Mutex::new(None)),
+            sessions: Arc::new(Mutex::new(SessionRegistry::default())),
             version: env!("CARGO_PKG_VERSION").to_string(),
         }
+    }
+
+    /// Resolve the session slot for a `thread_id`, creating it if absent.
+    ///
+    /// An empty `thread_id` resolves to the most recently active session (the
+    /// compatibility path for tools — and older clients — that don't send one).
+    /// Marks the slot as most-recently-used and evicts the LRU session when over
+    /// [`MAX_SESSIONS`].
+    async fn session_for(&self, thread_id: &str) -> SharedBashState {
+        let mut reg = self.sessions.lock().await;
+        let key = if thread_id.is_empty() {
+            reg.last_active.clone().unwrap_or_else(|| "default".to_string())
+        } else {
+            thread_id.to_string()
+        };
+
+        // Evict the LRU session if adding a brand-new key would exceed the cap.
+        if !reg.slots.contains_key(&key) && reg.slots.len() >= MAX_SESSIONS {
+            if let Some(victim) = reg
+                .last_used
+                .iter()
+                .filter(|(k, _)| **k != key)
+                .min_by_key(|(_, t)| **t)
+                .map(|(k, _)| k.clone())
+            {
+                reg.slots.remove(&victim);
+                reg.last_used.remove(&victim);
+                if reg.last_active.as_deref() == Some(victim.as_str()) {
+                    reg.last_active = None;
+                }
+                warn!("Evicted LRU shell session '{victim}' (session cap {MAX_SESSIONS})");
+            }
+        }
+
+        let slot =
+            reg.slots.entry(key.clone()).or_insert_with(|| Arc::new(Mutex::new(None))).clone();
+        reg.last_used.insert(key.clone(), Instant::now());
+        if !thread_id.is_empty() {
+            reg.last_active = Some(key);
+        }
+        slot
+    }
+
+    /// The most recently active session slot, without creating one. Used by
+    /// session-agnostic surfaces (e.g. the handoff prompt).
+    async fn active_slot(&self) -> Option<SharedBashState> {
+        let reg = self.sessions.lock().await;
+        reg.last_active.as_ref().and_then(|key| reg.slots.get(key).cloned())
     }
 }
 
@@ -434,8 +540,8 @@ impl WinxService {
             "Prepare a concise handoff for another agent. Include active objective, current state, important files, changed files, blockers, validation already run, and exact next commands.\n",
         );
 
-        let state_snapshot = {
-            let guard = self.bash_state.lock().await;
+        let state_snapshot = if let Some(slot) = self.active_slot().await {
+            let guard = slot.lock().await;
             guard.as_ref().map(|state| {
                 let whitelist = state
                     .whitelist_for_overwrite
@@ -459,6 +565,8 @@ impl WinxService {
                     state.whitelist_for_overwrite.len(),
                 )
             })
+        } else {
+            None
         };
 
         let Some((thread_id, workspace_root, cwd, mode, whitelist, whitelist_count)) =
@@ -529,8 +637,8 @@ impl WinxService {
         text
     }
 
-    async fn persist_state(&self) {
-        let guard = self.bash_state.lock().await;
+    async fn persist_state(&self, slot: &SharedBashState) {
+        let guard = slot.lock().await;
         if let Some(state) = guard.as_ref() {
             if let Err(error) = state.save_state_to_disk() {
                 warn!("Failed to persist bash state: {}", error);
@@ -573,16 +681,25 @@ impl WinxService {
 
     async fn handle_initialize(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let initialize: Initialize = Self::lenient_from_value(args).map_err(|e| {
+        let mut initialize: Initialize = Self::lenient_from_value(args).map_err(|e| {
             McpError::invalid_request(format!("Invalid Initialize parameters: {e}"), None)
         })?;
 
-        match crate::tools::initialize::handle_tool_call(&self.bash_state, initialize).await {
+        // Resolve the session key. A first_call may omit thread_id; generate one
+        // here and write it back so the handler and the registry agree on the id.
+        let mut thread_id = normalize_thread_id(&initialize.thread_id);
+        if thread_id.is_empty() {
+            thread_id = generate_thread_id();
+            initialize.thread_id.clone_from(&thread_id);
+        }
+        let slot = self.session_for(&thread_id).await;
+
+        match crate::tools::initialize::handle_tool_call(&slot, initialize).await {
             Ok(result) => {
-                self.persist_state().await;
+                self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![Content::text(result)]))
             }
-            Err(e) => Err(McpError::internal_error(format!("Initialize failed: {e}"), None)),
+            Err(e) => Err(to_mcp_error("Initialize", &e)),
         }
     }
 
@@ -597,12 +714,13 @@ impl WinxService {
             )
         })?;
 
-        match crate::tools::bash_command::handle_tool_call(&self.bash_state, bash_command).await {
+        let slot = self.session_for(&normalize_thread_id(&bash_command.thread_id)).await;
+        match crate::tools::bash_command::handle_tool_call(&slot, bash_command).await {
             Ok(output) => {
-                self.persist_state().await;
+                self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![Content::text(output)]))
             }
-            Err(e) => Err(McpError::internal_error(format!("BashCommand failed: {e}"), None)),
+            Err(e) => Err(to_mcp_error("BashCommand", &e)),
         }
     }
 
@@ -612,12 +730,13 @@ impl WinxService {
             McpError::invalid_request(format!("Invalid ReadFiles parameters: {e}"), None)
         })?;
 
-        match crate::tools::read_files::handle_tool_call(&self.bash_state, read_files).await {
+        let slot = self.session_for(&normalize_thread_id(&read_files.thread_id)).await;
+        match crate::tools::read_files::handle_tool_call(&slot, read_files).await {
             Ok(result) => {
-                self.persist_state().await;
+                self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![Content::text(result)]))
             }
-            Err(e) => Err(McpError::internal_error(format!("ReadFiles failed: {e}"), None)),
+            Err(e) => Err(to_mcp_error("ReadFiles", &e)),
         }
     }
 
@@ -630,17 +749,13 @@ impl WinxService {
             McpError::invalid_request(format!("Invalid FileWriteOrEdit parameters: {e}"), None)
         })?;
 
-        match crate::tools::file_write_or_edit::handle_tool_call(
-            &self.bash_state,
-            file_write_or_edit,
-        )
-        .await
-        {
+        let slot = self.session_for(&normalize_thread_id(&file_write_or_edit.thread_id)).await;
+        match crate::tools::file_write_or_edit::handle_tool_call(&slot, file_write_or_edit).await {
             Ok(result) => {
-                self.persist_state().await;
+                self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![Content::text(result)]))
             }
-            Err(e) => Err(McpError::internal_error(format!("FileWriteOrEdit failed: {e}"), None)),
+            Err(e) => Err(to_mcp_error("FileWriteOrEdit", &e)),
         }
     }
 
@@ -650,12 +765,13 @@ impl WinxService {
             McpError::invalid_request(format!("Invalid ContextSave parameters: {e}"), None)
         })?;
 
-        match crate::tools::context_save::handle_tool_call(&self.bash_state, context_save).await {
+        let slot = self.session_for(&normalize_thread_id(&context_save.thread_id)).await;
+        match crate::tools::context_save::handle_tool_call(&slot, context_save).await {
             Ok(result) => {
-                self.persist_state().await;
+                self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![Content::text(result)]))
             }
-            Err(e) => Err(McpError::internal_error(format!("ContextSave failed: {e}"), None)),
+            Err(e) => Err(to_mcp_error("ContextSave", &e)),
         }
     }
 
@@ -665,15 +781,16 @@ impl WinxService {
             McpError::invalid_request(format!("Invalid ReadImage parameters: {e}"), None)
         })?;
 
-        match crate::tools::read_image::handle_tool_call(&self.bash_state, read_image).await {
+        let slot = self.session_for(&normalize_thread_id(&read_image.thread_id)).await;
+        match crate::tools::read_image::handle_tool_call(&slot, read_image).await {
             Ok((mime_type, base64_data)) => {
-                self.persist_state().await;
+                self.persist_state(&slot).await;
                 // Return a real image content block (not base64 as text) so the
                 // model can actually see the image. rmcp's `Content::image`
                 // takes (data, mime_type).
                 Ok(CallToolResult::success(vec![Content::image(base64_data, mime_type)]))
             }
-            Err(e) => Err(McpError::internal_error(format!("ReadImage failed: {e}"), None)),
+            Err(e) => Err(to_mcp_error("ReadImage", &e)),
         }
     }
 }
@@ -685,4 +802,43 @@ pub async fn start_winx_server() -> Result<(), Box<dyn std::error::Error>> {
     let server = service.serve(stdio()).await?;
     server.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod session_registry_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn distinct_threads_get_distinct_sessions() {
+        let svc = WinxService::new();
+        let a = svc.session_for("thread_a").await;
+        let b = svc.session_for("thread_b").await;
+        // Two thread_ids must own two separate slots — the whole point of the
+        // registry: thread B never executes in thread A's shell.
+        assert!(!Arc::ptr_eq(&a, &b));
+        // Same id round-trips to the same slot.
+        let a2 = svc.session_for("thread_a").await;
+        assert!(Arc::ptr_eq(&a, &a2));
+    }
+
+    #[tokio::test]
+    async fn empty_thread_id_falls_back_to_last_active() {
+        let svc = WinxService::new();
+        let _a = svc.session_for("thread_a").await;
+        let b = svc.session_for("thread_b").await; // now last-active
+                                                   // A tool call without a thread_id reuses the most recently active slot.
+        let fallback = svc.session_for("").await;
+        assert!(Arc::ptr_eq(&b, &fallback));
+        assert!(svc.active_slot().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn lru_eviction_caps_live_sessions() {
+        let svc = WinxService::new();
+        for i in 0..(MAX_SESSIONS + 5) {
+            let _ = svc.session_for(&format!("t{i}")).await;
+        }
+        let reg = svc.sessions.lock().await;
+        assert!(reg.slots.len() <= MAX_SESSIONS, "session count {} over cap", reg.slots.len());
+    }
 }
