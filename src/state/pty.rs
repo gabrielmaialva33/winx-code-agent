@@ -538,15 +538,13 @@ impl PtyShell {
                         self.output_truncated = true;
                         let truncate_msg = "\n(...output truncated...)\n";
                         let keep_size = self.max_output_size / 2;
-                        // Snap the cut up to a char boundary: a raw byte offset can
-                        // land mid-UTF-8 (CJK/emoji/box-drawing/the prompt glyphs)
-                        // and slicing there would panic on this hot read path.
-                        let mut cut = self.output_buffer.len() - keep_size;
-                        while cut < self.output_buffer.len()
-                            && !self.output_buffer.is_char_boundary(cut)
-                        {
-                            cut += 1;
-                        }
+                        // Snap to a char boundary: a raw byte offset can land mid-UTF-8
+                        // (CJK/emoji/box-drawing/the prompt glyphs) and slicing there would
+                        // panic on this hot read path. Same helper as the poll-drain path.
+                        let cut = crate::utils::floor_char_boundary(
+                            &self.output_buffer,
+                            self.output_buffer.len() - keep_size,
+                        );
                         self.output_buffer =
                             format!("{truncate_msg}{}", &self.output_buffer[cut..]);
                     }

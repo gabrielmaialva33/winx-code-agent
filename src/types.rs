@@ -438,7 +438,7 @@ impl<'de> Deserialize<'de> for ReadFiles {
             return Err(serde::de::Error::custom(format!("Expected object, got {input}")));
         }
 
-        let helper: ReadFilesHelper = serde_json::from_value(input.clone())
+        let helper: ReadFilesHelper = serde_json::from_value(input)
             .map_err(|e| serde::de::Error::custom(format!("Failed to parse ReadFiles: {e}")))?;
 
         let thread_id = helper.thread_id.unwrap_or_default();
