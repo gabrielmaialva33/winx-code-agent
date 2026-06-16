@@ -656,7 +656,9 @@ fn fix_indentation(
             searched.chars().count() as isize - matched.chars().count() as isize
         })
         .collect();
-    let first_diff = diffs[0];
+    let Some(&first_diff) = diffs.first() else {
+        return replaced_lines.to_vec();
+    };
     if first_diff == 0 || !diffs.iter().all(|diff| *diff == first_diff) {
         return replaced_lines.to_vec();
     }
@@ -887,9 +889,15 @@ pub async fn handle_tool_call(
         .whitelist_for_overwrite
         .insert(file_path_str, FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines));
     if uses_search_replace {
-        let _ = crate::utils::workspace_stats::record_edit(&bash_state.workspace_root, &path);
-    } else {
-        let _ = crate::utils::workspace_stats::record_write(&bash_state.workspace_root, &path);
+        if let Err(e) =
+            crate::utils::workspace_stats::record_edit(&bash_state.workspace_root, &path)
+        {
+            debug!("failed to record edit stats: {e}");
+        }
+    } else if let Err(e) =
+        crate::utils::workspace_stats::record_write(&bash_state.workspace_root, &path)
+    {
+        debug!("failed to record write stats: {e}");
     }
 
     Ok(result)

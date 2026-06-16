@@ -286,10 +286,12 @@ pub async fn handle_tool_call(
                     range_format(start_line_num, end_line_num)
                 );
 
-                let _ = crate::utils::workspace_stats::record_read(
+                if let Err(e) = crate::utils::workspace_stats::record_read(
                     &workspace_root,
                     Path::new(&canon_path),
-                );
+                ) {
+                    debug!("failed to record read stats: {e}");
+                }
 
                 if truncated {
                     let remaining = read_files.file_paths.len().saturating_sub(index + 1);
