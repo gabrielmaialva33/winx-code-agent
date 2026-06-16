@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::state::line_ring::LineRing;
-use crate::state::terminal::TerminalEmulator;
+use crate::state::live_terminal::LiveTerminal;
 
 /// Default terminal dimensions (columns x rows)
 pub const DEFAULT_COLS: u16 = 200;
@@ -203,12 +203,14 @@ pub struct PtyShell {
     /// early). Anchoring completion on this instead of the bare glyphs removes
     /// the false-positive that truncated output when a program echoed them.
     prompt_end_marker: String,
-    /// Live terminal emulator fed continuously by the reader thread. Unlike the
-    /// scrollback ring (raw lines), this keeps a consolidated screen grid —
-    /// cursor moves, redraws, alternate-screen and synchronized-output applied —
-    /// so a TUI (the `claude` CLI, vim, htop) yields a stable, non-stacked
-    /// snapshot. See `live_snapshot`.
-    live: Arc<StdMutex<TerminalEmulator>>,
+    /// Live terminal emulator (fixed-viewport, `vt100`-backed) fed continuously
+    /// by the reader thread. Unlike the scrollback ring (raw lines), it keeps a
+    /// consolidated screen grid — cursor moves, redraws, alternate-screen
+    /// applied — so a TUI yields a stable, non-stacked snapshot. The fixed
+    /// viewport is what lets inline-rendering TUIs (the `agy`/Antigravity CLI,
+    /// which redraws with cursor-up + erase-line in the main screen) consolidate
+    /// instead of ghosting. See `live_snapshot`.
+    live: Arc<StdMutex<LiveTerminal>>,
 }
 
 impl std::fmt::Debug for PtyShell {
@@ -294,7 +296,7 @@ impl PtyShell {
 
         // Live terminal emulator, shared with the reader thread so the screen
         // grid stays current without any consumer needing to poll.
-        let live = Arc::new(StdMutex::new(TerminalEmulator::new(DEFAULT_COLS as usize)));
+        let live = Arc::new(StdMutex::new(LiveTerminal::new(DEFAULT_ROWS, DEFAULT_COLS)));
         let live_reader = Arc::clone(&live);
 
         // Spawn a background thread to read from the PTY
@@ -699,6 +701,11 @@ impl PtyShell {
         let new_size = PtySize { rows, cols, pixel_width: 0, pixel_height: 0 };
 
         self.master.resize(new_size).context("Failed to resize PTY")?;
+
+        // Keep the live emulator's viewport in lockstep with the PTY size.
+        if let Ok(mut emu) = self.live.lock() {
+            emu.resize(rows, cols);
+        }
 
         self.size = new_size;
         Ok(())

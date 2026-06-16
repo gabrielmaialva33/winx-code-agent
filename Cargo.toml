@@ -90,6 +90,7 @@ tree-sitter-html = "0.23.2"
 tree-sitter-php = "0.24.2"
 tree-sitter-c-sharp = "0.23.5"
 tree-sitter-lua = "0.5.0"
+vt100 = "0.16"
 
 [dev-dependencies]
 tempfile = "3.14"
