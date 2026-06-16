@@ -19,6 +19,7 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -312,9 +313,35 @@ struct SessionRegistry {
     slots: HashMap<String, SharedBashState>,
     /// Last-use timestamps for LRU eviction.
     last_used: HashMap<String, Instant>,
+    /// In-flight operation count per session. A session whose count is > 0 (it
+    /// has a live [`SessionGuard`]) is never chosen as an LRU eviction victim, so
+    /// a long-running call can't have its shell pulled out from under it.
+    in_flight: HashMap<String, Arc<AtomicUsize>>,
     /// Most recently addressed session, used as the fallback for tool calls
     /// that omit a `thread_id`.
     last_active: Option<String>,
+}
+
+/// RAII marker that a session has an operation in flight. Bumps the session's
+/// in-flight counter on creation and drops it on `Drop` — a plain synchronous
+/// `Drop`, so it works even though the registry behind it lives in an async
+/// `tokio::Mutex`. While any guard is alive the session is pinned against LRU
+/// eviction.
+struct SessionGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl SessionGuard {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        Self { counter }
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 /// How an empty `thread_id` is resolved by the session registry.
@@ -377,7 +404,7 @@ impl WinxService {
     /// a dedicated anonymous slot so remote clients can't land in each other's shell.
     /// Marks the slot as most-recently-used and evicts the LRU session when over
     /// [`MAX_SESSIONS`].
-    async fn session_for(&self, thread_id: &str) -> SharedBashState {
+    async fn session_for(&self, thread_id: &str) -> (SharedBashState, SessionGuard) {
         let mut reg = self.sessions.lock().await;
         let key = if thread_id.is_empty() {
             match self.isolation {
@@ -393,31 +420,47 @@ impl WinxService {
             thread_id.to_string()
         };
 
-        // Evict the LRU session if adding a brand-new key would exceed the cap.
+        // Evict the LRU session if adding a brand-new key would exceed the cap —
+        // but never evict a session with an operation in flight (that would pull
+        // the shell out from under a concurrent long-running call). If every other
+        // session is busy we briefly exceed the cap rather than corrupt one.
         if !reg.slots.contains_key(&key) && reg.slots.len() >= MAX_SESSIONS {
-            if let Some(victim) = reg
+            let victim = reg
                 .last_used
                 .iter()
                 .filter(|(k, _)| **k != key)
+                .filter(|(k, _)| {
+                    reg.in_flight.get(k.as_str()).map_or(0, |c| c.load(Ordering::SeqCst)) == 0
+                })
                 .min_by_key(|(_, t)| **t)
-                .map(|(k, _)| k.clone())
-            {
+                .map(|(k, _)| k.clone());
+            if let Some(victim) = victim {
                 reg.slots.remove(&victim);
                 reg.last_used.remove(&victim);
+                reg.in_flight.remove(&victim);
                 if reg.last_active.as_deref() == Some(victim.as_str()) {
                     reg.last_active = None;
                 }
                 warn!("Evicted LRU shell session '{victim}' (session cap {MAX_SESSIONS})");
+            } else {
+                warn!(
+                    "All {MAX_SESSIONS} sessions busy; exceeding the cap rather than evicting an in-flight session"
+                );
             }
         }
 
         let slot =
             reg.slots.entry(key.clone()).or_insert_with(|| Arc::new(Mutex::new(None))).clone();
+        let counter = reg
+            .in_flight
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(AtomicUsize::new(0)))
+            .clone();
         reg.last_used.insert(key.clone(), Instant::now());
         if !thread_id.is_empty() {
             reg.last_active = Some(key);
         }
-        slot
+        (slot, SessionGuard::new(counter))
     }
 
     /// The most recently active session slot, without creating one. Used by
@@ -755,7 +798,7 @@ impl WinxService {
             thread_id = generate_thread_id();
             initialize.thread_id.clone_from(&thread_id);
         }
-        let slot = self.session_for(&thread_id).await;
+        let (slot, _session_guard) = self.session_for(&thread_id).await;
 
         match crate::tools::initialize::handle_tool_call(&slot, initialize).await {
             Ok(result) => {
@@ -777,7 +820,8 @@ impl WinxService {
             )
         })?;
 
-        let slot = self.session_for(&normalize_thread_id(&bash_command.thread_id)).await;
+        let (slot, _session_guard) =
+            self.session_for(&normalize_thread_id(&bash_command.thread_id)).await;
         match crate::tools::bash_command::handle_tool_call(&slot, bash_command).await {
             Ok(output) => {
                 self.persist_state(&slot).await;
@@ -793,7 +837,8 @@ impl WinxService {
             McpError::invalid_request(format!("Invalid ReadFiles parameters: {e}"), None)
         })?;
 
-        let slot = self.session_for(&normalize_thread_id(&read_files.thread_id)).await;
+        let (slot, _session_guard) =
+            self.session_for(&normalize_thread_id(&read_files.thread_id)).await;
         match crate::tools::read_files::handle_tool_call(&slot, read_files).await {
             Ok(result) => {
                 self.persist_state(&slot).await;
@@ -812,7 +857,8 @@ impl WinxService {
             McpError::invalid_request(format!("Invalid FileWriteOrEdit parameters: {e}"), None)
         })?;
 
-        let slot = self.session_for(&normalize_thread_id(&file_write_or_edit.thread_id)).await;
+        let (slot, _session_guard) =
+            self.session_for(&normalize_thread_id(&file_write_or_edit.thread_id)).await;
         match crate::tools::file_write_or_edit::handle_tool_call(&slot, file_write_or_edit).await {
             Ok(result) => {
                 self.persist_state(&slot).await;
@@ -828,7 +874,8 @@ impl WinxService {
             McpError::invalid_request(format!("Invalid ContextSave parameters: {e}"), None)
         })?;
 
-        let slot = self.session_for(&normalize_thread_id(&context_save.thread_id)).await;
+        let (slot, _session_guard) =
+            self.session_for(&normalize_thread_id(&context_save.thread_id)).await;
         match crate::tools::context_save::handle_tool_call(&slot, context_save).await {
             Ok(result) => {
                 self.persist_state(&slot).await;
@@ -844,7 +891,8 @@ impl WinxService {
             McpError::invalid_request(format!("Invalid ReadImage parameters: {e}"), None)
         })?;
 
-        let slot = self.session_for(&normalize_thread_id(&read_image.thread_id)).await;
+        let (slot, _session_guard) =
+            self.session_for(&normalize_thread_id(&read_image.thread_id)).await;
         match crate::tools::read_image::handle_tool_call(&slot, read_image).await {
             Ok((mime_type, base64_data)) => {
                 self.persist_state(&slot).await;
@@ -874,23 +922,23 @@ mod session_registry_tests {
     #[tokio::test]
     async fn distinct_threads_get_distinct_sessions() {
         let svc = WinxService::new();
-        let a = svc.session_for("thread_a").await;
-        let b = svc.session_for("thread_b").await;
+        let (a, _) = svc.session_for("thread_a").await;
+        let (b, _) = svc.session_for("thread_b").await;
         // Two thread_ids must own two separate slots — the whole point of the
         // registry: thread B never executes in thread A's shell.
         assert!(!Arc::ptr_eq(&a, &b));
         // Same id round-trips to the same slot.
-        let a2 = svc.session_for("thread_a").await;
+        let (a2, _) = svc.session_for("thread_a").await;
         assert!(Arc::ptr_eq(&a, &a2));
     }
 
     #[tokio::test]
     async fn empty_thread_id_falls_back_to_last_active() {
         let svc = WinxService::new();
-        let _a = svc.session_for("thread_a").await;
-        let b = svc.session_for("thread_b").await; // now last-active
-                                                   // A tool call without a thread_id reuses the most recently active slot.
-        let fallback = svc.session_for("").await;
+        let (_a, _) = svc.session_for("thread_a").await;
+        let (b, _) = svc.session_for("thread_b").await; // now last-active
+                                                        // A tool call without a thread_id reuses the most recently active slot.
+        let (fallback, _) = svc.session_for("").await;
         assert!(Arc::ptr_eq(&b, &fallback));
         assert!(svc.active_slot().await.is_some());
     }
@@ -898,15 +946,15 @@ mod session_registry_tests {
     #[tokio::test]
     async fn strict_isolation_empty_thread_id_does_not_steal_active_session() {
         let svc = WinxService::with_isolation(SessionIsolation::Strict);
-        let a = svc.session_for("thread_a").await; // would be "last-active" under Lenient
-        let anon = svc.session_for("").await;
+        let (a, _) = svc.session_for("thread_a").await; // would be "last-active" under Lenient
+        let (anon, _) = svc.session_for("").await;
         // Strict mode: an empty thread_id must NOT resolve to another client's shell.
         assert!(!Arc::ptr_eq(&a, &anon));
         // Anonymous calls share one dedicated slot rather than hijacking named ones.
-        let anon2 = svc.session_for("").await;
+        let (anon2, _) = svc.session_for("").await;
         assert!(Arc::ptr_eq(&anon, &anon2));
         // Explicit thread_ids stay isolated as always.
-        let b = svc.session_for("thread_b").await;
+        let (b, _) = svc.session_for("thread_b").await;
         assert!(!Arc::ptr_eq(&a, &b));
     }
 
@@ -914,10 +962,27 @@ mod session_registry_tests {
     async fn lru_eviction_caps_live_sessions() {
         let svc = WinxService::new();
         for i in 0..(MAX_SESSIONS + 5) {
-            let _ = svc.session_for(&format!("t{i}")).await;
+            let (_, _) = svc.session_for(&format!("t{i}")).await;
         }
         let reg = svc.sessions.lock().await;
         assert!(reg.slots.len() <= MAX_SESSIONS, "session count {} over cap", reg.slots.len());
+    }
+
+    #[tokio::test]
+    async fn in_flight_session_is_not_evicted() {
+        let svc = WinxService::new();
+        // "keep" is created first (so it's the LRU candidate) and held busy.
+        let (_keep_slot, _keep_guard) = svc.session_for("keep").await;
+        // Saturate the cap and then churn well past it; eviction must skip the
+        // in-flight "keep" and evict idle fillers instead.
+        for i in 0..(MAX_SESSIONS + 10) {
+            let (_, _) = svc.session_for(&format!("filler{i}")).await;
+        }
+        let reg = svc.sessions.lock().await;
+        assert!(
+            reg.slots.contains_key("keep"),
+            "an in-flight session must survive LRU eviction churn"
+        );
     }
 }
 
