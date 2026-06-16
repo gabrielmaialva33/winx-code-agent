@@ -78,6 +78,10 @@ pub fn syntax_warning(path: &Path, content: &str) -> Option<String> {
             let language = tree_sitter_lua::LANGUAGE.into();
             tree_sitter_warning(content, &language, "Lua")
         }
+        // Python keeps the interpreter `compile()` check (not tree-sitter): the
+        // tree-sitter-python grammar silently accepts IndentationError and py2
+        // `print` statements, and indentation is *the* classic Python mistake —
+        // verified empirically that tree-sitter misses those, compile() catches them.
         "py" | "pyi" => python_warning(path),
         _ if matches!(file_name, "Dockerfile" | "Makefile") => None,
         _ => None,
