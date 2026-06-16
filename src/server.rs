@@ -40,7 +40,11 @@ use crate::types::{
 /// (PTY spawn, IO, lock poisoning, persistence) stay `internal_error`.
 fn to_mcp_error(tool: &str, err: &WinxError) -> McpError {
     let msg = format!("{tool} failed: {err}");
+    // Exhaustive on purpose — NO wildcard arm. A new `WinxError` variant must be
+    // classified by hand (client vs server) or the build breaks. This is the
+    // guard that keeps the JSON-RPC error codes honest over time.
     match err {
+        // Client-caused: the model can fix its own input or usage. -> invalid_request
         WinxError::BashStateNotInitialized
         | WinxError::CommandNotAllowed(_)
         | WinxError::PathSecurityError { .. }
@@ -53,6 +57,9 @@ fn to_mcp_error(tool: &str, err: &WinxError) -> McpError {
         | WinxError::DeserializationError(_)
         | WinxError::WorkspacePathError(_)
         | WinxError::InvalidInput(_)
+        | WinxError::ParseError(_)
+        | WinxError::FileAccessError { .. }
+        | WinxError::RecoverableSuggestionError { .. }
         | WinxError::SearchReplaceSyntaxError(_)
         | WinxError::SearchReplaceSyntaxErrorDetailed { .. }
         | WinxError::SearchBlockNotFound(_)
@@ -61,7 +68,22 @@ fn to_mcp_error(tool: &str, err: &WinxError) -> McpError {
         | WinxError::FileTooLarge { .. }
         | WinxError::InteractiveCommandDetected { .. }
         | WinxError::CommandAlreadyRunning { .. } => McpError::invalid_request(msg, None),
-        _ => McpError::internal_error(msg, None),
+        // Server-caused: genuine internal faults the model cannot fix. -> internal_error
+        WinxError::ShellInitializationError(_)
+        | WinxError::BashStateLockError(_)
+        | WinxError::CommandExecutionError(_)
+        | WinxError::SerializationError(_)
+        | WinxError::FileWriteError { .. }
+        | WinxError::DataLoadingError(_)
+        | WinxError::ContextSaveError(_)
+        | WinxError::CommandTimeout { .. }
+        | WinxError::ProcessCleanupError { .. }
+        | WinxError::BufferOverflow { .. }
+        | WinxError::SessionRecoveryError { .. }
+        | WinxError::ResourceAllocationError { .. }
+        | WinxError::IoError(_)
+        | WinxError::ConfigurationError(_)
+        | WinxError::FileError(_) => McpError::internal_error(msg, None),
     }
 }
 
@@ -843,5 +865,53 @@ mod session_registry_tests {
         }
         let reg = svc.sessions.lock().await;
         assert!(reg.slots.len() <= MAX_SESSIONS, "session count {} over cap", reg.slots.len());
+    }
+}
+
+#[cfg(test)]
+mod error_mapping_tests {
+    use super::*;
+    use rmcp::model::ErrorCode;
+    use std::path::PathBuf;
+
+    fn code_of(err: &WinxError) -> ErrorCode {
+        to_mcp_error("Tool", err).code
+    }
+
+    #[test]
+    fn client_caused_errors_map_to_invalid_request() {
+        // A validation suggestion is the model's to fix, not a server fault.
+        assert_eq!(
+            code_of(&WinxError::RecoverableSuggestionError {
+                message: "bad arg".into(),
+                suggestion: "try x".into(),
+            }),
+            ErrorCode::INVALID_REQUEST,
+        );
+        // Parse failures come from the model's input.
+        assert_eq!(
+            code_of(&WinxError::ParseError("unexpected token".into())),
+            ErrorCode::INVALID_REQUEST,
+        );
+        // A bad path the model handed us is something it can correct.
+        assert_eq!(
+            code_of(&WinxError::FileAccessError {
+                path: PathBuf::from("/nope"),
+                message: "no such file".into(),
+            }),
+            ErrorCode::INVALID_REQUEST,
+        );
+    }
+
+    #[test]
+    fn server_caused_errors_stay_internal_error() {
+        assert_eq!(
+            code_of(&WinxError::IoError(std::io::Error::other("disk gone"))),
+            ErrorCode::INTERNAL_ERROR,
+        );
+        assert_eq!(
+            code_of(&WinxError::BashStateLockError("poisoned".into())),
+            ErrorCode::INTERNAL_ERROR,
+        );
     }
 }
