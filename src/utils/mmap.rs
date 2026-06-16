@@ -271,7 +271,7 @@ fn read_mmap(file: &File, path: &Path) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns an error if the file cannot be read or mapped
-fn read_segmented_mmap(_file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
+fn read_segmented_mmap(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
     // Calculate number of segments needed
     let segment_count = file_size.div_ceil(SEGMENT_SIZE);
     debug!(
@@ -297,27 +297,12 @@ fn read_segmented_mmap(_file: &File, file_size: u64, path: &Path) -> Result<Vec<
             (segment_start as f64 / file_size as f64) * 100.0
         );
 
-        // Open a new file handle for each segment to avoid position conflicts
-        let segment_file = File::open(path).map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Error opening file for segment {i}: {e}"),
-        })?;
-
-        // Seek to segment start
-        let mut segment_file = segment_file;
-        segment_file.seek(SeekFrom::Start(segment_start)).map_err(|e| {
-            WinxError::FileAccessError {
-                path: path.to_path_buf(),
-                message: format!("Error seeking to segment start: {e}"),
-            }
-        })?;
-
-        // SAFETY: Memory mapping a segment is safe here because:
-        // - File handle is freshly opened and seeked to correct position
-        // - Segment bounds are calculated from verified file size
-        // - Data is immediately copied to Vec, not held across boundaries
+        // SAFETY: the shared file handle stays valid for the whole loop; mmap
+        // uses the explicit `.offset()`, not the fd seek position, so segments
+        // never conflict and no per-segment open()/seek() is needed. Bounds come
+        // from the verified file size; data is copied to Vec, not held.
         let segment_mmap = unsafe {
-            MmapOptions::new().offset(segment_start).len(segment_size as usize).map(&segment_file)
+            MmapOptions::new().offset(segment_start).len(segment_size as usize).map(file)
         }
         .map_err(|e| WinxError::FileAccessError {
             path: path.to_path_buf(),
