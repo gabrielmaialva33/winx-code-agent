@@ -147,18 +147,37 @@ fn error_context(content: &str, error_row: usize) -> String {
 }
 
 fn python_warning(path: &Path) -> Option<String> {
-    let python = if Command::new("python3").arg("--version").output().is_ok() {
-        "python3"
-    } else if Command::new("python").arg("--version").output().is_ok() {
-        "python"
-    } else {
-        return None;
-    };
+    let python = python_interpreter()?;
 
-    let output = Command::new(python).args(["-m", "py_compile"]).arg(path).output().ok()?;
+    // `compile()` parses without executing and, unlike `python -m py_compile`,
+    // does NOT write a `.pyc` next to the source — so syntax-checking a write
+    // never litters the user's tree with `__pycache__`.
+    let output = Command::new(python)
+        .args([
+            "-c",
+            "import sys; compile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')",
+        ])
+        .arg(path)
+        .output()
+        .ok()?;
     (!output.status.success()).then(|| {
         let stderr = String::from_utf8_lossy(&output.stderr);
         format!("Syntax warning: Python parser reported:\n{}", stderr.trim())
+    })
+}
+
+/// The available Python interpreter, probed once. The probe used to re-spawn
+/// `python --version` on every `.py` write.
+fn python_interpreter() -> Option<&'static str> {
+    static PYTHON: std::sync::OnceLock<Option<&'static str>> = std::sync::OnceLock::new();
+    *PYTHON.get_or_init(|| {
+        if Command::new("python3").arg("--version").output().is_ok() {
+            Some("python3")
+        } else if Command::new("python").arg("--version").output().is_ok() {
+            Some("python")
+        } else {
+            None
+        }
     })
 }
 
