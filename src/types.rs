@@ -578,6 +578,44 @@ pub enum BashCommandAction {
         #[serde(default)]
         submit: bool,
     },
+
+    /// Snapshot the live, stable screen of a shell's terminal: the consolidated
+    /// view a human would see right now (cursor moves, redraws, alternate-screen
+    /// and synchronized-output already applied), ANSI stripped. Unlike
+    /// `status_check`, it never stacks redraw generations and never waits — a
+    /// point-in-time photo, ideal for reading an interactive TUI's current frame
+    /// (the `claude` CLI, vim, htop, fzf).
+    Screen {
+        #[serde(default = "default_true")]
+        screen: bool,
+        bg_command_id: Option<String>,
+        /// Last N visible lines to return (0 or omitted = full screen buffer).
+        #[serde(default)]
+        lines: Option<usize>,
+    },
+
+    /// Block until an interactive TUI finishes its turn and is ready for input.
+    /// Combines generic quiescence (the screen stopped changing for `quiet_ms`)
+    /// with a per-app recognizer, then returns the stable snapshot plus the
+    /// detected turn state (`busy` / `awaiting_input` / `awaiting_approval`).
+    WaitForTurn {
+        #[serde(default = "default_true")]
+        wait_for_turn: bool,
+        bg_command_id: Option<String>,
+        /// Recognizer hint: `auto` (default), `claude`, `codex` or `generic`.
+        #[serde(default)]
+        recognizer: Option<String>,
+        /// Quiet window in ms — the screen must be unchanged this long to count
+        /// as idle (default 600).
+        #[serde(default)]
+        quiet_ms: Option<u64>,
+        /// Hard cap in seconds before returning regardless (default 30).
+        #[serde(default)]
+        timeout_seconds: Option<f32>,
+        /// Visible lines to return in the final snapshot (0 or omitted = full).
+        #[serde(default)]
+        lines: Option<usize>,
+    },
 }
 
 /// Parameters for the `BashCommand` tool
@@ -743,6 +781,10 @@ fn normalize_action_json(mut value: serde_json::Value) -> serde_json::Value {
         Some("send_specials")
     } else if map.contains_key("send_ascii") {
         Some("send_ascii")
+    } else if map.contains_key("screen") {
+        Some("screen")
+    } else if map.contains_key("wait_for_turn") {
+        Some("wait_for_turn")
     } else {
         None
     };

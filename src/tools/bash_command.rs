@@ -57,6 +57,14 @@ const MAX_OUTPUT_LENGTH: usize = 100_000;
 /// without monopolizing the conversation.
 const MAX_OUTPUT_TOKENS: usize = 25_000;
 
+/// Delay between typing text and the submitting Enter. Ink-based TUIs (Claude
+/// Code) collapse a burst of bytes into a single render tick and drop a CR that
+/// arrives glued to the text — the input box updates but never submits. Sending
+/// the Enter as a separate write after this short pause lets the TUI commit the
+/// typed text first, so `submit: true` reliably submits. ~40ms is imperceptible
+/// yet enough for the event loop to flush; harmless for plain shells.
+const SUBMIT_NUDGE_DELAY: Duration = Duration::from_millis(40);
+
 /// Tail of `text` at most `max_len` bytes long, snapped up to a char boundary so
 /// we never slice through a multibyte UTF-8 sequence (which would panic).
 fn char_safe_tail(text: &str, max_len: usize) -> &str {
@@ -435,6 +443,19 @@ fn send_utf8_in_byte_chunks(shell: &mut PtyShell, text: &str, chunk_size: usize)
     Ok(())
 }
 
+/// Send the submitting Enter as a separate, slightly-delayed write so an
+/// Ink-based TUI doesn't swallow a CR glued to the preceding input. Briefly
+/// drops the shell lock during the pause so the reader thread keeps draining.
+/// See [`SUBMIT_NUDGE_DELAY`].
+async fn submit_enter(shell_arc: &SharedPtyShell) -> Result<()> {
+    tokio::time::sleep(SUBMIT_NUDGE_DELAY).await;
+    let mut guard = shell_arc.lock().await;
+    let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
+    bash.send_special_key("Enter")
+        .map_err(|e| WinxError::CommandExecutionError(format!("Failed to submit: {e}")))?;
+    Ok(())
+}
+
 /// Check if action is effectively a status check - matches WCGW Python `is_status_check`
 #[allow(dead_code)]
 fn is_status_check_action(action: &BashCommandAction) -> bool {
@@ -529,6 +550,7 @@ pub async fn handle_tool_call(
 }
 
 /// Execute a bash action - matches WCGW Python's _`execute_bash()` function
+#[allow(clippy::too_many_lines)]
 async fn execute_bash_action(
     bash_state: &mut BashState,
     action: &BashCommandAction,
@@ -543,7 +565,9 @@ async fn execute_bash_action(
         BashCommandAction::StatusCheck { bg_command_id, .. }
         | BashCommandAction::SendText { bg_command_id, .. }
         | BashCommandAction::SendSpecials { bg_command_id, .. }
-        | BashCommandAction::SendAscii { bg_command_id, .. } => {
+        | BashCommandAction::SendAscii { bg_command_id, .. }
+        | BashCommandAction::Screen { bg_command_id, .. }
+        | BashCommandAction::WaitForTurn { bg_command_id, .. } => {
             if let Some(id) = bg_command_id {
                 let mut manager = BG_SHELL_MANAGER.lock().map_err(|e| {
                     WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}"))
@@ -626,6 +650,22 @@ async fn execute_bash_action(
                 is_bg,
                 bg_id.as_deref(),
                 timeout_s,
+            )
+            .await
+        }
+        BashCommandAction::Screen { lines, .. } => {
+            execute_screen(bash_state, bg_shell, is_bg, bg_id.as_deref(), *lines).await
+        }
+        BashCommandAction::WaitForTurn { recognizer, quiet_ms, timeout_seconds, lines, .. } => {
+            execute_wait_for_turn(
+                bash_state,
+                bg_shell,
+                is_bg,
+                bg_id.as_deref(),
+                recognizer.as_deref(),
+                *quiet_ms,
+                *timeout_seconds,
+                *lines,
             )
             .await
         }
@@ -926,7 +966,11 @@ fn finalize_tombstone(
 ) -> Result<String> {
     let ExitedShellInfo { last_command, final_output, .. } = tombstone;
     match action {
-        BashCommandAction::StatusCheck { .. } => {
+        // A dead shell's turn is over: Screen/WaitForTurn hand back the final
+        // captured output as the snapshot, exactly like a status check.
+        BashCommandAction::StatusCheck { .. }
+        | BashCommandAction::Screen { .. }
+        | BashCommandAction::WaitForTurn { .. } => {
             let rendered = wcgw_incremental_text(&final_output, "");
             let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
             // Build a compact status block matching `get_status` for a finished bg shell.
@@ -1038,6 +1082,152 @@ async fn execute_status_check(
     Ok(response)
 }
 
+/// Execute `Screen` — a stable, point-in-time snapshot of a shell's live
+/// terminal screen (consolidated grid, ANSI stripped). No waiting, no dedup;
+/// the foundation for reading an interactive TUI's current frame.
+async fn execute_screen(
+    bash_state: &BashState,
+    bg_shell: Option<SharedPtyShell>,
+    is_bg: bool,
+    bg_id: Option<&str>,
+    lines: Option<usize>,
+) -> Result<String> {
+    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
+    let max_lines = lines.unwrap_or(0);
+
+    let (snapshot, is_running, in_alt) = {
+        let guard = shell_arc.lock().await;
+        match guard.as_ref() {
+            Some(bash) => {
+                (bash.live_snapshot(max_lines), bash.command_running, bash.live_in_alt_screen())
+            }
+            None => (Vec::new(), false, false),
+        }
+    };
+
+    let joined = snapshot.join("\n");
+    let body = if joined.trim().is_empty() {
+        "(screen is empty)".to_string()
+    } else {
+        truncate_to_token_budget(&joined, MAX_OUTPUT_TOKENS).into_owned()
+    };
+    let alt = if in_alt { " [alt-screen]" } else { "" };
+    let status = get_status(bash_state, is_bg, bg_id, is_running, None);
+    Ok(format!("--- live screen{alt} ---\n{body}{status}"))
+}
+
+/// Execute `WaitForTurn` — block until an interactive TUI finishes its turn.
+///
+/// Polls the live screen, combining a per-app recognizer (claude/codex/auto)
+/// with a generic quiescence window: the turn is "ready" when the recognizer
+/// reports awaiting-input/approval (after a short settle) or, for an unknown
+/// TUI, when the screen simply stops changing for `quiet`. Returns the stable
+/// snapshot plus the detected state.
+#[allow(clippy::too_many_arguments)]
+async fn execute_wait_for_turn(
+    bash_state: &BashState,
+    bg_shell: Option<SharedPtyShell>,
+    is_bg: bool,
+    bg_id: Option<&str>,
+    recognizer_hint: Option<&str>,
+    quiet_ms: Option<u64>,
+    timeout_seconds: Option<f32>,
+    lines: Option<usize>,
+) -> Result<String> {
+    use crate::state::turn::{recognizer_for, TurnState};
+
+    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
+    let recognizer = recognizer_for(recognizer_hint.unwrap_or("auto"));
+    let quiet = Duration::from_millis(quiet_ms.unwrap_or(600).clamp(50, 10_000));
+    let settle = quiet.min(Duration::from_millis(300));
+    let hard_cap =
+        Duration::from_secs_f64(f64::from(timeout_seconds.unwrap_or(30.0)).clamp(0.5, 600.0));
+    let max_lines = lines.unwrap_or(0);
+    let poll = Duration::from_millis(120);
+    // Grace period so a freshly-prompted app has time to react before we'd
+    // otherwise mistake the *pre-input* idle screen for a finished turn.
+    let warmup = Duration::from_millis(2500);
+
+    let start = Instant::now();
+    let mut last_hash: Option<u64> = None;
+    let mut initial_hash: Option<u64> = None;
+    let mut stable_since = Instant::now();
+    let mut seen_busy = false;
+
+    loop {
+        let (snapshot, in_alt, alive, running) = {
+            let mut guard = shell_arc.lock().await;
+            match guard.as_mut() {
+                Some(bash) => (
+                    bash.live_snapshot(max_lines),
+                    bash.live_in_alt_screen(),
+                    bash.is_alive(),
+                    bash.command_running,
+                ),
+                None => (Vec::new(), false, false, false),
+            }
+        };
+
+        let hash = PtyShell::fingerprint(&snapshot.join("\n"));
+        if initial_hash.is_none() {
+            initial_hash = Some(hash);
+        }
+        if Some(hash) != last_hash {
+            last_hash = Some(hash);
+            stable_since = Instant::now();
+        }
+
+        let state = recognizer.detect(&snapshot);
+        if state == TurnState::Busy {
+            seen_busy = true;
+        }
+        let stable_for = stable_since.elapsed();
+        // Don't call it "done" until something actually happened since we began
+        // waiting: the app went Busy, the screen changed from the first frame we
+        // saw, or the warmup elapsed (instant reply / nothing to do).
+        let activity = seen_busy || Some(hash) != initial_hash || start.elapsed() >= warmup;
+        let ready = match state {
+            TurnState::Busy => false,
+            // A short settle is enough once we saw it go Busy; otherwise wait the
+            // full quiet window so a slow first token isn't read as "done".
+            TurnState::AwaitingInput | TurnState::AwaitingApproval => {
+                activity && stable_for >= if seen_busy { settle } else { quiet }
+            }
+            TurnState::Unknown => activity && stable_for >= quiet,
+        };
+
+        let timed_out = start.elapsed() >= hard_cap;
+        if ready || !alive || timed_out {
+            let reason = if !alive {
+                "exited"
+            } else if ready {
+                "ready"
+            } else {
+                "timeout"
+            };
+            let joined = snapshot.join("\n");
+            let body = if joined.trim().is_empty() {
+                "(screen is empty)".to_string()
+            } else {
+                truncate_to_token_budget(&joined, MAX_OUTPUT_TOKENS).into_owned()
+            };
+            let alt = if in_alt { " [alt-screen]" } else { "" };
+            let header = format!(
+                "--- turn: {} ({}, recognizer={}, waited {:.1}s){} ---",
+                state.as_str(),
+                reason,
+                recognizer.name(),
+                start.elapsed().as_secs_f64(),
+                alt
+            );
+            let status = get_status(bash_state, is_bg, bg_id, running, None);
+            return Ok(format!("{header}\n{body}{status}"));
+        }
+
+        tokio::time::sleep(poll).await;
+    }
+}
+
 /// Execute `send_text` - matches WCGW Python's `SendText` handling
 async fn execute_send_text(
     bash_state: &mut BashState,
@@ -1068,15 +1258,13 @@ async fn execute_send_text(
 
         // Send in chunks - matches WCGW Python: for i in range(0, len(command_data.send_text), 128)
         send_utf8_in_byte_chunks(bash, text, TEXT_CHUNK_SIZE)?;
+    }
 
-        // Only append Enter when the caller explicitly asks to submit. Many TUIs
-        // (e.g., Claude Code) treat a bare CR as a soft newline inside the input
-        // box, so blindly auto-Entering interferes with multi-step interaction.
-        if submit {
-            bash.send_special_key("Enter").map_err(|e| {
-                WinxError::CommandExecutionError(format!("Failed to send newline: {e}"))
-            })?;
-        }
+    // Only submit when explicitly asked. The Enter goes as a separate, delayed
+    // write so Ink TUIs (Claude Code) don't swallow a CR glued to the text — a
+    // bare CR there is otherwise treated as a soft newline and never submits.
+    if submit {
+        submit_enter(&shell_arc).await?;
     }
 
     // Wait for output
@@ -1165,11 +1353,12 @@ async fn execute_send_specials(
                 }
             }
         }
-        // Submit (append Enter) only when explicitly requested by the caller.
-        if submit {
-            bash.send_special_key("Enter")
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to submit: {e}")))?;
-        }
+    }
+
+    // Submit as a separate, slightly-delayed write (see `submit_enter`) so an
+    // Ink TUI doesn't drop the CR.
+    if submit {
+        submit_enter(&shell_arc).await?;
     }
 
     // NOTE: wcgw treats a bare Enter as a status check and applies its
@@ -1229,11 +1418,12 @@ async fn execute_send_ascii(
                 is_interrupt = true;
             }
         }
-        // Submit (append Enter) only when explicitly requested by the caller.
-        if submit {
-            bash.send_special_key("Enter")
-                .map_err(|e| WinxError::CommandExecutionError(format!("Failed to submit: {e}")))?;
-        }
+    }
+
+    // Submit as a separate, slightly-delayed write (see `submit_enter`) so an
+    // Ink TUI doesn't drop the CR.
+    if submit {
+        submit_enter(&shell_arc).await?;
     }
 
     // Same divergence from wcgw as in `execute_send_specials`: send_ascii [10]
