@@ -291,8 +291,10 @@ impl PtyShell {
         let mut reader = pair.master.try_clone_reader().context("Failed to clone PTY reader")?;
         let writer = pair.master.take_writer().context("Failed to take PTY writer")?;
 
-        // Create channel for output from reader thread
-        let (output_tx, output_rx) = mpsc::channel::<String>();
+        // Bounded channel: if the consumer stalls, the reader thread blocks on
+        // send (natural backpressure via the PTY OS buffer) instead of growing
+        // memory without bound on a runaway producer like `yes`.
+        let (output_tx, output_rx) = mpsc::sync_channel::<String>(1024);
 
         // Live terminal emulator, shared with the reader thread so the screen
         // grid stays current without any consumer needing to poll.
@@ -585,6 +587,52 @@ impl PtyShell {
         }
 
         Ok((self.output_buffer.clone(), complete))
+    }
+
+    /// Non-blocking drain of whatever the reader thread has already queued.
+    ///
+    /// Unlike [`read_output`](Self::read_output), this never sleeps: it consumes
+    /// every chunk currently available, updates prompt/completion state, and
+    /// returns immediately. `prune_finished_shells` uses it so the global
+    /// background-shell lock is never held across a blocking 100ms `read_output`.
+    /// Returns `true` if the command has completed (prompt seen or PTY closed).
+    pub fn poll_output_nonblocking(&mut self) -> bool {
+        let mut prompt_seen = false;
+        loop {
+            match self.output_rx.try_recv() {
+                Ok(chunk) => {
+                    let chunk_has_prompt =
+                        Self::check_prompt_complete(&chunk, &self.prompt_end_marker);
+                    self.output_buffer.push_str(&chunk);
+                    self.ring.push_chunk(&chunk);
+                    if chunk_has_prompt
+                        || Self::check_prompt_complete(&self.output_buffer, &self.prompt_end_marker)
+                    {
+                        prompt_seen = true;
+                    }
+                    if self.output_buffer.len() > self.max_output_size {
+                        self.output_truncated = true;
+                        let truncate_msg = "\n(...output truncated...)\n";
+                        let keep_size = self.max_output_size / 2;
+                        let cut = crate::utils::floor_char_boundary(
+                            &self.output_buffer,
+                            self.output_buffer.len() - keep_size,
+                        );
+                        self.output_buffer =
+                            format!("{truncate_msg}{}", &self.output_buffer[cut..]);
+                    }
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.command_running = false;
+                    return true;
+                }
+            }
+        }
+        if prompt_seen {
+            self.command_running = false;
+        }
+        prompt_seen
     }
 
     /// Check if the output ends with this shell's prompt.

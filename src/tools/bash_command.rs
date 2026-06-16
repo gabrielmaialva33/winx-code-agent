@@ -10,7 +10,6 @@ use regex::Regex;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -202,7 +201,7 @@ impl BackgroundShellManager {
             if !shell.is_alive() {
                 let tombstone = ExitedShellInfo {
                     last_command: shell.last_command.clone(),
-                    final_output: shell.output_buffer.clone(),
+                    final_output: std::mem::take(&mut shell.output_buffer),
                     exited_at: now,
                 };
                 finished.push((id.clone(), Some(tombstone)));
@@ -218,13 +217,16 @@ impl BackgroundShellManager {
             }
 
             if shell.command_running {
-                let _ = shell.read_output(0.1);
+                // Non-blocking: draining here must NOT hold the global manager
+                // lock across a 100ms blocking read (that serializes every other
+                // background-shell op behind a single slow PTY).
+                shell.poll_output_nonblocking();
             }
 
             if !shell.command_running {
                 let tombstone = ExitedShellInfo {
                     last_command: shell.last_command.clone(),
-                    final_output: shell.output_buffer.clone(),
+                    final_output: std::mem::take(&mut shell.output_buffer),
                     exited_at: now,
                 };
                 finished.push((id.clone(), Some(tombstone)));
@@ -454,21 +456,6 @@ async fn submit_enter(shell_arc: &SharedPtyShell) -> Result<()> {
     bash.send_special_key("Enter")
         .map_err(|e| WinxError::CommandExecutionError(format!("Failed to submit: {e}")))?;
     Ok(())
-}
-
-/// Check if action is effectively a status check - matches WCGW Python `is_status_check`
-#[allow(dead_code)]
-fn is_status_check_action(action: &BashCommandAction) -> bool {
-    match action {
-        BashCommandAction::StatusCheck { .. } => true,
-        BashCommandAction::SendSpecials { send_specials, .. } => {
-            send_specials.len() == 1 && send_specials[0] == SpecialKey::Enter
-        }
-        BashCommandAction::SendAscii { send_ascii, .. } => {
-            send_ascii.len() == 1 && send_ascii[0] == 10 // newline
-        }
-        _ => false,
-    }
 }
 
 // ==================== Main Tool Handler ====================
@@ -1480,130 +1467,6 @@ async fn execute_in_background(
     let _ = timeout_s;
     let _ = shell_arc;
     Ok(get_status(bash_state, true, Some(&bg_id), true, None))
-}
-
-// ==================== Legacy Screen-based Functions (kept for backward compatibility) ====================
-
-/// Process simple command execution for a bash command (legacy)
-#[allow(dead_code)]
-#[tracing::instrument(level = "debug", skip(command, cwd))]
-async fn execute_simple_command(command: &str, cwd: &Path) -> Result<String> {
-    debug!("Executing command: {}", command);
-
-    let start_time = Instant::now();
-    let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-        .arg(command)
-        .current_dir(cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let output = cmd.output().context("Failed to execute command")?;
-    let elapsed = start_time.elapsed();
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    let raw_result = format!("{stdout}{stderr}");
-    let mut result = raw_result.clone();
-    if !raw_result.is_empty() {
-        let rendered_lines = render_terminal_output(&raw_result);
-        if rendered_lines.is_empty() {
-            // Fallback: just strip ANSI codes if rendering failed or wasn't needed
-            result = strip_ansi_codes(&raw_result);
-        } else {
-            result = rendered_lines.join("\n");
-        }
-    }
-
-    result = truncate_to_token_budget(&result, MAX_OUTPUT_TOKENS).into_owned();
-
-    let exit_status = if output.status.success() {
-        "Command completed successfully".to_string()
-    } else {
-        format!("Command failed with status: {}", output.status)
-    };
-
-    let current_dir = std::env::current_dir()
-        .map_or_else(|_| "Unknown".to_string(), |p| p.to_string_lossy().into_owned());
-
-    debug!("Command executed in {:.2?}", elapsed);
-    Ok(format!("{result}\n\n---\n\nstatus = {exit_status}\ncwd = {current_dir}\n"))
-}
-
-/// Execute command in screen (legacy)
-#[allow(dead_code)]
-#[tracing::instrument(level = "debug", skip(command, cwd, screen_name))]
-async fn execute_in_screen(command: &str, cwd: &Path, screen_name: &str) -> Result<String> {
-    debug!("Executing command in screen session '{}': {}", screen_name, command);
-
-    let screen_check = Command::new("which")
-        .arg("screen")
-        .output()
-        .context("Failed to check for screen command")?;
-
-    if !screen_check.status.success() {
-        warn!("Screen command not found, falling back to direct execution");
-        return execute_simple_command(command, cwd).await;
-    }
-
-    let _cleanup = Command::new("screen").args(["-X", "-S", screen_name, "quit"]).output();
-
-    let screen_cmd = format!(
-        "screen -dmS {} bash -c '{} ; ec=$? ; echo \"Command completed with exit code: $ec\" ; sleep 1 ; exit $ec'",
-        screen_name,
-        command.replace('\'', "'\\''")
-    );
-
-    let screen_start = Command::new("sh")
-        .arg("-c")
-        .arg(&screen_cmd)
-        .current_dir(cwd)
-        .output()
-        .context("Failed to start screen session")?;
-
-    if !screen_start.status.success() {
-        let stderr = String::from_utf8_lossy(&screen_start.stderr).to_string();
-        error!("Failed to start screen session: {}", stderr);
-        return Err(WinxError::CommandExecutionError(format!(
-            "Failed to start screen session: {stderr}"
-        )));
-    }
-
-    sleep(Duration::from_millis(300)).await;
-
-    let screen_check =
-        Command::new("screen").args(["-ls"]).output().context("Failed to list screen sessions")?;
-
-    let screen_list = String::from_utf8_lossy(&screen_check.stdout).to_string();
-
-    let current_dir = std::env::current_dir()
-        .map_or_else(|_| "Unknown".to_string(), |p| p.to_string_lossy().into_owned());
-
-    Ok(format!(
-        "Started command in background screen session '{screen_name}'.\n\
-        Use status_check to get output.\n\n\
-        Screen sessions:\n{screen_list}\n\
-        ---\n\n\
-        status = running in background\n\
-        cwd = {current_dir}\n"
-    ))
-}
-
-/// Converts a `SpecialKey` to its screen stuff input representation (legacy)
-#[allow(dead_code)]
-fn special_key_to_screen_input(key: SpecialKey) -> String {
-    match key {
-        SpecialKey::Enter => String::from("\r"),
-        SpecialKey::KeyUp => String::from("\x1b[A"),
-        SpecialKey::KeyDown => String::from("\x1b[B"),
-        SpecialKey::KeyLeft => String::from("\x1b[D"),
-        SpecialKey::KeyRight => String::from("\x1b[C"),
-        SpecialKey::CtrlC => String::from("\x03"),
-        SpecialKey::CtrlD => String::from("\x04"),
-        SpecialKey::CtrlZ => String::from("\x1a"),
-    }
 }
 
 #[cfg(test)]
