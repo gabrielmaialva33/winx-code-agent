@@ -149,10 +149,34 @@ impl TurnRecognizer for ClaudeRecognizer {
 
 // --- Codex CLI --------------------------------------------------------------
 
-/// Recognizer for the `codex` CLI. Best-effort: keys off the same canonical
-/// footer/keyword signals; the exact UI is less stable than Claude's so it
-/// leans on quiescence when unsure. TODO: calibrate against captured sessions.
+/// Recognizer for the `codex` CLI (Ink TUI). Markers verified against a real
+/// codex-cli 0.139.0 (gpt-5.5) session captured through winx:
+///   * **Busy**: the footer shows `• Working (Ns • esc to interrupt)` while
+///     generating — the same `esc to interrupt` anchor claude uses.
+///   * **`AwaitingApproval`**: the command-confirmation dialog ("Would you like
+///     to run the following command?", "Press enter to confirm or esc to
+///     cancel") shown when codex must escalate (e.g. `-a untrusted`).
+///   * **`AwaitingInput`**: the input box, whose prompt glyph is `›` (U+203A) —
+///     distinct from claude's `❯` and from a bare `>`.
 pub struct CodexRecognizer;
+
+impl CodexRecognizer {
+    fn is_approval(screen: &[String]) -> bool {
+        // Phrase-based and localized to the bottom of the screen. The `›`
+        // selection glyph also appears in this dialog, so it MUST be classified
+        // as approval (checked before the input box), not as plain input.
+        let joined = tail_lower(screen, 30);
+        joined.contains("would you like to run")
+            || joined.contains("press enter to confirm")
+            || joined.contains("yes, proceed")
+    }
+
+    fn has_input_box(screen: &[String]) -> bool {
+        // Codex's Ink prompt char is `›` (U+203A). Only consulted once Busy and
+        // approval are ruled out, so a lingering `›` can't mask an active turn.
+        screen.iter().any(|l| l.trim_start().starts_with('›'))
+    }
+}
 
 impl TurnRecognizer for CodexRecognizer {
     fn name(&self) -> &'static str {
@@ -160,14 +184,22 @@ impl TurnRecognizer for CodexRecognizer {
     }
 
     fn detect(&self, screen: &[String]) -> TurnState {
+        // Order matters: Busy and approval before the input box so a stale `›`
+        // never shadows an active or blocked turn.
+        //
+        // `preparing to execute` covers the transient where codex is running a
+        // tool call: it briefly drops the `esc to interrupt` footer while the
+        // submitted prompt's `›` still lingers in the history — without this it
+        // would read as a false AwaitingInput mid-execution.
         if any_line_contains(screen, "esc to interrupt")
-            || any_line_contains(screen, "press esc to")
-            || any_line_contains(screen, "working…")
-            || any_line_contains(screen, "thinking…")
+            || any_line_contains(screen, "preparing to execute")
         {
             return TurnState::Busy;
         }
-        if screen.iter().any(|l| l.contains('❯') || l.trim_start().starts_with('>')) {
+        if Self::is_approval(screen) {
+            return TurnState::AwaitingApproval;
+        }
+        if Self::has_input_box(screen) {
             return TurnState::AwaitingInput;
         }
         TurnState::Unknown
@@ -312,14 +344,96 @@ mod tests {
     }
 
     #[test]
-    fn auto_prefers_busy_codex_over_stale_claude_prompt() {
-        // Regression: a genuinely busy Codex screen that also has a stale `❯`
-        // must NOT be reported as ready just because ClaudeRecognizer sees the
-        // prompt glyph. Busy wins across recognizers.
-        let screen = lines(&["❯ old prompt", "", "Reading files...", "working…"]);
-        assert_eq!(ClaudeRecognizer.detect(&screen), TurnState::AwaitingInput);
+    fn auto_surfaces_codex_input_when_claude_is_blind() {
+        // A real codex idle screen: claude's recognizer doesn't know the `›`
+        // glyph and returns Unknown, but auto must still surface codex's
+        // AwaitingInput rather than collapsing to Unknown.
+        let screen = lines(&["• PONG", "› Run /review on my current changes"]);
+        assert_eq!(ClaudeRecognizer.detect(&screen), TurnState::Unknown);
+        assert_eq!(CodexRecognizer.detect(&screen), TurnState::AwaitingInput);
+        assert_eq!(AutoRecognizer.detect(&screen), TurnState::AwaitingInput);
+    }
+
+    #[test]
+    fn auto_stays_busy_with_stale_prompt_glyphs() {
+        // Both a stale claude `❯` and a codex `›` can linger while a turn
+        // streams; the `esc to interrupt` footer must keep auto Busy, never
+        // letting a leftover prompt glyph flip it to ready.
+        let screen = lines(&["❯ old", "› old", "• Working (2s • esc to interrupt)"]);
+        assert_eq!(AutoRecognizer.detect(&screen), TurnState::Busy);
+    }
+
+    // Codex fixtures below are from a real `codex` (codex-cli 0.139.0, gpt-5.5)
+    // session captured through winx's PTY.
+
+    #[test]
+    fn codex_busy_via_working_footer() {
+        let screen = lines(&[
+            "› escreva um poema longo sobre o oceano",
+            "",
+            "• Working (1s • esc to interrupt)",
+            "",
+            "  gpt-5.5 high · ~/Documents/projects/winx-code-agent",
+        ]);
         assert_eq!(CodexRecognizer.detect(&screen), TurnState::Busy);
         assert_eq!(AutoRecognizer.detect(&screen), TurnState::Busy);
+    }
+
+    #[test]
+    fn codex_idle_input_box_uses_angle_prompt() {
+        // Regression: codex's Ink prompt glyph is `›` (U+203A), not claude's `❯`
+        // nor a bare `>`. The old recognizer missed it and fell back to Unknown,
+        // forcing pure quiescence. Now it reports AwaitingInput explicitly.
+        let screen = lines(&[
+            "• PONG",
+            "",
+            "› Run /review on my current changes",
+            "",
+            "  gpt-5.5 high · ~/Documents/projects/winx-code-agent",
+        ]);
+        assert_eq!(CodexRecognizer.detect(&screen), TurnState::AwaitingInput);
+    }
+
+    #[test]
+    fn codex_awaiting_approval_command_dialog() {
+        // The real approval dialog codex shows under `-a untrusted`. Note the
+        // `›` selection glyph also appears here, so approval MUST be checked
+        // before the input box or it would read as AwaitingInput.
+        let screen = lines(&[
+            "  Would you like to run the following command?",
+            "",
+            "  $ touch /tmp/x.txt",
+            "",
+            "› 1. Yes, proceed (y)",
+            "  2. Yes, and don't ask again (p)",
+            "  3. No, and tell Codex what to do differently (esc)",
+            "",
+            "  Press enter to confirm or esc to cancel",
+        ]);
+        assert_eq!(CodexRecognizer.detect(&screen), TurnState::AwaitingApproval);
+        assert_eq!(AutoRecognizer.detect(&screen), TurnState::AwaitingApproval);
+    }
+
+    #[test]
+    fn codex_preparing_to_execute_is_busy_not_input() {
+        // Regression from a live session: while codex prepares/runs a tool call
+        // it briefly shows no `esc to interrupt` footer, and the just-submitted
+        // prompt's `›` lingers in the history above. That transient must read as
+        // Busy, not a false AwaitingInput, or a pilot would inject mid-execution.
+        let screen = lines(&[
+            "› execute o comando de shell 'touch /tmp/x.txt'",
+            "• Vou executar exatamente esse comando",
+            "• Preparing to execute shell command  9",
+        ]);
+        assert_eq!(CodexRecognizer.detect(&screen), TurnState::Busy);
+    }
+
+    #[test]
+    fn codex_busy_wins_over_stale_angle_prompt() {
+        // A busy codex still shows the `›` input box; "esc to interrupt" must
+        // keep it Busy so we never send input mid-stream.
+        let screen = lines(&["› an earlier prompt", "• Working (3s • esc to interrupt)"]);
+        assert_eq!(CodexRecognizer.detect(&screen), TurnState::Busy);
     }
 
     #[test]
