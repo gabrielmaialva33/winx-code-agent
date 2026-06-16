@@ -3,5 +3,6 @@ pub mod bash_state;
 pub mod persistence;
 pub mod pty;
 pub mod terminal;
+pub mod turn;
 
 pub use bash_state::BashState;
