@@ -182,9 +182,43 @@ fn collect_command_texts(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
     }
 }
 
+/// Commands that can execute arbitrary code passed as a string argument.
+///
+/// If a `code_writer` allowlist permits any of these, the allowlist is
+/// effectively unrestricted: the tree-sitter parser sees `bash -c '...'`,
+/// `eval "..."`, `find -exec ...` or `xargs sh` as a single allowed command and
+/// can't inspect the code hidden inside. This list backs an advisory warning,
+/// not enforcement — enforcement stays fail-closed regardless.
+pub const SHELL_SPAWNING_COMMANDS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "csh", "tcsh", "eval", "source", ".", "env",
+    "xargs", "nice", "nohup", "timeout", "find", "watch", "sudo", "su", "ssh", "python", "python3",
+    "perl", "ruby", "node", "deno", "awk", "gawk", "php", "lua",
+];
+
+/// Return the deduplicated allowlist entries that make a `code_writer` allowlist
+/// bypassable (see [`SHELL_SPAWNING_COMMANDS`]).
+///
+/// The allowlist matches on command *name*, so we compare the basename of each
+/// entry's first whitespace-delimited token: `find`, `/usr/bin/find` and
+/// `find -exec rm {} +` all resolve to `find`.
+pub fn detect_allowlist_bypass(allowed: &[String]) -> Vec<String> {
+    let mut hits: Vec<String> = allowed
+        .iter()
+        .filter_map(|entry| {
+            let first = entry.split_whitespace().next()?;
+            let base = std::path::Path::new(first).file_name()?.to_str()?;
+            SHELL_SPAWNING_COMMANDS.contains(&base).then(|| base.to_string())
+        })
+        .collect();
+    hits.sort();
+    hits.dedup();
+    hits
+}
+
 #[cfg(test)]
 mod tests {
     use super::assert_single_statement;
+    use super::detect_allowlist_bypass;
     use super::extract_command_texts;
 
     #[test]
@@ -229,6 +263,29 @@ mod tests {
     fn accepts_bash_lc_script_when_tree_sitter_reports_error() {
         let command = "bash -lc 'printf \"%s\\n\" \"-- drm connectors --\"; for s in /sys/class/drm/card*-*/status; do [ -e \"$s\" ] || continue; c=${s%/status}; printf \"%s: %s\" \"${c##*/}\" \"$(cat \"$s\")\"; done'";
         assert!(assert_single_statement(command).is_ok());
+    }
+
+    #[test]
+    fn detect_allowlist_bypass_flags_shell_spawners() {
+        let allowed = vec![
+            "ls".to_string(),
+            "bash".to_string(),
+            "cat -n".to_string(),
+            "find . -exec rm {} +".to_string(),
+        ];
+        assert_eq!(detect_allowlist_bypass(&allowed), vec!["bash".to_string(), "find".to_string()]);
+    }
+
+    #[test]
+    fn detect_allowlist_bypass_clean_list_is_empty() {
+        let allowed = vec!["ls".to_string(), "cat".to_string(), "grep -n foo".to_string()];
+        assert!(detect_allowlist_bypass(&allowed).is_empty());
+    }
+
+    #[test]
+    fn detect_allowlist_bypass_matches_basename_of_path() {
+        let allowed = vec!["/usr/bin/env python".to_string()];
+        assert_eq!(detect_allowlist_bypass(&allowed), vec!["env".to_string()]);
     }
 
     #[test]

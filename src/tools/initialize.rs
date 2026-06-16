@@ -55,6 +55,17 @@ fn code_writer_state(
     config.allowed_commands.normalize();
     config.update_relative_globs(&workspace_root.to_string_lossy());
 
+    if let AllowedCommands::List(cmds) = &config.allowed_commands {
+        let bypass = crate::utils::bash_parser::detect_allowlist_bypass(cmds);
+        if !bypass.is_empty() {
+            warn!(
+                commands = ?bypass,
+                "code_writer allowlist includes shell-spawning commands; the command \
+                 allowlist is effectively bypassable and does not sandbox the agent"
+            );
+        }
+    }
+
     (
         BashCommandMode {
             bash_mode: BashMode::NormalMode,
@@ -316,6 +327,26 @@ pub async fn handle_tool_call(
                     initialize.code_writer_config.as_ref()
                 )
             );
+
+            // Transparency: a code_writer command allowlist that includes a
+            // shell/eval spawner is bypassable (`bash -c '...'`, `find -exec`),
+            // so surface it in the response the model reads — here the allowlist
+            // is a convenience filter, not a sandbox.
+            if let Some(cfg) = initialize.code_writer_config.as_ref() {
+                if let AllowedCommands::List(cmds) = &cfg.allowed_commands {
+                    let bypass = crate::utils::bash_parser::detect_allowlist_bypass(cmds);
+                    if !bypass.is_empty() {
+                        let _ = writeln!(
+                            response,
+                            "\n⚠️  SECURITY: code_writer allowlist includes shell/eval commands ({}). \
+                             They execute arbitrary code from string arguments (e.g. `bash -c …`, \
+                             `find -exec …`), so the command allowlist is effectively bypassable and \
+                             does NOT sandbox the agent. Drop them if you intended a hard restriction.",
+                            bypass.join(", ")
+                        );
+                    }
+                }
+            }
 
             let active_workspace = bash_state_guard
                 .as_ref()
