@@ -59,6 +59,7 @@ pub fn recognizer_for(hint: &str) -> Box<dyn TurnRecognizer> {
     match hint.trim().to_ascii_lowercase().as_str() {
         "claude" => Box::new(ClaudeRecognizer),
         "codex" => Box::new(CodexRecognizer),
+        "antigravity" | "agy" | "gemini" => Box::new(AntigravityRecognizer),
         "generic" | "none" | "off" => Box::new(GenericRecognizer),
         _ => Box::new(AutoRecognizer),
     }
@@ -201,6 +202,43 @@ impl TurnRecognizer for CodexRecognizer {
         }
         if Self::has_input_box(screen) {
             return TurnState::AwaitingInput;
+        }
+        TurnState::Unknown
+    }
+}
+
+// --- Antigravity CLI --------------------------------------------------------
+
+/// Recognizer for the `agy` (Antigravity CLI, Gemini) TUI. **Best-effort.**
+/// Unlike claude/codex (Ink, alt-screen + in-place redraw), agy renders in
+/// append mode inside winx's PTY: spent `Generating…` / `esc to cancel` frames
+/// ghost into later screens and are never cleared. We therefore lead with the
+/// idle hint `? for shortcuts`, which only sits at the *bottom* of the screen
+/// when input is actually ready — a busy turn pushes it out of the tail — and
+/// only then fall back to the busy markers. Markers verified against a real
+/// agy 1.0.8 (Gemini 3.5 Flash) session captured through winx.
+///
+/// Deliberately NOT part of [`AutoRecognizer`]: its markers (`esc to cancel`,
+/// `generating`) are generic enough to pollute claude/codex detection, so it is
+/// opt-in only via the `agy`/`antigravity` hint — mirroring [`GenericRecognizer`].
+pub struct AntigravityRecognizer;
+
+impl TurnRecognizer for AntigravityRecognizer {
+    fn name(&self) -> &'static str {
+        "antigravity"
+    }
+
+    fn detect(&self, screen: &[String]) -> TurnState {
+        // Idle hint first: `? for shortcuts` only sits at the bottom when the
+        // input box is ready. A busy turn pushes it out of the tail, and under
+        // append-mode rendering spent busy markers ghost into the idle screen —
+        // so leading with the idle hint (scoped to the tail) is what survives
+        // the ghosting. Only then fall back to the busy markers.
+        if tail_lower(screen, 4).contains("? for shortcuts") {
+            return TurnState::AwaitingInput;
+        }
+        if any_line_contains(screen, "generating") || any_line_contains(screen, "esc to cancel") {
+            return TurnState::Busy;
         }
         TurnState::Unknown
     }
@@ -434,6 +472,45 @@ mod tests {
         // keep it Busy so we never send input mid-stream.
         let screen = lines(&["› an earlier prompt", "• Working (3s • esc to interrupt)"]);
         assert_eq!(CodexRecognizer.detect(&screen), TurnState::Busy);
+    }
+
+    // Antigravity (`agy` 1.0.8, Gemini 3.5 Flash) fixtures captured through
+    // winx. agy renders in append mode, so these intentionally include the ghost
+    // `Generating…` / `esc to cancel` frames that linger after the turn — the
+    // recognizer must see through them.
+
+    #[test]
+    fn antigravity_busy_via_generating_and_esc_to_cancel() {
+        let screen = lines(&[
+            "> responda com uma palavra: PONG    Gemini 3.5 Flash (Medium)",
+            "⣾  Generating...",
+            "  PONG",
+            "esc to cancel    Gemini 3.5 Flash (Medium)",
+        ]);
+        assert_eq!(AntigravityRecognizer.detect(&screen), TurnState::Busy);
+    }
+
+    #[test]
+    fn antigravity_idle_via_shortcuts_hint_despite_ghost_frames() {
+        // The real idle screen still carries ghost `Generating…`/`esc to cancel`
+        // lines from the finished turn, but `? for shortcuts` sits at the bottom
+        // only when input is ready — so it must win over the ghosts.
+        let screen = lines(&[
+            "  PONG",
+            "⣯  Generating..",
+            "esc to cancel    Gemini 3.5 Flash (Medium)",
+            "? for shortcuts",
+        ]);
+        assert_eq!(AntigravityRecognizer.detect(&screen), TurnState::AwaitingInput);
+    }
+
+    #[test]
+    fn antigravity_is_opt_in_not_part_of_auto() {
+        // agy's best-effort markers would pollute claude/codex, so it is opt-in
+        // only and auto must stay blind to its idle hint.
+        let screen = lines(&["? for shortcuts"]);
+        assert_eq!(AntigravityRecognizer.detect(&screen), TurnState::AwaitingInput);
+        assert_eq!(AutoRecognizer.detect(&screen), TurnState::Unknown);
     }
 
     #[test]

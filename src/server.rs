@@ -136,7 +136,7 @@ const BASH_COMMAND_DESCRIPTION: &str =
      - On running a bg command you'll get a bg command id that you should use to get status or interact. \
      - Piloting an interactive full-screen TUI (the `claude` CLI, vim, htop, fzf, a REPL)? Run it in the background, then drive it with these two actions: \
      - `screen` ({\"screen\":true,\"bg_command_id\":\"...\",\"lines\":N}) returns a STABLE snapshot of the live terminal screen (cursor moves, redraws, alternate-screen and synchronized-output already applied; ANSI stripped). Use this to read the current frame — unlike `status_check`, it never stacks redraw generations and never waits. \
-     - `wait_for_turn` ({\"wait_for_turn\":true,\"bg_command_id\":\"...\",\"recognizer\":\"auto|claude|codex|generic\",\"quiet_ms\":600,\"timeout_seconds\":30}) BLOCKS until the TUI finishes its turn and is ready for input, then returns the stable snapshot plus the detected state (busy / awaiting_input / awaiting_approval). Typical REPL loop: run the app in bg -> wait_for_turn -> send_text(submit:true) -> wait_for_turn -> screen, repeat.";
+     - `wait_for_turn` ({\"wait_for_turn\":true,\"bg_command_id\":\"...\",\"recognizer\":\"auto|claude|codex|antigravity|generic\",\"quiet_ms\":600,\"timeout_seconds\":30}) BLOCKS until the TUI finishes its turn and is ready for input, then returns the stable snapshot plus the detected state (busy / awaiting_input / awaiting_approval). Typical REPL loop: run the app in bg -> wait_for_turn -> send_text(submit:true) -> wait_for_turn -> screen, repeat.";
 
 const READ_FILES_DESCRIPTION: &str =
     "- Read full file content of one or more files. \

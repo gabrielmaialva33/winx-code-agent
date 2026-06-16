@@ -602,7 +602,8 @@ pub enum BashCommandAction {
         #[serde(default = "default_true")]
         wait_for_turn: bool,
         bg_command_id: Option<String>,
-        /// Recognizer hint: `auto` (default), `claude`, `codex` or `generic`.
+        /// Recognizer hint: `auto` (default), `claude`, `codex`, `antigravity`
+        /// (aka `agy`) or `generic`.
         #[serde(default)]
         recognizer: Option<String>,
         /// Quiet window in ms — the screen must be unchanged this long to count
