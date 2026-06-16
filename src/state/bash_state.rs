@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -14,10 +14,6 @@ use crate::state::persistence::{
     save_bash_state as save_state_file, BashStateSnapshot,
 };
 use crate::state::pty::PtyShell;
-use crate::state::terminal::{
-    incremental_text, TerminalEmulator, TerminalOutputDiff, DEFAULT_MAX_SCREEN_LINES,
-    MAX_OUTPUT_SIZE as TERMINAL_MAX_OUTPUT_SIZE,
-};
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
 };
@@ -101,61 +97,6 @@ impl FileWhitelistData {
 }
 
 #[derive(Debug, Clone)]
-pub struct TerminalState {
-    pub last_command: String,
-    pub last_pending_output: String,
-    pub command_running: bool,
-    pub terminal_emulator: Arc<StdMutex<TerminalEmulator>>,
-    pub diff_detector: Option<TerminalOutputDiff>,
-    pub limit_buffer: bool,
-    pub max_buffer_lines: usize,
-}
-
-impl Default for TerminalState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TerminalState {
-    pub fn new() -> Self {
-        Self {
-            last_command: String::new(),
-            last_pending_output: String::new(),
-            command_running: false,
-            terminal_emulator: Arc::new(StdMutex::new(TerminalEmulator::new(160))),
-            diff_detector: Some(TerminalOutputDiff::new()),
-            limit_buffer: false,
-            max_buffer_lines: DEFAULT_MAX_SCREEN_LINES,
-        }
-    }
-
-    pub fn process_output(&mut self, output: &str) -> String {
-        self.last_pending_output = output.to_string();
-        if let Ok(mut emulator) = self.terminal_emulator.lock() {
-            emulator.process(output);
-            emulator.display().join("\n")
-        } else {
-            output.to_string()
-        }
-    }
-
-    pub fn get_incremental_output(&mut self, output: &str) -> String {
-        let result = incremental_text(output, &self.last_pending_output);
-        self.last_pending_output = output.to_string();
-        result
-    }
-
-    pub fn smart_truncate(&mut self, max_size: usize) {
-        if let Ok(screen) = self.terminal_emulator.lock() {
-            if let Ok(mut screen_guard) = screen.get_screen().lock() {
-                screen_guard.smart_truncate(max_size);
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
 pub struct BashState {
     pub cwd: PathBuf,
     pub workspace_root: PathBuf,
@@ -165,7 +106,6 @@ pub struct BashState {
     pub file_edit_mode: FileEditMode,
     pub write_if_empty_mode: WriteIfEmptyMode,
     pub whitelist_for_overwrite: HashMap<String, FileWhitelistData>,
-    pub terminal_state: TerminalState,
     pub pty_shell: Arc<Mutex<Option<PtyShell>>>,
     pub initialized: bool,
 }
@@ -193,7 +133,6 @@ impl BashState {
                 allowed_globs: AllowedGlobs::All("all".to_string()),
             },
             whitelist_for_overwrite: HashMap::new(),
-            terminal_state: TerminalState::new(),
             pty_shell: Arc::new(Mutex::new(None)),
             initialized: false,
         }

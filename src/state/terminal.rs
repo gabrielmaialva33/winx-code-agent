@@ -1190,15 +1190,6 @@ impl TerminalEmulator {
         Self { performer, screen, alternate, parser: Parser::new() }
     }
 
-    /// Creates a new terminal emulator with specified maximum lines
-    pub fn new_with_max_lines(columns: usize, max_lines: usize) -> Self {
-        let screen = Arc::new(Mutex::new(Screen::new_with_max_lines(columns, max_lines)));
-        let alternate = Arc::new(Mutex::new(Screen::new_with_max_lines(columns, max_lines)));
-        let performer = TerminalPerformer::new(screen.clone(), alternate.clone());
-
-        Self { performer, screen, alternate, parser: Parser::new() }
-    }
-
     /// Process input and update screen state.
     ///
     /// One-shot: uses a throwaway parser so each call is independent. Used by
@@ -1245,11 +1236,6 @@ impl TerminalEmulator {
         }
     }
 
-    /// Get the current screen state
-    pub fn get_screen(&self) -> Arc<Mutex<Screen>> {
-        self.screen.clone()
-    }
-
     /// Get the screen contents as a vector of strings (active screen buffer).
     pub fn display(&self) -> Vec<String> {
         let target = if self.performer.in_alt_screen { &self.alternate } else { &self.screen };
@@ -1258,30 +1244,6 @@ impl TerminalEmulator {
         } else {
             warn!("Failed to lock screen for display");
             vec![]
-        }
-    }
-
-    /// Snapshot the last `max_lines` lines of the live screen — the stable,
-    /// consolidated view a human would see (cursor moves/redraws already
-    /// applied), trailing blanks trimmed and ANSI fully stripped. `max_lines`
-    /// of 0 means "all lines".
-    pub fn snapshot(&self, max_lines: usize) -> Vec<String> {
-        let lines = self.display();
-        let lines = if max_lines > 0 && lines.len() > max_lines {
-            lines[lines.len() - max_lines..].to_vec()
-        } else {
-            lines
-        };
-        lines.into_iter().map(|l| strip_ansi_codes(&l)).collect()
-    }
-
-    /// Get the screen contents as plain text
-    pub fn to_plain_text(&self) -> String {
-        if let Ok(screen) = self.screen.lock() {
-            screen.to_plain_text()
-        } else {
-            warn!("Failed to lock screen for to_plain_text");
-            String::new()
         }
     }
 
@@ -1382,148 +1344,6 @@ lazy_static::lazy_static! {
     static ref TERMINAL_CACHE: TerminalCache = TerminalCache::new(100, CACHE_TTL);
 }
 
-/// Terminal output difference detector
-#[derive(Debug, Clone)]
-pub struct TerminalOutputDiff {
-    /// Previous output lines
-    previous_output: Vec<String>,
-    /// Hash of previous output
-    output_hash: String,
-    /// Maximum number of lines to compare
-    max_lines: usize,
-}
-
-impl Default for TerminalOutputDiff {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl TerminalOutputDiff {
-    /// Create a new terminal output diff detector
-    pub fn new() -> Self {
-        Self { previous_output: Vec::new(), output_hash: String::new(), max_lines: 1000 }
-    }
-
-    /// Create a new terminal output diff detector with specified maximum lines
-    pub fn new_with_max_lines(max_lines: usize) -> Self {
-        Self { previous_output: Vec::new(), output_hash: String::new(), max_lines }
-    }
-
-    /// Detect changes between previous and new output
-    pub fn detect_changes(&mut self, new_output: &[String]) -> Vec<String> {
-        if self.previous_output.is_empty() {
-            // First run, just return all lines
-            self.previous_output = new_output.to_vec();
-            self.output_hash = self.calculate_hash(new_output);
-            return new_output.to_vec();
-        }
-
-        // Check if output is identical (fast path)
-        let new_hash = self.calculate_hash(new_output);
-        if new_hash == self.output_hash {
-            return Vec::new(); // No changes
-        }
-
-        // Find differences
-        let mut changes = Vec::new();
-
-        // Find where new content starts
-        let nold = self.previous_output.len().min(self.max_lines);
-        let nnew = new_output.len().min(self.max_lines);
-
-        // Try to find where old output ends and new output begins using a more efficient algorithm
-        let mut matched_position = None;
-
-        // Check if new output contains all of old output as a prefix
-        let is_prefix = nold <= nnew && (0..nold).all(|i| self.previous_output[i] == new_output[i]);
-
-        if is_prefix {
-            // Simple case: new output is old output plus additions
-            matched_position = Some(nold);
-        } else {
-            // More complex case: try to find the last matching block
-            let mut best_match = 0;
-            let mut best_position = 0;
-
-            // Use sliding window approach to find largest match
-            let window_size = 3.min(nold); // Use 3 lines as context for matching
-
-            if window_size > 0 {
-                for i in (0..=nnew.saturating_sub(window_size)).rev() {
-                    // Try matching last window_size lines of old output with window at position i in new output
-                    let mut match_count = 0;
-                    for j in 0..window_size {
-                        if i + j < nnew
-                            && nold.saturating_sub(window_size) + j < nold
-                            && new_output[i + j]
-                                == self.previous_output[nold.saturating_sub(window_size) + j]
-                        {
-                            match_count += 1;
-                        }
-                    }
-
-                    if match_count > best_match {
-                        best_match = match_count;
-                        best_position = i + window_size;
-
-                        if best_match == window_size {
-                            // Perfect match, no need to continue
-                            break;
-                        }
-                    }
-                }
-            }
-
-            if best_match >= window_size / 2 {
-                // Found a reasonable match
-                matched_position = Some(best_position);
-            }
-        }
-
-        // Extract changes based on matched position
-        if let Some(pos) = matched_position {
-            if pos < nnew {
-                changes = new_output[pos..].to_vec();
-
-                // Check if first line of changes matches last line of previous output
-                if !changes.is_empty()
-                    && !self.previous_output.is_empty()
-                    && changes[0] == self.previous_output[self.previous_output.len() - 1]
-                {
-                    changes.remove(0);
-                }
-            }
-        } else {
-            // Fallback: couldn't find a good match, show all new lines
-            changes = new_output.to_vec();
-        }
-
-        // Update state for next comparison
-        self.previous_output = new_output.to_vec();
-        self.output_hash = new_hash;
-
-        changes
-    }
-
-    /// Calculate a hash of the output lines for quick comparison
-    fn calculate_hash(&self, lines: &[String]) -> String {
-        // Simple hash function based on content
-        // In a production setting, use a proper hash function
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        for line in lines.iter().take(self.max_lines) {
-            std::hash::Hash::hash(line, &mut hasher);
-        }
-        format!("{:x}", std::hash::Hasher::finish(&hasher))
-    }
-
-    /// Reset the diff detector
-    pub fn reset(&mut self) {
-        self.previous_output.clear();
-        self.output_hash.clear();
-    }
-}
-
 /// Render terminal output with line wrapping
 pub fn render_terminal_output(text: &str) -> Vec<String> {
     // Check cache first
@@ -1556,92 +1376,6 @@ pub fn render_terminal_output(text: &str) -> Vec<String> {
     // IMPORTANT: Strip any remaining ANSI codes from the result lines to prevent JSON-RPC errors.
     // This is the core fix for "invalid character '\x1b'" errors.
     result.into_iter().map(|line| strip_ansi_codes(&line)).collect()
-}
-
-/// Get incremental text output by comparing old and new terminal states
-pub fn incremental_text(text: &str, last_pending_output: &str) -> String {
-    // Optimization: Quick check for empty input
-    if text.is_empty() {
-        return String::new();
-    }
-
-    // Optimization: If last output is empty, just process everything
-    if last_pending_output.is_empty() {
-        // First call, return all processed lines with leading/trailing whitespace trimmed
-        let lines = render_terminal_output(text);
-        return lines.join("\n").trim().to_string();
-    }
-
-    // Optimization: Handle case where new text is just appended to old text
-    let is_append = text.starts_with(last_pending_output);
-
-    if is_append && text.len() > last_pending_output.len() {
-        // Incremental case - only process the new part
-        let new_part = &text[last_pending_output.len()..];
-
-        // Ensure we have enough context by including a bit more than just the new
-        // part. Snap the start down to a char boundary: a raw `len - 200` offset
-        // can land inside a multibyte code point and panic on the slice.
-        let context_len = 200.min(last_pending_output.len());
-        let full_context = if context_len > 0 {
-            let start_pos = crate::utils::floor_char_boundary(
-                last_pending_output,
-                last_pending_output.len() - context_len,
-            );
-            format!("{}{}", &last_pending_output[start_pos..], new_part)
-        } else {
-            new_part.to_string()
-        };
-
-        // Process the combined output for context
-        let previous_lines = render_terminal_output(last_pending_output);
-        let combined_lines = render_terminal_output(&full_context);
-
-        // Create a diff detector for efficient comparison
-        let mut diff_detector = TerminalOutputDiff::new();
-        diff_detector.previous_output = previous_lines;
-
-        // Get just the changes
-        let changes = diff_detector.detect_changes(&combined_lines);
-
-        if changes.is_empty() {
-            return String::new();
-        }
-
-        return changes.join("\n");
-    }
-
-    // Fallback for non-append cases:
-
-    // Limit text size to prevent excessive memory usage
-    let text_limit = if text.len() > MAX_OUTPUT_SIZE {
-        let start_offset = text.len() - MAX_OUTPUT_SIZE;
-
-        // Find the start of a line to avoid cutting in the middle
-        let adjusted_offset =
-            text[start_offset..].find('\n').map_or(start_offset, |pos| start_offset + pos + 1);
-
-        &text[adjusted_offset..]
-    } else {
-        text
-    };
-
-    // Process both old and new output
-    let previous_lines = render_terminal_output(last_pending_output);
-    let new_lines = render_terminal_output(text_limit);
-
-    // Create a diff detector for efficient comparison
-    let mut diff_detector = TerminalOutputDiff::new();
-    diff_detector.previous_output = previous_lines;
-
-    // Get the incremental changes
-    let changes = diff_detector.detect_changes(&new_lines);
-
-    if changes.is_empty() {
-        return String::new();
-    }
-
-    changes.join("\n")
 }
 
 /// Strip ANSI escape codes from a string using a robust regex
@@ -1764,28 +1498,6 @@ mod tests {
     }
 
     #[test]
-    fn test_incremental_output() {
-        let old = vec!["Line 1".to_string(), "Line 2".to_string()];
-        let new = vec!["Line 1".to_string(), "Line 2".to_string(), "Line 3".to_string()];
-
-        let mut diff_detector = TerminalOutputDiff::new();
-        diff_detector.previous_output = old;
-
-        let incremental = diff_detector.detect_changes(&new);
-        assert_eq!(incremental, vec!["Line 3"]);
-
-        // Test with completely different content
-        let old = vec!["Line A".to_string(), "Line B".to_string()];
-        let new = vec!["Line X".to_string(), "Line Y".to_string()];
-
-        let mut diff_detector = TerminalOutputDiff::new();
-        diff_detector.previous_output = old;
-
-        let incremental = diff_detector.detect_changes(&new);
-        assert_eq!(incremental, vec!["Line X", "Line Y"]);
-    }
-
-    #[test]
     fn test_render_terminal_output() {
         let text = "Hello\r\nWorld\r\n\x1b[31mRed\x1b[0m Text";
         let lines = render_terminal_output(text);
@@ -1838,15 +1550,6 @@ mod tests {
         // Unknown key should return None
         let not_found = cache.get("unknown");
         assert_eq!(not_found, None);
-    }
-
-    #[test]
-    fn test_incremental_text_append() {
-        let old_text = "Line 1\nLine 2\n";
-        let new_text = "Line 1\nLine 2\nLine 3\n";
-
-        let incremental = incremental_text(new_text, old_text);
-        assert_eq!(incremental, "Line 3");
     }
 
     #[test]
