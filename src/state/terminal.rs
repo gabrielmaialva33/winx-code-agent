@@ -468,8 +468,16 @@ impl Screen {
 /// Terminal state performer that handles VTE events
 #[derive(Clone)]
 pub struct TerminalPerformer {
-    /// The screen state
+    /// The primary screen state
     screen: Arc<Mutex<Screen>>,
+    /// The alternate screen buffer (smcup/rmcup apps: vim, htop, less, fzf)
+    alternate: Arc<Mutex<Screen>>,
+    /// Whether the alternate screen buffer is currently active
+    in_alt_screen: bool,
+    /// Saved cursor position for DECSC/DECRC and `?1048`/`?1049`
+    saved_cursor: Option<(usize, usize)>,
+    /// Saved text attributes paired with `saved_cursor`
+    saved_attributes: Option<ScreenCellAttributes>,
     /// Current text attributes
     attributes: ScreenCellAttributes,
     /// SGR parameters cache for optimization
@@ -495,9 +503,13 @@ impl std::fmt::Debug for TerminalPerformer {
 
 impl TerminalPerformer {
     /// Creates a new terminal performer
-    pub fn new(screen: Arc<Mutex<Screen>>) -> Self {
+    pub fn new(screen: Arc<Mutex<Screen>>, alternate: Arc<Mutex<Screen>>) -> Self {
         Self {
             screen,
+            alternate,
+            in_alt_screen: false,
+            saved_cursor: None,
+            saved_attributes: None,
             attributes: ScreenCellAttributes::default(),
             sgr_state: HashMap::new(),
             current_hyperlink_id: None,
@@ -506,9 +518,86 @@ impl TerminalPerformer {
         }
     }
 
-    /// Get a reference to the screen
+    /// Get a reference to the primary screen
     pub fn screen(&self) -> &Arc<Mutex<Screen>> {
         &self.screen
+    }
+
+    /// The currently-active screen target (primary or alternate).
+    fn active(&self) -> Arc<Mutex<Screen>> {
+        if self.in_alt_screen {
+            self.alternate.clone()
+        } else {
+            self.screen.clone()
+        }
+    }
+
+    /// Save cursor position + attributes (DECSC / `?1048h`).
+    fn save_cursor(&mut self) {
+        if let Ok(screen) = self.active().lock() {
+            self.saved_cursor = Some(screen.cursor_position);
+        }
+        self.saved_attributes = Some(self.attributes.clone());
+    }
+
+    /// Restore cursor position + attributes (DECRC / `?1048l`).
+    fn restore_cursor(&mut self) {
+        if let Some((row, col)) = self.saved_cursor {
+            if let Ok(mut screen) = self.active().lock() {
+                screen.move_cursor(row, col);
+            }
+        }
+        if let Some(attrs) = self.saved_attributes.take() {
+            self.attributes = attrs;
+        }
+    }
+
+    /// Enter or leave the alternate screen buffer (`?1049`, `?47`, `?1047`).
+    fn set_alt_screen(&mut self, enable: bool) {
+        if enable == self.in_alt_screen {
+            return;
+        }
+        if enable {
+            self.save_cursor();
+            self.in_alt_screen = true;
+            if let Ok(mut screen) = self.alternate.lock() {
+                screen.clear();
+            }
+        } else {
+            self.in_alt_screen = false;
+            self.restore_cursor();
+        }
+    }
+
+    /// Handle a DEC private mode set/reset (`CSI ? <n> h|l`).
+    fn handle_private_mode(&mut self, params: &vte::Params, action: char) {
+        let set = action == 'h';
+        for group in params {
+            let Some(&mode) = group.first() else { continue };
+            match mode {
+                // Alternate screen buffer
+                1049 | 1047 | 47 => self.set_alt_screen(set),
+                // Save/restore cursor
+                1048 => {
+                    if set {
+                        self.save_cursor();
+                    } else {
+                        self.restore_cursor();
+                    }
+                }
+                // Cursor visibility (DECTCEM)
+                25 => {
+                    if let Ok(mut screen) = self.active().lock() {
+                        screen.cursor_visible = set;
+                    }
+                }
+                // Synchronized output (?2026 — Claude's Ink TUI uses this per
+                // frame), bracketed paste (?2004), focus reporting (?1004),
+                // theme notifications (?2031), mouse modes, ... carry no grid
+                // state for our snapshot purposes; consume silently.
+                _ => {}
+            }
+        }
     }
 
     /// Reset all text attributes
@@ -834,6 +923,21 @@ impl TerminalPerformer {
             'B' => screen.move_cursor(current_row + n, current_col),
             'C' => screen.move_cursor(current_row, current_col + n),
             'D' => screen.move_cursor(current_row, current_col.saturating_sub(n)),
+            // CNL / CPL: N lines down/up, cursor to column 0
+            'E' => screen.move_cursor(current_row + n, 0),
+            'F' => screen.move_cursor(current_row.saturating_sub(n), 0),
+            // CHA / HPA: cursor to an absolute column (1-based). Claude's Ink
+            // TUI leans on this constantly; without it, column-positioned text
+            // collapses together (e.g. "ClaudeCodev2.1.159").
+            'G' | '`' => {
+                let col = usize::from(Self::csi_param(params, 0, 1)).saturating_sub(1);
+                screen.move_cursor(current_row, col);
+            }
+            // VPA: cursor to an absolute row (1-based)
+            'd' => {
+                let row = usize::from(Self::csi_param(params, 0, 1)).saturating_sub(1);
+                screen.move_cursor(row, current_col);
+            }
             'H' | 'f' => {
                 let row = usize::from(Self::csi_param(params, 0, 1)).saturating_sub(1);
                 let col = usize::from(Self::csi_param(params, 1, 1)).saturating_sub(1);
@@ -928,7 +1032,7 @@ impl TerminalPerformer {
 // Implement the VTE Perform trait
 impl Perform for TerminalPerformer {
     fn print(&mut self, c: char) {
-        if let Ok(mut screen) = self.screen.lock() {
+        if let Ok(mut screen) = self.active().lock() {
             screen.put_char(c, self.attributes.clone());
         } else {
             warn!("Failed to lock screen for print");
@@ -936,7 +1040,7 @@ impl Perform for TerminalPerformer {
     }
 
     fn execute(&mut self, byte: u8) {
-        if let Ok(mut screen) = self.screen.lock() {
+        if let Ok(mut screen) = self.active().lock() {
             match byte {
                 b'\r' => screen.carriage_return(),
                 b'\n' => {
@@ -991,20 +1095,24 @@ impl Perform for TerminalPerformer {
         self.handle_osc_params(params, bell_terminated);
     }
 
-    fn csi_dispatch(
-        &mut self,
-        params: &vte::Params,
-        _intermediates: &[u8],
-        _ignore: bool,
-        c: char,
-    ) {
+    fn csi_dispatch(&mut self, params: &vte::Params, intermediates: &[u8], _ignore: bool, c: char) {
         // Special case for SGR ('m') to avoid borrowing conflict
         if c == 'm' {
             self.handle_sgr_dispatch(params);
             return;
         }
 
-        if let Ok(mut screen) = self.screen.lock() {
+        // DEC private sequences (`CSI ? <n> h|l`): alternate screen, cursor
+        // visibility, save/restore, synchronized output, ... The `?` arrives as
+        // the first intermediate byte in vte 0.15.
+        if intermediates.first() == Some(&b'?') {
+            if c == 'h' || c == 'l' {
+                self.handle_private_mode(params, c);
+            }
+            return;
+        }
+
+        if let Ok(mut screen) = self.active().lock() {
             if Self::handle_cursor_csi(&mut screen, params, c)
                 || Self::handle_erase_csi(&mut screen, params, c)
                 || Self::handle_scroll_csi(&mut screen, params, c)
@@ -1023,15 +1131,14 @@ impl Perform for TerminalPerformer {
             match byte {
                 b'c' => {
                     // RIS - Reset to Initial State
-                    if let Ok(mut screen) = self.screen.lock() {
+                    if let Ok(mut screen) = self.active().lock() {
                         screen.clear();
                     }
                     self.reset_attributes();
                 }
-                b'7' | b'8' => {
-                    // DECSC/DECRC - Save/restore cursor
-                    // Not implemented yet
-                }
+                // DECSC / DECRC - save / restore cursor + attributes
+                b'7' => self.save_cursor(),
+                b'8' => self.restore_cursor(),
                 _ => debug!("Unhandled ESC dispatch: {:?}", byte),
             }
         }
@@ -1039,12 +1146,29 @@ impl Perform for TerminalPerformer {
 }
 
 /// Terminal emulator that processes input and maintains screen state
-#[derive(Clone)]
 pub struct TerminalEmulator {
     /// The performer that handles terminal events
     performer: TerminalPerformer,
-    /// The shared screen state
+    /// The shared primary screen state
     screen: Arc<Mutex<Screen>>,
+    /// The shared alternate screen buffer (smcup/rmcup apps: vim, htop, less)
+    alternate: Arc<Mutex<Screen>>,
+    /// Persistent VTE parser, so escape sequences that straddle `feed()` chunk
+    /// boundaries decode correctly (the live PTY tap feeds ~4 KiB at a time).
+    parser: Parser,
+}
+
+// `vte::Parser` is not `Clone`; a clone gets a fresh parser (its state is
+// transient) while sharing the screen Arcs, matching the prior derived behavior.
+impl Clone for TerminalEmulator {
+    fn clone(&self) -> Self {
+        Self {
+            performer: self.performer.clone(),
+            screen: self.screen.clone(),
+            alternate: self.alternate.clone(),
+            parser: Parser::new(),
+        }
+    }
 }
 
 // Custom debug implementation to avoid issues with Parser
@@ -1060,20 +1184,26 @@ impl TerminalEmulator {
     /// Creates a new terminal emulator
     pub fn new(columns: usize) -> Self {
         let screen = Arc::new(Mutex::new(Screen::new(columns)));
-        let performer = TerminalPerformer::new(screen.clone());
+        let alternate = Arc::new(Mutex::new(Screen::new(columns)));
+        let performer = TerminalPerformer::new(screen.clone(), alternate.clone());
 
-        Self { performer, screen }
+        Self { performer, screen, alternate, parser: Parser::new() }
     }
 
     /// Creates a new terminal emulator with specified maximum lines
     pub fn new_with_max_lines(columns: usize, max_lines: usize) -> Self {
         let screen = Arc::new(Mutex::new(Screen::new_with_max_lines(columns, max_lines)));
-        let performer = TerminalPerformer::new(screen.clone());
+        let alternate = Arc::new(Mutex::new(Screen::new_with_max_lines(columns, max_lines)));
+        let performer = TerminalPerformer::new(screen.clone(), alternate.clone());
 
-        Self { performer, screen }
+        Self { performer, screen, alternate, parser: Parser::new() }
     }
 
-    /// Process input and update screen state
+    /// Process input and update screen state.
+    ///
+    /// One-shot: uses a throwaway parser so each call is independent. Used by
+    /// `render_terminal_output` on standalone buffers. For a continuously-fed
+    /// live terminal, use [`Self::feed`] instead.
     pub fn process(&mut self, data: &str) {
         let mut parser = Parser::new();
 
@@ -1084,6 +1214,18 @@ impl TerminalEmulator {
         for chunk in data_bytes.chunks(chunk_size) {
             parser.advance(&mut self.performer, chunk);
         }
+    }
+
+    /// Feed raw bytes into the live emulator using the *persistent* parser, so
+    /// multi-byte escape sequences split across chunk boundaries are decoded
+    /// correctly. This is the entry point for the PTY live tap.
+    pub fn feed(&mut self, bytes: &[u8]) {
+        self.parser.advance(&mut self.performer, bytes);
+    }
+
+    /// Whether the alternate screen buffer is currently active.
+    pub fn in_alt_screen(&self) -> bool {
+        self.performer.in_alt_screen
     }
 
     /// Process input with limited buffer (for large outputs)
@@ -1108,14 +1250,29 @@ impl TerminalEmulator {
         self.screen.clone()
     }
 
-    /// Get the screen contents as a vector of strings
+    /// Get the screen contents as a vector of strings (active screen buffer).
     pub fn display(&self) -> Vec<String> {
-        if let Ok(screen) = self.screen.lock() {
+        let target = if self.performer.in_alt_screen { &self.alternate } else { &self.screen };
+        if let Ok(screen) = target.lock() {
             screen.display()
         } else {
             warn!("Failed to lock screen for display");
             vec![]
         }
+    }
+
+    /// Snapshot the last `max_lines` lines of the live screen — the stable,
+    /// consolidated view a human would see (cursor moves/redraws already
+    /// applied), trailing blanks trimmed and ANSI fully stripped. `max_lines`
+    /// of 0 means "all lines".
+    pub fn snapshot(&self, max_lines: usize) -> Vec<String> {
+        let lines = self.display();
+        let lines = if max_lines > 0 && lines.len() > max_lines {
+            lines[lines.len() - max_lines..].to_vec()
+        } else {
+            lines
+        };
+        lines.into_iter().map(|l| strip_ansi_codes(&l)).collect()
     }
 
     /// Get the screen contents as plain text
@@ -1706,5 +1863,49 @@ mod tests {
         terminal.process("\x1b[38;5;208mOrange\x1b[0mNormal");
         let display = terminal.display();
         assert_eq!(display, vec!["OrangeNormal"]);
+    }
+
+    #[test]
+    fn cha_positions_absolute_column_no_collapse() {
+        // CHA (ESC[<col>G) must move to an absolute column, leaving spaces in
+        // between, instead of concatenating. Regression for "ClaudeCodev2.1.159".
+        let mut t = TerminalEmulator::new(40);
+        t.process("AAA\x1b[10GBBB");
+        // "AAA" at cols 0-2, then ESC[10G -> col 9 (1-based), "BBB" at 9-11.
+        assert_eq!(t.display(), vec!["AAA      BBB"]);
+    }
+
+    #[test]
+    fn alternate_screen_isolates_and_restores() {
+        let mut t = TerminalEmulator::new(40);
+        t.process("primary text");
+        assert!(!t.in_alt_screen());
+        // Enter alt screen, write, leave -> primary content survives untouched.
+        t.process("\x1b[?1049h");
+        assert!(t.in_alt_screen());
+        t.process("ALT");
+        assert_eq!(t.display(), vec!["ALT"]);
+        t.process("\x1b[?1049l");
+        assert!(!t.in_alt_screen());
+        assert_eq!(t.display(), vec!["primary text"]);
+    }
+
+    #[test]
+    fn feed_decodes_escape_split_across_chunks() {
+        // A cursor sequence split across two feed() calls must still apply,
+        // thanks to the persistent parser.
+        let mut t = TerminalEmulator::new(40);
+        t.feed(b"AAAAA\x1b[3"); // partial CSI
+        t.feed(b"D__"); // completes ESC[3D (left 3 from col 5 -> col 2), writes __
+        assert_eq!(t.display(), vec!["AA__A"]);
+    }
+
+    #[test]
+    fn synchronized_output_mode_is_consumed() {
+        // Claude's Ink TUI wraps each frame in ?2026h/?2026l; we consume the
+        // mode and keep the content.
+        let mut t = TerminalEmulator::new(40);
+        t.process("\x1b[?2026hHELLO\x1b[?2026l");
+        assert_eq!(t.display(), vec!["HELLO"]);
     }
 }
