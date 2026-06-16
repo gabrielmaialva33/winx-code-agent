@@ -30,7 +30,7 @@ use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
 
-use crate::server::WinxService;
+use crate::server::{SessionIsolation, WinxService};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -60,9 +60,15 @@ pub async fn start_http_server(
     // `Initialize` created before `BashCommand` runs ("Bash state not
     // initialized"). Sharing one instance keeps shells alive for the server's
     // lifetime; isolation between logical sessions is provided per `thread_id`
-    // by the service's internal session registry, so concurrent clients no
-    // longer share a single shell.
-    let shared = WinxService::new();
+    // by the service's internal session registry.
+    //
+    // Strict isolation: with many clients behind one shared token, an empty
+    // `thread_id` must NOT fall back to whoever was last active (that would land
+    // one client in another's shell). Strict mode disables that fallback. Two
+    // clients that deliberately reuse the same explicit `thread_id` still share a
+    // shell — real multi-tenant isolation needs per-client tokens, which the
+    // single shared-token model doesn't provide.
+    let shared = WinxService::with_isolation(SessionIsolation::Strict);
     let mcp_service = StreamableHttpService::new(
         move || Ok(shared.clone()),
         Arc::new(LocalSessionManager::default()),

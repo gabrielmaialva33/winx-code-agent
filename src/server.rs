@@ -317,12 +317,32 @@ struct SessionRegistry {
     last_active: Option<String>,
 }
 
+/// How an empty `thread_id` is resolved by the session registry.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SessionIsolation {
+    /// Local stdio transport — a single client. An empty `thread_id` falls back
+    /// to the last-active session (legacy single-client convenience).
+    Lenient,
+    /// Remote HTTP transport — multiple clients behind one shared bearer token.
+    /// The last-active fallback is disabled, so an empty `thread_id` from one
+    /// client can never resolve to another client's shell; such calls get a
+    /// dedicated anonymous slot instead. Clients must use the `thread_id` that
+    /// `Initialize` hands back.
+    ///
+    /// Residual: two clients that deliberately send the *same* explicit
+    /// `thread_id` still share a shell. Closing that needs per-client tokens,
+    /// which the single shared-token model intentionally doesn't provide.
+    Strict,
+}
+
 /// Winx service. Holds the per-thread session registry.
 #[derive(Clone)]
 pub struct WinxService {
     sessions: Arc<Mutex<SessionRegistry>>,
     /// Version information for the service
     pub version: String,
+    /// How empty `thread_id`s are resolved (see [`SessionIsolation`]).
+    isolation: SessionIsolation,
 }
 
 impl Default for WinxService {
@@ -332,25 +352,43 @@ impl Default for WinxService {
 }
 
 impl WinxService {
-    /// Create a new `WinxService` instance
+    /// Create a new `WinxService` for the local stdio transport (lenient,
+    /// single-client session isolation).
     pub fn new() -> Self {
-        info!("Creating new WinxService instance");
+        Self::with_isolation(SessionIsolation::Lenient)
+    }
+
+    /// Create a `WinxService` with an explicit session-isolation policy. The
+    /// HTTP transport uses [`SessionIsolation::Strict`].
+    pub fn with_isolation(isolation: SessionIsolation) -> Self {
+        info!(?isolation, "Creating new WinxService instance");
         Self {
             sessions: Arc::new(Mutex::new(SessionRegistry::default())),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            isolation,
         }
     }
 
     /// Resolve the session slot for a `thread_id`, creating it if absent.
     ///
-    /// An empty `thread_id` resolves to the most recently active session (the
-    /// compatibility path for tools — and older clients — that don't send one).
+    /// An empty `thread_id` resolves, under [`SessionIsolation::Lenient`], to the
+    /// most recently active session (the compatibility path for tools — and older
+    /// clients — that don't send one); under [`SessionIsolation::Strict`] it gets
+    /// a dedicated anonymous slot so remote clients can't land in each other's shell.
     /// Marks the slot as most-recently-used and evicts the LRU session when over
     /// [`MAX_SESSIONS`].
     async fn session_for(&self, thread_id: &str) -> SharedBashState {
         let mut reg = self.sessions.lock().await;
         let key = if thread_id.is_empty() {
-            reg.last_active.clone().unwrap_or_else(|| "default".to_string())
+            match self.isolation {
+                // Single local client: reuse the most recently active shell.
+                SessionIsolation::Lenient => {
+                    reg.last_active.clone().unwrap_or_else(|| "default".to_string())
+                }
+                // Many remote clients sharing one token: never resolve to
+                // someone else's active shell. Empty thread_id gets its own slot.
+                SessionIsolation::Strict => "anonymous".to_string(),
+            }
         } else {
             thread_id.to_string()
         };
@@ -855,6 +893,21 @@ mod session_registry_tests {
         let fallback = svc.session_for("").await;
         assert!(Arc::ptr_eq(&b, &fallback));
         assert!(svc.active_slot().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn strict_isolation_empty_thread_id_does_not_steal_active_session() {
+        let svc = WinxService::with_isolation(SessionIsolation::Strict);
+        let a = svc.session_for("thread_a").await; // would be "last-active" under Lenient
+        let anon = svc.session_for("").await;
+        // Strict mode: an empty thread_id must NOT resolve to another client's shell.
+        assert!(!Arc::ptr_eq(&a, &anon));
+        // Anonymous calls share one dedicated slot rather than hijacking named ones.
+        let anon2 = svc.session_for("").await;
+        assert!(Arc::ptr_eq(&anon, &anon2));
+        // Explicit thread_ids stay isolated as always.
+        let b = svc.session_for("thread_b").await;
+        assert!(!Arc::ptr_eq(&a, &b));
     }
 
     #[tokio::test]
