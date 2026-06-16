@@ -16,11 +16,13 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc::{self, TryRecvError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
+
+use crate::state::terminal::TerminalEmulator;
 
 /// Default terminal dimensions (columns x rows)
 pub const DEFAULT_COLS: u16 = 200;
@@ -203,6 +205,12 @@ pub struct PtyShell {
     /// early). Anchoring completion on this instead of the bare glyphs removes
     /// the false-positive that truncated output when a program echoed them.
     prompt_end_marker: String,
+    /// Live terminal emulator fed continuously by the reader thread. Unlike the
+    /// scrollback ring (raw lines), this keeps a consolidated screen grid —
+    /// cursor moves, redraws, alternate-screen and synchronized-output applied —
+    /// so a TUI (the `claude` CLI, vim, htop) yields a stable, non-stacked
+    /// snapshot. See `live_snapshot`.
+    live: Arc<StdMutex<TerminalEmulator>>,
 }
 
 impl std::fmt::Debug for PtyShell {
@@ -286,6 +294,11 @@ impl PtyShell {
         // Create channel for output from reader thread
         let (output_tx, output_rx) = mpsc::channel::<String>();
 
+        // Live terminal emulator, shared with the reader thread so the screen
+        // grid stays current without any consumer needing to poll.
+        let live = Arc::new(StdMutex::new(TerminalEmulator::new(DEFAULT_COLS as usize)));
+        let live_reader = Arc::clone(&live);
+
         // Spawn a background thread to read from the PTY
         // This prevents blocking the main thread
         thread::spawn(move || {
@@ -297,6 +310,13 @@ impl PtyShell {
                         break;
                     }
                     Ok(n) => {
+                        // Tap the raw bytes into the live emulator first (brief
+                        // lock; feed is O(chunk len)). Feeding bytes — not the
+                        // lossy String — keeps the persistent VTE parser exact
+                        // across chunk boundaries.
+                        if let Ok(mut emu) = live_reader.lock() {
+                            emu.feed(&buf[..n]);
+                        }
                         let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
                         if output_tx.send(chunk).is_err() {
                             // Receiver dropped, exit thread
@@ -329,6 +349,7 @@ impl PtyShell {
             last_returned_hash: None,
             attach_hint,
             prompt_end_marker: format!("{WCGW_PROMPT_END}{nonce}"),
+            live,
         };
 
         // Initialize the shell with WCGW-style prompt
@@ -704,6 +725,23 @@ impl PtyShell {
         debug!("PTY sending special key: {} ({:?})", key, bytes);
         self.send_bytes(bytes)?;
         Ok(())
+    }
+
+    /// Snapshot the live terminal screen — a stable, consolidated view of what a
+    /// human would currently see, with cursor moves/redraws applied and ANSI
+    /// stripped. `max_lines` of 0 returns the full screen buffer. This is the
+    /// foundation for piloting interactive TUIs (the `claude` CLI, vim, ...).
+    pub fn live_snapshot(&self, max_lines: usize) -> Vec<String> {
+        match self.live.lock() {
+            Ok(emu) => emu.snapshot(max_lines),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Whether the live terminal is currently on the alternate screen buffer
+    /// (a full-screen app like vim/htop/less is running).
+    pub fn live_in_alt_screen(&self) -> bool {
+        self.live.lock().is_ok_and(|emu| emu.in_alt_screen())
     }
 
     /// Resize the terminal
