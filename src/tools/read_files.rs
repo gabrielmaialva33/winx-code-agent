@@ -15,7 +15,6 @@ use tracing::{debug, error, info, instrument, warn};
 use crate::errors::{ErrorRecovery, Result, WinxError};
 use crate::state::bash_state::BashState;
 use crate::types::ReadFiles;
-use crate::utils::file_cache::FileCache;
 use crate::utils::mmap::read_file_to_string;
 use crate::utils::path::{expand_user, validate_path_in_workspace};
 
@@ -255,7 +254,6 @@ pub async fn handle_tool_call(
     };
 
     let mut message = String::new();
-    let cache = FileCache::global();
     let mut file_ranges_dict: HashMap<String, ReadCoverage> = HashMap::new();
 
     for (index, file_path) in read_files.file_paths.iter().enumerate() {
@@ -288,8 +286,6 @@ pub async fn handle_tool_call(
                     range_format(start_line_num, end_line_num)
                 );
 
-                let _ = cache.record_read_range(Path::new(&canon_path), line_range.0, line_range.1);
-                let _ = cache.record_file_hash(Path::new(&canon_path), &entry.1);
                 let _ = crate::utils::workspace_stats::record_read(
                     &workspace_root,
                     Path::new(&canon_path),
