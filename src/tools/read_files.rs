@@ -116,11 +116,16 @@ async fn read_file(
     }
 
     let mut truncated = false;
-    let tokens_count = count_tokens(&result_content);
     let max_tokens = max_tokens.unwrap_or_else(|| select_max_tokens(file_path));
+    // Tokenize once; reuse the ids for both the count and the truncation below,
+    // instead of encoding the (possibly large) content a second time on truncate.
+    let token_ids = crate::utils::encoder::encode_ids(&result_content);
+    let tokens_count = token_ids
+        .as_ref()
+        .map_or_else(|| crate::utils::encoder::estimate_tokens(&result_content), Vec::len);
 
     if tokens_count > max_tokens {
-        truncate_to_token_budget(&mut result_content, max_tokens);
+        truncate_to_token_budget(&mut result_content, max_tokens, token_ids);
         // Tell the agent exactly where to resume so the tail isn't silently lost.
         let kept_lines = result_content.lines().count();
         let last_shown = (start_idx + kept_lines).min(total_lines);
@@ -155,15 +160,10 @@ fn hash_content(content: &str) -> String {
     })
 }
 
-fn count_tokens(content: &str) -> usize {
-    crate::utils::encoder::count_tokens(content)
-}
-
-fn truncate_to_token_budget(content: &mut String, max_tokens: usize) {
-    // Tokenize once, keep the first `max_tokens` ids and decode them back. The
-    // old binary search re-tokenized the whole (large) string O(log n) times and
-    // walked char_indices on every step — both O(n) — for no benefit.
-    let Some(ids) = crate::utils::encoder::encode_ids(content) else {
+fn truncate_to_token_budget(content: &mut String, max_tokens: usize, ids: Option<Vec<u32>>) {
+    // `ids` were already computed by the caller (the token count needs them too),
+    // so reuse them instead of re-encoding the whole string a second time here.
+    let Some(ids) = ids else {
         // No tokenizer available: fall back to a char-count cut.
         let byte_idx = byte_index_for_char_count(content, max_tokens);
         content.truncate(byte_idx);
