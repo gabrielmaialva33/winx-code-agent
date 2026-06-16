@@ -10,7 +10,6 @@
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::hash_map::DefaultHasher;
-use std::collections::VecDeque;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -22,6 +21,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
+use crate::state::line_ring::LineRing;
 use crate::state::terminal::TerminalEmulator;
 
 /// Default terminal dimensions (columns x rows)
@@ -188,12 +188,10 @@ pub struct PtyShell {
     max_output_size: usize,
     /// Flag for output truncation
     pub output_truncated: bool,
-    /// Rolling buffer of fully-emitted lines for opt-in scrollback. The newest
-    /// line is at the back; capped at `RING_BUFFER_LINES`.
-    pub line_ring: VecDeque<String>,
-    /// Carries the unterminated tail across reads so partial lines aren't
-    /// double-counted when more bytes arrive.
-    line_ring_partial: String,
+    /// Bounded scrollback ring of raw PTY lines (newest at the back) plus the
+    /// in-flight partial line, with drop accounting so a truncated scrollback is
+    /// reported to the caller instead of silently shrinking. See `LineRing`.
+    ring: LineRing,
     /// Hash of the last rendered output we shipped to the caller. Used by the
     /// delta path in `status_check` to elide repeats when the screen is idle.
     pub last_returned_hash: Option<u64>,
@@ -344,8 +342,7 @@ impl PtyShell {
             command_running: false,
             max_output_size: MAX_OUTPUT_SIZE,
             output_truncated: false,
-            line_ring: VecDeque::with_capacity(RING_BUFFER_LINES),
-            line_ring_partial: String::new(),
+            ring: LineRing::new(RING_BUFFER_LINES, MAX_PARTIAL_LINE_BYTES),
             last_returned_hash: None,
             attach_hint,
             prompt_end_marker: format!("{WCGW_PROMPT_END}{nonce}"),
@@ -477,71 +474,22 @@ impl PtyShell {
         Ok(())
     }
 
-    /// Push freshly-arrived bytes through the line-oriented ringbuffer so
-    /// callers can request bounded scrollback later.
-    fn ingest_into_ring(&mut self, chunk: &str) {
-        let combined = if self.line_ring_partial.is_empty() {
-            chunk.to_string()
-        } else {
-            let mut s = std::mem::take(&mut self.line_ring_partial);
-            s.push_str(chunk);
-            s
-        };
-
-        let mut last_nl_end: Option<usize> = None;
-        for (idx, ch) in combined.char_indices() {
-            if ch == '\n' {
-                let end = idx + ch.len_utf8();
-                let start = last_nl_end.unwrap_or(0);
-                // Keep the raw line (CR/cursor moves intact); the emulator in
-                // collect_scrollback replays them. Only drop a trailing CR (CRLF).
-                let line = combined[start..idx].trim_end_matches('\r').to_string();
-                if self.line_ring.len() == RING_BUFFER_LINES {
-                    self.line_ring.pop_front();
-                }
-                self.line_ring.push_back(line);
-                last_nl_end = Some(end);
-            }
-        }
-
-        if let Some(end) = last_nl_end {
-            self.line_ring_partial = combined[end..].to_string();
-        } else {
-            self.line_ring_partial = combined;
-        }
-
-        // A stream that never emits a newline (a `\r`-only progress bar, a binary
-        // blob, `yes | tr -d '\n'`) would grow the partial without bound. Keep
-        // only the tail; older bytes of an unterminated line aren't useful as
-        // scrollback. Snap to a char boundary so we never split a code point.
-        if self.line_ring_partial.len() > MAX_PARTIAL_LINE_BYTES {
-            let cut = self.line_ring_partial.len() - MAX_PARTIAL_LINE_BYTES;
-            let cut = crate::utils::floor_char_boundary(&self.line_ring_partial, cut);
-            self.line_ring_partial.drain(..cut);
-        }
-    }
-
-    /// Return up to `lines` recent lines from the ringbuffer, oldest first.
-    /// Includes any in-flight partial line.
+    /// Return up to `lines` recent lines from the scrollback ring, oldest
+    /// first. When older lines were evicted or a long unterminated line was
+    /// clipped, a `[winx: …]` notice is prepended so the caller knows the
+    /// scrollback is incomplete rather than silently receiving less than asked.
     pub fn collect_scrollback(&self, lines: usize) -> String {
-        if lines == 0 {
-            return String::new();
+        // The ring holds raw PTY lines. Replay them through the terminal
+        // emulator so cursor movements (readline echo, in-place redraws) are
+        // *applied* — not merely stripped — yielding what the screen actually
+        // showed. A plain strip can't undo a `\x1b[D`, so it would leave
+        // `>>> p>>> pr>>> pri...` echo noise behind; the emulator collapses it.
+        let rendered =
+            crate::state::terminal::render_terminal_output(&self.ring.raw(lines)).join("\n");
+        match self.ring.scrollback_notice(lines) {
+            Some(notice) => format!("{notice}\n{rendered}"),
+            None => rendered,
         }
-        let start = self.line_ring.len().saturating_sub(lines);
-        let mut out = String::new();
-        for line in self.line_ring.iter().skip(start) {
-            out.push_str(line);
-            out.push('\n');
-        }
-        if !self.line_ring_partial.is_empty() {
-            out.push_str(&self.line_ring_partial);
-        }
-        // The ring holds raw PTY lines. Replay them through the terminal emulator
-        // so cursor movements (readline echo, in-place redraws) are *applied* —
-        // not merely stripped — yielding what the screen actually showed. A plain
-        // strip can't undo a `\x1b[D`, so it would leave `>>> p>>> pr>>> pri...`
-        // echo noise behind; the emulator collapses it to the final line.
-        crate::state::terminal::render_terminal_output(&out).join("\n")
     }
 
     /// Hash arbitrary rendered output into a u64 dedup key.
@@ -566,7 +514,7 @@ impl PtyShell {
             match self.output_rx.try_recv() {
                 Ok(chunk) => {
                     self.output_buffer.push_str(&chunk);
-                    self.ingest_into_ring(&chunk);
+                    self.ring.push_chunk(&chunk);
                     no_data_count = 0;
 
                     // Check for WCGW prompt indicating command completion
