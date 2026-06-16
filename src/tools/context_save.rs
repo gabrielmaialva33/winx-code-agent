@@ -217,6 +217,11 @@ pub(crate) fn load_saved_context(id: &str) -> Result<Option<(String, Option<Bash
 
     let (memory_file_path, state_file_path) = context_paths(id)?;
     if !memory_file_path.exists() {
+        tracing::warn!(
+            task_id = %id,
+            path = %memory_file_path.display(),
+            "task_id_to_resume requested but no saved context found; starting fresh"
+        );
         return Ok(None);
     }
 
