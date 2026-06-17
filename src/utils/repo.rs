@@ -144,7 +144,7 @@ fn get_all_files_max_depth(root: &Path, is_git_repo: bool) -> Vec<String> {
 /// Walk `root` for files, gitignore-aware (only inside a git repo), keeping
 /// dotfiles but always pruning the `.git` directory, capped at
 /// `MAX_ENTRIES_CHECK` entries and `MAX_WALK_DEPTH` deep. Returns absolute paths.
-/// Shared by the read-only `SearchFiles` / `Glob` tools.
+/// Shared by the read-only code-navigation paths (`CodeMap` outline/references).
 pub fn walk_workspace_files(root: &Path) -> Vec<PathBuf> {
     let is_git_repo = find_git_root(root).is_some();
     let walker = WalkBuilder::new(root)

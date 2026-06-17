@@ -1014,33 +1014,38 @@ pub struct ReadImage {
     pub thread_id: String,
 }
 
-/// Parameters for the `SearchFiles` tool (structured, gitignore-aware grep).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SearchFiles {
-    /// Regular expression to search for, in Rust `regex` syntax.
-    pub pattern: String,
+/// Operation for the `CodeMap` tool.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CodeMapOperation {
+    /// A file's symbol definitions, or a ranked repo-wide symbol map for a directory.
+    Outline,
+    /// The definition + reference (call/use) sites of a symbol name across the repo.
+    References,
+}
 
-    /// Directory (or single file) to search under. Relative paths resolve
-    /// against the workspace; leave empty to search the whole workspace.
+/// Parameters for the `CodeMap` tool: tree-sitter code navigation. One tool with
+/// two operations, in place of separate `Outline` / `FindReferences` tools.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct CodeMap {
+    /// `outline` (symbols in a file, or a ranked repo symbol map for a directory)
+    /// or `references` (the definition + use sites of a symbol name).
+    pub operation: CodeMapOperation,
+
+    /// For `outline`: the file or directory to map (empty or a directory = a
+    /// ranked repo symbol map). For `references`: the directory or file to search
+    /// under (empty = the whole workspace). Relative paths resolve against the
+    /// workspace.
     #[serde(default)]
     pub path: String,
 
-    /// Optional glob restricting which files are searched, e.g. `**/*.rs` or
-    /// `src/**/*.ts` (a bare `*.rs` matches at any depth). Empty searches every
-    /// text file.
+    /// For `references` ONLY: the exact symbol name to find (e.g. `parse_config`).
+    /// Required for `references`, ignored by `outline`.
     #[serde(default)]
-    pub glob: String,
+    pub name: String,
 
-    /// Match case-insensitively. Defaults to false (case-sensitive).
-    #[serde(default)]
-    pub ignore_case: bool,
-
-    /// Lines of surrounding context to include on each side of a match.
-    /// Defaults to 0.
-    #[serde(default)]
-    pub context_lines: usize,
-
-    /// Maximum number of matching lines to return. 0 means the default (200).
+    /// Maximum results: symbols (single file) or files (repo map) for `outline`,
+    /// occurrences for `references`. 0 means the default.
     #[serde(default)]
     pub max_results: usize,
 
@@ -1050,74 +1055,8 @@ pub struct SearchFiles {
     pub thread_id: String,
 }
 
-/// One match in `SearchFiles` structured output.
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct SearchMatch {
-    /// Workspace-relative path of the file the match was found in.
-    pub file: String,
-    /// 1-based line number of the matching line.
-    pub line: usize,
-    /// The full text of the matching line.
-    pub text: String,
-}
-
-/// Structured result of a `SearchFiles` call (mirrors the text block).
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct SearchFilesOutput {
-    /// The regex that was searched for.
-    pub pattern: String,
-    /// Number of matching lines actually returned (capped at `max_results`). When
-    /// `truncated` is true more matches exist; unlike `GlobOutput.total` this is
-    /// the returned count, not a pre-cap total (counting every match would defeat
-    /// the early-exit cap).
-    pub total_matches: usize,
-    /// Number of distinct files that had at least one returned match.
-    pub files_matched: usize,
-    /// True if scanning stopped at a cap (`max_results`, output budget, or
-    /// files-scanned limit) — results may be incomplete. False means every match
-    /// in the searched scope was returned.
-    pub truncated: bool,
-    /// The matching lines (excludes context lines).
-    pub matches: Vec<SearchMatch>,
-}
-
-/// Structured result of a `Glob` call (mirrors the text block).
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-pub struct GlobOutput {
-    /// The glob pattern that was matched.
-    pub pattern: String,
-    /// Total number of files that matched (before the `max_results` cap).
-    pub total: usize,
-    /// Number of paths actually returned in `paths`.
-    pub shown: usize,
-    /// Matching workspace-relative paths, ranked best-first.
-    pub paths: Vec<String>,
-}
-
-/// Parameters for the `Glob` tool (gitignore-aware file discovery).
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Glob {
-    /// Glob pattern to match file paths, e.g. `**/*.rs`, `src/**/*.ts` or
-    /// `Cargo.toml` (a bare `Cargo.toml` matches at any depth). Matched against
-    /// workspace-relative paths.
-    pub pattern: String,
-
-    /// Directory to search under. Relative paths resolve against the workspace;
-    /// leave empty to search the whole workspace.
-    #[serde(default)]
-    pub path: String,
-
-    /// Maximum number of paths to return. 0 means the default (200).
-    #[serde(default)]
-    pub max_results: usize,
-
-    /// Optional thread ID identifying the shell session to operate on. When
-    /// omitted, the most recently active session is used.
-    #[serde(default)]
-    pub thread_id: String,
-}
-
-/// Parameters for the `Outline` tool (tree-sitter symbol map).
+/// Parameters for the `Outline` operation (tree-sitter symbol map), used
+/// internally by `CodeMap`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Outline {
     /// File or directory to outline. A file returns that file's symbols; a
@@ -1217,6 +1156,16 @@ pub struct ReferencesOutput {
     pub truncated: bool,
     /// Occurrences, definitions first then references, each group by file/line.
     pub hits: Vec<ReferenceHit>,
+}
+
+/// Structured output of the `CodeMap` tool: an outline result or a references
+/// result, depending on the `operation`. Untagged so the structured content is
+/// just the inner object (matching what the underlying handler emits).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(untagged)]
+pub enum CodeMapOutput {
+    Outline(OutlineOutput),
+    References(ReferencesOutput),
 }
 
 #[cfg(test)]

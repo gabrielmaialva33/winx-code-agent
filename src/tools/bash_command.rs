@@ -999,7 +999,7 @@ async fn read_completion_extras(
     let pointer = match (shell.output_truncated, shell.scratch_path()) {
         (true, Some(path)) => format!(
             "\n\n---\n[Output was truncated to fit context. The earlier (dropped) output was \
-             saved to:\n{}\nRead it with ReadFiles or search it with SearchFiles.]\n---",
+             saved to:\n{}\nRead it with ReadFiles or grep it via BashCommand.]\n---",
             path.display()
         ),
         _ => String::new(),

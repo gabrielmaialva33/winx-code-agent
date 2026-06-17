@@ -32,7 +32,7 @@ const MAX_OUTLINE_FILE_SIZE: u64 = 2_000_000;
 /// Byte proxy (~4 bytes/token) for the rendered repo-map budget.
 const OUTLINE_MAX_BYTES: usize = 24_000 * 4;
 /// Stop after reading+parsing this many files in repo mode, so a tree of
-/// definition-less supported files can't be fully scanned (mirrors `SearchFiles`).
+/// definition-less supported files can't be fully scanned (a scan-budget cap).
 const MAX_FILES_SCANNED: usize = 20_000;
 
 type Configs = HashMap<String, Option<TagsConfiguration>>;
@@ -173,7 +173,7 @@ fn ranked_supported_files(root: &Path, workspace_root: &Path) -> Vec<(PathBuf, S
         .collect();
 
     // Pre-sort alphabetically so equal-score ties resolve deterministically
-    // (stable sort keeps this order), matching Glob.
+    // (stable sort keeps this order).
     files.sort_by(|a, b| a.1.cmp(&b.1));
     let rels: Vec<String> = files.iter().map(|(_, r)| r.clone()).collect();
     if let Some(scores) = score_paths(&rels) {

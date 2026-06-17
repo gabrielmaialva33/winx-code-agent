@@ -26,7 +26,7 @@ use crate::utils::symbols;
 const DEFAULT_MAX_HITS: usize = 200;
 /// Skip files larger than this when scanning.
 const MAX_FILE_SIZE: u64 = 2_000_000;
-/// Stop after reading+parsing this many files (mirrors `SearchFiles`).
+/// Stop after reading+parsing this many files (a scan-budget cap).
 const MAX_FILES_SCANNED: usize = 20_000;
 
 type Configs = HashMap<String, Option<TagsConfiguration>>;

@@ -278,8 +278,7 @@ async fn test_05_send_specials_ctrl_c() -> Result<()> {
         wait_for_seconds: Some(2.0),
         thread_id: "i2238-ctrlc".to_string(),
     };
-    let status_result =
-        tools::bash_command::handle_tool_call(&bash_state_arc, status_after).await;
+    let status_result = tools::bash_command::handle_tool_call(&bash_state_arc, status_after).await;
     assert!(
         status_result
             .as_ref()

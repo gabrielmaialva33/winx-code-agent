@@ -60,13 +60,12 @@ long-running TUIs without leaking output buffers into your token budget.
 | `Initialize`      | Boots the workspace, picks the mode, hands you a `thread_id`. Call this first or everything else errors out. With no workspace path it spins up a scratch playground; resuming a task (`task_id_to_resume`) reopens its saved project root. |
 | `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, drives TUIs. Supports `is_background`, `status_check`, `send_text`, `send_specials`, `send_ascii`, `allow_multi`, plus `screen` (a stable point-in-time frame of an interactive TUI with the cursor position; pass `diff:true` for only the lines that changed since your last look) and `wait_for_turn` (block until the TUI is ready for input, via per-app or configurable recognizers). When a foreground command finishes, the status line reports its real `exit code` (parsed from the prompt marker), so failures surface without grepping stderr. |
 | `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range. When the token budget is hit it tells you the exact line + `file:N-M` syntax to resume from instead of silently dropping the tail. |
-| `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks (with optional `@start-end` line anchors to pin a repeated block). Validates file read coverage and freshness before writing, reports any fuzzy tolerances it had to apply, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet. |
+| `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks (with optional `@start-end` line anchors to pin a repeated block). Validates file read coverage and freshness before writing, reports any fuzzy tolerances it had to apply, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet. The success message includes a compact diff of what changed. |
+| `MultiFileEdit`   | Edits several files all-or-nothing: every file's edit is validated and computed in memory first, and only if all succeed is anything written - so a SEARCH that fails to match in the last file leaves the earlier ones untouched. For a single file use `FileWriteOrEdit`. |
+| `UndoEdit`        | Reverts a file to its content before the last `FileWriteOrEdit`/`MultiFileEdit` this session (per-file, last ~10 edits kept in memory). Refused if the file changed on disk since your edit; a brand-new file's creation isn't undoable. |
 | `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                              |
 | `ReadImage`       | Returns a native MCP image content block (not base64 as text), so multimodal models actually see the image. Confined to the workspace (like `ReadFiles`) and size-capped.                                  |
-| `SearchFiles`     | Structured, gitignore-aware regex search across the workspace - a built-in `rg`. Scope with `path`/`glob`, toggle `ignore_case`, set `context_lines`/`max_results`. Returns the file then `line:match` (context as `line-text`), token-budgeted. Works in `architect`/`code_writer` too, where shelling out to `rg`/`grep` is blocked. |
-| `Glob`            | gitignore-aware file discovery by glob (`**/*.rs`, `src/**/*.ts`, `Cargo.toml`). Returns workspace-relative paths ranked best-first by the embedded relevance model, capped with an "N more" note. Also works in the restricted modes where `find`/`ls` are blocked. |
-| `Outline`         | Tree-sitter symbol map (functions, types, methods, classes, ...). A file path returns that file's definitions; a directory (or empty) returns a relevance-ranked, token-budgeted repo symbol map. 11 languages, read-only, works in every mode - a token-cheap alternative to reading whole files just to learn their shape. |
-| `FindReferences`  | Find where a symbol is defined and referenced (called/used) across the codebase, by name. A semantic lookup that counts only real identifier occurrences (never inside strings/comments, unlike grep); lists definitions first, then references. |
+| `CodeMap`         | Tree-sitter code navigation, in one tool with two `operation`s. `outline`: a symbol map (functions, types, methods, ...) - a file returns its definitions, a directory (or empty) a relevance-ranked, token-budgeted repo symbol map, in 11 languages. `references`: where a `name` is defined and used (called) across the repo, counting only real identifier occurrences (never inside strings/comments, unlike grep), definitions first. For plain-text/regex search and file discovery, just use `rg`/`fd`/`grep` via `BashCommand`. |
 
 ## Search/Replace editing
 
@@ -403,8 +402,8 @@ cargo run --release
 
 ### Check it's wired up
 
-List MCP tools in your client. You should see ten entries: `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`,
-`ContextSave`, `ReadImage`, `SearchFiles`, `Glob`, `Outline`, `FindReferences`. The first call always has to be `Initialize`; Winx tracks workspace + mode per thread.
+List MCP tools in your client. You should see nine entries: `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`,
+`MultiFileEdit`, `UndoEdit`, `ContextSave`, `ReadImage`, `CodeMap`. The first call always has to be `Initialize`; Winx tracks workspace + mode per thread.
 
 ## Remote access (ChatGPT & other remote MCP clients)
 

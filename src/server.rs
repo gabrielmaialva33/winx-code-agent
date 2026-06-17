@@ -29,9 +29,8 @@ use crate::errors::WinxError;
 use crate::state::bash_state::generate_thread_id;
 use crate::state::BashState;
 use crate::types::{
-    normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, FindReferences, Glob,
-    GlobOutput, Initialize, MultiFileEdit, Outline, OutlineOutput, ReadFiles, ReadImage,
-    ReferencesOutput, SearchFiles, SearchFilesOutput, UndoEdit,
+    normalize_thread_id, BashCommand, CodeMap, CodeMapOutput, ContextSave, FileWriteOrEdit,
+    Initialize, MultiFileEdit, ReadFiles, ReadImage, UndoEdit,
 };
 
 /// Map a domain [`WinxError`] to the right JSON-RPC error kind.
@@ -297,32 +296,13 @@ const CONTEXT_SAVE_DESCRIPTION: &str =
      - Provide random 3 word unqiue id or whatever user provided. \
      - Leave project path as empty string if no project path";
 
-const SEARCH_FILES_DESCRIPTION: &str =
-    "- Search file contents with a regular expression (Rust regex syntax) — a structured `grep`/`rg`. \
-     - Prefer this over running `rg`/`grep` through BashCommand: it is gitignore-aware, workspace-confined, token-budgeted, and works in every mode (including architect/code_writer, where shell search is blocked). \
-     - `pattern` is required. Scope with `path` (directory or file; defaults to the whole workspace) and `glob` (e.g. `**/*.rs`; a bare `*.rs` matches at any depth). \
-     - Set `ignore_case` for case-insensitive matching, `context_lines` for surrounding lines, and `max_results` to cap matches. \
-     - Output is the file path, then `line:matched text` (context lines use `line-text`).";
-
-const GLOB_DESCRIPTION: &str =
-    "- Find files by glob pattern (e.g. `**/*.rs`, `src/**/*.ts`, `Cargo.toml`) — a gitignore-aware `find`. \
-     - Prefer this over `find`/`ls` through BashCommand: it is gitignore-aware, workspace-confined, ranked by relevance, and works in every mode. \
-     - `pattern` is required (a bare name like `Cargo.toml` matches at any depth). Scope with `path`; cap with `max_results`. \
-     - Returns workspace-relative paths, best-first.";
-
-const OUTLINE_DESCRIPTION: &str =
-    "- Map code symbols (functions, types, methods, classes, ...) via tree-sitter — a token-cheap structural view of a file or repo, like an IDE outline. \
-     - Prefer this over reading whole files just to learn their shape, or grepping for `fn `/`class `. \
-     - `path` to a FILE returns that file's definitions; `path` to a DIRECTORY (or empty = the whole workspace) returns a relevance-ranked, token-budgeted symbol map across files. \
-     - Cap with `max_results` (symbols for a single file, files for a repo map). gitignore-aware, workspace-confined, works in every mode. \
-     - 11 languages (rust, js/ts, go, c, c++, java, ruby, c#, php, lua); other files return no symbols.";
-
-const FIND_REFERENCES_DESCRIPTION: &str =
-    "- Find where a symbol is defined and referenced (called/used) across the codebase, by name — a name-based semantic lookup via tree-sitter. \
-     - Prefer this over grepping an identifier: it counts only real symbol occurrences, never matches inside strings or comments. \
-     - `name` is required (exact identifier). Scope with `path` (file or directory; empty = whole workspace); cap with `max_results`. \
-     - Output lists definitions first, then references, as `def|ref  file:line  kind  name`. gitignore-aware, workspace-confined, works in every mode. Same 11 languages as Outline. \
-     - Note: C/C++ grammars tag definitions only (no call sites), so `references` reads 0 for `.c`/`.h`/`.cpp` — use it for \"where is this defined\", not call counts, in those languages.";
+const CODE_MAP_DESCRIPTION: &str =
+    "- Navigate code structure via tree-sitter - the semantic layer plain grep/rg can't give you. Pick an `operation`: \
+     - operation=\"outline\": map symbols (functions, types, methods, classes, ...). `path` to a FILE returns that file's definitions; `path` to a DIRECTORY (or empty = the whole workspace) returns a relevance-ranked, token-budgeted symbol map across files. Use it instead of reading whole files just to learn their shape. \
+     - operation=\"references\": find where a symbol is defined and referenced (called/used), by name. `name` is required (exact identifier). Counts only real symbol occurrences, never matches inside strings or comments. Output lists definitions first, then references, as `def|ref  file:line  kind  name`. \
+     - Scope either operation with `path` (file or directory; empty = whole workspace); cap with `max_results`. gitignore-aware, workspace-confined, works in every mode. \
+     - 11 languages (rust, js/ts, go, c, c++, java, ruby, c#, php, lua); other files return no symbols. Note: C/C++ grammars tag definitions only, so references reads 0 for `.c`/`.h`/`.cpp`. \
+     - For plain-text/regex search or file discovery, use rg / grep / fd / find via BashCommand.";
 
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
 static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();
@@ -373,24 +353,9 @@ fn build_winx_tools() -> Vec<Tool> {
             "Read an image from the shell.",
             ToolAnnotations::new().read_only(true).open_world(false),
         ),
-        mcp_tool_io::<SearchFiles, SearchFilesOutput>(
-            "SearchFiles",
-            SEARCH_FILES_DESCRIPTION,
-            ToolAnnotations::new().read_only(true).open_world(false),
-        ),
-        mcp_tool_io::<Glob, GlobOutput>(
-            "Glob",
-            GLOB_DESCRIPTION,
-            ToolAnnotations::new().read_only(true).open_world(false),
-        ),
-        mcp_tool_io::<Outline, OutlineOutput>(
-            "Outline",
-            OUTLINE_DESCRIPTION,
-            ToolAnnotations::new().read_only(true).open_world(false),
-        ),
-        mcp_tool_io::<FindReferences, ReferencesOutput>(
-            "FindReferences",
-            FIND_REFERENCES_DESCRIPTION,
+        mcp_tool_io::<CodeMap, CodeMapOutput>(
+            "CodeMap",
+            CODE_MAP_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
         ),
     ]
@@ -751,10 +716,7 @@ impl ServerHandler for WinxService {
             "UndoEdit" => self.handle_undo_edit(args_value).await,
             "ContextSave" => self.handle_context_save(args_value).await,
             "ReadImage" => self.handle_read_image(args_value).await,
-            "SearchFiles" => self.handle_search_files(args_value).await,
-            "Glob" => self.handle_glob(args_value).await,
-            "Outline" => self.handle_outline(args_value).await,
-            "FindReferences" => self.handle_find_references(args_value).await,
+            "CodeMap" => self.handle_code_map(args_value).await,
             _ => Err(McpError::invalid_request(format!("Unknown tool: {tool}"), None)),
         };
 
@@ -816,10 +778,7 @@ fn audit_summary(tool: &str, args: Option<&Value>) -> String {
         }
         "Initialize" => format!("ws={} mode={}", s("any_workspace_path"), s("mode_name")),
         "ContextSave" => format!("id={}", s("id")),
-        "SearchFiles" => format!("pattern={:?}", clip(s("pattern"))),
-        "Glob" => format!("pattern={}", s("pattern")),
-        "Outline" => format!("path={}", s("path")),
-        "FindReferences" => format!("name={}", s("name")),
+        "CodeMap" => format!("op={} path={} name={}", s("operation"), s("path"), s("name")),
         _ => String::new(),
     }
 }
@@ -1141,81 +1100,22 @@ impl WinxService {
         }
     }
 
-    async fn handle_search_files(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+    async fn handle_code_map(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let search: SearchFiles = Self::lenient_from_value(args).map_err(|e| {
-            McpError::invalid_request(format!("Invalid SearchFiles parameters: {e}"), None)
+        let code_map: CodeMap = Self::lenient_from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid CodeMap parameters: {e}"), None)
         })?;
 
         // Read-only: no persist_state (nothing in the session changes).
         let (slot, _session_guard) =
-            self.session_for(&normalize_thread_id(&search.thread_id)).await;
-        match crate::tools::search_files::handle_tool_call(&slot, search).await {
+            self.session_for(&normalize_thread_id(&code_map.thread_id)).await;
+        match crate::tools::code_map::handle_tool_call(&slot, code_map).await {
             Ok((text, structured)) => {
                 let mut result = CallToolResult::success(vec![Content::text(text)]);
                 result.structured_content = Some(structured);
                 Ok(result)
             }
-            Err(e) => Err(to_mcp_error("SearchFiles", &e)),
-        }
-    }
-
-    async fn handle_glob(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
-        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let glob_args: Glob = Self::lenient_from_value(args).map_err(|e| {
-            McpError::invalid_request(format!("Invalid Glob parameters: {e}"), None)
-        })?;
-
-        // Read-only: no persist_state.
-        let (slot, _session_guard) =
-            self.session_for(&normalize_thread_id(&glob_args.thread_id)).await;
-        match crate::tools::glob::handle_tool_call(&slot, glob_args).await {
-            Ok((text, structured)) => {
-                let mut result = CallToolResult::success(vec![Content::text(text)]);
-                result.structured_content = Some(structured);
-                Ok(result)
-            }
-            Err(e) => Err(to_mcp_error("Glob", &e)),
-        }
-    }
-
-    async fn handle_outline(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
-        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let outline: Outline = Self::lenient_from_value(args).map_err(|e| {
-            McpError::invalid_request(format!("Invalid Outline parameters: {e}"), None)
-        })?;
-
-        // Read-only: no persist_state.
-        let (slot, _session_guard) =
-            self.session_for(&normalize_thread_id(&outline.thread_id)).await;
-        match crate::tools::outline::handle_tool_call(&slot, outline).await {
-            Ok((text, structured)) => {
-                let mut result = CallToolResult::success(vec![Content::text(text)]);
-                result.structured_content = Some(structured);
-                Ok(result)
-            }
-            Err(e) => Err(to_mcp_error("Outline", &e)),
-        }
-    }
-
-    async fn handle_find_references(
-        &self,
-        args: Option<Value>,
-    ) -> Result<CallToolResult, McpError> {
-        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
-        let find: FindReferences = Self::lenient_from_value(args).map_err(|e| {
-            McpError::invalid_request(format!("Invalid FindReferences parameters: {e}"), None)
-        })?;
-
-        // Read-only: no persist_state.
-        let (slot, _session_guard) = self.session_for(&normalize_thread_id(&find.thread_id)).await;
-        match crate::tools::references::handle_tool_call(&slot, find).await {
-            Ok((text, structured)) => {
-                let mut result = CallToolResult::success(vec![Content::text(text)]);
-                result.structured_content = Some(structured);
-                Ok(result)
-            }
-            Err(e) => Err(to_mcp_error("FindReferences", &e)),
+            Err(e) => Err(to_mcp_error("CodeMap", &e)),
         }
     }
 }

@@ -5,21 +5,20 @@
 //! is [`crate::server::WinxService`].
 
 pub mod bash_command;
+pub mod code_map;
 pub mod context_save;
 pub mod file_write_or_edit;
-pub mod glob;
 pub mod initialize;
 pub mod multi_file_edit;
 pub mod outline;
 pub mod read_files;
 pub mod read_image;
 pub mod references;
-pub mod search_files;
 pub mod undo_edit;
 
 /// Serialize a tool's structured output to JSON for the MCP result's
 /// `structuredContent`, mapping the (practically impossible) failure to a domain
-/// error instead of panicking. Shared by the read-only search/glob tools.
+/// error instead of panicking. Used by the read-only `CodeMap` handlers.
 pub(crate) fn structured_json<T: serde::Serialize>(
     value: &T,
 ) -> crate::errors::Result<serde_json::Value> {

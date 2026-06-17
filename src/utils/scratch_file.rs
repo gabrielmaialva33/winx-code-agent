@@ -4,7 +4,7 @@
 //! tail and drops the oldest bytes (see the truncation paths in `pty.rs`). That
 //! dropped head is the part the agent can no longer see. Instead of losing it,
 //! we append it to a file under `<workspace>/.winx/scratch/` so the agent can
-//! recover it with ReadFiles/SearchFiles. The file lives inside the workspace on
+//! recover it with `ReadFiles` (or grep via `BashCommand`). The file lives inside the workspace on
 //! purpose: those read tools are workspace-confined and pipe through the
 //! redaction layer, so a leaked secret in the log is still scrubbed on the way
 //! back out.
