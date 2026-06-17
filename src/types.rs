@@ -922,6 +922,35 @@ pub struct FileWriteOrEdit {
     pub thread_id: String,
 }
 
+/// One file's worth of edits in a [`MultiFileEdit`] batch. Same semantics as the
+/// corresponding [`FileWriteOrEdit`] fields.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FileEditEntry {
+    /// Path to the file to write or edit (absolute, ~ allowed).
+    pub file_path: String,
+    /// If > 50%, the content is the entire file; if <= 50%, search/replace blocks.
+    pub percentage_to_change: u32,
+    /// Full file content or search/replace blocks (see `FileWriteOrEdit`).
+    pub text_or_search_replace_blocks: String,
+}
+
+/// Parameters for the `MultiFileEdit` tool: apply edits across several files
+/// all-or-nothing at the COMPUTE stage.
+///
+/// Every file is validated and its new content computed in memory first; only
+/// if ALL succeed are any writes performed. So a SEARCH that fails to match in
+/// the last file leaves the first files untouched. The write stage is a sequence
+/// of atomic single-file renames and stops at the first I/O failure (already
+/// written files are not rolled back, which is reported clearly).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct MultiFileEdit {
+    /// Two or more files to edit together. For a single file use `FileWriteOrEdit`.
+    pub files: Vec<FileEditEntry>,
+
+    /// The thread ID for this session
+    pub thread_id: String,
+}
+
 /// Parameters for the `ContextSave` tool
 ///
 /// This struct represents the parameters needed to save context information

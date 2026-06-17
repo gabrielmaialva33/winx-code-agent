@@ -9,6 +9,7 @@ pub mod context_save;
 pub mod file_write_or_edit;
 pub mod glob;
 pub mod initialize;
+pub mod multi_file_edit;
 pub mod outline;
 pub mod read_files;
 pub mod read_image;

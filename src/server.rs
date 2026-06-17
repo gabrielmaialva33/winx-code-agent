@@ -30,8 +30,8 @@ use crate::state::bash_state::generate_thread_id;
 use crate::state::BashState;
 use crate::types::{
     normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, FindReferences, Glob,
-    GlobOutput, Initialize, Outline, OutlineOutput, ReadFiles, ReadImage, ReferencesOutput,
-    SearchFiles, SearchFilesOutput,
+    GlobOutput, Initialize, MultiFileEdit, Outline, OutlineOutput, ReadFiles, ReadImage,
+    ReferencesOutput, SearchFiles, SearchFilesOutput,
 };
 
 /// Map a domain [`WinxError`] to the right JSON-RPC error kind.
@@ -278,6 +278,13 @@ const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
      Preserve leading spaces and indentations in both SEARCH and REPLACE blocks. \
      If a short block would match multiple places, anchor it to a line number from ReadFiles instead of padding with context: write the marker as \"<<<<<<< SEARCH @42\" (or a range \"@42-50\") to target that 1-based location. A stale anchor falls back to the normal search, so it never makes a valid edit fail.";
 
+const MULTI_FILE_EDIT_DESCRIPTION: &str =
+    "- Edits SEVERAL files together, all-or-nothing. Use this over multiple FileWriteOrEdit calls when a change spans files and a partial apply would be bad (e.g. rename a symbol across files). \
+     - Every file's edit is validated and computed in memory FIRST; only if ALL succeed is anything written, so a SEARCH that fails to match in the last file leaves the earlier files untouched. \
+     - Each entry has the same fields as FileWriteOrEdit: file_path (absolute, ~ allowed), percentage_to_change, and text_or_search_replace_blocks. Each file must have been read with ReadFiles first. \
+     - Provide 2+ files; for a single file use FileWriteOrEdit. Do not list the same file twice. \
+     - If a write fails mid-batch (rare: disk/permissions), it stops and reports which files were already written; those are not rolled back.";
+
 const CONTEXT_SAVE_DESCRIPTION: &str =
     "Saves provided description and file contents of all the relevant file paths or globs in a single text file. \
      - Provide random 3 word unqiue id or whatever user provided. \
@@ -337,6 +344,11 @@ fn build_winx_tools() -> Vec<Tool> {
         mcp_tool::<FileWriteOrEdit>(
             "FileWriteOrEdit",
             FILE_WRITE_OR_EDIT_DESCRIPTION,
+            ToolAnnotations::new().destructive(true).open_world(false),
+        ),
+        mcp_tool::<MultiFileEdit>(
+            "MultiFileEdit",
+            MULTI_FILE_EDIT_DESCRIPTION,
             ToolAnnotations::new().destructive(true).open_world(false),
         ),
         mcp_tool::<ContextSave>(
@@ -723,6 +735,7 @@ impl ServerHandler for WinxService {
             "BashCommand" => self.handle_bash_command(args_value).await,
             "ReadFiles" => self.handle_read_files(args_value).await,
             "FileWriteOrEdit" => self.handle_file_write_or_edit(args_value).await,
+            "MultiFileEdit" => self.handle_multi_file_edit(args_value).await,
             "ContextSave" => self.handle_context_save(args_value).await,
             "ReadImage" => self.handle_read_image(args_value).await,
             "SearchFiles" => self.handle_search_files(args_value).await,
@@ -779,6 +792,9 @@ fn audit_summary(tool: &str, args: Option<&Value>) -> String {
             }
         }
         "FileWriteOrEdit" | "ReadImage" => format!("path={}", s("file_path")),
+        "MultiFileEdit" => {
+            format!("files={}", args.get("files").and_then(Value::as_array).map_or(0, Vec::len))
+        }
         "ReadFiles" => {
             format!(
                 "files={}",
@@ -1037,6 +1053,25 @@ impl WinxService {
                 Ok(CallToolResult::success(vec![Content::text(result)]))
             }
             Err(e) => Err(to_mcp_error("FileWriteOrEdit", &e)),
+        }
+    }
+
+    async fn handle_multi_file_edit(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let multi: MultiFileEdit = Self::lenient_from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid MultiFileEdit parameters: {e}"), None)
+        })?;
+
+        let (slot, _session_guard) = self.session_for(&normalize_thread_id(&multi.thread_id)).await;
+        match crate::tools::multi_file_edit::handle_tool_call(&slot, multi).await {
+            Ok(result) => {
+                self.persist_state(&slot).await;
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            Err(e) => Err(to_mcp_error("MultiFileEdit", &e)),
         }
     }
 

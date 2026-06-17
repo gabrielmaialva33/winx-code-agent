@@ -906,13 +906,12 @@ fn snippet_similarity(candidate: &[String], search: &[String]) -> f64 {
         - candidate.len().abs_diff(search.len()) as f64
 }
 
-fn uses_search_replace(file_write_or_edit: &FileWriteOrEdit) -> bool {
-    if file_write_or_edit.percentage_to_change <= 50 {
+fn uses_search_replace(percentage_to_change: u32, blocks: &str) -> bool {
+    if percentage_to_change <= 50 {
         return true;
     }
 
-    let first_content_line =
-        file_write_or_edit.text_or_search_replace_blocks.trim_start().lines().next();
+    let first_content_line = blocks.trim_start().lines().next();
     first_content_line.is_some_and(|line| search_marker().is_ok_and(|marker| marker.is_match(line)))
 }
 
@@ -946,7 +945,50 @@ pub async fn handle_tool_call(
         return Err(WinxError::ThreadIdMismatch(thread_id));
     }
 
-    let expanded_path = expand_user(&file_write_or_edit.file_path);
+    let planned = plan_edit(
+        bash_state,
+        &file_write_or_edit.file_path,
+        file_write_or_edit.percentage_to_change,
+        &file_write_or_edit.text_or_search_replace_blocks,
+    )?;
+    commit_edit(bash_state, planned)
+}
+
+/// A validated, computed edit that has not yet touched disk. Produced by
+/// [`plan_edit`] (all the checks + the in-memory new content) and consumed by
+/// [`commit_edit`] (the write). Splitting the two is what lets `MultiFileEdit`
+/// validate and compute EVERY file before writing ANY of them.
+pub(crate) struct PlannedEdit {
+    path: PathBuf,
+    file_path_str: String,
+    /// "edited" (search/replace) or "wrote" (full content), for the message.
+    action: &'static str,
+    new_content: String,
+    /// Prior on-disk content, for the post-edit diff. `None` for a new file.
+    previous: Option<String>,
+    tolerances: Vec<ToleranceKind>,
+    uses_search_replace: bool,
+}
+
+impl PlannedEdit {
+    /// The workspace-confined target path, for batch error reporting.
+    pub(crate) fn target(&self) -> &str {
+        &self.file_path_str
+    }
+}
+
+/// Validate and compute an edit WITHOUT writing: resolve + workspace-confine the
+/// path, enforce the mode gate, read the current file once, enforce the
+/// hash/read-enough whitelist gate, and apply the search/replace blocks (or take
+/// the full content). Borrows `bash_state` immutably, so a batch can plan every
+/// file before committing any.
+pub(crate) fn plan_edit(
+    bash_state: &BashState,
+    file_path: &str,
+    percentage_to_change: u32,
+    blocks: &str,
+) -> Result<PlannedEdit> {
+    let expanded_path = expand_user(file_path);
     let path = if Path::new(&expanded_path).is_absolute() {
         PathBuf::from(&expanded_path)
     } else {
@@ -958,7 +1000,7 @@ pub async fn handle_tool_call(
 
     let file_path_str = path.to_string_lossy().to_string();
 
-    let uses_search_replace = uses_search_replace(&file_write_or_edit);
+    let uses_search_replace = uses_search_replace(percentage_to_change, blocks);
     let operation_allowed = if uses_search_replace {
         bash_state.is_file_edit_allowed(&file_path_str)
     } else {
@@ -967,7 +1009,7 @@ pub async fn handle_tool_call(
 
     if !operation_allowed {
         return Err(WinxError::FileAccessError {
-            path: path.clone(),
+            path,
             message: "File operation not allowed in current mode.".to_string(),
         });
     }
@@ -994,7 +1036,7 @@ pub async fn handle_tool_call(
         let current_hash = hash_content(original_content);
         if whitelist.file_hash != current_hash {
             return Err(WinxError::FileAccessError {
-                path: path.clone(),
+                path,
                 message: format!(
                     "{file_path_str} changed on disk since you last read it. \
                      Call ReadFiles again to get the current content, then retry the edit."
@@ -1003,7 +1045,7 @@ pub async fn handle_tool_call(
         }
         if !uses_search_replace && !whitelist.is_read_enough() {
             return Err(WinxError::FileAccessError {
-                path: path.clone(),
+                path,
                 message: format!(
                     "Read more of the file before overwriting. Unread line ranges: {}",
                     format_unread_ranges(whitelist)
@@ -1012,42 +1054,59 @@ pub async fn handle_tool_call(
         }
     }
 
-    // `mkdir -p` for new files (no-op for edits, whose parent already exists).
-    ensure_parent_dirs(&path)?;
-
-    let result = if uses_search_replace {
+    let (action, new_content, tolerances) = if uses_search_replace {
         // Empty when editing a not-yet-existing file; apply_blocks then fails with
         // a clear "block not found" rather than a raw I/O error.
         let original_content = pre_write_content.as_deref().unwrap_or_default();
-        let (new_content, tolerances) = apply_blocks_with_unescape_retry(
-            original_content,
-            &file_write_or_edit.text_or_search_replace_blocks,
-        )?;
-
-        write_no_follow(&path, new_content.as_bytes())?;
-        operation_result(
-            "edited",
-            &file_path_str,
-            &path,
-            &new_content,
-            &tolerances,
-            Some(original_content),
-        )
+        let (new_content, tolerances) = apply_blocks_with_unescape_retry(original_content, blocks)?;
+        ("edited", new_content, tolerances)
     } else {
-        let new_content = &file_write_or_edit.text_or_search_replace_blocks;
-        write_no_follow(&path, new_content.as_bytes())?;
-        // `pre_write_content` is the prior version for the diff (None for a new file).
-        operation_result(
-            "wrote",
-            &file_path_str,
-            &path,
-            new_content,
-            &[],
-            pre_write_content.as_deref(),
-        )
+        ("wrote", blocks.to_string(), Vec::new())
     };
 
-    refresh_whitelist_and_stats(bash_state, file_path_str, &path, uses_search_replace)?;
+    Ok(PlannedEdit {
+        path,
+        file_path_str,
+        action,
+        new_content,
+        previous: pre_write_content,
+        tolerances,
+        uses_search_replace,
+    })
+}
+
+/// Write a [`PlannedEdit`] to disk atomically and refresh the whitelist/stats.
+/// Returns the success message (including the post-edit diff). This is the only
+/// step that mutates the filesystem.
+pub(crate) fn commit_edit(bash_state: &mut BashState, planned: PlannedEdit) -> Result<String> {
+    let PlannedEdit {
+        path,
+        file_path_str,
+        action,
+        new_content,
+        previous,
+        tolerances,
+        uses_search_replace,
+    } = planned;
+
+    // `mkdir -p` for new files (no-op for edits, whose parent already exists).
+    ensure_parent_dirs(&path)?;
+    write_no_follow(&path, new_content.as_bytes())?;
+    let result = operation_result(
+        action,
+        &file_path_str,
+        &path,
+        &new_content,
+        &tolerances,
+        previous.as_deref(),
+    );
+    refresh_whitelist_and_stats(
+        bash_state,
+        file_path_str,
+        &path,
+        &new_content,
+        uses_search_replace,
+    );
     Ok(result)
 }
 
@@ -1059,11 +1118,17 @@ fn refresh_whitelist_and_stats(
     bash_state: &mut BashState,
     file_path_str: String,
     path: &Path,
+    new_content: &str,
     uses_search_replace: bool,
-) -> Result<()> {
-    let final_content = fs::read_to_string(path)?;
-    let hash = hash_content(&final_content);
-    let total_lines = final_content.lines().count();
+) {
+    // Hash the content we just wrote, in memory, instead of reading the file back
+    // off disk: a read-back both wastes an IO and opens a TOCTOU window where an
+    // external write between our atomic rename and the read-back would record a
+    // hash for content winx never produced (and could even fail with `?` after the
+    // write already succeeded). `write_no_follow` wrote exactly these bytes, so a
+    // later ReadFiles sees them and the hash matches.
+    let hash = hash_content(new_content);
+    let total_lines = new_content.lines().count();
     bash_state
         .whitelist_for_overwrite
         .insert(file_path_str, FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines));
@@ -1076,7 +1141,6 @@ fn refresh_whitelist_and_stats(
     if let Err(e) = stats {
         debug!("failed to record {kind} stats: {e}");
     }
-    Ok(())
 }
 
 /// Lines of context shown around each hunk in the post-edit diff.
