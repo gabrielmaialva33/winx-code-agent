@@ -150,23 +150,26 @@ fn error_context(content: &str, error_row: usize) -> String {
     out
 }
 
+/// Syntax-check argv[1] via `compile()` (so no `.pyc` is emitted, unlike
+/// `py_compile`) and print just `msg (line N)` on error. Catching `SyntaxError`
+/// ourselves keeps the interpreter from dumping a traceback whose top frames are
+/// *this* wrapper — the model should see only the error in its own file.
+const PY_SYNTAX_CHECK: &str = concat!(
+    "import sys\n",
+    "try:\n",
+    "    compile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')\n",
+    "except SyntaxError as e:\n",
+    "    print(f'{e.msg} (line {e.lineno})', file=sys.stderr)\n",
+    "    sys.exit(1)\n",
+);
+
 fn python_warning(path: &Path) -> Option<String> {
     let python = python_interpreter()?;
 
-    // `compile()` parses without executing and, unlike `python -m py_compile`,
-    // does NOT write a `.pyc` next to the source — so syntax-checking a write
-    // never litters the user's tree with `__pycache__`.
-    let output = Command::new(python)
-        .args([
-            "-c",
-            "import sys; compile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')",
-        ])
-        .arg(path)
-        .output()
-        .ok()?;
+    let output = Command::new(python).args(["-c", PY_SYNTAX_CHECK]).arg(path).output().ok()?;
     (!output.status.success()).then(|| {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        format!("Syntax warning: Python parser reported:\n{}", stderr.trim())
+        format!("Syntax warning: Python parser reported: {}", stderr.trim())
     })
 }
 
