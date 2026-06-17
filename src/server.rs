@@ -29,8 +29,9 @@ use crate::errors::WinxError;
 use crate::state::bash_state::generate_thread_id;
 use crate::state::BashState;
 use crate::types::{
-    normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, Glob, GlobOutput, Initialize,
-    Outline, OutlineOutput, ReadFiles, ReadImage, SearchFiles, SearchFilesOutput,
+    normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, FindReferences, Glob,
+    GlobOutput, Initialize, Outline, OutlineOutput, ReadFiles, ReadImage, ReferencesOutput,
+    SearchFiles, SearchFilesOutput,
 };
 
 /// Map a domain [`WinxError`] to the right JSON-RPC error kind.
@@ -302,6 +303,12 @@ const OUTLINE_DESCRIPTION: &str =
      - Cap with `max_results` (symbols for a single file, files for a repo map). gitignore-aware, workspace-confined, works in every mode. \
      - 11 languages (rust, js/ts, go, c, c++, java, ruby, c#, php, lua); other files return no symbols.";
 
+const FIND_REFERENCES_DESCRIPTION: &str =
+    "- Find where a symbol is defined and referenced (called/used) across the codebase, by name — a name-based semantic lookup via tree-sitter. \
+     - Prefer this over grepping an identifier: it counts only real symbol occurrences, never matches inside strings or comments. \
+     - `name` is required (exact identifier). Scope with `path` (file or directory; empty = whole workspace); cap with `max_results`. \
+     - Output lists definitions first, then references, as `def|ref  file:line  kind  name`. gitignore-aware, workspace-confined, works in every mode. Same 11 languages as Outline.";
+
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
 static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();
 
@@ -354,6 +361,11 @@ fn build_winx_tools() -> Vec<Tool> {
         mcp_tool_io::<Outline, OutlineOutput>(
             "Outline",
             OUTLINE_DESCRIPTION,
+            ToolAnnotations::new().read_only(true).open_world(false),
+        ),
+        mcp_tool_io::<FindReferences, ReferencesOutput>(
+            "FindReferences",
+            FIND_REFERENCES_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
         ),
     ]
@@ -709,6 +721,7 @@ impl ServerHandler for WinxService {
             "SearchFiles" => self.handle_search_files(args_value).await,
             "Glob" => self.handle_glob(args_value).await,
             "Outline" => self.handle_outline(args_value).await,
+            "FindReferences" => self.handle_find_references(args_value).await,
             _ => Err(McpError::invalid_request(format!("Unknown tool: {tool}"), None)),
         };
 
@@ -755,6 +768,7 @@ fn audit_summary(tool: &str, args: Option<&Value>) -> String {
         "SearchFiles" => format!("pattern={:?}", clip(s("pattern"))),
         "Glob" => format!("pattern={}", s("pattern")),
         "Outline" => format!("path={}", s("path")),
+        "FindReferences" => format!("name={}", s("name")),
         _ => String::new(),
     }
 }
@@ -1078,6 +1092,27 @@ impl WinxService {
                 Ok(result)
             }
             Err(e) => Err(to_mcp_error("Outline", &e)),
+        }
+    }
+
+    async fn handle_find_references(
+        &self,
+        args: Option<Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let find: FindReferences = Self::lenient_from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid FindReferences parameters: {e}"), None)
+        })?;
+
+        // Read-only: no persist_state.
+        let (slot, _session_guard) = self.session_for(&normalize_thread_id(&find.thread_id)).await;
+        match crate::tools::references::handle_tool_call(&slot, find).await {
+            Ok((text, structured)) => {
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content = Some(structured);
+                Ok(result)
+            }
+            Err(e) => Err(to_mcp_error("FindReferences", &e)),
         }
     }
 }
