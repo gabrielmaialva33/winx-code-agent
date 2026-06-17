@@ -1130,6 +1130,55 @@ pub struct OutlineOutput {
     pub truncated: bool,
 }
 
+/// Parameters for the `FindReferences` tool (tree-sitter symbol occurrences).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct FindReferences {
+    /// Symbol name to find — an exact identifier match (e.g. `parse_config`).
+    pub name: String,
+
+    /// Directory or file to search under. Relative paths resolve against the
+    /// workspace; leave empty to search the whole workspace.
+    #[serde(default)]
+    pub path: String,
+
+    /// Maximum occurrences to return. 0 means the default.
+    #[serde(default)]
+    pub max_results: usize,
+
+    /// Optional thread ID identifying the shell session to operate on. When
+    /// omitted, the most recently active session is used.
+    #[serde(default)]
+    pub thread_id: String,
+}
+
+/// One symbol occurrence in `FindReferences` output.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ReferenceHit {
+    /// Workspace-relative path.
+    pub file: String,
+    /// 1-based line.
+    pub line: usize,
+    /// Symbol kind from the grammar (e.g. `function`, `call`, `method`).
+    pub kind: String,
+    /// True for a definition, false for a reference (call / use site).
+    pub is_definition: bool,
+}
+
+/// Structured result of a `FindReferences` call (mirrors the text block).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct ReferencesOutput {
+    /// The symbol name that was searched for.
+    pub name: String,
+    /// Number of returned hits that are definitions.
+    pub definitions: usize,
+    /// Number of returned hits that are references (call / use sites).
+    pub references: usize,
+    /// True if the result was capped (more occurrences exist).
+    pub truncated: bool,
+    /// Occurrences, definitions first then references, each group by file/line.
+    pub hits: Vec<ReferenceHit>,
+}
+
 #[cfg(test)]
 mod thread_id_tests {
     use super::normalize_thread_id;
