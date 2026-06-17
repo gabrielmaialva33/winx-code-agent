@@ -30,7 +30,7 @@ use crate::state::bash_state::generate_thread_id;
 use crate::state::BashState;
 use crate::types::{
     normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, Glob, GlobOutput, Initialize,
-    ReadFiles, ReadImage, SearchFiles, SearchFilesOutput,
+    Outline, OutlineOutput, ReadFiles, ReadImage, SearchFiles, SearchFilesOutput,
 };
 
 /// Map a domain [`WinxError`] to the right JSON-RPC error kind.
@@ -295,6 +295,13 @@ const GLOB_DESCRIPTION: &str =
      - `pattern` is required (a bare name like `Cargo.toml` matches at any depth). Scope with `path`; cap with `max_results`. \
      - Returns workspace-relative paths, best-first.";
 
+const OUTLINE_DESCRIPTION: &str =
+    "- Map code symbols (functions, types, methods, classes, ...) via tree-sitter — a token-cheap structural view of a file or repo, like an IDE outline. \
+     - Prefer this over reading whole files just to learn their shape, or grepping for `fn `/`class `. \
+     - `path` to a FILE returns that file's definitions; `path` to a DIRECTORY (or empty = the whole workspace) returns a relevance-ranked, token-budgeted symbol map across files. \
+     - Cap with `max_results` (symbols for a single file, files for a repo map). gitignore-aware, workspace-confined, works in every mode. \
+     - 11 languages (rust, js/ts, go, c, c++, java, ruby, c#, php, lua); other files return no symbols.";
+
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
 static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();
 
@@ -342,6 +349,11 @@ fn build_winx_tools() -> Vec<Tool> {
         mcp_tool_io::<Glob, GlobOutput>(
             "Glob",
             GLOB_DESCRIPTION,
+            ToolAnnotations::new().read_only(true).open_world(false),
+        ),
+        mcp_tool_io::<Outline, OutlineOutput>(
+            "Outline",
+            OUTLINE_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
         ),
     ]
@@ -696,6 +708,7 @@ impl ServerHandler for WinxService {
             "ReadImage" => self.handle_read_image(args_value).await,
             "SearchFiles" => self.handle_search_files(args_value).await,
             "Glob" => self.handle_glob(args_value).await,
+            "Outline" => self.handle_outline(args_value).await,
             _ => Err(McpError::invalid_request(format!("Unknown tool: {tool}"), None)),
         };
 
@@ -741,6 +754,7 @@ fn audit_summary(tool: &str, args: Option<&Value>) -> String {
         "ContextSave" => format!("id={}", s("id")),
         "SearchFiles" => format!("pattern={:?}", clip(s("pattern"))),
         "Glob" => format!("pattern={}", s("pattern")),
+        "Outline" => format!("path={}", s("path")),
         _ => String::new(),
     }
 }
@@ -1045,6 +1059,25 @@ impl WinxService {
                 Ok(result)
             }
             Err(e) => Err(to_mcp_error("Glob", &e)),
+        }
+    }
+
+    async fn handle_outline(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let outline: Outline = Self::lenient_from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid Outline parameters: {e}"), None)
+        })?;
+
+        // Read-only: no persist_state.
+        let (slot, _session_guard) =
+            self.session_for(&normalize_thread_id(&outline.thread_id)).await;
+        match crate::tools::outline::handle_tool_call(&slot, outline).await {
+            Ok((text, structured)) => {
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content = Some(structured);
+                Ok(result)
+            }
+            Err(e) => Err(to_mcp_error("Outline", &e)),
         }
     }
 }

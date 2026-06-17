@@ -12,6 +12,7 @@ pub mod output_compress;
 pub mod path;
 pub mod path_prob;
 pub mod repo;
+pub mod symbols;
 pub mod syntax;
 pub mod workspace_stats;
 

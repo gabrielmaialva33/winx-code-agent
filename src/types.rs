@@ -1077,6 +1077,59 @@ pub struct Glob {
     pub thread_id: String,
 }
 
+/// Parameters for the `Outline` tool (tree-sitter symbol map).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Outline {
+    /// File or directory to outline. A file returns that file's symbols; a
+    /// directory (or empty = the whole workspace) returns a ranked repo symbol
+    /// map. Relative paths resolve against the workspace.
+    #[serde(default)]
+    pub path: String,
+
+    /// Maximum symbols to return for a single file, or maximum files for a repo
+    /// map. 0 means the default.
+    #[serde(default)]
+    pub max_results: usize,
+
+    /// Optional thread ID identifying the shell session to operate on. When
+    /// omitted, the most recently active session is used.
+    #[serde(default)]
+    pub thread_id: String,
+}
+
+/// One symbol (definition) in `Outline` output.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct OutlineSymbol {
+    /// Symbol name.
+    pub name: String,
+    /// Symbol kind from the grammar (e.g. `function`, `struct`, `method`, `class`).
+    pub kind: String,
+    /// 1-based line where the definition starts.
+    pub line: usize,
+}
+
+/// Symbols for one file in `Outline` output.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct OutlineFile {
+    /// Workspace-relative path of the file.
+    pub file: String,
+    /// Definitions found in the file, in source order.
+    pub symbols: Vec<OutlineSymbol>,
+}
+
+/// Structured result of an `Outline` call (mirrors the text block).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct OutlineOutput {
+    /// `file` for a single-file outline, `repo` for a workspace symbol map.
+    pub mode: String,
+    /// Number of files included in `files`.
+    pub files_shown: usize,
+    /// Per-file symbol lists.
+    pub files: Vec<OutlineFile>,
+    /// True if the symbol map was capped (more files or symbols exist).
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod thread_id_tests {
     use super::normalize_thread_id;

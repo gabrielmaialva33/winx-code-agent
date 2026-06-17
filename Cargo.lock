@@ -2301,6 +2301,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-tags"
+version = "0.26.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba419171ace99ea326903dffc603ce627d6936719812d50cc95ba4377abd9cd1"
+dependencies = [
+ "memchr",
+ "regex",
+ "streaming-iterator",
+ "thiserror 2.0.18",
+ "tree-sitter",
+]
+
+[[package]]
 name = "tree-sitter-typescript"
 version = "0.23.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2703,6 +2716,7 @@ dependencies = [
  "tree-sitter-php",
  "tree-sitter-ruby",
  "tree-sitter-rust",
+ "tree-sitter-tags",
  "tree-sitter-typescript",
  "vt100",
  "vte",
