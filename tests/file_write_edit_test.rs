@@ -817,6 +817,13 @@ B_CHANGED
         winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, edit).await;
 
     assert!(matches!(result, Err(WinxError::SearchBlockAmbiguous { .. })));
+    if let Err(WinxError::SearchBlockAmbiguous { match_count, suggestions, .. }) = &result {
+        assert_eq!(*match_count, 2);
+        assert!(
+            suggestions.iter().any(|s| s.contains("lines:")),
+            "ambiguous error should report the matched line ranges: {suggestions:?}"
+        );
+    }
     assert_eq!(std::fs::read_to_string(&file_path)?, original);
 
     Ok(())

@@ -356,10 +356,18 @@ fn select_unique_best_path(
         });
     }
 
+    let ranges = best_paths
+        .iter()
+        .filter_map(|(_, reps)| reps.first().map(|r| format!("{}-{}", r.start + 1, r.end)))
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(WinxError::SearchBlockAmbiguous {
         block_content: block.search.join("\n"),
         match_count: best_paths.len(),
-        suggestions: vec!["Add more context before or after this block.".to_string()],
+        suggestions: vec![
+            format!("Equally-good matches at lines: {ranges}"),
+            "Add more context before or after this block to make it unique.".to_string(),
+        ],
     })
 }
 
@@ -415,10 +423,18 @@ fn select_unique_candidate(
         });
     }
 
+    let ranges = best
+        .iter()
+        .map(|candidate| format!("{}-{}", candidate.start + 1, candidate.end))
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(WinxError::SearchBlockAmbiguous {
         block_content: block.search.join("\n"),
         match_count: best.len(),
-        suggestions: vec!["Add more context to make the search block unique.".to_string()],
+        suggestions: vec![
+            format!("Equally-good matches at lines: {ranges}"),
+            "Add more context to make the search block unique.".to_string(),
+        ],
     })
 }
 
@@ -712,19 +728,24 @@ fn trim_empty_edge_lines(lines: &[String]) -> Vec<String> {
 const SNIPPET_CONTEXT_LINES: usize = 10;
 
 fn not_found_error(block: &SearchReplaceBlock, lines: &[String], offset: usize) -> WinxError {
-    let snippet = closest_snippet(lines, offset, &block.search);
+    let (snippet, similarity) = closest_snippet(lines, offset, &block.search);
     WinxError::SearchBlockNotFound(format!(
         "Block not found in file. The SEARCH block below didn't match anywhere:\n{}\n\n\
-         Closest matching context in the file (with surrounding lines):\n{}",
+         Closest matching context in the file ({:.0}% similar — if this is what you meant, the \
+         file content has drifted; re-read it and copy the SEARCH text exactly):\n{}",
         block.search.join("\n"),
+        similarity * 100.0,
         snippet
     ))
 }
 
-fn closest_snippet(lines: &[String], offset: usize, search: &[String]) -> String {
+/// Returns the ±context snippet of the closest match plus its similarity in
+/// `[0,1]`, so the error can tell the model *how close* it got — a 95% near-miss
+/// (stale read) reads very differently from a 20% one (wrong file/block).
+fn closest_snippet(lines: &[String], offset: usize, search: &[String]) -> (String, f64) {
     let window = search.len().max(1);
     if lines.is_empty() || offset >= lines.len() {
-        return String::new();
+        return (String::new(), 0.0);
     }
 
     let max_start = lines.len().saturating_sub(window);
@@ -742,12 +763,16 @@ fn closest_snippet(lines: &[String], offset: usize, search: &[String]) -> String
     // 1-based line numbers (the file is shown numbered elsewhere too).
     let context_start = best_start.saturating_sub(SNIPPET_CONTEXT_LINES);
     let context_end = (best_start + window + SNIPPET_CONTEXT_LINES).min(lines.len());
-    lines[context_start..context_end]
+    let snippet = lines[context_start..context_end]
         .iter()
         .enumerate()
         .map(|(index, line)| format!("{:>6}  {}", context_start + index + 1, line))
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    // `best_score` sums per-line normalized Levenshtein (0..1 each) minus a
+    // length penalty; divide by the window for an average similarity in [0,1].
+    let similarity = (best_score / window as f64).clamp(0.0, 1.0);
+    (snippet, similarity)
 }
 
 fn snippet_similarity(candidate: &[String], search: &[String]) -> f64 {
