@@ -65,7 +65,6 @@ fn to_mcp_error(tool: &str, err: &WinxError) -> McpError {
         | WinxError::SearchReplaceSyntaxErrorDetailed { .. }
         | WinxError::SearchBlockNotFound(_)
         | WinxError::SearchBlockAmbiguous { .. }
-        | WinxError::SearchBlockConflict { .. }
         | WinxError::FileTooLarge { .. }
         | WinxError::InteractiveCommandDetected { .. }
         | WinxError::CommandAlreadyRunning { .. } => McpError::invalid_request(msg, None),
@@ -94,10 +93,52 @@ pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
 /// Helper function to create JSON schema from schemars Schema
 fn schema_to_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, Value>> {
     let schema = schema_for!(T);
-    let value = serde_json::to_value(schema).unwrap_or(Value::Object(serde_json::Map::new()));
+    let mut value = serde_json::to_value(schema).unwrap_or(Value::Object(serde_json::Map::new()));
+    // schemars stamps a redundant `title` (usually just the type/field name) on
+    // every schema node; the LLM pays tokens for it on every tool call for zero
+    // signal. Strip it — context-aware, so a user data field literally named
+    // "title" is never touched.
+    strip_schema_titles(&mut value);
     match value {
         Value::Object(map) => Arc::new(map),
         _ => Arc::new(serde_json::Map::new()),
+    }
+}
+
+/// Recursively remove `title` keys from JSON-Schema nodes only.
+///
+/// A dict is treated as a schema node when it carries a schema-shaped key
+/// (`type`/`$ref`/`properties`/`items`/`enum`/`const`/`anyOf`/`allOf`/`oneOf`/
+/// `additionalProperties`). This mirrors wcgw's `recursive_purge_dict_key` so a
+/// property whose *name* is "title" keeps its value.
+fn strip_schema_titles(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            const SCHEMA_KEYS: &[&str] = &[
+                "type",
+                "$ref",
+                "properties",
+                "items",
+                "additionalProperties",
+                "enum",
+                "const",
+                "anyOf",
+                "allOf",
+                "oneOf",
+            ];
+            if SCHEMA_KEYS.iter().any(|k| map.contains_key(*k)) {
+                map.remove("title");
+            }
+            for child in map.values_mut() {
+                strip_schema_titles(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_schema_titles(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -983,6 +1024,43 @@ mod session_registry_tests {
             reg.slots.contains_key("keep"),
             "an in-flight session must survive LRU eviction churn"
         );
+    }
+}
+
+#[cfg(test)]
+mod schema_tests {
+    use super::{schema_to_input_schema, strip_schema_titles};
+    use serde_json::json;
+
+    #[test]
+    fn strips_titles_from_schema_nodes_only() {
+        let mut v = json!({
+            "type": "object",
+            "title": "ShouldGo",
+            "properties": {
+                // a user field literally named "title" must survive as a key,
+                // and its inner schema's own title must be stripped.
+                "title": { "type": "string", "title": "InnerGoes" }
+            }
+        });
+        strip_schema_titles(&mut v);
+        assert!(v.get("title").is_none(), "schema-node title not stripped");
+        let props = v.get("properties").and_then(serde_json::Value::as_object);
+        assert!(
+            props.is_some_and(|p| p.contains_key("title")),
+            "property key named 'title' must be preserved"
+        );
+        assert!(
+            props.and_then(|p| p.get("title")).and_then(|t| t.get("title")).is_none(),
+            "inner schema title not stripped"
+        );
+    }
+
+    #[test]
+    fn real_tool_schema_carries_no_titles() {
+        let schema = schema_to_input_schema::<crate::types::Initialize>();
+        let blob = serde_json::to_string(&*schema).unwrap_or_default();
+        assert!(!blob.contains("\"title\""), "tool schema still contains titles: {blob}");
     }
 }
 
