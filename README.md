@@ -40,7 +40,13 @@ long-running TUIs without leaking output buffers into your token budget.
 - File reads with WCGW-style line ranges (`file.rs:10-40`, `file.rs:10-`, `file.rs:-40`). Active files are tracked
   and prioritized in the repository context across calls.
 - File writes and SEARCH/REPLACE edits that survive ambiguous matches, indentation drift, and the usual unicode
-  quote-mismatches from LLMs. Writes are blocked when the file hasn't been read or the cached content is stale.
+  quote-mismatches from LLMs. Writes are blocked when the file hasn't been read or the cached content is stale, the
+  success message shows a compact diff of what changed, and recent edits are reversible with `UndoEdit`.
+  `MultiFileEdit` applies a change across several files all-or-nothing (validated in memory first, so a failure on the
+  last file leaves the earlier ones untouched).
+- Tree-sitter code navigation via `CodeMap`: a token-budgeted symbol map of a file or the whole repo, or a
+  definition/reference lookup for a symbol name - the semantic view that plain `grep` can't give you, across 11
+  languages.
 - `ContextSave` for handing a task summary plus its files to the next session - including workspace context, active
   files, git status/diff, and terminal sharing for proper resumption. Resuming reopens the saved project root and
   token-caps the restored memory so it never overflows the context window.
@@ -48,7 +54,12 @@ long-running TUIs without leaking output buffers into your token budget.
 - Clean, token-aware shell output: cursor/ANSI noise from interactive programs (REPLs, progress
   bars) is rendered away through a terminal emulator, and mechanical repetition is collapsed
   losslessly (`line  [winx: ×N]`) so build/install logs don't blow your context budget. Toggle the
-  collapsing with `WINX_NO_COMPRESS`.
+  collapsing with `WINX_NO_COMPRESS`. When output still overflows the cap, the dropped head is streamed
+  to a scratch file under `.winx/scratch/` the agent can re-read, instead of being lost.
+- Secret redaction on by default: provider API keys, JWTs, PEM private-key blocks and `user:pass@` URLs
+  are scrubbed from **all** tool output and saved memory before they reach the model (disable with
+  `WINX_NO_REDACT=1`). An opt-in Landlock sandbox (`WINX_SANDBOX=1`, Linux) adds a kernel-enforced second
+  layer that confines writes to the workspace and hides the home directory.
 - Two transports: **stdio** for local clients, plus an optional token-gated **Streamable HTTP** server
   (`winx serve --http`) for remote MCP clients like ChatGPT - see
   [Remote access](#remote-access-chatgpt--other-remote-mcp-clients).
@@ -507,10 +518,17 @@ commands inside the workspace - same blast radius as letting the model into your
 (`--http`) extends that reach to the network; see
 [Remote access](#remote-access-chatgpt--other-remote-mcp-clients) for the extra precautions it demands.
 
+Two things are on by default to reduce the blast radius: **secret redaction** scrubs high-confidence credentials
+from all tool output and saved memory (`WINX_NO_REDACT=1` to disable), and the PTY shell's whole process group is
+killed on teardown so background jobs it spawned don't leak.
+
 If you want a tighter leash:
 
 - `architect` mode disables writes and most commands;
-- `code_writer` mode lets you allowlist commands and write globs.
+- `code_writer` mode lets you allowlist commands and write globs;
+- `WINX_SANDBOX=1` enables an opt-in Landlock filesystem sandbox (Linux): writes are confined to the workspace
+  plus `/tmp`, and the home directory is unreadable, so a manipulated agent can't read `~/.ssh`/`~/.aws` or modify
+  files outside the project.
 
 [SECURITY.md](SECURITY.md) has the disclosure process and threat model.
 
