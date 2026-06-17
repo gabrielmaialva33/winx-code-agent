@@ -58,9 +58,9 @@ long-running TUIs without leaking output buffers into your token budget.
 | Tool              | What it does                                                                                                                                                                                              |
 |-------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `Initialize`      | Boots the workspace, picks the mode, hands you a `thread_id`. Call this first or everything else errors out. With no workspace path it spins up a scratch playground; resuming a task (`task_id_to_resume`) reopens its saved project root. |
-| `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, drives TUIs. Supports `is_background`, `status_check`, `send_text`, `send_specials`, `send_ascii`, `allow_multi` for multi-statement scripts. |
+| `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, drives TUIs. Supports `is_background`, `status_check`, `send_text`, `send_specials`, `send_ascii`, `allow_multi`, plus `screen` (a stable point-in-time frame of an interactive TUI with the cursor position; pass `diff:true` for only the lines that changed since your last look) and `wait_for_turn` (block until the TUI is ready for input, via per-app or configurable recognizers). |
 | `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range. When the token budget is hit it tells you the exact line + `file:N-M` syntax to resume from instead of silently dropping the tail. |
-| `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks. Validates file read coverage and freshness before writing, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet.  |
+| `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks (with optional `@start-end` line anchors to pin a repeated block). Validates file read coverage and freshness before writing, reports any fuzzy tolerances it had to apply, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet. |
 | `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                              |
 | `ReadImage`       | Returns a native MCP image content block (not base64 as text), so multimodal models actually see the image.                                                                                               |
 
@@ -87,6 +87,12 @@ Things the matcher forgives so you don't have to babysit the model:
 - retries once with `\"` unescaped when the model over-escapes quotes in SEARCH
 - refuses edits that only matched after too much fuzzy fixup, and rejects blocks
   that match in too many places — so you re-read instead of corrupting the file
+- anchor a block to a line number to pin one of several identical snippets —
+  `<<<<<<< SEARCH @42` (or a range `@42-50`); a stale anchor falls back to the
+  normal search, so it never fails an otherwise-valid edit
+- tells you on success which tolerances it had to apply (so you learn your
+  SEARCH drifted), and on a miss how close the nearest match was, with `~`
+  marking the lines that diverged
 
 ## Install
 
@@ -455,6 +461,8 @@ All optional — Winx works out of the box without any of these.
 | `RUST_LOG` | Log verbosity, e.g. `winx_code_agent=info`. At `info` you get the per-call **audit trail** (tool name, arg summary, duration, ok/error). |
 | `WINX_HTTP_TOKEN` | Shared secret for the HTTP transport, used if `--token` isn't passed (see [Remote access](#remote-access-chatgpt--other-remote-mcp-clients)). |
 | `WINX_NO_COMPRESS` | Set to `1` to disable output compression and see raw, uncollapsed shell output (the `[winx: ×N]` collapsing is on by default). |
+| `WINX_TURN_RECOGNIZER_CONFIG` | JSON `{"busy":[…],"awaiting_input":[…],"awaiting_approval":[…]}` of marker strings/regexes. With `recognizer:"configurable"`, lets `wait_for_turn` drive an arbitrary TUI without bespoke code. |
+| `WINX_CODING_TOKEN_BUDGET` / `WINX_NONCODING_TOKEN_BUDGET` | Override the per-file token budget for `ReadFiles` (and saved memory) — raise it for large-context models. Defaults: `24000` / `8000`. |
 | `WINX_KEEP_TAIL_PIPE` | Set to `1` to keep a trailing `\| tail …` instead of stripping it. Winx truncates output server-side, so by default it drops a redundant trailing `tail` (wcgw parity). |
 | `WINX_USE_SCREEN` / `WINX_ATTACH_TERMINAL` | Run the shell inside `screen`/`tmux` so you can attach to the live session. Set to `screen`, `tmux`, or any truthy value; Winx prints an attach hint on `Initialize`. |
 | `WINX_OPEN_CONTEXT` | Set to `1` to open the saved context file in your default app after `ContextSave`. |
