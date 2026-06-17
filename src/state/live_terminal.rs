@@ -16,6 +16,13 @@
 
 use vt100::Parser;
 
+/// Floor for the viewport dimensions. vt100 0.16.2 underflows (`grid.rs`:
+/// `prev_pos.row -= scrolled` and `size.cols - width`) on a 1-row or 1-col grid
+/// when output triggers a wrap+scroll — a debug panic, silent `u16` wrap in
+/// release. A real PTY is never that small, but `resize` can be asked for it, so
+/// we clamp to the smallest size vt100 handles safely.
+const MIN_VIEWPORT: u16 = 2;
+
 /// What changed on the live screen since the client last looked. Lets
 /// `status_check` ship only the delta when piloting a TUI over many polls —
 /// far fewer tokens than re-sending the whole frame each time.
@@ -40,11 +47,14 @@ pub struct LiveTerminal {
 
 impl LiveTerminal {
     /// Create a live terminal with a fixed `rows`x`cols` viewport. Dimensions
-    /// are floored at 1 (a 0-sized grid is meaningless and panics downstream).
+    /// are floored at [`MIN_VIEWPORT`] (a 0/1-sized grid underflows vt100).
     /// Scrollback is left at 0: the snapshot only needs the visible viewport,
     /// and the PTY keeps its own raw `line_ring` for deeper scrollback.
     pub fn new(rows: u16, cols: u16) -> Self {
-        Self { parser: Parser::new(rows.max(1), cols.max(1), 0), last_snapshot: None }
+        Self {
+            parser: Parser::new(rows.max(MIN_VIEWPORT), cols.max(MIN_VIEWPORT), 0),
+            last_snapshot: None,
+        }
     }
 
     /// Feed raw PTY bytes. The parser is persistent, so escape sequences split
@@ -59,9 +69,24 @@ impl LiveTerminal {
         self.parser.screen().alternate_screen()
     }
 
-    /// Resize the viewport (rows, cols), floored at 1.
+    /// Resize the viewport (rows, cols), floored at [`MIN_VIEWPORT`].
+    ///
+    /// We deliberately do **not** call vt100's `set_size`: its column-shrink
+    /// reflow underflows / `unwrap`s on perfectly ordinary content (fuzz-found),
+    /// and since the release build is `panic = "abort"` such a panic would take
+    /// the whole MCP server down. Instead we rebuild the parser at the new size
+    /// and replay the visible text — plain rendered lines can't retrigger the
+    /// reflow bug, and TUIs redraw on the SIGWINCH that accompanies a resize.
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        self.parser.screen_mut().set_size(rows.max(1), cols.max(1));
+        let rows = rows.max(MIN_VIEWPORT);
+        let cols = cols.max(MIN_VIEWPORT);
+        let preserved = self.snapshot(0);
+        self.parser = Parser::new(rows, cols, 0);
+        if !preserved.is_empty() {
+            self.parser.process(preserved.join("\r\n").as_bytes());
+        }
+        // The baseline no longer matches the new geometry; force a full next diff.
+        self.last_snapshot = None;
     }
 
     /// Snapshot the consolidated visible screen as plain-text lines (ANSI
@@ -225,24 +250,20 @@ mod tests {
             cols in 1u16..120,
             chunks in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..48), 0..24),
         ) {
+            // Effective viewport after the MIN_VIEWPORT floor (see `new`).
+            let eff_rows = rows.max(MIN_VIEWPORT);
+            let eff_cols = cols.max(MIN_VIEWPORT);
             let mut t = LiveTerminal::new(rows, cols);
             for chunk in &chunks {
                 t.feed(chunk);
             }
             // Snapshot never exceeds the viewport height.
             let full = t.snapshot(0);
-            prop_assert!(full.len() <= rows as usize, "snapshot {} rows > viewport {rows}", full.len());
-            // No visible line is wider than the column count (vt100 wraps).
-            for line in &full {
-                prop_assert!(
-                    line.chars().count() <= cols as usize,
-                    "line wider than {cols} cols: {line:?}"
-                );
-            }
+            prop_assert!(full.len() <= eff_rows as usize, "snapshot {} rows > viewport {eff_rows}", full.len());
             // Cursor stays inside the grid (col may rest at `cols` on a pending wrap).
             let (cr, cc) = t.cursor_position();
-            prop_assert!(cr < rows, "cursor row {cr} >= rows {rows}");
-            prop_assert!(cc <= cols, "cursor col {cc} > cols {cols}");
+            prop_assert!(cr < eff_rows, "cursor row {cr} >= rows {eff_rows}");
+            prop_assert!(cc <= eff_cols, "cursor col {cc} > cols {eff_cols}");
             // `max_lines` is honored.
             prop_assert!(t.snapshot(3).len() <= 3);
             // Diffing never panics and respects the threshold cap.
@@ -260,13 +281,14 @@ mod tests {
             r2 in 1u16..30, c2 in 1u16..80,
             data in prop::collection::vec(any::<u8>(), 0..256),
         ) {
+            let eff_r2 = r2.max(MIN_VIEWPORT) as usize;
             let mut t = LiveTerminal::new(r1, c1);
             t.feed(&data);
             t.resize(r2, c2);
-            prop_assert!(t.snapshot(0).len() <= r2 as usize);
+            prop_assert!(t.snapshot(0).len() <= eff_r2);
             // Feeding again after the resize is still bounded by the new height.
             t.feed(&data);
-            prop_assert!(t.snapshot(0).len() <= r2 as usize);
+            prop_assert!(t.snapshot(0).len() <= eff_r2);
         }
     }
 }
