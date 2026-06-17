@@ -357,6 +357,18 @@ fn context_save_response(
 /// # Returns
 ///
 /// A formatted string containing the memory data
+/// Make a glob portable for resume: if it's absolute and under `project_root`,
+/// store it relative to the root (recorded separately in the memory); otherwise
+/// keep it verbatim. A clone or another machine then still resolves it.
+fn relativize_glob(glob: &str, project_root: &str) -> String {
+    if project_root.is_empty() {
+        return glob.to_string();
+    }
+    Path::new(glob)
+        .strip_prefix(project_root)
+        .map_or_else(|_| glob.to_string(), |rel| rel.to_string_lossy().to_string())
+}
+
 fn format_memory(context: &ContextSave, relevant_files_data: &str) -> String {
     let mut memory_data = String::new();
 
@@ -369,9 +381,16 @@ fn format_memory(context: &ContextSave, relevant_files_data: &str) -> String {
     memory_data.push_str(&context.description);
     memory_data.push_str("\n\n");
 
-    // Add the relevant file globs
-    let _ =
-        write!(memory_data, "Relevant file globs: {}\n\n", context.relevant_file_globs.join(", "));
+    // Add the relevant file globs, made portable: an absolute glob under the
+    // project root is stored relative to it (the root is recorded above), so the
+    // saved memory resumes in a clone — or on another machine — where the
+    // absolute path no longer exists. Already-relative globs are kept as-is.
+    let portable_globs = context
+        .relevant_file_globs
+        .iter()
+        .map(|glob| relativize_glob(glob, &context.project_root_path))
+        .collect::<Vec<_>>();
+    let _ = write!(memory_data, "Relevant file globs: {}\n\n", portable_globs.join(", "));
 
     // Add the content of the relevant files
     memory_data.push_str("File contents:\n\n");
@@ -627,7 +646,19 @@ fn sanitize_filename(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::cap_file_to_tokens;
+    use super::{cap_file_to_tokens, relativize_glob};
+
+    #[test]
+    fn relativize_glob_makes_absolute_portable() {
+        // Absolute glob under the root -> relative.
+        assert_eq!(relativize_glob("/home/u/proj/src/*.rs", "/home/u/proj"), "src/*.rs");
+        // Already relative -> untouched.
+        assert_eq!(relativize_glob("src/*.rs", "/home/u/proj"), "src/*.rs");
+        // Outside the root -> kept verbatim.
+        assert_eq!(relativize_glob("/etc/*.conf", "/home/u/proj"), "/etc/*.conf");
+        // No project root -> unchanged.
+        assert_eq!(relativize_glob("/abs/x", ""), "/abs/x");
+    }
 
     #[test]
     fn small_file_is_untouched() {
