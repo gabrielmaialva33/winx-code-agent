@@ -28,12 +28,12 @@ long-running TUIs without leaking output buffers into your token budget.
 
 ## What you get
 
-- A stateful bash session per thread with proper PTY semantics — foreground, background, status checks, text input,
+- A stateful bash session per thread with proper PTY semantics - foreground, background, status checks, text input,
   Enter/Ctrl-C/Ctrl-D, raw ASCII. Multiline scripts and top-level `command` shorthand both work; NUL bytes are
   rejected before they reach the shell.
 - Workspaces with three modes: `wcgw` (full access), `architect` (read-only), `code_writer` (allowlist of commands and
-  write globs). The command allowlist is parsed with tree-sitter, so it checks **every** command on the line —
-  pipelines, `&&`/`||`/`;`, command substitution, subshells — not just the first word, and can't be bypassed with
+  write globs). The command allowlist is parsed with tree-sitter, so it checks **every** command on the line -
+  pipelines, `&&`/`||`/`;`, command substitution, subshells - not just the first word, and can't be bypassed with
   `ls && curl … | sh` or `ls $(rm …)`.
 - A resilient PTY: a shell that won't return to a prompt (even after Ctrl-C) is auto-reset at the same cwd/mode, child
   processes are reaped on drop, and prompt detection is robust to a custom `PS1`. Opt into `zsh` with `WINX_SHELL=zsh`.
@@ -41,7 +41,7 @@ long-running TUIs without leaking output buffers into your token budget.
   and prioritized in the repository context across calls.
 - File writes and SEARCH/REPLACE edits that survive ambiguous matches, indentation drift, and the usual unicode
   quote-mismatches from LLMs. Writes are blocked when the file hasn't been read or the cached content is stale.
-- `ContextSave` for handing a task summary plus its files to the next session — including workspace context, active
+- `ContextSave` for handing a task summary plus its files to the next session - including workspace context, active
   files, git status/diff, and terminal sharing for proper resumption. Resuming reopens the saved project root and
   token-caps the restored memory so it never overflows the context window.
 - `ReadImage` so multimodal clients can pull screenshots, mockups, error PNGs, etc.
@@ -50,7 +50,7 @@ long-running TUIs without leaking output buffers into your token budget.
   losslessly (`line  [winx: ×N]`) so build/install logs don't blow your context budget. Toggle the
   collapsing with `WINX_NO_COMPRESS`.
 - Two transports: **stdio** for local clients, plus an optional token-gated **Streamable HTTP** server
-  (`winx serve --http`) for remote MCP clients like ChatGPT — see
+  (`winx serve --http`) for remote MCP clients like ChatGPT - see
   [Remote access](#remote-access-chatgpt--other-remote-mcp-clients).
 
 ## MCP Tools
@@ -63,8 +63,10 @@ long-running TUIs without leaking output buffers into your token budget.
 | `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks (with optional `@start-end` line anchors to pin a repeated block). Validates file read coverage and freshness before writing, reports any fuzzy tolerances it had to apply, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet. |
 | `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                              |
 | `ReadImage`       | Returns a native MCP image content block (not base64 as text), so multimodal models actually see the image. Confined to the workspace (like `ReadFiles`) and size-capped.                                  |
-| `SearchFiles`     | Structured, gitignore-aware regex search across the workspace — a built-in `rg`. Scope with `path`/`glob`, toggle `ignore_case`, set `context_lines`/`max_results`. Returns the file then `line:match` (context as `line-text`), token-budgeted. Works in `architect`/`code_writer` too, where shelling out to `rg`/`grep` is blocked. |
+| `SearchFiles`     | Structured, gitignore-aware regex search across the workspace - a built-in `rg`. Scope with `path`/`glob`, toggle `ignore_case`, set `context_lines`/`max_results`. Returns the file then `line:match` (context as `line-text`), token-budgeted. Works in `architect`/`code_writer` too, where shelling out to `rg`/`grep` is blocked. |
 | `Glob`            | gitignore-aware file discovery by glob (`**/*.rs`, `src/**/*.ts`, `Cargo.toml`). Returns workspace-relative paths ranked best-first by the embedded relevance model, capped with an "N more" note. Also works in the restricted modes where `find`/`ls` are blocked. |
+| `Outline`         | Tree-sitter symbol map (functions, types, methods, classes, ...). A file path returns that file's definitions; a directory (or empty) returns a relevance-ranked, token-budgeted repo symbol map. 11 languages, read-only, works in every mode - a token-cheap alternative to reading whole files just to learn their shape. |
+| `FindReferences`  | Find where a symbol is defined and referenced (called/used) across the codebase, by name. A semantic lookup that counts only real identifier occurrences (never inside strings/comments, unlike grep); lists definitions first, then references. |
 
 ## Search/Replace editing
 
@@ -85,11 +87,11 @@ Things the matcher forgives so you don't have to babysit the model:
 - strips `ReadFiles` line numbers if they leak into a SEARCH block
 - normalizes the usual "smart quote" / em-dash / ellipsis substitutions
 - uses neighboring blocks to disambiguate when the same snippet appears twice
-- single-line substring edits work — you don't need the whole line in SEARCH
+- single-line substring edits work - you don't need the whole line in SEARCH
 - retries once with `\"` unescaped when the model over-escapes quotes in SEARCH
 - refuses edits that only matched after too much fuzzy fixup, and rejects blocks
-  that match in too many places — so you re-read instead of corrupting the file
-- anchor a block to a line number to pin one of several identical snippets —
+  that match in too many places - so you re-read instead of corrupting the file
+- anchor a block to a line number to pin one of several identical snippets -
   `<<<<<<< SEARCH @42` (or a range `@42-50`); a stale anchor falls back to the
   normal search, so it never fails an otherwise-valid edit
 - tells you on success which tolerances it had to apply (so you learn your
@@ -102,10 +104,10 @@ Things the matcher forgives so you don't have to babysit the model:
 cargo install winx-code-agent
 ```
 
-Binary lands in `~/.cargo/bin` — every config snippet below assumes that's on `$PATH`. If your MCP client launches with
+Binary lands in `~/.cargo/bin` - every config snippet below assumes that's on `$PATH`. If your MCP client launches with
 a sterile env, swap `winx-code-agent` for the absolute path (`which winx-code-agent`).
 
-Needs Rust 1.75+, Linux/macOS/WSL2, and a real terminal (any modern one — Winx spawns its own PTY).
+Needs Rust 1.75+, Linux/macOS/WSL2, and a real terminal (any modern one - Winx spawns its own PTY).
 
 <details>
 <summary><b>Claude Code (CLI)</b></summary>
@@ -277,7 +279,7 @@ Add to `~/.gemini/settings.json`:
 <details>
 <summary><b>agy (Google Antigravity CLI)</b></summary>
 
-`agy` is Google's new Gemini-powered CLI (Go binary, usually at `~/.local/bin/agy`). No `mcp add` subcommand yet — it
+`agy` is Google's new Gemini-powered CLI (Go binary, usually at `~/.local/bin/agy`). No `mcp add` subcommand yet - it
 reads MCP servers from JSON.
 
 Edit `~/.gemini/config/mcp_config.json` (also `~/.gemini/antigravity/mcp_config.json` if you run the Antigravity IDE
@@ -401,22 +403,22 @@ cargo run --release
 
 ### Check it's wired up
 
-List MCP tools in your client. You should see eight entries: `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`,
-`ContextSave`, `ReadImage`, `SearchFiles`, `Glob`. The first call always has to be `Initialize` — Winx tracks workspace + mode per thread.
+List MCP tools in your client. You should see ten entries: `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`,
+`ContextSave`, `ReadImage`, `SearchFiles`, `Glob`, `Outline`, `FindReferences`. The first call always has to be `Initialize`; Winx tracks workspace + mode per thread.
 
 ## Remote access (ChatGPT & other remote MCP clients)
 
-By default Winx speaks MCP over **stdio** — the local transport every desktop client (Claude Desktop, Cursor, VS Code)
-uses. For clients that live in the cloud and can't reach your machine over stdio — like ChatGPT's developer-mode custom
-connectors — Winx can also serve MCP over **Streamable HTTP**:
+By default Winx speaks MCP over **stdio** - the local transport every desktop client (Claude Desktop, Cursor, VS Code)
+uses. For clients that live in the cloud and can't reach your machine over stdio - like ChatGPT's developer-mode custom
+connectors - Winx can also serve MCP over **Streamable HTTP**:
 
 ```bash
 winx serve --http --bind 127.0.0.1:8000 --token "$(openssl rand -hex 24)"
 ```
 
 The MCP protocol is served at `/mcp`. Every request must carry the token in the `Authorization: Bearer <token>` header
-(header-only — a `?token=` query parameter would leak the secret into proxy/tunnel access logs and browser history).
-Without a token the server refuses to start — serving a shell over the network without auth is remote code execution
+(header-only - a `?token=` query parameter would leak the secret into proxy/tunnel access logs and browser history).
+Without a token the server refuses to start - serving a shell over the network without auth is remote code execution
 waiting to happen. The endpoint also caps request bodies (64 MB) and times out stuck requests (120 s).
 
 | Flag             | Purpose                                                                                          |
@@ -426,7 +428,7 @@ waiting to happen. The endpoint also caps request bodies (64 MB) and times out s
 | `--token`        | Shared secret required on every request. Falls back to the `WINX_HTTP_TOKEN` env var.            |
 | `--allowed-host` | Extra `Host` authority to accept (your tunnel hostname). Repeatable. Loopback is always allowed. |
 
-Remote clients run in the cloud, so the endpoint has to be reachable over HTTPS — put a tunnel in front of the loopback
+Remote clients run in the cloud, so the endpoint has to be reachable over HTTPS - put a tunnel in front of the loopback
 listener and allow its hostname through the built-in DNS-rebinding guard:
 
 ```bash
@@ -446,19 +448,19 @@ In ChatGPT (Settings → Apps → Advanced → **Developer mode**), add a connec
 - **Authentication**: bearer / API-key token set to `<your-token>`, so the connector sends it as
   `Authorization: Bearer <your-token>` (the token is no longer accepted in the URL)
 
-Remote clients are effectively **stateless** — they don't reuse the MCP session between tool calls — so the HTTP
+Remote clients are effectively **stateless** - they don't reuse the MCP session between tool calls - so the HTTP
 transport shares one shell session across all requests: the shell `Initialize` creates stays alive for the lifetime of
 the server, and later `BashCommand` calls find it. Reuse the same `thread_id` across calls.
 
 > [!WARNING]
 > The HTTP transport puts arbitrary shell and file access on the network. Anyone with the token (and URL) gets a shell
-> on your machine as your user — and not just inside the workspace, since `BashCommand` in `wcgw` mode isn't
+> on your machine as your user - and not just inside the workspace, since `BashCommand` in `wcgw` mode isn't
 > path-restricted. Bind to loopback, keep it behind an authenticated tunnel, prefer `architect`/`code_writer` mode or a
 > container, and shut it down when you're done.
 
 ## Environment variables
 
-All optional — Winx works out of the box without any of these.
+All optional - Winx works out of the box without any of these.
 
 | Variable | Effect |
 |----------|--------|
@@ -466,7 +468,7 @@ All optional — Winx works out of the box without any of these.
 | `WINX_HTTP_TOKEN` | Shared secret for the HTTP transport, used if `--token` isn't passed (see [Remote access](#remote-access-chatgpt--other-remote-mcp-clients)). |
 | `WINX_NO_COMPRESS` | Set to `1` to disable output compression and see raw, uncollapsed shell output (the `[winx: ×N]` collapsing is on by default). |
 | `WINX_TURN_RECOGNIZER_CONFIG` | JSON `{"busy":[…],"awaiting_input":[…],"awaiting_approval":[…]}` of marker strings/regexes. With `recognizer:"configurable"`, lets `wait_for_turn` drive an arbitrary TUI without bespoke code. |
-| `WINX_CODING_TOKEN_BUDGET` / `WINX_NONCODING_TOKEN_BUDGET` | Override the per-file token budget for `ReadFiles` (and saved memory) — raise it for large-context models. Defaults: `24000` / `8000`. |
+| `WINX_CODING_TOKEN_BUDGET` / `WINX_NONCODING_TOKEN_BUDGET` | Override the per-file token budget for `ReadFiles` (and saved memory) - raise it for large-context models. Defaults: `24000` / `8000`. |
 | `WINX_KEEP_TAIL_PIPE` | Set to `1` to keep a trailing `\| tail …` instead of stripping it. Winx truncates output server-side, so by default it drops a redundant trailing `tail` (wcgw parity). |
 | `WINX_USE_SCREEN` / `WINX_ATTACH_TERMINAL` | Run the shell inside `screen`/`tmux` so you can attach to the live session. Set to `screen`, `tmux`, or any truthy value; Winx prints an attach hint on `Initialize`. |
 | `WINX_OPEN_CONTEXT` | Set to `1` to open the saved context file in your default app after `ContextSave`. |
@@ -482,12 +484,12 @@ cargo test --all-features
 ```
 
 CI runs the same three. If you touch `src/state/pty.rs` or anything in `src/tools/bash_command.rs`, the regression suite
-at `tests/bash_pty_regression_test.rs` is what protects against the usual TUI/PTY foot-guns — run it first.
+at `tests/bash_pty_regression_test.rs` is what protects against the usual TUI/PTY foot-guns - run it first.
 
 Robustness is also fuzzed and model-checked:
 
 - **proptest** feeds arbitrary/adversarial bytes into the live terminal emulator, the ANSI stripper, and the exit-code
-  parser, asserting they never panic and stay within the viewport. (This is how we found — and worked around — a vt100
+  parser, asserting they never panic and stay within the viewport. (This is how we found - and worked around - a vt100
   underflow on tiny grids and a reflow panic on column shrink that would otherwise crash the `panic = "abort"` release.)
 - **loom** exhaustively model-checks the session pin counter (the lock-free guard that keeps an in-flight session from
   being LRU-evicted) across every thread interleaving. It's behind a feature so it doesn't perturb the normal build:
@@ -499,7 +501,7 @@ Robustness is also fuzzed and model-checked:
 ## A note on security
 
 By default this is a local (stdio) MCP server. Anything connected to it can read files, edit files, and run shell
-commands inside the workspace — same blast radius as letting the model into your terminal. The optional HTTP transport
+commands inside the workspace - same blast radius as letting the model into your terminal. The optional HTTP transport
 (`--http`) extends that reach to the network; see
 [Remote access](#remote-access-chatgpt--other-remote-mcp-clients) for the extra precautions it demands.
 
