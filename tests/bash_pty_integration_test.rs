@@ -142,10 +142,12 @@ async fn test_03_status_check() -> Result<()> {
             );
         }
         Err(e) => {
-            // Expected: "No running command to check status of"
+            // After the echo finished, a StatusCheck on the main shell reports
+            // there's nothing running (the output was already returned on
+            // completion). This is the expected path.
             assert!(
-                e.to_string().contains("No running command"),
-                "Error should indicate no running command"
+                e.to_string().contains("No command is currently running"),
+                "status check after completion should say nothing is running, got: {e}"
             );
         }
     }
@@ -260,11 +262,31 @@ async fn test_05_send_specials_ctrl_c() -> Result<()> {
         thread_id: "i2238-ctrlc".to_string(),
     };
 
-    let interrupt_response =
+    let _interrupt_response =
         tools::bash_command::handle_tool_call(&bash_state_arc, ctrl_c_cmd).await?;
 
-    // After Ctrl+C, the command should be interrupted
-    // Response might show "process exited" or "^C" or still running (need another Ctrl+C)
+    // Ctrl+C delivers SIGINT to the foreground sleep, which exits. Confirm the
+    // main shell is actually idle afterward: a status check now reports there is
+    // nothing running (rather than the sleep still hanging).
+    let status_after = BashCommand {
+        action_json: BashCommandAction::StatusCheck {
+            status_check: true,
+            bg_command_id: None,
+            scrollback_lines: None,
+            verbose: false,
+        },
+        wait_for_seconds: Some(2.0),
+        thread_id: "i2238-ctrlc".to_string(),
+    };
+    let status_result =
+        tools::bash_command::handle_tool_call(&bash_state_arc, status_after).await;
+    assert!(
+        status_result
+            .as_ref()
+            .err()
+            .is_some_and(|e| e.to_string().contains("No command is currently running")),
+        "after Ctrl+C the main shell should be idle, got: {status_result:?}"
+    );
 
     Ok(())
 }
@@ -482,7 +504,10 @@ async fn test_full_workflow_i2238() -> Result<()> {
         action_json: BashCommandAction::SendText {
             send_text: "hello".to_string(),
             bg_command_id: None,
-            submit: false,
+            // Submit (send Enter) so the `read -p` completes and the main shell
+            // goes idle; otherwise it stays busy and the later file_cmd fails
+            // with "a command is already running".
+            submit: true,
         },
         wait_for_seconds: Some(3.0),
         thread_id: "i2238".to_string(),
