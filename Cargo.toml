@@ -94,6 +94,15 @@ vt100 = "0.16"
 
 [dev-dependencies]
 tempfile = "3.14"
+# Property-based fuzzing of the terminal/ANSI parsers and pure helpers.
+proptest = "1.5"
+
+# `loom` model-checks the lock-free pin counter (SessionPin) under every
+# thread interleaving. Only pulled in under `--cfg loom`, so normal builds and
+# `cargo test` stay loom-free. Run with:
+#   RUSTFLAGS="--cfg loom" cargo test --lib loom_
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
 
 [features]
 default = []
