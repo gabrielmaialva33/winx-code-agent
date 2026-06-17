@@ -22,6 +22,7 @@
 
 pub mod errors;
 pub mod http_server;
+pub mod sandbox;
 pub mod server;
 pub mod state;
 pub mod tools;

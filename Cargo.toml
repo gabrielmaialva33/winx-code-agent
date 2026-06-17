@@ -101,6 +101,11 @@ tree-sitter-c-sharp = "0.23.5"
 tree-sitter-lua = "0.5.0"
 vt100 = "0.16"
 
+# Opt-in Landlock filesystem sandbox (WINX_SANDBOX=1). Linux-only LSM, so the
+# dep is gated to Linux targets; the runtime env var is the actual gate.
+[target.'cfg(target_os = "linux")'.dependencies]
+landlock = "0.4"
+
 [dev-dependencies]
 tempfile = "3.14"
 # Property-based fuzzing of the terminal/ANSI parsers and pure helpers.

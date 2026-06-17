@@ -75,12 +75,27 @@ fn setup_logging(verbose: bool, debug: bool) {
         .init();
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     let cli = Cli::parse();
 
     setup_logging(cli.verbose, cli.debug);
 
+    // Opt-in Landlock sandbox (WINX_SANDBOX=1), confining writes to the cwd (the
+    // workspace) + /tmp. Applied BEFORE the tokio runtime is built, so its worker
+    // threads - and the PTY shell forked from one of them - inherit the Landlock
+    // domain (restrict_self only covers the calling thread and its future
+    // children, and a #[tokio::main] runtime's workers already exist by the time
+    // the async body runs). No-op unless the env var is set.
+    winx_code_agent::sandbox::apply_if_requested();
+
+    tokio::runtime::Runtime::new()
+        .map_err(|e| {
+            WinxError::ShellInitializationError(format!("failed to start tokio runtime: {e}"))
+        })?
+        .block_on(async_main(cli))
+}
+
+async fn async_main(cli: Cli) -> Result<()> {
     // Pre-warm the embedded Claude tokenizer off the hot path. Deserializing
     // tokenizer.json takes a beat; without this the FIRST real `count_tokens`
     // (a ReadFiles/ContextSave the agent is waiting on) would eat that latency.
