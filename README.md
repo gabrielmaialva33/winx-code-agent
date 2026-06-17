@@ -480,6 +480,18 @@ cargo test --all-features
 CI runs the same three. If you touch `src/state/pty.rs` or anything in `src/tools/bash_command.rs`, the regression suite
 at `tests/bash_pty_regression_test.rs` is what protects against the usual TUI/PTY foot-guns — run it first.
 
+Robustness is also fuzzed and model-checked:
+
+- **proptest** feeds arbitrary/adversarial bytes into the live terminal emulator, the ANSI stripper, and the exit-code
+  parser, asserting they never panic and stay within the viewport. (This is how we found — and worked around — a vt100
+  underflow on tiny grids and a reflow panic on column shrink that would otherwise crash the `panic = "abort"` release.)
+- **loom** exhaustively model-checks the session pin counter (the lock-free guard that keeps an in-flight session from
+  being LRU-evicted) across every thread interleaving. It's behind a feature so it doesn't perturb the normal build:
+
+  ```bash
+  cargo test --features loom --lib loom_
+  ```
+
 ## A note on security
 
 By default this is a local (stdio) MCP server. Anything connected to it can read files, edit files, and run shell
