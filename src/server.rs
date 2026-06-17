@@ -19,15 +19,8 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 use std::process::Command;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-
-// The session pin counter swaps to loom's instrumented atomics under the `loom`
-// feature so it can be model-checked, while every normal build stays on std.
-#[cfg(feature = "loom")]
-use loom::sync::{atomic::AtomicUsize as PinAtomic, Arc as PinArc};
-#[cfg(not(feature = "loom"))]
-use std::sync::{atomic::AtomicUsize as PinAtomic, Arc as PinArc};
 use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -374,17 +367,17 @@ struct SessionRegistry {
 /// Lock-free pin counter for one session. A live [`SessionGuard`] keeps the
 /// count `> 0`, which marks the session as in-flight so LRU eviction skips it.
 /// Clones share the same counter — the registry hands a clone to each
-/// concurrent call. Atomics are loom-instrumented under the `loom` feature so
-/// the acquire/release races (the `Drop` runs *outside* the registry lock) can
-/// be model-checked; see the `loom_tests` module.
+/// concurrent call. The acquire/release discipline (the guard's `Drop` runs
+/// *outside* the registry lock) is loom model-checked by `loom_tests`, which
+/// mirrors this exact logic; keep the two in lockstep.
 #[derive(Clone)]
 struct SessionPin {
-    count: PinArc<PinAtomic>,
+    count: Arc<AtomicUsize>,
 }
 
 impl Default for SessionPin {
     fn default() -> Self {
-        Self { count: PinArc::new(PinAtomic::new(0)) }
+        Self { count: Arc::new(AtomicUsize::new(0)) }
     }
 }
 
@@ -407,7 +400,7 @@ impl SessionPin {
 /// `tokio::Mutex`. While any guard is alive the session is pinned against LRU
 /// eviction.
 struct SessionGuard {
-    count: PinArc<PinAtomic>,
+    count: Arc<AtomicUsize>,
 }
 
 impl Drop for SessionGuard {
@@ -1137,17 +1130,52 @@ mod error_mapping_tests {
     }
 }
 
-/// Loom model-checks the [`SessionPin`] counter — the one piece of session
-/// state touched off the registry lock (a guard's `Drop` decrements while a
-/// concurrent eviction may be reading it). Loom can't model the surrounding
-/// `tokio::Mutex`, so we isolate and exhaustively check the lock-free counter.
+/// Loom model-check of the [`SessionPin`] counting discipline — the one piece
+/// of session state touched off the registry lock (a guard's `Drop` decrements
+/// while a concurrent eviction may be reading it via `is_pinned`). Loom can't
+/// model the surrounding `tokio::Mutex`, so we isolate the lock-free counter and
+/// exhaustively check it under every interleaving.
 ///
-/// Built only under the `loom` feature; the normal suite would panic here
-/// because loom atomics must run inside `loom::model`. Run with:
+/// `SessionPin` itself stays on std atomics: instrumenting it would force every
+/// `WinxService` test (which constructs pins outside `loom::model`) to panic
+/// under `--all-features`. Instead `PinModel` below mirrors `SessionPin`'s exact
+/// logic — `acquire` = `fetch_add(SeqCst)`, guard `Drop` = `fetch_sub(SeqCst)`,
+/// `is_pinned` = `load(SeqCst) > 0`. Keep the two in lockstep.
+///
+/// Built only under the `loom` feature. Run with:
 ///   cargo test --features loom --lib loom_
 #[cfg(all(test, feature = "loom"))]
 mod loom_tests {
-    use super::{Ordering, SessionPin};
+    use loom::sync::atomic::{AtomicUsize, Ordering};
+    use loom::sync::Arc;
+
+    #[derive(Clone)]
+    struct PinModel {
+        count: Arc<AtomicUsize>,
+    }
+
+    struct GuardModel {
+        count: Arc<AtomicUsize>,
+    }
+
+    impl PinModel {
+        fn new() -> Self {
+            Self { count: Arc::new(AtomicUsize::new(0)) }
+        }
+        fn acquire(&self) -> GuardModel {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            GuardModel { count: self.count.clone() }
+        }
+        fn is_pinned(&self) -> bool {
+            self.count.load(Ordering::SeqCst) > 0
+        }
+    }
+
+    impl Drop for GuardModel {
+        fn drop(&mut self) {
+            self.count.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
 
     /// Two concurrent in-flight ops on the same session: under *every* thread
     /// interleaving each `acquire` is balanced by its guard's `Drop`, so the pin
@@ -1157,7 +1185,7 @@ mod loom_tests {
     #[test]
     fn loom_concurrent_guards_balance_to_zero() {
         loom::model(|| {
-            let pin = SessionPin::default();
+            let pin = PinModel::new();
             let p1 = pin.clone();
             let p2 = pin.clone();
             let h1 = loom::thread::spawn(move || drop(p1.acquire()));
@@ -1168,13 +1196,13 @@ mod loom_tests {
         });
     }
 
-    /// One op stays in flight while another observes: the observer must never
-    /// see the live session as unpinned (which the eviction filter would read as
-    /// "safe to evict", pulling the shell out from under the running op).
+    /// One op stays in flight while another runs concurrently: the observer must
+    /// never see the live session as unpinned (which the eviction filter would
+    /// read as "safe to evict", pulling the shell out from under the running op).
     #[test]
     fn loom_live_guard_always_reads_pinned() {
         loom::model(|| {
-            let pin = SessionPin::default();
+            let pin = PinModel::new();
             let observer = pin.clone();
             let held = pin.acquire();
             // A second op starts and finishes concurrently; throughout, the
