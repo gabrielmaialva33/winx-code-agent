@@ -1010,6 +1010,50 @@ pub struct SearchFiles {
     pub thread_id: String,
 }
 
+/// One match in `SearchFiles` structured output.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SearchMatch {
+    /// Workspace-relative path of the file the match was found in.
+    pub file: String,
+    /// 1-based line number of the matching line.
+    pub line: usize,
+    /// The full text of the matching line.
+    pub text: String,
+}
+
+/// Structured result of a `SearchFiles` call (mirrors the text block).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SearchFilesOutput {
+    /// The regex that was searched for.
+    pub pattern: String,
+    /// Number of matching lines actually returned (capped at `max_results`). When
+    /// `truncated` is true more matches exist; unlike `GlobOutput.total` this is
+    /// the returned count, not a pre-cap total (counting every match would defeat
+    /// the early-exit cap).
+    pub total_matches: usize,
+    /// Number of distinct files that had at least one returned match.
+    pub files_matched: usize,
+    /// True if scanning stopped at a cap (`max_results`, output budget, or
+    /// files-scanned limit) — results may be incomplete. False means every match
+    /// in the searched scope was returned.
+    pub truncated: bool,
+    /// The matching lines (excludes context lines).
+    pub matches: Vec<SearchMatch>,
+}
+
+/// Structured result of a `Glob` call (mirrors the text block).
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct GlobOutput {
+    /// The glob pattern that was matched.
+    pub pattern: String,
+    /// Total number of files that matched (before the `max_results` cap).
+    pub total: usize,
+    /// Number of paths actually returned in `paths`.
+    pub shown: usize,
+    /// Matching workspace-relative paths, ranked best-first.
+    pub paths: Vec<String>,
+}
+
 /// Parameters for the `Glob` tool (gitignore-aware file discovery).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Glob {

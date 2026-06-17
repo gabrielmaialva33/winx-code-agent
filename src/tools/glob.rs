@@ -13,7 +13,7 @@ use tokio::sync::Mutex;
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
-use crate::types::Glob;
+use crate::types::{Glob, GlobOutput};
 use crate::utils::path::{glob_matches, resolve_in_workspace};
 use crate::utils::path_prob::score_paths;
 use crate::utils::repo::walk_workspace_files;
@@ -21,10 +21,12 @@ use crate::utils::repo::walk_workspace_files;
 /// Cap on paths returned when the caller passes 0.
 const DEFAULT_MAX_RESULTS: usize = 200;
 
+/// Returns the human-readable text block and the structured (`GlobOutput`) JSON
+/// the caller attaches to the MCP result's `structuredContent`.
 pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     args: Glob,
-) -> Result<String> {
+) -> Result<(String, serde_json::Value)> {
     let (cwd, workspace_root) = {
         let guard = bash_state_arc.lock().await;
         let bash_state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
@@ -59,7 +61,10 @@ pub async fn handle_tool_call(
         .collect();
 
     if matches.is_empty() {
-        return Ok(format!("No files match {} under {}.", args.pattern, root.display()));
+        let out = format!("No files match {} under {}.", args.pattern, root.display());
+        let structured =
+            GlobOutput { pattern: args.pattern, total: 0, shown: 0, paths: Vec::new() };
+        return Ok((out, crate::tools::structured_json(&structured)?));
     }
 
     let total = matches.len();
@@ -67,8 +72,9 @@ pub async fn handle_tool_call(
     rank(&mut matches);
 
     let shown = total.min(max_results);
+    let paths: Vec<String> = matches.into_iter().take(shown).collect();
     let mut out = format!("{total} file(s) match {} (showing {shown}, ranked):\n", args.pattern);
-    for path in matches.iter().take(shown) {
+    for path in &paths {
         out.push_str(path);
         out.push('\n');
     }
@@ -76,7 +82,8 @@ pub async fn handle_tool_call(
         let _ =
             write!(out, "(...{} more; raise max_results or narrow the pattern.)", total - shown);
     }
-    Ok(out)
+    let structured = GlobOutput { pattern: args.pattern, total, shown, paths };
+    Ok((out, crate::tools::structured_json(&structured)?))
 }
 
 /// Order best-first via the embedded path-probability model (higher log-prob
@@ -122,7 +129,7 @@ mod tests {
         std::fs::write(dir.path().join("src/sub/b.rs"), "").unwrap();
         std::fs::write(dir.path().join("c.txt"), "").unwrap();
         let st = state_in(&dir);
-        let out = handle_tool_call(&st, args("*.rs")).await.unwrap();
+        let (out, _) = handle_tool_call(&st, args("*.rs")).await.unwrap();
         assert!(out.contains("src/a.rs"));
         assert!(out.contains("src/sub/b.rs"));
         assert!(!out.contains("c.txt"));
@@ -135,7 +142,7 @@ mod tests {
         std::fs::write(dir.path().join("src/a.ts"), "").unwrap();
         std::fs::write(dir.path().join("top.ts"), "").unwrap();
         let st = state_in(&dir);
-        let out = handle_tool_call(&st, args("src/**/*.ts")).await.unwrap();
+        let (out, _) = handle_tool_call(&st, args("src/**/*.ts")).await.unwrap();
         assert!(out.contains("src/a.ts"));
         assert!(!out.contains("top.ts"));
     }
@@ -145,7 +152,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("a.rs"), "").unwrap();
         let st = state_in(&dir);
-        let out = handle_tool_call(&st, args("*.zzz")).await.unwrap();
+        let (out, _) = handle_tool_call(&st, args("*.zzz")).await.unwrap();
         assert!(out.to_lowercase().contains("no files match"));
     }
 
@@ -158,8 +165,20 @@ mod tests {
         std::fs::write(dir.path().join("src/top.ts"), "").unwrap();
         std::fs::write(dir.path().join("src/deep/bottom.ts"), "").unwrap();
         let st = state_in(&dir);
-        let out = handle_tool_call(&st, args("src/*.ts")).await.unwrap();
+        let (out, _) = handle_tool_call(&st, args("src/*.ts")).await.unwrap();
         assert!(out.contains("src/top.ts"));
         assert!(!out.contains("src/deep/bottom.ts"), "single * must not cross /");
+    }
+
+    #[tokio::test]
+    async fn structured_output_reports_total_and_paths() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "").unwrap();
+        let st = state_in(&dir);
+        let (_, structured) = handle_tool_call(&st, args("*.rs")).await.unwrap();
+        assert_eq!(structured["total"], 2);
+        assert_eq!(structured["shown"], 2);
+        assert_eq!(structured["paths"].as_array().unwrap().len(), 2);
     }
 }

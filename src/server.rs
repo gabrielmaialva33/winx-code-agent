@@ -1,4 +1,4 @@
-//! Winx MCP Server implementation using rmcp 0.12.0
+//! Winx MCP Server implementation using rmcp 1.7
 //! Core MCP tools only - High performance shell and file management
 
 use rmcp::{
@@ -29,8 +29,8 @@ use crate::errors::WinxError;
 use crate::state::bash_state::generate_thread_id;
 use crate::state::BashState;
 use crate::types::{
-    normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, Glob, Initialize, ReadFiles,
-    ReadImage, SearchFiles,
+    normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, Glob, GlobOutput, Initialize,
+    ReadFiles, ReadImage, SearchFiles, SearchFilesOutput,
 };
 
 /// Map a domain [`WinxError`] to the right JSON-RPC error kind.
@@ -148,6 +148,22 @@ fn mcp_tool<T: schemars::JsonSchema>(
     annotations: ToolAnnotations,
 ) -> Tool {
     Tool::new(name, description, schema_to_input_schema::<T>()).with_annotations(annotations)
+}
+
+/// Like [`mcp_tool`] but also advertises an output schema (`I` = input args,
+/// `O` = structured output). The output schema is built and title-stripped the
+/// same way as the input schema. rmcp always serializes it (and the matching
+/// `structuredContent`) regardless of the negotiated protocol version; clients
+/// that understand output schemas (2025-06-18+) validate against it, and older
+/// ones harmlessly ignore the extra field.
+fn mcp_tool_io<I: schemars::JsonSchema, O: schemars::JsonSchema>(
+    name: &'static str,
+    description: &'static str,
+    annotations: ToolAnnotations,
+) -> Tool {
+    Tool::new(name, description, schema_to_input_schema::<I>())
+        .with_annotations(annotations)
+        .with_raw_output_schema(schema_to_input_schema::<O>())
 }
 
 const INITIALIZE_DESCRIPTION: &str =
@@ -318,12 +334,12 @@ fn build_winx_tools() -> Vec<Tool> {
             "Read an image from the shell.",
             ToolAnnotations::new().read_only(true).open_world(false),
         ),
-        mcp_tool::<SearchFiles>(
+        mcp_tool_io::<SearchFiles, SearchFilesOutput>(
             "SearchFiles",
             SEARCH_FILES_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
         ),
-        mcp_tool::<Glob>(
+        mcp_tool_io::<Glob, GlobOutput>(
             "Glob",
             GLOB_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
@@ -567,7 +583,10 @@ impl ServerHandler for WinxService {
             Implementation::new("winx-mcp-server", self.version.clone())
                 .with_title("Winx High-Performance MCP"),
         )
-        .with_protocol_version(ProtocolVersion::V_2024_11_05)
+        // Advertise 2025-06-18 (structured tool output + output schemas). rmcp
+        // negotiates `min(peer, server)`, so older clients still get 2024-11-05
+        // automatically — bumping the ceiling never breaks them.
+        .with_protocol_version(ProtocolVersion::V_2025_06_18)
         .with_instructions(
                 "Winx is a high-performance Rust implementation of MCP tools for shell and file management."
         )
@@ -1001,7 +1020,11 @@ impl WinxService {
         let (slot, _session_guard) =
             self.session_for(&normalize_thread_id(&search.thread_id)).await;
         match crate::tools::search_files::handle_tool_call(&slot, search).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
+            Ok((text, structured)) => {
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content = Some(structured);
+                Ok(result)
+            }
             Err(e) => Err(to_mcp_error("SearchFiles", &e)),
         }
     }
@@ -1016,7 +1039,11 @@ impl WinxService {
         let (slot, _session_guard) =
             self.session_for(&normalize_thread_id(&glob_args.thread_id)).await;
         match crate::tools::glob::handle_tool_call(&slot, glob_args).await {
-            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
+            Ok((text, structured)) => {
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content = Some(structured);
+                Ok(result)
+            }
             Err(e) => Err(to_mcp_error("Glob", &e)),
         }
     }
