@@ -13,6 +13,7 @@ pub mod path;
 pub mod path_prob;
 pub mod redact;
 pub mod repo;
+pub mod scratch_file;
 pub mod symbols;
 pub mod syntax;
 pub mod workspace_stats;

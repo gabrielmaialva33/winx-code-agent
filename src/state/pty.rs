@@ -12,7 +12,7 @@ use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize}
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -30,6 +30,11 @@ pub const DEFAULT_ROWS: u16 = 50;
 
 /// Maximum output buffer size to prevent memory issues
 const MAX_OUTPUT_SIZE: usize = 1_000_000;
+
+/// Cap on bytes streamed to one command's output-offload scratch file, so a
+/// command emitting gigabytes cannot fill the disk. The head beyond this is
+/// dropped (the agent still gets the first 50 MB plus the live tail).
+const SCRATCH_MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 /// How many fully-formed lines to keep in the per-shell ringbuffer. Callers can
 /// ask for at most this many lines of historical context via
@@ -215,6 +220,16 @@ pub struct PtyShell {
     /// which redraws with cursor-up + erase-line in the main screen) consolidate
     /// instead of ghosting. See `live_snapshot`.
     live: Arc<StdMutex<LiveTerminal>>,
+    /// Workspace root under which output-offload scratch files are written.
+    /// `None` until a caller sets it (the workspace is only known after
+    /// Initialize, and `execute_command` sets it per command). See
+    /// `crate::utils::scratch_file`.
+    scratch_workspace_root: Option<PathBuf>,
+    /// Scratch file holding the CURRENT command's dropped output head, created
+    /// lazily on the first truncation and reset per command.
+    scratch_path: Option<PathBuf>,
+    /// Bytes already streamed to `scratch_path`, used to enforce `SCRATCH_MAX_BYTES`.
+    scratch_bytes: u64,
 }
 
 impl std::fmt::Debug for PtyShell {
@@ -440,6 +455,9 @@ impl PtyShell {
             attach_hint,
             prompt_end_marker: format!("{WCGW_PROMPT_END}{nonce}"),
             live,
+            scratch_workspace_root: None,
+            scratch_path: None,
+            scratch_bytes: 0,
         };
 
         // Initialize the shell with WCGW-style prompt
@@ -555,6 +573,7 @@ impl PtyShell {
         // Clear previous state
         self.output_buffer.clear();
         self.output_truncated = false;
+        self.reset_scratch();
         self.last_command = command.to_string();
         self.command_running = true;
         self.last_exit_code = None;
@@ -623,21 +642,8 @@ impl PtyShell {
                         debug!("Prompt detected, draining remaining output...");
                     }
 
-                    // Truncate if too large
-                    if self.output_buffer.len() > self.max_output_size {
-                        self.output_truncated = true;
-                        let truncate_msg = "\n(...output truncated...)\n";
-                        let keep_size = self.max_output_size / 2;
-                        // Snap to a char boundary: a raw byte offset can land mid-UTF-8
-                        // (CJK/emoji/box-drawing/the prompt glyphs) and slicing there would
-                        // panic on this hot read path. Same helper as the poll-drain path.
-                        let cut = crate::utils::floor_char_boundary(
-                            &self.output_buffer,
-                            self.output_buffer.len() - keep_size,
-                        );
-                        self.output_buffer =
-                            format!("{truncate_msg}{}", &self.output_buffer[cut..]);
-                    }
+                    // Truncate if too large (offloads the dropped head to scratch).
+                    self.truncate_output_buffer_with_offload();
                 }
                 Err(TryRecvError::Empty) => {
                     // No data available, wait briefly
@@ -700,17 +706,7 @@ impl PtyShell {
                     {
                         prompt_seen = true;
                     }
-                    if self.output_buffer.len() > self.max_output_size {
-                        self.output_truncated = true;
-                        let truncate_msg = "\n(...output truncated...)\n";
-                        let keep_size = self.max_output_size / 2;
-                        let cut = crate::utils::floor_char_boundary(
-                            &self.output_buffer,
-                            self.output_buffer.len() - keep_size,
-                        );
-                        self.output_buffer =
-                            format!("{truncate_msg}{}", &self.output_buffer[cut..]);
-                    }
+                    self.truncate_output_buffer_with_offload();
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -756,6 +752,76 @@ impl PtyShell {
         // else — this confirms the prompt ends the line AND yields the code.
         let after = clean.rsplit_once(prompt_end)?.1;
         after.strip_prefix(':')?.trim().parse::<i32>().ok()
+    }
+
+    /// Point output-offload scratch files at `root` (the workspace). Idempotent;
+    /// callers set it per command so it always tracks the current workspace.
+    pub fn set_scratch_root(&mut self, root: &Path) {
+        self.scratch_workspace_root = Some(root.to_path_buf());
+    }
+
+    /// The scratch file holding the current command's dropped output head, if any
+    /// was offloaded this command.
+    pub fn scratch_path(&self) -> Option<&Path> {
+        self.scratch_path.as_deref()
+    }
+
+    /// Forget the current command's scratch file so the next command starts a
+    /// fresh one. Does not delete the file (pruned later by age).
+    pub fn reset_scratch(&mut self) {
+        self.scratch_path = None;
+        self.scratch_bytes = 0;
+    }
+
+    /// Append a just-dropped output `head` to the per-command scratch file so the
+    /// agent can recover it via `ReadFiles`. Best-effort: needs a known workspace
+    /// root, stops at `SCRATCH_MAX_BYTES`, and swallows IO errors.
+    fn offload_dropped_head(&mut self, head: &str) {
+        let Some(root) = self.scratch_workspace_root.clone() else {
+            return;
+        };
+        // Clamp to the remaining byte budget so the file honors SCRATCH_MAX_BYTES
+        // exactly (a single head can be up to keep_size, ~500 KB). Snap to a char
+        // boundary so we never slice mid-UTF-8.
+        let remaining = SCRATCH_MAX_BYTES.saturating_sub(self.scratch_bytes);
+        if remaining == 0 {
+            return;
+        }
+        let head = match usize::try_from(remaining) {
+            Ok(rem) if rem < head.len() => &head[..crate::utils::floor_char_boundary(head, rem)],
+            _ => head,
+        };
+        if self.scratch_path.is_none() {
+            self.scratch_path = crate::utils::scratch_file::new_scratch_path(&root);
+        }
+        let Some(path) = self.scratch_path.clone() else {
+            return;
+        };
+        match crate::utils::scratch_file::append_scratch(&path, head.as_bytes()) {
+            Ok(()) => self.scratch_bytes = self.scratch_bytes.saturating_add(head.len() as u64),
+            Err(e) => debug!("scratch: append to {} failed: {e}", path.display()),
+        }
+    }
+
+    /// Once `output_buffer` exceeds the cap, offload the head about to be dropped
+    /// to the scratch file, then keep only the tail with a truncation marker.
+    /// Shared by the blocking and non-blocking drain paths so the offload and the
+    /// char-boundary handling live in one place.
+    fn truncate_output_buffer_with_offload(&mut self) {
+        if self.output_buffer.len() <= self.max_output_size {
+            return;
+        }
+        self.output_truncated = true;
+        let keep_size = self.max_output_size / 2;
+        // Snap to a char boundary: a raw byte offset can land mid-UTF-8
+        // (CJK/emoji/box-drawing/the prompt glyphs) and slicing there would panic.
+        let cut = crate::utils::floor_char_boundary(
+            &self.output_buffer,
+            self.output_buffer.len() - keep_size,
+        );
+        let head = self.output_buffer[..cut].to_owned();
+        self.offload_dropped_head(&head);
+        self.output_buffer = format!("\n(...output truncated...)\n{}", &self.output_buffer[cut..]);
     }
 
     /// Send Ctrl+C (interrupt) to the PTY

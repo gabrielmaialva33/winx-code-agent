@@ -795,6 +795,7 @@ async fn execute_command(
     }
 
     // Send command in chunks of 64 characters - matches WCGW Python exactly
+    let scratch_root = bash_state.workspace_root.clone();
     {
         let mut bash_guard = bash_state.pty_shell.lock().await;
 
@@ -802,6 +803,10 @@ async fn execute_command(
 
         bash.output_buffer.clear();
         bash.output_truncated = false;
+        // Offload an over-long output's dropped head to a scratch file under the
+        // current workspace so the agent can recover it via ReadFiles.
+        bash.reset_scratch();
+        bash.set_scratch_root(&scratch_root);
         // Mirror send_command's full reset. This foreground path hand-rolls the
         // field mutation (it chunks the send for WCGW parity) and used to drop
         // these two: a stale exit code or dedup hash would then leak into the
@@ -970,14 +975,36 @@ async fn wait_for_output(
 
     // Surface the just-finished command's exit code (parsed from the prompt
     // marker) so the agent sees failure without grepping stderr.
-    let mut exit_code = None;
-    if complete {
-        exit_code = shell_arc.lock().await.as_ref().and_then(|shell| shell.last_exit_code);
-    }
+    // Exit code (parsed from the prompt) plus a pointer to any offloaded output
+    // scratch file, read in one lock acquisition.
+    let (exit_code, scratch_pointer) = read_completion_extras(shell_arc, complete).await;
 
     // Add status - matches WCGW Python get_status
     let status = get_status(bash_state, is_bg, bg_id, !complete, running_for.as_deref(), exit_code);
-    Ok(format!("{rendered}{status}"))
+    Ok(format!("{rendered}{status}{scratch_pointer}"))
+}
+
+/// Pull the just-finished command's exit code and, if its output overflowed and
+/// the dropped head was offloaded, a pointer message to the scratch file - in a
+/// single lock acquisition so callers don't lock the shell twice.
+async fn read_completion_extras(
+    shell_arc: &SharedPtyShell,
+    complete: bool,
+) -> (Option<i32>, String) {
+    let guard = shell_arc.lock().await;
+    let Some(shell) = guard.as_ref() else {
+        return (None, String::new());
+    };
+    let exit_code = if complete { shell.last_exit_code } else { None };
+    let pointer = match (shell.output_truncated, shell.scratch_path()) {
+        (true, Some(path)) => format!(
+            "\n\n---\n[Output was truncated to fit context. The earlier (dropped) output was \
+             saved to:\n{}\nRead it with ReadFiles or search it with SearchFiles.]\n---",
+            path.display()
+        ),
+        _ => String::new(),
+    };
+    (exit_code, pointer)
 }
 
 /// Render the final cached output of an exited background shell.
@@ -1540,9 +1567,13 @@ async fn execute_in_background(
     };
 
     // Send command via the same PTY path used by foreground execute_command.
+    let scratch_root = bash_state.workspace_root.clone();
     {
         let mut guard = shell_arc.lock().await;
         let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
+        // Offload an over-long bg output's dropped head too (send_command resets
+        // the per-command scratch state; this points it at the workspace).
+        bash.set_scratch_root(&scratch_root);
         bash.send_command(command).map_err(|e| {
             WinxError::CommandExecutionError(format!("Failed to send bg command: {e}"))
         })?;
