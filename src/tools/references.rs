@@ -51,17 +51,32 @@ pub async fn handle_tool_call(
     })?;
     let max = if args.max_results == 0 { DEFAULT_MAX_HITS } else { args.max_results };
 
-    let candidates: Vec<PathBuf> =
-        if root.is_file() { vec![root.clone()] } else { walk_workspace_files(&root) };
+    // Don't silently degrade a typo'd file path into an empty whole-workspace
+    // scan (mirrors Outline).
+    let candidates: Vec<PathBuf> = if root.is_file() {
+        vec![root.clone()]
+    } else if root.is_dir() {
+        walk_workspace_files(&root)
+    } else {
+        return Err(WinxError::FileAccessError {
+            path: root.clone(),
+            message: "path not found (or not a regular file/directory)".to_string(),
+        });
+    };
 
     let mut context = TagsContext::new();
     let mut configs: Configs = HashMap::new();
-    let mut hits: Vec<ReferenceHit> = Vec::new();
+    // Two buckets: definitions are collected UNCAPPED (there are few, and losing
+    // one is the worst failure), only references are capped at `max`. The walk is
+    // stopped only by the file budget — never by the hit count — so a definition
+    // in a late-walked file is never missed (which the naive top-of-loop cap did).
+    let mut defs: Vec<ReferenceHit> = Vec::new();
+    let mut refs: Vec<ReferenceHit> = Vec::new();
     let mut scanned = 0usize;
     let mut truncated = false;
 
     for abs in candidates {
-        if hits.len() >= max || scanned >= MAX_FILES_SCANNED {
+        if scanned >= MAX_FILES_SCANNED {
             truncated = true;
             break;
         }
@@ -80,29 +95,30 @@ pub async fn handle_tool_call(
             if s.name != args.name {
                 continue;
             }
-            hits.push(ReferenceHit {
+            let hit = ReferenceHit {
                 file: rel.clone(),
                 line: s.line,
                 kind: s.kind,
                 is_definition: s.is_definition,
-            });
+            };
+            if s.is_definition {
+                defs.push(hit);
+            } else if refs.len() < max {
+                refs.push(hit);
+            } else {
+                truncated = true; // more references than the cap allows
+            }
         }
     }
 
-    // Definitions first (most useful), then by file/line. Cap keeps definitions.
-    hits.sort_by(|a, b| {
-        b.is_definition
-            .cmp(&a.is_definition)
-            .then_with(|| a.file.cmp(&b.file))
-            .then_with(|| a.line.cmp(&b.line))
-    });
-    if hits.len() > max {
-        hits.truncate(max);
-        truncated = true;
-    }
-
-    let definitions = hits.iter().filter(|h| h.is_definition).count();
-    let references = hits.len() - definitions;
+    let by_loc =
+        |a: &ReferenceHit, b: &ReferenceHit| a.file.cmp(&b.file).then_with(|| a.line.cmp(&b.line));
+    defs.sort_by(by_loc);
+    refs.sort_by(by_loc);
+    let definitions = defs.len();
+    let references = refs.len();
+    let mut hits = defs;
+    hits.extend(refs); // definitions first, then references
 
     let out = render(&args.name, &hits, definitions, references, truncated, &root);
     let structured = ReferencesOutput { name: args.name, definitions, references, truncated, hits };
@@ -203,34 +219,37 @@ mod tests {
         assert!(out.to_lowercase().contains("no occurrences"));
     }
 
-    // ADVERSARIAL: does the top-of-loop hits.len()>=max cap drop the definition
-    // when many reference files are walked before the def file?
     #[tokio::test]
-    async fn adversarial_def_dropped_by_early_cap() {
+    async fn definition_survives_when_references_exceed_cap() {
+        // Regression (B1): definitions are uncapped, so the def is found and kept
+        // even when far more reference hits than `max` are collected, regardless
+        // of filesystem walk order.
         let dir = TempDir::new().unwrap();
-        // 5000 ref-only files. Walk order is filesystem readdir order (NOT
-        // sorted by walk_workspace_files), so the single def file is very
-        // unlikely to land in the first 200 visited.
-        for i in 0..5000 {
+        for i in 0..20 {
             std::fs::write(
-                dir.path().join(format!("ref_{i:05}.rs")),
+                dir.path().join(format!("ref_{i:02}.rs")),
                 "fn caller() { target(); }\n",
             )
             .unwrap();
         }
-        std::fs::write(dir.path().join("the_def.rs"), "fn target() {}\n").unwrap();
+        std::fs::write(dir.path().join("zzz_def.rs"), "fn target() {}\n").unwrap();
         let st = state_in(&dir);
-        let (out, structured) = handle_tool_call(&st, args("target")).await.unwrap();
-        eprintln!("DEFS={} REFS={} TRUNC={}", structured["definitions"], structured["references"], structured["truncated"]);
-        // The claim under review: "definitions are never dropped before references".
-        // This asserts the BUG: if the def is dropped, definitions==0.
-        eprintln!("DEFINITION SURVIVED? {}", structured["definitions"] == 1);
-        assert_eq!(structured["definitions"], 1, "BUG CONFIRMED: definition dropped by early cap before def file was scanned. out head:\n{}", &out[..out.len().min(200)]);
+        let mut a = args("target");
+        a.max_results = 3; // far fewer than the 20 reference hits
+        let (_, structured) = handle_tool_call(&st, a).await.unwrap();
+        assert_eq!(
+            structured["definitions"], 1,
+            "definition must never be dropped by the reference cap"
+        );
+        assert!(structured["references"].as_u64().unwrap() <= 3);
+        assert_eq!(structured["truncated"], true);
+        assert_eq!(structured["hits"][0]["is_definition"], true); // definitions listed first
     }
 
-    // ADVERSARIAL: over-matching across types — A::run and B::run both named run.
     #[tokio::test]
-    async fn adversarial_method_overmatch_across_types() {
+    async fn bare_name_matches_same_name_across_types() {
+        // Documented limitation: a name-based lookup can't distinguish A::run from
+        // B::run — both count. Useful as a superset for rename/impact analysis.
         let dir = TempDir::new().unwrap();
         std::fs::write(
             dir.path().join("a.rs"),
@@ -238,8 +257,18 @@ mod tests {
         )
         .unwrap();
         let st = state_in(&dir);
-        let (_out, structured) = handle_tool_call(&st, args("run")).await.unwrap();
-        eprintln!("run DEFS={} REFS={}", structured["definitions"], structured["references"]);
-        // Just observe: bare-name match cannot distinguish A::run from B::run.
+        let (_, structured) = handle_tool_call(&st, args("run")).await.unwrap();
+        assert_eq!(structured["definitions"], 2);
+    }
+
+    #[tokio::test]
+    async fn nonexistent_path_errors() {
+        // B3: a typo'd path must error, not silently scan the whole workspace.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("real.rs"), "fn x() {}\n").unwrap();
+        let st = state_in(&dir);
+        let mut a = args("x");
+        a.path = "nope_typo.rs".to_string();
+        assert!(handle_tool_call(&st, a).await.is_err());
     }
 }
