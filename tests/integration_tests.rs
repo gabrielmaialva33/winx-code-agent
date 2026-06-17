@@ -99,7 +99,7 @@ async fn test_context_save_resume_restores_task_context() -> Result<()> {
         init_type: InitializeType::FirstCall,
         mode_name: ModeName::Wcgw,
         any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
-        thread_id: "resume-source".to_string(),
+        thread_id: "resumesource".to_string(),
         code_writer_config: None,
         initial_files_to_read: vec![],
         task_id_to_resume: String::new(),
@@ -120,7 +120,7 @@ async fn test_context_save_resume_restores_task_context() -> Result<()> {
         init_type: InitializeType::FirstCall,
         mode_name: ModeName::Wcgw,
         any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
-        thread_id: "resume-target".to_string(),
+        thread_id: "resumetarget".to_string(),
         code_writer_config: None,
         initial_files_to_read: vec![],
         task_id_to_resume: task_id,
@@ -252,7 +252,12 @@ async fn test_initialize_normalizes_thread_id() -> Result<()> {
 
     let state = bash_state_arc.lock().await;
     let bash_state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-    assert_eq!(bash_state.current_thread_id, "thread123_");
+    assert!(
+        bash_state.current_thread_id.starts_with("thread123_")
+            && bash_state.current_thread_id != "thread123_",
+        "got {}",
+        bash_state.current_thread_id
+    );
 
     Ok(())
 }
@@ -340,7 +345,11 @@ fn test_bash_command_deserializer_normalizes_thread_id_and_preserves_tail(
         "thread_id": "thread-123_$"
     }))?;
 
-    assert_eq!(bash_command.thread_id, "thread123_");
+    assert!(
+        bash_command.thread_id.starts_with("thread123_") && bash_command.thread_id != "thread123_",
+        "got {}",
+        bash_command.thread_id
+    );
     if let BashCommandAction::Command { command, .. } = bash_command.action_json {
         assert_eq!(command, "rg TODO src | tail -n 20");
     } else {
@@ -361,7 +370,11 @@ fn test_bash_command_deserializer_accepts_command_shorthand(
         "thread_id": "thread-123_$"
     }))?;
 
-    assert_eq!(bash_command.thread_id, "thread123_");
+    assert!(
+        bash_command.thread_id.starts_with("thread123_") && bash_command.thread_id != "thread123_",
+        "got {}",
+        bash_command.thread_id
+    );
     if let BashCommandAction::Command { command, allow_multi, .. } = bash_command.action_json {
         assert_eq!(command, "pwd");
         assert!(!allow_multi);
@@ -381,7 +394,11 @@ fn test_bash_command_deserializer_accepts_top_level_command_shorthand(
         "thread_id": "thread-123_$"
     }))?;
 
-    assert_eq!(bash_command.thread_id, "thread123_");
+    assert!(
+        bash_command.thread_id.starts_with("thread123_") && bash_command.thread_id != "thread123_",
+        "got {}",
+        bash_command.thread_id
+    );
     assert_eq!(bash_command.wait_for_seconds, Some(2.0));
     if let BashCommandAction::Command { command, allow_multi, .. } = bash_command.action_json {
         assert_eq!(command, "pwd\nls");
@@ -422,7 +439,7 @@ async fn test_bash_command_top_level_multiline_payload_executes() -> Result<()> 
         init_type: InitializeType::FirstCall,
         mode_name: ModeName::Wcgw,
         any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
-        thread_id: "dogfood-bash".to_string(),
+        thread_id: "dogfoodbash".to_string(),
         code_writer_config: None,
         initial_files_to_read: vec![],
         task_id_to_resume: String::new(),
@@ -601,7 +618,7 @@ async fn test_file_write_or_edit_treats_search_marker_as_edit_even_with_high_per
         init_type: InitializeType::FirstCall,
         mode_name: ModeName::Wcgw,
         any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
-        thread_id: "search-marker-edit".to_string(),
+        thread_id: "searchmarkeredit".to_string(),
         code_writer_config: None,
         initial_files_to_read: vec![],
         task_id_to_resume: String::new(),
@@ -792,7 +809,7 @@ async fn test_code_writer_mode_enforces_file_write_globs() -> Result<()> {
         init_type: InitializeType::FirstCall,
         mode_name: ModeName::CodeWriter,
         any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
-        thread_id: "code-writer-mode".to_string(),
+        thread_id: "codewritermode".to_string(),
         code_writer_config: Some(CodeWriterConfig {
             allowed_globs: AllowedGlobs::List(vec!["*.rs".to_string()]),
             allowed_commands: AllowedCommands::List(vec![]),

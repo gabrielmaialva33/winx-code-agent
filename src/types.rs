@@ -2,7 +2,29 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 pub fn normalize_thread_id(thread_id: &str) -> String {
-    thread_id.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect()
+    let filtered: String = thread_id.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
+    // If filtering removed characters, distinct ids could collapse to the same
+    // form ("user-1" and "user1" both become "user1"), silently sharing one
+    // session and one state file. Append a short, stable hash of the ORIGINAL so
+    // distinct inputs stay distinct. Already-safe ids (the common case, incl.
+    // generated `tid_*`) and ids that filter to empty are returned unchanged.
+    if filtered.is_empty() || filtered == thread_id {
+        filtered
+    } else {
+        format!("{filtered}_{:08x}", fnv1a_32(thread_id))
+    }
+}
+
+/// FNV-1a 32-bit — a tiny, dependency-free hash that is stable across runs and
+/// compiler versions (unlike `DefaultHasher`), so a normalized `thread_id`
+/// resolves to the same session and state file after a server restart.
+fn fnv1a_32(s: &str) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for byte in s.bytes() {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 /// Type of shell environment initialization
@@ -911,6 +933,41 @@ pub struct ReadImage {
     /// omitted, the most recently active session is used.
     #[serde(default)]
     pub thread_id: String,
+}
+
+#[cfg(test)]
+mod thread_id_tests {
+    use super::normalize_thread_id;
+
+    #[test]
+    fn clean_id_is_unchanged() {
+        assert_eq!(normalize_thread_id("tid_deadbeef"), "tid_deadbeef");
+        assert_eq!(normalize_thread_id("worker_1"), "worker_1");
+    }
+
+    #[test]
+    fn empty_and_all_special_normalize_to_empty() {
+        assert_eq!(normalize_thread_id(""), "");
+        assert_eq!(normalize_thread_id("---"), "");
+    }
+
+    #[test]
+    fn separator_variants_do_not_collide() {
+        // "user-1" and "user1" must NOT resolve to the same session/state file.
+        let a = normalize_thread_id("user-1");
+        let b = normalize_thread_id("user1");
+        assert_ne!(a, b);
+        assert!(a.starts_with("user1_"), "got {a}");
+        assert_eq!(b, "user1");
+        // "user-1" vs "user_1" must also stay distinct.
+        assert_ne!(normalize_thread_id("user-1"), normalize_thread_id("user_1"));
+    }
+
+    #[test]
+    fn normalization_is_deterministic() {
+        // Same input -> same hash -> same session across restarts.
+        assert_eq!(normalize_thread_id("a-b.c"), normalize_thread_id("a-b.c"));
+    }
 }
 
 #[cfg(test)]

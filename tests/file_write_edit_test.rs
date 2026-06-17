@@ -182,7 +182,7 @@ mod tests {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_full_write_reports_syntax_warning() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let bash_state_arc = create_initialized_state(&temp_dir, "syntax-warning").await?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "syntaxwarning").await?;
 
     let file_path = temp_dir.path().join("bad.json");
     let file_write = FileWriteOrEdit {
@@ -593,7 +593,7 @@ if __name__ == "__main__":
 #[tokio::test(flavor = "multi_thread")]
 async fn test_search_replace_matches_with_indentation_tolerance() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let bash_state_arc = create_initialized_state(&temp_dir, "indent-tolerance").await?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "indenttolerance").await?;
 
     let file_path = temp_dir.path().join("indent.py");
     std::fs::write(
@@ -632,7 +632,7 @@ class Example:
 #[tokio::test(flavor = "multi_thread")]
 async fn test_search_replace_matches_across_extra_blank_lines() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let bash_state_arc = create_initialized_state(&temp_dir, "blank-lines").await?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "blanklines").await?;
 
     let file_path = temp_dir.path().join("blank_lines.txt");
     std::fs::write(&file_path, "alpha\n\nbeta\ngamma\n")?;
@@ -663,7 +663,7 @@ beta-updated
 #[tokio::test(flavor = "multi_thread")]
 async fn test_search_replace_normalizes_common_unicode_mistakes() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let bash_state_arc = create_initialized_state(&temp_dir, "unicode-mistakes").await?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "unicodemistakes").await?;
 
     let file_path = temp_dir.path().join("unicode.txt");
     std::fs::write(&file_path, "println!(\"hello - world...\");\n")?;
@@ -688,7 +688,7 @@ async fn test_search_replace_normalizes_common_unicode_mistakes() -> Result<()> 
 #[tokio::test(flavor = "multi_thread")]
 async fn test_search_replace_removes_readfiles_line_numbers() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let bash_state_arc = create_initialized_state(&temp_dir, "line-nums").await?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "linenums").await?;
 
     let file_path = temp_dir.path().join("line_nums.rs");
     std::fs::write(&file_path, "fn main() {\n    println!(\"old\");\n}\n")?;
@@ -721,7 +721,7 @@ async fn test_search_replace_removes_readfiles_line_numbers() -> Result<()> {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_search_replace_uses_surrounding_blocks_to_disambiguate() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let bash_state_arc = create_initialized_state(&temp_dir, "context-match").await?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "contextmatch").await?;
 
     let file_path = temp_dir.path().join("context.txt");
     std::fs::write(&file_path, "A\nB\nC\nB\n")?;
@@ -760,7 +760,7 @@ C
 #[tokio::test(flavor = "multi_thread")]
 async fn test_search_replace_applies_unordered_independent_blocks() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let bash_state_arc = create_initialized_state(&temp_dir, "unordered-blocks").await?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "unorderedblocks").await?;
 
     let file_path = temp_dir.path().join("unordered.txt");
     std::fs::write(&file_path, "A\nB\nC\nB\n")?;
@@ -794,7 +794,7 @@ A_MODIFIED
 #[tokio::test(flavor = "multi_thread")]
 async fn test_search_replace_ambiguous_match_does_not_write() -> Result<()> {
     let temp_dir = TempDir::new()?;
-    let bash_state_arc = create_initialized_state(&temp_dir, "ambiguous-match").await?;
+    let bash_state_arc = create_initialized_state(&temp_dir, "ambiguousmatch").await?;
 
     let file_path = temp_dir.path().join("ambiguous.txt");
     let original = "A\nB\nB\n";
