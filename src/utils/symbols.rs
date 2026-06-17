@@ -7,16 +7,18 @@
 
 use tree_sitter_tags::{TagsConfiguration, TagsContext};
 
-/// A code symbol definition extracted from a source file.
+/// A code symbol occurrence (definition or reference) from a source file.
 #[derive(Debug, Clone)]
 pub struct Symbol {
     /// Symbol name (e.g. `parse_config`).
     pub name: String,
     /// Symbol kind from the grammar's tags query (e.g. `function`, `struct`,
-    /// `method`, `class`, `module`).
+    /// `method`, `class`, `call`).
     pub kind: String,
-    /// 1-based line where the definition starts.
+    /// 1-based line where the occurrence starts.
     pub line: usize,
+    /// True for a definition, false for a reference (call / use site).
+    pub is_definition: bool,
 }
 
 /// Map a file extension to its tree-sitter language + embedded tags query.
@@ -59,17 +61,37 @@ pub fn config_for(ext: &str) -> Option<TagsConfiguration> {
     TagsConfiguration::new(language, query, "").ok()
 }
 
-/// Extract definition symbols from `content` using a pre-built `config`.
-/// `context` is reusable across files. Best-effort: a parse/iteration error
-/// yields the symbols collected so far (possibly empty).
+/// Extract definition symbols from `text` using a pre-built `config`.
+/// `context` is reusable across files.
 pub fn extract(context: &mut TagsContext, config: &TagsConfiguration, text: &str) -> Vec<Symbol> {
+    collect(context, config, text, true)
+}
+
+/// Extract all occurrences — definitions AND references (call/use sites).
+pub fn extract_all(
+    context: &mut TagsContext,
+    config: &TagsConfiguration,
+    text: &str,
+) -> Vec<Symbol> {
+    collect(context, config, text, false)
+}
+
+/// Shared collector. Best-effort: a parse/iteration error yields whatever was
+/// gathered so far (possibly empty). `source[tag.name_range]` is safe because
+/// `text` is valid UTF-8 and the range comes from tree-sitter over that buffer.
+fn collect(
+    context: &mut TagsContext,
+    config: &TagsConfiguration,
+    text: &str,
+    definitions_only: bool,
+) -> Vec<Symbol> {
     let source = text.as_bytes();
     let mut out = Vec::new();
     let Ok((tags, _)) = context.generate_tags(config, source, None) else {
         return out;
     };
     for tag in tags.flatten() {
-        if !tag.is_definition {
+        if definitions_only && !tag.is_definition {
             continue;
         }
         let name = String::from_utf8_lossy(&source[tag.name_range.clone()]).into_owned();
@@ -80,6 +102,7 @@ pub fn extract(context: &mut TagsContext, config: &TagsConfiguration, text: &str
             name,
             kind: config.syntax_type_name(tag.syntax_type_id).to_string(),
             line: tag.span.start.row + 1,
+            is_definition: tag.is_definition,
         });
     }
     out
