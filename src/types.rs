@@ -951,6 +951,17 @@ pub struct MultiFileEdit {
     pub thread_id: String,
 }
 
+/// Parameters for the `UndoEdit` tool: revert a file to its content before the
+/// last `FileWriteOrEdit`/`MultiFileEdit` in this session.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct UndoEdit {
+    /// Path of the file whose last edit should be reverted (absolute, ~ allowed).
+    pub file_path: String,
+
+    /// The thread ID for this session
+    pub thread_id: String,
+}
+
 /// Parameters for the `ContextSave` tool
 ///
 /// This struct represents the parameters needed to save context information

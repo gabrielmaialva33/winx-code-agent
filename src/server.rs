@@ -31,7 +31,7 @@ use crate::state::BashState;
 use crate::types::{
     normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, FindReferences, Glob,
     GlobOutput, Initialize, MultiFileEdit, Outline, OutlineOutput, ReadFiles, ReadImage,
-    ReferencesOutput, SearchFiles, SearchFilesOutput,
+    ReferencesOutput, SearchFiles, SearchFilesOutput, UndoEdit,
 };
 
 /// Map a domain [`WinxError`] to the right JSON-RPC error kind.
@@ -285,6 +285,13 @@ const MULTI_FILE_EDIT_DESCRIPTION: &str =
      - Provide 2+ files; for a single file use FileWriteOrEdit. Do not list the same file twice. \
      - If a write fails mid-batch (rare: disk/permissions), it stops and reports which files were already written; those are not rolled back.";
 
+const UNDO_EDIT_DESCRIPTION: &str =
+    "- Reverts a file to the content it had before the last FileWriteOrEdit/MultiFileEdit you made to it THIS session. \
+     - Use this to back out a wrong edit instead of re-typing the old content. \
+     - Per-file: call it again on the same file to walk further back through its edits (the last ~10 edits per session are kept, in memory only). \
+     - Refused if the file changed on disk since your edit (so an undo never discards newer changes), and a brand-new file's creation cannot be undone (no prior content) - use BashCommand rm for that. \
+     - Provide file_path (absolute, ~ allowed).";
+
 const CONTEXT_SAVE_DESCRIPTION: &str =
     "Saves provided description and file contents of all the relevant file paths or globs in a single text file. \
      - Provide random 3 word unqiue id or whatever user provided. \
@@ -349,6 +356,11 @@ fn build_winx_tools() -> Vec<Tool> {
         mcp_tool::<MultiFileEdit>(
             "MultiFileEdit",
             MULTI_FILE_EDIT_DESCRIPTION,
+            ToolAnnotations::new().destructive(true).open_world(false),
+        ),
+        mcp_tool::<UndoEdit>(
+            "UndoEdit",
+            UNDO_EDIT_DESCRIPTION,
             ToolAnnotations::new().destructive(true).open_world(false),
         ),
         mcp_tool::<ContextSave>(
@@ -736,6 +748,7 @@ impl ServerHandler for WinxService {
             "ReadFiles" => self.handle_read_files(args_value).await,
             "FileWriteOrEdit" => self.handle_file_write_or_edit(args_value).await,
             "MultiFileEdit" => self.handle_multi_file_edit(args_value).await,
+            "UndoEdit" => self.handle_undo_edit(args_value).await,
             "ContextSave" => self.handle_context_save(args_value).await,
             "ReadImage" => self.handle_read_image(args_value).await,
             "SearchFiles" => self.handle_search_files(args_value).await,
@@ -791,7 +804,7 @@ fn audit_summary(tool: &str, args: Option<&Value>) -> String {
                 format!("action={kind}")
             }
         }
-        "FileWriteOrEdit" | "ReadImage" => format!("path={}", s("file_path")),
+        "FileWriteOrEdit" | "ReadImage" | "UndoEdit" => format!("path={}", s("file_path")),
         "MultiFileEdit" => {
             format!("files={}", args.get("files").and_then(Value::as_array).map_or(0, Vec::len))
         }
@@ -1072,6 +1085,22 @@ impl WinxService {
                 Ok(CallToolResult::success(vec![Content::text(result)]))
             }
             Err(e) => Err(to_mcp_error("MultiFileEdit", &e)),
+        }
+    }
+
+    async fn handle_undo_edit(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let undo: UndoEdit = Self::lenient_from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid UndoEdit parameters: {e}"), None)
+        })?;
+
+        let (slot, _session_guard) = self.session_for(&normalize_thread_id(&undo.thread_id)).await;
+        match crate::tools::undo_edit::handle_tool_call(&slot, undo).await {
+            Ok(result) => {
+                self.persist_state(&slot).await;
+                Ok(CallToolResult::success(vec![Content::text(result)]))
+            }
+            Err(e) => Err(to_mcp_error("UndoEdit", &e)),
         }
     }
 

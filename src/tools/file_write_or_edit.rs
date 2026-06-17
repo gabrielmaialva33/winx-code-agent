@@ -291,7 +291,7 @@ fn split_lines(content: &str) -> Vec<String> {
 /// created are fresh, so they stay inside the workspace. A residual symlink-swap
 /// TOCTOU on an intermediate dir is the same window `write_no_follow` documents
 /// for the leaf — acceptable on a single-user local server.
-fn ensure_parent_dirs(path: &Path) -> Result<()> {
+pub(crate) fn ensure_parent_dirs(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             fs::create_dir_all(parent).map_err(|e| WinxError::FileAccessError {
@@ -303,7 +303,7 @@ fn ensure_parent_dirs(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn write_no_follow(path: &Path, content: &[u8]) -> std::io::Result<()> {
+pub(crate) fn write_no_follow(path: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Error;
 
     let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
@@ -915,7 +915,7 @@ fn uses_search_replace(percentage_to_change: u32, blocks: &str) -> bool {
     first_content_line.is_some_and(|line| search_marker().is_ok_and(|marker| marker.is_match(line)))
 }
 
-fn hash_content(content: &str) -> String {
+pub(crate) fn hash_content(content: &str) -> String {
     let digest = Sha256::digest(content.as_bytes());
     digest.iter().fold(String::with_capacity(digest.len() * 2), |mut hash, byte| {
         let _ = write!(hash, "{byte:02x}");
@@ -1092,6 +1092,20 @@ pub(crate) fn commit_edit(bash_state: &mut BashState, planned: PlannedEdit) -> R
     // `mkdir -p` for new files (no-op for edits, whose parent already exists).
     ensure_parent_dirs(&path)?;
     write_no_follow(&path, new_content.as_bytes())?;
+
+    // Record an undo checkpoint AFTER the write succeeded (never a phantom one for
+    // a failed edit). Only existing files: a brand-new file has no prior content
+    // to restore, so its creation is intentionally not undoable.
+    if let Some(prior_content) = &previous {
+        let prior_whitelist = bash_state.whitelist_for_overwrite.get(&file_path_str).cloned();
+        bash_state.push_edit_checkpoint(crate::state::bash_state::EditCheckpoint {
+            file_path_str: file_path_str.clone(),
+            path: path.clone(),
+            prior_content: prior_content.clone(),
+            prior_whitelist,
+        });
+    }
+
     let result = operation_result(
         action,
         &file_path_str,

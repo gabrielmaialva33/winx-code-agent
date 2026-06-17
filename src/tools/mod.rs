@@ -15,6 +15,7 @@ pub mod read_files;
 pub mod read_image;
 pub mod references;
 pub mod search_files;
+pub mod undo_edit;
 
 /// Serialize a tool's structured output to JSON for the MCP result's
 /// `structuredContent`, mapping the (practically impossible) failure to a domain

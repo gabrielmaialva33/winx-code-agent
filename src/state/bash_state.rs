@@ -3,7 +3,7 @@ use anyhow::Result;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -96,6 +96,31 @@ impl FileWhitelistData {
     }
 }
 
+/// How many edit checkpoints to keep per session for `UndoEdit`. In-memory only
+/// (not persisted), oldest dropped past the cap, bounding memory on long sessions.
+const EDIT_CHECKPOINT_CAP: usize = 10;
+
+/// Largest prior-content a checkpoint will hold. Files (up to the 50 MB edit
+/// ceiling) above this aren't checkpointed, so a session editing huge assets
+/// can't pile up to ~CAP * 50 MB of undo snapshots in memory; those edits just
+/// aren't undoable.
+const EDIT_CHECKPOINT_MAX_CONTENT_BYTES: usize = 1_000_000;
+
+/// A single file's pre-edit state, captured by `FileWriteOrEdit`/`MultiFileEdit`
+/// after a successful write so `UndoEdit` can restore it. Only existing files get
+/// one (a brand-new file's creation is not undoable - there is no prior content).
+#[derive(Debug, Clone)]
+pub struct EditCheckpoint {
+    /// Resolved, workspace-confined path string (matches `whitelist_for_overwrite` keys).
+    pub file_path_str: String,
+    pub path: PathBuf,
+    /// File content before the edit, to be written back on undo.
+    pub prior_content: String,
+    /// The whitelist entry before the edit, restored on undo so the hash gate of a
+    /// later edit matches the reverted content. `None` if there was none.
+    pub prior_whitelist: Option<FileWhitelistData>,
+}
+
 #[derive(Debug, Clone)]
 pub struct BashState {
     pub cwd: PathBuf,
@@ -108,6 +133,10 @@ pub struct BashState {
     pub whitelist_for_overwrite: HashMap<String, FileWhitelistData>,
     pub pty_shell: Arc<Mutex<Option<PtyShell>>>,
     pub initialized: bool,
+    /// In-memory ring of recent edit checkpoints for `UndoEdit` (newest at the
+    /// back). Deliberately not part of `BashStateSnapshot`: undo is for immediate
+    /// mid-session recovery, not across restarts.
+    pub edit_checkpoints: VecDeque<EditCheckpoint>,
 }
 
 impl Default for BashState {
@@ -135,7 +164,33 @@ impl BashState {
             whitelist_for_overwrite: HashMap::new(),
             pty_shell: Arc::new(Mutex::new(None)),
             initialized: false,
+            edit_checkpoints: VecDeque::new(),
         }
+    }
+
+    /// Record a pre-edit checkpoint for `UndoEdit`, dropping the oldest past the
+    /// cap. Large files are skipped (not undoable) to bound memory.
+    pub fn push_edit_checkpoint(&mut self, checkpoint: EditCheckpoint) {
+        if checkpoint.prior_content.len() > EDIT_CHECKPOINT_MAX_CONTENT_BYTES {
+            info!(
+                file = %checkpoint.file_path_str,
+                "UndoEdit: not checkpointing a file over 1 MB (too large to hold in memory)"
+            );
+            return;
+        }
+        self.edit_checkpoints.push_back(checkpoint);
+        while self.edit_checkpoints.len() > EDIT_CHECKPOINT_CAP {
+            self.edit_checkpoints.pop_front();
+        }
+    }
+
+    /// Remove and return the most recent checkpoint for `file_path_str` (per-file
+    /// LIFO, so repeated undos on one file walk its edits back while leaving other
+    /// files' checkpoints in place). `None` if that file has no checkpoint.
+    pub fn pop_edit_checkpoint_for(&mut self, file_path_str: &str) -> Option<EditCheckpoint> {
+        let index =
+            self.edit_checkpoints.iter().rposition(|cp| cp.file_path_str == file_path_str)?;
+        self.edit_checkpoints.remove(index)
     }
 
     pub async fn init_pty_shell(&mut self) -> Result<()> {
