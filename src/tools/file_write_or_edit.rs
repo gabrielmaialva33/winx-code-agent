@@ -731,8 +731,8 @@ fn not_found_error(block: &SearchReplaceBlock, lines: &[String], offset: usize) 
     let (snippet, similarity) = closest_snippet(lines, offset, &block.search);
     WinxError::SearchBlockNotFound(format!(
         "Block not found in file. The SEARCH block below didn't match anywhere:\n{}\n\n\
-         Closest matching context in the file ({:.0}% similar — if this is what you meant, the \
-         file content has drifted; re-read it and copy the SEARCH text exactly):\n{}",
+         Closest matching context in the file ({:.0}% similar; lines marked ~ are the ones that \
+         diverged from your SEARCH — re-read the file and copy the text exactly):\n{}",
         block.search.join("\n"),
         similarity * 100.0,
         snippet
@@ -766,7 +766,23 @@ fn closest_snippet(lines: &[String], offset: usize, search: &[String]) -> (Strin
     let snippet = lines[context_start..context_end]
         .iter()
         .enumerate()
-        .map(|(index, line)| format!("{:>6}  {}", context_start + index + 1, line))
+        .map(|(index, line)| {
+            let abs = context_start + index;
+            // Mark with '~' the matched-window lines that diverged most from the
+            // SEARCH at that position, so the model sees exactly WHICH lines
+            // drifted — not just the block as a whole. Context lines aren't marked.
+            let marker = if abs >= best_start && abs < best_start + window {
+                let search_line = &search[abs - best_start];
+                if strsim::normalized_levenshtein(line.trim(), search_line.trim()) < 0.6 {
+                    '~'
+                } else {
+                    ' '
+                }
+            } else {
+                ' '
+            };
+            format!("{:>6} {marker} {line}", abs + 1)
+        })
         .collect::<Vec<_>>()
         .join("\n");
     // `best_score` sums per-line normalized Levenshtein (0..1 each) minus a
