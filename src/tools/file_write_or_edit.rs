@@ -75,6 +75,32 @@ impl ToleranceKind {
             ToleranceKind::IgnoreWhitespace => 50,
         }
     }
+
+    /// Short human-readable name, surfaced in the success message so the agent
+    /// learns which way its SEARCH text drifted from the file.
+    fn display_name(self) -> &'static str {
+        match self {
+            ToleranceKind::TrimEnd => "trailing whitespace",
+            ToleranceKind::RemoveLineNumbers => "line-number prefixes",
+            ToleranceKind::NormalizeCommonMistakes => "smart-quote/dash normalization",
+            ToleranceKind::IgnoreIndentation => "indentation",
+            ToleranceKind::IgnoreWhitespace => "all whitespace",
+        }
+    }
+}
+
+/// Union of all fuzzy tolerances applied across a set of replacements, in
+/// first-seen order, deduplicated.
+fn collect_tolerances(replacements: &[Replacement]) -> Vec<ToleranceKind> {
+    let mut out: Vec<ToleranceKind> = Vec::new();
+    for replacement in replacements {
+        for &tolerance in &replacement.tolerances {
+            if !out.contains(&tolerance) {
+                out.push(tolerance);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +117,9 @@ struct Replacement {
     start: usize,
     end: usize,
     replace: Vec<String>,
+    /// Fuzzy tolerances applied to land this match (empty = exact). Threaded up
+    /// so the success message can tell the agent its SEARCH text drifted.
+    tolerances: Vec<ToleranceKind>,
 }
 
 fn parse_blocks(content: &str) -> Result<Vec<SearchReplaceBlock>> {
@@ -168,10 +197,13 @@ fn parse_blocks(content: &str) -> Result<Vec<SearchReplaceBlock>> {
 /// Apply search/replace blocks, retrying once with `\"` unescaped if the first
 /// attempt fails to match. LLMs frequently over-escape quotes in SEARCH text;
 /// wcgw does the same fallback in `do_diff_edit`.
-fn apply_blocks_with_unescape_retry(original: &str, raw: &str) -> Result<String> {
+fn apply_blocks_with_unescape_retry(
+    original: &str,
+    raw: &str,
+) -> Result<(String, Vec<ToleranceKind>)> {
     let blocks = parse_blocks(raw)?;
     match apply_blocks(original, &blocks) {
-        Ok(content) => Ok(content),
+        Ok(result) => Ok(result),
         Err(first_err) => {
             let unescaped = raw.replace("\\\"", "\"");
             if unescaped == raw {
@@ -183,7 +215,10 @@ fn apply_blocks_with_unescape_retry(original: &str, raw: &str) -> Result<String>
     }
 }
 
-fn apply_blocks(content: &str, blocks: &[SearchReplaceBlock]) -> Result<String> {
+fn apply_blocks(
+    content: &str,
+    blocks: &[SearchReplaceBlock],
+) -> Result<(String, Vec<ToleranceKind>)> {
     // `parse_blocks` reads the LLM's SEARCH/REPLACE via `.lines()`, which strips
     // `\r`, so blocks are always LF. Normalize the file to LF too: otherwise a
     // CRLF line matches only via the TrimEnd tolerance (inflating the score) and
@@ -199,16 +234,18 @@ fn apply_blocks(content: &str, blocks: &[SearchReplaceBlock]) -> Result<String> 
     };
 
     let original_lines = split_lines(content_lf);
-    let edited = apply_blocks_ordered(&original_lines, blocks).or_else(|ordered_error| {
-        if blocks.len() == 1 {
-            Err(ordered_error)
-        } else {
-            apply_blocks_individually(&original_lines, blocks)
-        }
-    })?;
+    let (edited, tolerances) =
+        apply_blocks_ordered(&original_lines, blocks).or_else(|ordered_error| {
+            if blocks.len() == 1 {
+                Err(ordered_error)
+            } else {
+                apply_blocks_individually(&original_lines, blocks)
+            }
+        })?;
 
     let joined = edited.join("\n");
-    Ok(if uses_crlf { joined.replace('\n', "\r\n") } else { joined })
+    let content_out = if uses_crlf { joined.replace('\n', "\r\n") } else { joined };
+    Ok((content_out, tolerances))
 }
 
 fn split_lines(content: &str) -> Vec<String> {
@@ -272,7 +309,10 @@ const MAX_SEARCH_NODES: u32 = 50_000;
 /// `replace_or_throw` "Too many warnings, not applying" guard.
 const MAX_TOTAL_TOLERANCE_SCORE: usize = 1000;
 
-fn apply_blocks_ordered(lines: &[String], blocks: &[SearchReplaceBlock]) -> Result<Vec<String>> {
+fn apply_blocks_ordered(
+    lines: &[String],
+    blocks: &[SearchReplaceBlock],
+) -> Result<(Vec<String>, Vec<ToleranceKind>)> {
     let mut budget = MAX_SEARCH_NODES;
     let (score, replacements) = best_ordered_replacements(lines, blocks, 0, 0, &mut budget)?;
     if score > MAX_TOTAL_TOLERANCE_SCORE {
@@ -282,7 +322,8 @@ fn apply_blocks_ordered(lines: &[String], blocks: &[SearchReplaceBlock]) -> Resu
              and make the SEARCH text match the current content exactly."
         )));
     }
-    Ok(apply_replacements(lines, &replacements))
+    let tolerances = collect_tolerances(&replacements);
+    Ok((apply_replacements(lines, &replacements), tolerances))
 }
 
 fn best_ordered_replacements(
@@ -327,6 +368,7 @@ fn best_ordered_replacements(
                 start: candidate.start,
                 end: candidate.end,
                 replace: candidate.replace,
+                tolerances: candidate.tolerances,
             }];
             path.append(&mut tail);
             valid_paths.push((candidate.score + tail_score, path));
@@ -374,9 +416,10 @@ fn select_unique_best_path(
 fn apply_blocks_individually(
     lines: &[String],
     blocks: &[SearchReplaceBlock],
-) -> Result<Vec<String>> {
+) -> Result<(Vec<String>, Vec<ToleranceKind>)> {
     let mut running_lines = lines.to_vec();
     let mut total_score = 0usize;
+    let mut tolerances: Vec<ToleranceKind> = Vec::new();
     for block in blocks {
         let candidate = select_unique_candidate(block, find_candidates(&running_lines, block, 0))?;
         // Enforce the same fuzzy-fixup ceiling as `apply_blocks_ordered`. Without
@@ -390,16 +433,22 @@ fn apply_blocks_individually(
                  re-read it and make the SEARCH text match the current content exactly."
             )));
         }
+        for &tolerance in &candidate.tolerances {
+            if !tolerances.contains(&tolerance) {
+                tolerances.push(tolerance);
+            }
+        }
         running_lines = apply_replacements(
             &running_lines,
             &[Replacement {
                 start: candidate.start,
                 end: candidate.end,
                 replace: candidate.replace,
+                tolerances: Vec::new(),
             }],
         );
     }
-    Ok(running_lines)
+    Ok((running_lines, tolerances))
 }
 
 fn select_unique_candidate(
@@ -904,13 +953,13 @@ pub async fn handle_tool_call(
 
     let result = if uses_search_replace {
         let original_content = fs::read_to_string(&path)?;
-        let new_content = apply_blocks_with_unescape_retry(
+        let (new_content, tolerances) = apply_blocks_with_unescape_retry(
             &original_content,
             &file_write_or_edit.text_or_search_replace_blocks,
         )?;
 
         write_no_follow(&path, new_content.as_bytes())?;
-        operation_result("edited", &file_path_str, &path, &new_content)
+        operation_result("edited", &file_path_str, &path, &new_content, &tolerances)
     } else {
         write_no_follow(&path, file_write_or_edit.text_or_search_replace_blocks.as_bytes())?;
         operation_result(
@@ -918,6 +967,7 @@ pub async fn handle_tool_call(
             &file_path_str,
             &path,
             &file_write_or_edit.text_or_search_replace_blocks,
+            &[],
         )
     };
 
@@ -944,8 +994,24 @@ pub async fn handle_tool_call(
     Ok(result)
 }
 
-fn operation_result(action: &str, file_path: &str, path: &Path, content: &str) -> String {
+fn operation_result(
+    action: &str,
+    file_path: &str,
+    path: &Path,
+    content: &str,
+    tolerances: &[ToleranceKind],
+) -> String {
     let mut result = format!("Successfully {action} {file_path}");
+    if !tolerances.is_empty() {
+        // The edit matched only after fuzzy fixups — tell the agent so it learns
+        // its SEARCH text had drifted (stale read), instead of silently "winning".
+        let names = tolerances.iter().map(|t| t.display_name()).collect::<Vec<_>>().join(", ");
+        let _ = write!(
+            result,
+            "\n\nNote: matched after tolerating {names} differences — your SEARCH text didn't \
+             match the file exactly. Re-read the file if you expected an exact match."
+        );
+    }
     if let Some(warning) = crate::utils::syntax::syntax_warning(path, content) {
         let _ = write!(result, "\n\n{warning}");
     }
@@ -989,7 +1055,7 @@ mod indentation_tests {
             search: vec!["line two".to_string()],
             replace: vec!["line TWO".to_string()],
         };
-        let out = apply_blocks(content, &[block])?;
+        let (out, _) = apply_blocks(content, &[block])?;
         assert_eq!(out, "line one\r\nline TWO\r\nline three\r\n");
         Ok(())
     }
@@ -999,9 +1065,33 @@ mod indentation_tests {
         let content = "a\nb\nc\n";
         let block =
             SearchReplaceBlock { search: vec!["b".to_string()], replace: vec!["B".to_string()] };
-        let out = apply_blocks(content, &[block])?;
+        let (out, _) = apply_blocks(content, &[block])?;
         assert_eq!(out, "a\nB\nc\n");
         assert!(!out.contains('\r'));
+        Ok(())
+    }
+
+    #[test]
+    fn apply_blocks_reports_indentation_tolerance() -> Result<()> {
+        // The file is indented two spaces more than the SEARCH block, so the
+        // match lands only via the indentation tolerance — which must surface.
+        let content = "  alpha\n  beta\n";
+        let block = SearchReplaceBlock {
+            search: vec!["alpha".to_string(), "beta".to_string()],
+            replace: vec!["alpha".to_string(), "BETA".to_string()],
+        };
+        let (_out, tolerances) = apply_blocks(content, &[block])?;
+        assert!(!tolerances.is_empty(), "indentation mismatch should report a tolerance");
+        Ok(())
+    }
+
+    #[test]
+    fn apply_blocks_exact_match_reports_no_tolerances() -> Result<()> {
+        let content = "a\nb\nc\n";
+        let block =
+            SearchReplaceBlock { search: vec!["b".to_string()], replace: vec!["B".to_string()] };
+        let (_out, tolerances) = apply_blocks(content, &[block])?;
+        assert!(tolerances.is_empty(), "exact match must not report tolerances");
         Ok(())
     }
 }
