@@ -187,10 +187,12 @@ fn byte_index_for_char_count(content: &str, char_count: usize) -> usize {
 }
 
 fn select_max_tokens(file_path: &str) -> usize {
+    // Budgets are overridable per deployment via env vars so large-context
+    // clients can pull more of each file into context (defaults match wcgw).
     if is_source_code_file(file_path) {
-        CODING_MAX_TOKENS
+        crate::utils::encoder::budget_from_env("WINX_CODING_TOKEN_BUDGET", CODING_MAX_TOKENS)
     } else {
-        NONCODING_MAX_TOKENS
+        crate::utils::encoder::budget_from_env("WINX_NONCODING_TOKEN_BUDGET", NONCODING_MAX_TOKENS)
     }
 }
 

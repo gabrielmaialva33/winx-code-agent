@@ -232,7 +232,7 @@ pub(crate) fn load_saved_context(id: &str) -> Result<Option<(String, Option<Bash
         })?;
     // Cap the injected context so a large saved memory can't blow the Initialize
     // response past the model's window. Keep the head (project root + plan).
-    let memory_data = truncate_memory_to_tokens(memory_data, MEMORY_MAX_TOKENS);
+    let memory_data = truncate_memory_to_tokens(memory_data, memory_token_budget());
     let state = load_bash_state_from_path(&state_file_path).map_err(|e| {
         WinxError::SerializationError(format!("Failed to load saved bash state: {e}"))
     })?;
@@ -243,6 +243,12 @@ pub(crate) fn load_saved_context(id: &str) -> Result<Option<(String, Option<Bash
 /// Saved memory is treated as non-code prose; cap it like wcgw's
 /// `noncoding_max_tokens` so resuming a task never floods the context window.
 const MEMORY_MAX_TOKENS: usize = 8_000;
+
+/// Memory token budget, overridable via `WINX_NONCODING_TOKEN_BUDGET` (saved
+/// memory is prose, so it shares the non-coding budget with `ReadFiles`).
+fn memory_token_budget() -> usize {
+    crate::utils::encoder::budget_from_env("WINX_NONCODING_TOKEN_BUDGET", MEMORY_MAX_TOKENS)
+}
 
 /// Floor on each file's per-file token slice, so even a glob of many files still
 /// shows a usable head of each one rather than a useless few tokens.
@@ -457,7 +463,7 @@ fn read_files_content(file_paths: &[PathBuf], max_files: usize) -> Result<String
     // inlined whole and the global cap afterward kept only the head — usually
     // just the first file, losing every later file and each file's tail.
     let shown = file_paths.len().min(max_files).max(1);
-    let per_file_tokens = (MEMORY_MAX_TOKENS / shown).max(MIN_PER_FILE_SAVE_TOKENS);
+    let per_file_tokens = (memory_token_budget() / shown).max(MIN_PER_FILE_SAVE_TOKENS);
 
     for (i, path) in file_paths.iter().take(max_files).enumerate() {
         // Try to read as UTF-8 text, skip binary files

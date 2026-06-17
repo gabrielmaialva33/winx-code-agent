@@ -46,9 +46,32 @@ pub fn decode_ids(ids: &[u32]) -> Option<String> {
     tokenizer.decode(ids, false).ok()
 }
 
+/// Read a token-budget override from env var `var` (e.g.
+/// `WINX_CODING_TOKEN_BUDGET`), falling back to `default` when unset, zero, or
+/// unparseable. Lets large-context clients tune how much of each file is pulled
+/// into context — and how much saved memory is kept — without a rebuild.
+pub fn budget_from_env(var: &str, default: usize) -> usize {
+    std::env::var(var)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
+
 /// Cheap fallback estimate used only when the tokenizer is unavailable.
 pub fn estimate_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4).max(text.split_whitespace().count())
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::budget_from_env;
+
+    #[test]
+    fn falls_back_to_default_when_unset_or_invalid() {
+        // A name nothing sets -> default. (Avoids mutating process env in tests.)
+        assert_eq!(budget_from_env("WINX_DEFINITELY_UNSET_BUDGET_XYZ", 24_000), 24_000);
+    }
 }
 
 #[cfg(test)]
