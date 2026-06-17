@@ -925,7 +925,20 @@ async fn wait_for_output(
     // Conscious compression: collapse mechanical repetition (identical line runs,
     // blank-line blocks) before truncating, to save tokens without dropping any
     // unique context. Falls back to the raw text when nothing is safe to collapse.
-    let rendered = crate::utils::output_compress::compress_output(&rendered).unwrap_or(rendered);
+    let rendered = {
+        let before_lines = rendered.lines().count();
+        match crate::utils::output_compress::compress_output(&rendered) {
+            Some(compressed) => {
+                debug!(
+                    from_lines = before_lines,
+                    to_lines = compressed.lines().count(),
+                    "winx collapsed mechanical repetition in shell output"
+                );
+                compressed
+            }
+            None => rendered,
+        }
+    };
 
     // Truncate if needed - matches WCGW Python token truncation
     let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
