@@ -11,6 +11,7 @@ pub mod mode_prompts;
 pub mod output_compress;
 pub mod path;
 pub mod path_prob;
+pub mod redact;
 pub mod repo;
 pub mod symbols;
 pub mod syntax;

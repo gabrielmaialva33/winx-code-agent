@@ -65,7 +65,10 @@ fn save_context(bash_state: &BashState, mut context: ContextSave) -> Result<Stri
     let (relevant_files, warnings) = collect_relevant_files(&context, &bash_state.workspace_root)?;
     let memory_dir = resolve_memory_dir()?;
     let relevant_files_data = read_files_content(&relevant_files, 10_000)?;
-    let memory_data = format_memory(&context, &relevant_files_data);
+    // Scrub credentials before they're written to the on-disk memory file (it is
+    // re-read into context on resume, so a leaked secret would persist).
+    let memory_data =
+        crate::utils::redact::redact(&format_memory(&context, &relevant_files_data)).into_owned();
     let safe_id = sanitize_filename(&context.id);
 
     let (memory_file_path, state_file_path) = context_paths_from_dir(&memory_dir, &safe_id);

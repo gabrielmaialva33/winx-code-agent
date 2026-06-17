@@ -669,7 +669,10 @@ impl ServerHandler for WinxService {
             ));
         }
 
-        let text = self.knowledge_transfer_prompt_text().await;
+        // This prompt embeds git status/diff and file context, so scrub it too —
+        // it returns a GetPromptResult and bypasses the call_tool choke point.
+        let text =
+            crate::utils::redact::redact(&self.knowledge_transfer_prompt_text().await).into_owned();
 
         Ok(GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, text)])
             .with_description("Knowledge transfer handoff prompt"))
@@ -682,7 +685,10 @@ impl ServerHandler for WinxService {
     ) -> Result<ReadResourceResult, McpError> {
         let content = match param.uri.as_ref() {
             "file://readme" => match tokio::fs::read_to_string("README.md").await {
-                Ok(content) => vec![ResourceContents::text(content, param.uri.clone())],
+                Ok(content) => vec![ResourceContents::text(
+                    crate::utils::redact::redact(&content).into_owned(),
+                    param.uri.clone(),
+                )],
                 Err(_) => vec![ResourceContents::text(
                     "README.md not found".to_string(),
                     param.uri.clone(),
@@ -726,10 +732,25 @@ impl ServerHandler for WinxService {
             _ => Err(McpError::invalid_request(format!("Unknown tool: {tool}"), None)),
         };
 
+        // Scrub credentials (provider keys, JWTs, PEM blocks, user:pass URLs)
+        // from everything leaving the server — shell output, file contents,
+        // search results — before it reaches the model. `WINX_NO_REDACT` opts out.
+        let result = match result {
+            Ok(mut call) => {
+                redact_result(&mut call);
+                Ok(call)
+            }
+            err => err,
+        };
+
         let ms = started.elapsed().as_millis();
         match &result {
             Ok(_) => info!(tool = %tool, ms, "tool call ok — {summary}"),
-            Err(error) => warn!(tool = %tool, ms, "tool call error — {summary}: {}", error.message),
+            Err(error) => warn!(
+                tool = %tool, ms,
+                "tool call error — {summary}: {}",
+                crate::utils::redact::redact(&error.message)
+            ),
         }
         result
     }
@@ -771,6 +792,23 @@ fn audit_summary(tool: &str, args: Option<&Value>) -> String {
         "Outline" => format!("path={}", s("path")),
         "FindReferences" => format!("name={}", s("name")),
         _ => String::new(),
+    }
+}
+
+/// Scrub credential patterns from a tool result's text blocks and structured
+/// content, in place. Central choke point so every tool is covered (see
+/// [`crate::utils::redact`]).
+fn redact_result(result: &mut CallToolResult) {
+    use rmcp::model::RawContent;
+    for content in &mut result.content {
+        if let RawContent::Text(text) = &mut content.raw {
+            if let std::borrow::Cow::Owned(scrubbed) = crate::utils::redact::redact(&text.text) {
+                text.text = scrubbed;
+            }
+        }
+    }
+    if let Some(structured) = result.structured_content.as_mut() {
+        crate::utils::redact::redact_json(structured);
     }
 }
 
