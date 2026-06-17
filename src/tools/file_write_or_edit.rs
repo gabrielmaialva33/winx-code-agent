@@ -5,6 +5,7 @@
 
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use similar::{ChangeTag, TextDiff};
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::io::{BufWriter, Write};
@@ -971,7 +972,14 @@ pub async fn handle_tool_call(
         });
     }
 
-    if path.exists() {
+    // Read the existing file ONCE: the same bytes feed the hash check, the
+    // search/replace input, and the post-edit diff. Reading it twice opened a
+    // TOCTOU window where an external write between the hash check and the edit
+    // would apply the edit to (and diff against) content the hash never vetted.
+    let pre_write_content: Option<String> =
+        if path.exists() { Some(fs::read_to_string(&path)?) } else { None };
+
+    if let Some(original_content) = pre_write_content.as_deref() {
         let whitelist =
             bash_state.whitelist_for_overwrite.get(&file_path_str).ok_or_else(|| {
                 WinxError::FileAccessError {
@@ -983,8 +991,7 @@ pub async fn handle_tool_call(
                     ),
                 }
             })?;
-        let original_content = fs::read_to_string(&path)?;
-        let current_hash = hash_content(&original_content);
+        let current_hash = hash_content(original_content);
         if whitelist.file_hash != current_hash {
             return Err(WinxError::FileAccessError {
                 path: path.clone(),
@@ -1009,46 +1016,109 @@ pub async fn handle_tool_call(
     ensure_parent_dirs(&path)?;
 
     let result = if uses_search_replace {
-        let original_content = fs::read_to_string(&path)?;
+        // Empty when editing a not-yet-existing file; apply_blocks then fails with
+        // a clear "block not found" rather than a raw I/O error.
+        let original_content = pre_write_content.as_deref().unwrap_or_default();
         let (new_content, tolerances) = apply_blocks_with_unescape_retry(
-            &original_content,
+            original_content,
             &file_write_or_edit.text_or_search_replace_blocks,
         )?;
 
         write_no_follow(&path, new_content.as_bytes())?;
-        operation_result("edited", &file_path_str, &path, &new_content, &tolerances)
+        operation_result(
+            "edited",
+            &file_path_str,
+            &path,
+            &new_content,
+            &tolerances,
+            Some(original_content),
+        )
     } else {
-        write_no_follow(&path, file_write_or_edit.text_or_search_replace_blocks.as_bytes())?;
+        let new_content = &file_write_or_edit.text_or_search_replace_blocks;
+        write_no_follow(&path, new_content.as_bytes())?;
+        // `pre_write_content` is the prior version for the diff (None for a new file).
         operation_result(
             "wrote",
             &file_path_str,
             &path,
-            &file_write_or_edit.text_or_search_replace_blocks,
+            new_content,
             &[],
+            pre_write_content.as_deref(),
         )
     };
 
-    // Update whitelist
-    let final_content = fs::read_to_string(&path)?;
+    refresh_whitelist_and_stats(bash_state, file_path_str, &path, uses_search_replace)?;
+    Ok(result)
+}
+
+/// After a successful write, re-read the file to re-whitelist it at its new hash
+/// (so a follow-up edit sees a fresh, fully-read entry) and record the
+/// edit/write in the workspace stats. Stats failures are non-fatal — they only
+/// feed heuristics, never correctness.
+fn refresh_whitelist_and_stats(
+    bash_state: &mut BashState,
+    file_path_str: String,
+    path: &Path,
+    uses_search_replace: bool,
+) -> Result<()> {
+    let final_content = fs::read_to_string(path)?;
     let hash = hash_content(&final_content);
     let total_lines = final_content.lines().count();
-
     bash_state
         .whitelist_for_overwrite
         .insert(file_path_str, FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines));
-    if uses_search_replace {
-        if let Err(e) =
-            crate::utils::workspace_stats::record_edit(&bash_state.workspace_root, &path)
-        {
-            debug!("failed to record edit stats: {e}");
-        }
-    } else if let Err(e) =
-        crate::utils::workspace_stats::record_write(&bash_state.workspace_root, &path)
-    {
-        debug!("failed to record write stats: {e}");
-    }
 
-    Ok(result)
+    let (kind, stats) = if uses_search_replace {
+        ("edit", crate::utils::workspace_stats::record_edit(&bash_state.workspace_root, path))
+    } else {
+        ("write", crate::utils::workspace_stats::record_write(&bash_state.workspace_root, path))
+    };
+    if let Err(e) = stats {
+        debug!("failed to record {kind} stats: {e}");
+    }
+    Ok(())
+}
+
+/// Lines of context shown around each hunk in the post-edit diff.
+const DIFF_CONTEXT_LINES: usize = 3;
+/// Cap on the rendered diff. Past this, the success message carries only the
+/// `+added/-removed` line summary so a wholesale rewrite can't flood the model's
+/// context with a giant diff.
+const MAX_DIFF_LINES: usize = 200;
+/// Combined `previous + current` byte ceiling for running the (super-linear)
+/// Myers diff at all. Beyond it, only the net line-count change is reported.
+const MAX_DIFF_INPUT_BYTES: usize = 512 * 1024;
+
+/// A compact unified diff of the change just written, for the success message so
+/// the agent sees exactly what landed (catching a fuzzy match that hit the wrong
+/// spot, or an edit that did nothing). `None` when the content is byte-identical
+/// (a no-op write). A diff longer than `MAX_DIFF_LINES` collapses to its
+/// `+added/-removed` line counts.
+fn change_summary(previous: &str, current: &str) -> Option<String> {
+    if previous == current {
+        return None;
+    }
+    // The line-level Myers diff is super-linear; files can be up to MAX_FILE_SIZE
+    // (50 MB). Above this combined size, skip it and report only the net
+    // line-count change (an O(n) scan) so a big rewrite can't burn seconds/RAM.
+    if previous.len().saturating_add(current.len()) > MAX_DIFF_INPUT_BYTES {
+        let (before, after) = (previous.lines().count(), current.lines().count());
+        return Some(format!("Changes: {before} -> {after} lines (file too large to diff)"));
+    }
+    let diff = TextDiff::from_lines(previous, current);
+    let (mut added, mut removed) = (0usize, 0usize);
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Equal => {}
+        }
+    }
+    let rendered = diff.unified_diff().context_radius(DIFF_CONTEXT_LINES).to_string();
+    if rendered.lines().count() > MAX_DIFF_LINES {
+        return Some(format!("Changes: +{added} -{removed} lines (diff too large to show)"));
+    }
+    Some(format!("Changes (+{added} -{removed}):\n{}", rendered.trim_end()))
 }
 
 fn operation_result(
@@ -1057,6 +1127,7 @@ fn operation_result(
     path: &Path,
     content: &str,
     tolerances: &[ToleranceKind],
+    previous: Option<&str>,
 ) -> String {
     let mut result = format!("Successfully {action} {file_path}");
     if !tolerances.is_empty() {
@@ -1069,6 +1140,11 @@ fn operation_result(
              match the file exactly. Re-read the file if you expected an exact match."
         );
     }
+    // Show what actually changed, when we have a prior version to diff against (an
+    // edit, or an overwrite of an existing file — a brand-new file has none).
+    if let Some(diff) = previous.and_then(|prev| change_summary(prev, content)) {
+        let _ = write!(result, "\n\n{diff}");
+    }
     if let Some(warning) = crate::utils::syntax::syntax_warning(path, content) {
         let _ = write!(result, "\n\n{warning}");
     }
@@ -1077,6 +1153,7 @@ fn operation_result(
 
 #[cfg(test)]
 mod indentation_tests {
+    #![allow(clippy::expect_used)]
     use super::*;
 
     // The indent fixer used to byte-slice over indentation that can contain
@@ -1191,5 +1268,55 @@ mod indentation_tests {
         let (out, _) = apply_blocks_with_unescape_retry(content, raw)?;
         assert_eq!(out, "a\nY\nb\n", "stale anchor should fall back, not fail");
         Ok(())
+    }
+
+    #[test]
+    fn change_summary_is_none_for_identical_content() {
+        assert!(change_summary("a\nb\nc\n", "a\nb\nc\n").is_none());
+    }
+
+    #[test]
+    fn change_summary_shows_diff_and_counts() {
+        let summary = change_summary("a\nb\nc\n", "a\nB\nc\n").expect("content changed");
+        assert!(summary.contains("+1 -1"), "line counts missing: {summary}");
+        assert!(summary.contains("-b"), "removed line missing: {summary}");
+        assert!(summary.contains("+B"), "added line missing: {summary}");
+    }
+
+    #[test]
+    fn operation_result_includes_diff_when_previous_differs() {
+        // .txt avoids a tree-sitter syntax warning muddying the assertion.
+        let r =
+            operation_result("edited", "n.txt", Path::new("n.txt"), "a\nB\n", &[], Some("a\nb\n"));
+        assert!(r.contains("Successfully edited n.txt"));
+        assert!(r.contains("Changes (+1 -1)"), "diff missing from result: {r}");
+    }
+
+    #[test]
+    fn operation_result_has_no_diff_for_a_new_file() {
+        let r = operation_result("wrote", "n.txt", Path::new("n.txt"), "hello\n", &[], None);
+        assert!(r.contains("Successfully wrote n.txt"));
+        assert!(!r.contains("Changes"), "new file should carry no diff: {r}");
+    }
+
+    #[test]
+    fn change_summary_skips_myers_on_oversized_input() {
+        // Over the byte ceiling -> cheap line-count summary, never the Myers diff.
+        let big = "x\n".repeat(MAX_DIFF_INPUT_BYTES);
+        let summary = change_summary("", &big).expect("content changed");
+        assert!(summary.contains("file too large to diff"), "should skip Myers: {summary}");
+    }
+
+    #[test]
+    fn change_summary_collapses_a_huge_diff() {
+        // A from-scratch write of far more than MAX_DIFF_LINES lines must not
+        // inline the whole thing — only the +added/-removed summary.
+        let big: String = (0..MAX_DIFF_LINES + 50).fold(String::new(), |mut s, i| {
+            let _ = writeln!(s, "line {i}");
+            s
+        });
+        let summary = change_summary("", &big).expect("content changed");
+        assert!(summary.contains("diff too large to show"), "should collapse: {summary}");
+        assert!(!summary.contains("line 10"), "must not inline content: {summary}");
     }
 }

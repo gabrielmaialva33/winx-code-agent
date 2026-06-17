@@ -56,6 +56,9 @@ toml = "1.1"
 # Performance and concurrency
 rayon = "1.10"
 
+# Unified-diff rendering for the post-edit "Changes" summary in FileWriteOrEdit.
+similar = "2"
+
 # Advanced string matching algorithms
 portable-pty = "0.9.0"
 lazy_static = "1.5"
