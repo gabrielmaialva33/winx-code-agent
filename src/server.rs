@@ -177,7 +177,7 @@ const BASH_COMMAND_DESCRIPTION: &str =
      - Only run long running commands in background. Each background command is run in a new non-reusable shell. \
      - On running a bg command you'll get a bg command id that you should use to get status or interact. \
      - Piloting an interactive full-screen TUI (the `claude` CLI, vim, htop, fzf, a REPL)? Run it in the background, then drive it with these two actions: \
-     - `screen` ({\"screen\":true,\"bg_command_id\":\"...\",\"lines\":N}) returns a STABLE snapshot of the live terminal screen (cursor moves, redraws, alternate-screen and synchronized-output already applied; ANSI stripped). Use this to read the current frame — unlike `status_check`, it never stacks redraw generations and never waits. \
+     - `screen` ({\"screen\":true,\"bg_command_id\":\"...\",\"lines\":N,\"diff\":true}) returns a STABLE snapshot of the live terminal screen (cursor moves, redraws, alternate-screen and synchronized-output already applied; ANSI stripped), with the cursor position in the header. Use this to read the current frame — unlike `status_check`, it never stacks redraw generations and never waits. Pass \"diff\":true to get back ONLY the lines that changed since your last `screen` look (large token savings when polling a TUI frame-by-frame; first look or a big change still returns the full frame). \
      - `wait_for_turn` ({\"wait_for_turn\":true,\"bg_command_id\":\"...\",\"recognizer\":\"auto|claude|codex|antigravity|generic\",\"quiet_ms\":600,\"timeout_seconds\":30}) BLOCKS until the TUI finishes its turn and is ready for input, then returns the stable snapshot plus the detected state (busy / awaiting_input / awaiting_approval). Typical REPL loop: run the app in bg -> wait_for_turn -> send_text(submit:true) -> wait_for_turn -> screen, repeat.";
 
 const READ_FILES_DESCRIPTION: &str =
@@ -258,7 +258,8 @@ const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
      Break large *SEARCH/REPLACE* blocks into a series of smaller blocks that each change a small portion of the file. \
      Include just the changing lines, and a few surrounding lines (0-3 lines) if needed for uniqueness. \
      Other than for uniqueness, avoid including those lines which do not change in search (and replace) blocks. Target 0-3 non trivial extra lines per block. \
-     Preserve leading spaces and indentations in both SEARCH and REPLACE blocks.";
+     Preserve leading spaces and indentations in both SEARCH and REPLACE blocks. \
+     If a short block would match multiple places, anchor it to a line number from ReadFiles instead of padding with context: write the marker as \"<<<<<<< SEARCH @42\" (or a range \"@42-50\") to target that 1-based location. A stale anchor falls back to the normal search, so it never makes a valid edit fail.";
 
 const CONTEXT_SAVE_DESCRIPTION: &str =
     "Saves provided description and file contents of all the relevant file paths or globs in a single text file. \

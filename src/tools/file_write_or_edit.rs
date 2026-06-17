@@ -32,7 +32,7 @@ fn regex_marker(
 }
 
 fn search_marker() -> Result<&'static Regex> {
-    regex_marker(&SEARCH_MARKER, r"(?m)^<<<<<<+\s*SEARCH>?\s*$")
+    regex_marker(&SEARCH_MARKER, r"(?m)^<<<<<<+\s*SEARCH>?(?:\s*@(\d+)(?:-(\d+))?)?\s*$")
 }
 
 fn divider_marker() -> Result<&'static Regex> {
@@ -45,10 +45,17 @@ fn replace_marker() -> Result<&'static Regex> {
 
 const MAX_FILE_SIZE: u64 = 50_000_000;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 struct SearchReplaceBlock {
     search: Vec<String>,
     replace: Vec<String>,
+    /// Optional 1-based line anchor from a `SEARCH @start[-end]` marker. When
+    /// present, matching prefers candidates starting in this range — disambiguating
+    /// a block that repeats — with a fallback to the normal fuzzy search if the
+    /// anchor matches nothing, so a stale anchor degrades gracefully instead of
+    /// failing the edit.
+    anchor_start: Option<usize>,
+    anchor_end: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,7 +135,13 @@ fn parse_blocks(content: &str) -> Result<Vec<SearchReplaceBlock>> {
     let mut i = 0;
 
     while i < lines.len() {
-        if search_marker()?.is_match(lines[i]) {
+        let anchors = search_marker()?.captures(lines[i]).map(|caps| {
+            (
+                caps.get(1).and_then(|m| m.as_str().parse::<usize>().ok()),
+                caps.get(2).and_then(|m| m.as_str().parse::<usize>().ok()),
+            )
+        });
+        if let Some((anchor_start, anchor_end)) = anchors {
             let line_num = i + 1;
             i += 1;
             let mut search_lines = Vec::new();
@@ -177,6 +190,8 @@ fn parse_blocks(content: &str) -> Result<Vec<SearchReplaceBlock>> {
             blocks.push(SearchReplaceBlock {
                 search: search_lines.into_iter().map(str::to_string).collect(),
                 replace: replace_lines.into_iter().map(str::to_string).collect(),
+                anchor_start,
+                anchor_end,
             });
         } else if divider_marker()?.is_match(lines[i]) || replace_marker()?.is_match(lines[i]) {
             return Err(WinxError::SearchReplaceSyntaxError(format!(
@@ -513,7 +528,29 @@ fn find_candidates(
     if candidates.is_empty() {
         candidates = find_contiguous_candidates(lines, block, offset, true);
     }
-    candidates
+    narrow_to_anchor(candidates, block)
+}
+
+/// If the block carried a `@start[-end]` line anchor, keep only the candidates
+/// starting in that 1-based range — this is how a repeated block is made
+/// unambiguous. Falls back to the full set when the anchor matched nothing, so a
+/// stale/wrong anchor degrades to the normal search instead of failing the edit.
+fn narrow_to_anchor(
+    candidates: Vec<MatchCandidate>,
+    block: &SearchReplaceBlock,
+) -> Vec<MatchCandidate> {
+    let Some(start) = block.anchor_start else {
+        return candidates;
+    };
+    let lo = start.saturating_sub(1); // 1-based -> 0-based
+    let hi = block.anchor_end.unwrap_or(start).saturating_sub(1);
+    let anchored: Vec<MatchCandidate> =
+        candidates.iter().filter(|c| c.start >= lo && c.start <= hi).cloned().collect();
+    if anchored.is_empty() {
+        candidates
+    } else {
+        anchored
+    }
 }
 
 fn find_single_line_substring_candidates(
@@ -1054,6 +1091,7 @@ mod indentation_tests {
         let block = SearchReplaceBlock {
             search: vec!["line two".to_string()],
             replace: vec!["line TWO".to_string()],
+            ..Default::default()
         };
         let (out, _) = apply_blocks(content, &[block])?;
         assert_eq!(out, "line one\r\nline TWO\r\nline three\r\n");
@@ -1063,8 +1101,11 @@ mod indentation_tests {
     #[test]
     fn apply_blocks_leaves_lf_files_as_lf() -> Result<()> {
         let content = "a\nb\nc\n";
-        let block =
-            SearchReplaceBlock { search: vec!["b".to_string()], replace: vec!["B".to_string()] };
+        let block = SearchReplaceBlock {
+            search: vec!["b".to_string()],
+            replace: vec!["B".to_string()],
+            ..Default::default()
+        };
         let (out, _) = apply_blocks(content, &[block])?;
         assert_eq!(out, "a\nB\nc\n");
         assert!(!out.contains('\r'));
@@ -1079,6 +1120,7 @@ mod indentation_tests {
         let block = SearchReplaceBlock {
             search: vec!["alpha".to_string(), "beta".to_string()],
             replace: vec!["alpha".to_string(), "BETA".to_string()],
+            ..Default::default()
         };
         let (_out, tolerances) = apply_blocks(content, &[block])?;
         assert!(!tolerances.is_empty(), "indentation mismatch should report a tolerance");
@@ -1088,10 +1130,46 @@ mod indentation_tests {
     #[test]
     fn apply_blocks_exact_match_reports_no_tolerances() -> Result<()> {
         let content = "a\nb\nc\n";
-        let block =
-            SearchReplaceBlock { search: vec!["b".to_string()], replace: vec!["B".to_string()] };
+        let block = SearchReplaceBlock {
+            search: vec!["b".to_string()],
+            replace: vec!["B".to_string()],
+            ..Default::default()
+        };
         let (_out, tolerances) = apply_blocks(content, &[block])?;
         assert!(tolerances.is_empty(), "exact match must not report tolerances");
+        Ok(())
+    }
+
+    #[test]
+    fn anchor_parses_start_and_range() -> Result<()> {
+        let ranged = parse_blocks("<<<<<<< SEARCH @5-8\nfoo\n=======\nbar\n>>>>>>> REPLACE")?;
+        assert_eq!(ranged[0].anchor_start, Some(5));
+        assert_eq!(ranged[0].anchor_end, Some(8));
+        let single = parse_blocks("<<<<<<< SEARCH @3\nfoo\n=======\nbar\n>>>>>>> REPLACE")?;
+        assert_eq!(single[0].anchor_start, Some(3));
+        assert_eq!(single[0].anchor_end, None);
+        let plain = parse_blocks("<<<<<<< SEARCH\nfoo\n=======\nbar\n>>>>>>> REPLACE")?;
+        assert_eq!(plain[0].anchor_start, None);
+        Ok(())
+    }
+
+    #[test]
+    fn anchor_disambiguates_a_repeated_block() -> Result<()> {
+        // "x" appears on all three lines; @3 targets only the third.
+        let content = "x\nx\nx\n";
+        let raw = "<<<<<<< SEARCH @3\nx\n=======\nY\n>>>>>>> REPLACE";
+        let (out, _) = apply_blocks_with_unescape_retry(content, raw)?;
+        assert_eq!(out, "x\nx\nY\n", "anchor @3 must edit only the 3rd line");
+        Ok(())
+    }
+
+    #[test]
+    fn stale_anchor_falls_back_to_normal_search() -> Result<()> {
+        // @99 is out of range; the single "x" must still be found, not failed.
+        let content = "a\nx\nb\n";
+        let raw = "<<<<<<< SEARCH @99\nx\n=======\nY\n>>>>>>> REPLACE";
+        let (out, _) = apply_blocks_with_unescape_retry(content, raw)?;
+        assert_eq!(out, "a\nY\nb\n", "stale anchor should fall back, not fail");
         Ok(())
     }
 }
