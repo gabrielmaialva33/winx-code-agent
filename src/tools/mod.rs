@@ -12,6 +12,7 @@ pub mod initialize;
 pub mod outline;
 pub mod read_files;
 pub mod read_image;
+pub mod references;
 pub mod search_files;
 
 /// Serialize a tool's structured output to JSON for the MCP result's
