@@ -125,11 +125,14 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [lints.rust]
+# `loom` is a custom cfg set only via RUSTFLAGS="--cfg loom" for model-checking
+# the session pin counter; declare it so normal builds don't warn it's unknown.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 # Note: unsafe_code is allowed in specific modules (mmap.rs, bash_state.rs) for I/O operations
 # unsafe_code = "deny"  # Re-enable when refactoring complete
 # Allow unused code in library - some functions are for public API or future use
 dead_code = "allow"
-unused = "allow"
+unused = { level = "allow", priority = -1 }
 
 [profile.release]
 lto = true

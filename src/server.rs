@@ -501,9 +501,7 @@ impl WinxService {
                 .last_used
                 .iter()
                 .filter(|(k, _)| **k != key)
-                .filter(|(k, _)| {
-                    reg.in_flight.get(k.as_str()).is_none_or(|p| !p.is_pinned())
-                })
+                .filter(|(k, _)| reg.in_flight.get(k.as_str()).map_or(true, |p| !p.is_pinned()))
                 .min_by_key(|(_, t)| **t)
                 .map(|(k, _)| k.clone());
             if let Some(victim) = victim {
