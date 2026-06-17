@@ -230,16 +230,79 @@ impl std::fmt::Debug for PtyShell {
     }
 }
 
+/// Resolve the process group to signal for a PTY child, but ONLY when it is
+/// safe: the pid must be a real child (`> 1`) that leads its own group
+/// (`getpgid(pid) == pid`). portable-pty `setsid`s the shell, so a live PTY
+/// child is always its own group leader; if that ever stopped holding,
+/// `kill(-pgid, ...)` would hit some unrelated group, so we refuse instead of
+/// guessing.
+///
+/// The `pid > 1` check is load-bearing: `kill(-1, ...)` means "every process I
+/// may signal" and `kill(0, ...)` means "my own group" - either would be
+/// catastrophic from a teardown path.
+#[cfg(unix)]
+fn killable_group(pid: u32) -> Option<i32> {
+    let pid = i32::try_from(pid).ok()?;
+    if pid <= 1 {
+        return None;
+    }
+    // SAFETY: getpgid(2) reads the group of an existing pid; integer-only, no
+    // memory touched. Returns -1 for a dead/invalid pid, which fails the check.
+    let group = unsafe { libc::getpgid(pid) };
+    (group == pid).then_some(group)
+}
+
+/// Send `signal` to the whole process group `pgid` (group-kill via negative
+/// pid). `pgid` must be one vetted by [`killable_group`].
+#[cfg(unix)]
+fn signal_group(pgid: i32, signal: i32) {
+    // SAFETY: kill(2) with a negative pid signals a process group; integer-only,
+    // no memory touched. `pgid` came from `killable_group`, so it is `> 1`.
+    unsafe {
+        libc::kill(-pgid, signal);
+    }
+}
+
 impl Drop for PtyShell {
-    /// Kill and reap the shell child so it doesn't leak.
+    /// Kill and reap the shell child **and its whole process group** so neither
+    /// the shell nor anything it spawned leaks.
     ///
-    /// `std::process::Child::drop` neither kills nor waits, so without this every
-    /// dropped shell (`reset_shell`, background-shell prune/remove) would leak a
-    /// live bash process — soon a zombie — plus the reader thread blocked in
-    /// `read()`. Killing the child closes the PTY slave, which makes the reader's
-    /// `read()` return EOF so the thread terminates on its own. Best-effort.
+    /// `std::process::Child::drop` neither kills nor waits, and even
+    /// `Child::kill` signals only the shell itself: a background job it started
+    /// (`npm run dev &`, a `nohup`'d server) would be reparented to init and live
+    /// on. Because portable-pty runs the shell as a session/group leader, we can
+    /// signal the whole group with a negative pid - SIGTERM first so well-behaved
+    /// children can clean up, then `Child::kill` (SIGKILL on the leader, which
+    /// closes the PTY slave so the reader thread's `read()` returns EOF and the
+    /// thread exits), then SIGKILL the group to sweep anything still alive, then
+    /// reap. The pgid is captured while the leader is alive and reused: it stays
+    /// valid until we `wait()`, even after the leader dies. All best-effort.
     fn drop(&mut self) {
+        // Only group-kill the direct bash/zsh path. Under screen/tmux (`attach_hint`
+        // is `Some`) the `Child` is a multiplexer *client*; the real shell runs in
+        // a detached daemon in another process group, so a group-kill here would
+        // miss the shell entirely and could disturb unrelated sessions of the same
+        // multiplexer. Let the multiplexer own its lifecycle in that case.
+        #[cfg(unix)]
+        let pgid = if self.attach_hint.is_some() {
+            None
+        } else {
+            self.child.process_id().and_then(killable_group)
+        };
+
+        #[cfg(unix)]
+        if let Some(pgid) = pgid {
+            signal_group(pgid, libc::SIGTERM);
+        }
+
+        // SIGKILL the leader and close the PTY slave (unblocks the reader thread).
         let _ = self.child.kill();
+
+        #[cfg(unix)]
+        if let Some(pgid) = pgid {
+            signal_group(pgid, libc::SIGKILL);
+        }
+
         let _ = self.child.wait();
     }
 }
@@ -1026,6 +1089,53 @@ mod tests {
         let (cols, rows) = shell.get_size();
         assert_eq!(cols, 120);
         assert_eq!(rows, 40);
+        Ok(())
+    }
+
+    /// `kill(pid, 0)` probes existence without sending a signal: 0 = the pid
+    /// exists, -1 (ESRCH) = it's gone. A freshly-killed orphan lingers briefly
+    /// as a zombie under init until reaped, so callers poll.
+    #[cfg(unix)]
+    fn pid_alive(pid: i32) -> bool {
+        // SAFETY: kill(2) with signal 0 only checks permission/existence for an
+        // integer pid; it sends nothing and touches no memory.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dropping_shell_kills_orphaned_background_child() -> Result<()> {
+        // A background job the shell starts must not outlive the shell. Spawn a
+        // long `sleep` in the background, record its pid, drop the shell, and
+        // confirm the sleep is gone - proving the group-kill reached past the
+        // shell to a child `Child::kill` alone would have orphaned.
+        let dir = TempDir::new()?;
+        let pidfile = dir.path().join("child.pid");
+        let mut shell = PtyShell::new(dir.path(), false)?;
+
+        shell
+            .send_command(&format!("sleep 300 & echo $! > {} ; echo spawned", pidfile.display()))?;
+        let (out, _) = shell.read_output(3.0)?;
+        assert!(out.contains("spawned"), "command did not run: {out}");
+
+        let child_pid: i32 = std::fs::read_to_string(&pidfile)?
+            .trim()
+            .parse()
+            .map_err(|e| anyhow!("bad pid file: {e}"))?;
+        assert!(pid_alive(child_pid), "background child should be running before drop");
+
+        drop(shell);
+
+        // The group-kill plus init reaping the orphan are async w.r.t. us; poll.
+        let mut gone = false;
+        for _ in 0..150 {
+            if !pid_alive(child_pid) {
+                gone = true;
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert!(gone, "background child {child_pid} survived shell teardown (orphan leak)");
         Ok(())
     }
 }
