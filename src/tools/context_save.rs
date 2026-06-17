@@ -244,6 +244,24 @@ pub(crate) fn load_saved_context(id: &str) -> Result<Option<(String, Option<Bash
 /// `noncoding_max_tokens` so resuming a task never floods the context window.
 const MEMORY_MAX_TOKENS: usize = 8_000;
 
+/// Floor on each file's per-file token slice, so even a glob of many files still
+/// shows a usable head of each one rather than a useless few tokens.
+const MIN_PER_FILE_SAVE_TOKENS: usize = 500;
+
+/// Keep the first `max_tokens` of a file's content and note what was dropped.
+/// Used so a single large file in a `ContextSave` glob doesn't crowd out the rest.
+fn cap_file_to_tokens(content: &str, max_tokens: usize) -> String {
+    match crate::utils::encoder::encode_ids(content) {
+        Some(ids) if ids.len() > max_tokens => {
+            let omitted = ids.len() - max_tokens;
+            let head = crate::utils::encoder::decode_ids(&ids[..max_tokens])
+                .unwrap_or_else(|| content.chars().take(max_tokens.saturating_mul(4)).collect());
+            format!("{head}\n[... {omitted} tokens truncated for context save ...]")
+        }
+        _ => content.to_string(),
+    }
+}
+
 /// Truncate saved memory to `max_tokens`, keeping the head (where the project
 /// root and the plan/status live) and appending a marker. Falls back to the
 /// untouched text if the tokenizer is unavailable.
@@ -434,12 +452,19 @@ fn read_files_content(file_paths: &[PathBuf], max_files: usize) -> Result<String
     let mut result = String::new();
     let mut skipped_binary = Vec::new();
 
+    // Give each file a fair slice of the memory budget so one huge file (a 200KB
+    // log) can't eat the whole window and bury the rest. Before this, files were
+    // inlined whole and the global cap afterward kept only the head — usually
+    // just the first file, losing every later file and each file's tail.
+    let shown = file_paths.len().min(max_files).max(1);
+    let per_file_tokens = (MEMORY_MAX_TOKENS / shown).max(MIN_PER_FILE_SAVE_TOKENS);
+
     for (i, path) in file_paths.iter().take(max_files).enumerate() {
         // Try to read as UTF-8 text, skip binary files
         match fs::read_to_string(path) {
             Ok(file_content) => {
                 let _ = writeln!(result, "--- File {}: {} ---", i + 1, path.display());
-                result.push_str(&file_content);
+                result.push_str(&cap_file_to_tokens(&file_content, per_file_tokens));
                 result.push_str("\n\n");
             }
             Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
@@ -592,4 +617,29 @@ fn sanitize_filename(input: &str) -> String {
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cap_file_to_tokens;
+
+    #[test]
+    fn small_file_is_untouched() {
+        let content = "def add(a, b):\n    return a + b\n";
+        assert_eq!(cap_file_to_tokens(content, 4_000), content);
+    }
+
+    #[test]
+    fn large_file_is_capped_with_a_note() {
+        // ~5k tokens of distinct words, capped to 100.
+        use std::fmt::Write as _;
+        let mut big = String::new();
+        for i in 0..5_000 {
+            let _ = write!(big, "word{i} ");
+        }
+        let capped = cap_file_to_tokens(&big, 100);
+        assert!(capped.len() < big.len(), "should shrink");
+        assert!(capped.contains("truncated for context save"), "should note truncation");
+        assert!(capped.starts_with("word0"), "should keep the head");
+    }
 }
