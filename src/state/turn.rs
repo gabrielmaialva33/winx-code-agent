@@ -13,6 +13,8 @@
 //! Recognizers operate on already-rendered, ANSI-stripped screen lines, so they
 //! never deal with escape codes — only with the visible text a human sees.
 
+use regex::Regex;
+
 /// What an interactive program is doing right now, inferred from the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TurnState {
@@ -61,8 +63,23 @@ pub fn recognizer_for(hint: &str) -> Box<dyn TurnRecognizer> {
         "codex" => Box::new(CodexRecognizer),
         "antigravity" | "agy" | "gemini" => Box::new(AntigravityRecognizer),
         "generic" | "none" | "off" => Box::new(GenericRecognizer),
+        "configurable" => configurable_from_env(),
         _ => Box::new(AutoRecognizer),
     }
+}
+
+/// Build a [`GenericConfigurable`] from the `WINX_TURN_RECOGNIZER_CONFIG` env var
+/// (JSON markers), or fall back to the generic quiescence recognizer when it is
+/// unset, empty, or invalid.
+fn configurable_from_env() -> Box<dyn TurnRecognizer> {
+    if let Ok(json) = std::env::var("WINX_TURN_RECOGNIZER_CONFIG") {
+        if let Ok(markers) = serde_json::from_str::<crate::types::TurnRecognizerMarkers>(&json) {
+            if !markers.is_empty() {
+                return Box::new(GenericConfigurable::new(&markers));
+            }
+        }
+    }
+    Box::new(GenericRecognizer)
 }
 
 // --- shared helpers ---------------------------------------------------------
@@ -260,6 +277,63 @@ impl TurnRecognizer for GenericRecognizer {
     }
 }
 
+// --- Configurable from markers ----------------------------------------------
+
+/// A recognizer built from marker strings/regexes in config
+/// ([`crate::types::TurnRecognizerMarkers`]), so `wait_for_turn` can pilot an
+/// arbitrary TUI without bespoke code. Same scan discipline as the built-ins:
+/// busy across the whole screen (a long response can push its footer out of the
+/// tail), approval/input tail-scoped so a stale scrollback prompt can't fire.
+pub struct GenericConfigurable {
+    busy: Vec<Regex>,
+    approval: Vec<Regex>,
+    input: Vec<Regex>,
+}
+
+impl GenericConfigurable {
+    pub fn new(markers: &crate::types::TurnRecognizerMarkers) -> Self {
+        Self {
+            busy: compile_markers(&markers.busy),
+            approval: compile_markers(&markers.awaiting_approval),
+            input: compile_markers(&markers.awaiting_input),
+        }
+    }
+}
+
+/// Compile each marker as a case-insensitive regex, falling back to a literal
+/// substring when the pattern doesn't compile; unusable markers are dropped.
+fn compile_markers(patterns: &[String]) -> Vec<Regex> {
+    patterns
+        .iter()
+        .filter_map(|pattern| {
+            Regex::new(&format!("(?i){pattern}"))
+                .or_else(|_| Regex::new(&format!("(?i){}", regex::escape(pattern))))
+                .ok()
+        })
+        .collect()
+}
+
+impl TurnRecognizer for GenericConfigurable {
+    fn name(&self) -> &'static str {
+        "configurable"
+    }
+
+    fn detect(&self, screen: &[String]) -> TurnState {
+        let whole = screen.join("\n");
+        if self.busy.iter().any(|re| re.is_match(&whole)) {
+            return TurnState::Busy;
+        }
+        let tail = tail_lower(screen, 30);
+        if self.approval.iter().any(|re| re.is_match(&tail)) {
+            return TurnState::AwaitingApproval;
+        }
+        if self.input.iter().any(|re| re.is_match(&tail)) {
+            return TurnState::AwaitingInput;
+        }
+        TurnState::Unknown
+    }
+}
+
 // --- Auto -------------------------------------------------------------------
 
 /// Runs every app-specific recognizer and combines their verdicts by priority:
@@ -291,6 +365,35 @@ mod tests {
 
     fn lines(s: &[&str]) -> Vec<String> {
         s.iter().map(|x| (*x).to_string()).collect()
+    }
+
+    #[test]
+    fn configurable_classifies_by_marker_case_insensitively() {
+        let markers = crate::types::TurnRecognizerMarkers {
+            busy: vec!["working".to_string()],
+            awaiting_input: vec![r"\$".to_string()],
+            awaiting_approval: vec!["confirm".to_string()],
+        };
+        let recognizer = GenericConfigurable::new(&markers);
+        assert_eq!(recognizer.detect(&lines(&["WORKING on it"])), TurnState::Busy);
+        assert_eq!(recognizer.detect(&lines(&["user@host:~$ "])), TurnState::AwaitingInput);
+        assert_eq!(
+            recognizer.detect(&lines(&["Please Confirm (y/n)"])),
+            TurnState::AwaitingApproval
+        );
+        assert_eq!(recognizer.detect(&lines(&["just some text"])), TurnState::Unknown);
+    }
+
+    #[test]
+    fn configurable_busy_beats_a_stale_prompt() {
+        let markers = crate::types::TurnRecognizerMarkers {
+            busy: vec!["esc to interrupt".to_string()],
+            awaiting_input: vec![">".to_string()],
+            awaiting_approval: vec![],
+        };
+        let recognizer = GenericConfigurable::new(&markers);
+        // Both a prompt glyph and a busy marker on screen → Busy must win.
+        assert_eq!(recognizer.detect(&lines(&["> ", "esc to interrupt"])), TurnState::Busy);
     }
 
     // Fixtures below are taken from a real `claude` v2.1.159 session captured

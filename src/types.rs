@@ -15,6 +15,33 @@ pub fn normalize_thread_id(thread_id: &str) -> String {
     }
 }
 
+/// Marker strings (literal or regex) that let `wait_for_turn` drive an arbitrary
+/// interactive TUI without a hand-written recognizer. Loaded from the
+/// `WINX_TURN_RECOGNIZER_CONFIG` env var (JSON) when the recognizer hint is
+/// `configurable`. Each marker is matched case-insensitively; an invalid regex
+/// falls back to a literal-substring match.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TurnRecognizerMarkers {
+    /// Screen is actively working (scanned across the whole screen). E.g.
+    /// `["esc to interrupt", "generating"]`.
+    #[serde(default)]
+    pub busy: Vec<String>,
+    /// Screen is waiting for input (scanned in the tail). E.g. `["❯", "›"]`.
+    #[serde(default)]
+    pub awaiting_input: Vec<String>,
+    /// Screen is asking for confirmation (scanned in the tail). E.g.
+    /// `["do you want", "y/n"]`.
+    #[serde(default)]
+    pub awaiting_approval: Vec<String>,
+}
+
+impl TurnRecognizerMarkers {
+    /// True when no markers are configured (nothing to recognize).
+    pub fn is_empty(&self) -> bool {
+        self.busy.is_empty() && self.awaiting_input.is_empty() && self.awaiting_approval.is_empty()
+    }
+}
+
 /// FNV-1a 32-bit — a tiny, dependency-free hash that is stable across runs and
 /// compiler versions (unlike `DefaultHasher`), so a normalized `thread_id`
 /// resolves to the same session and state file after a server restart.
