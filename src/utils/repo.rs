@@ -141,6 +141,36 @@ fn get_all_files_max_depth(root: &Path, is_git_repo: bool) -> Vec<String> {
     files
 }
 
+/// Walk `root` for files, gitignore-aware (only inside a git repo), keeping
+/// dotfiles but always pruning the `.git` directory, capped at
+/// `MAX_ENTRIES_CHECK` entries and `MAX_WALK_DEPTH` deep. Returns absolute paths.
+/// Shared by the read-only `SearchFiles` / `Glob` tools.
+pub fn walk_workspace_files(root: &Path) -> Vec<PathBuf> {
+    let is_git_repo = find_git_root(root).is_some();
+    let walker = WalkBuilder::new(root)
+        .max_depth(Some(MAX_WALK_DEPTH))
+        .hidden(false)
+        .parents(true)
+        .ignore(false)
+        .git_ignore(is_git_repo)
+        .git_global(is_git_repo)
+        .git_exclude(is_git_repo)
+        .require_git(true)
+        .filter_entry(|entry| entry.file_name() != ".git")
+        .build();
+
+    let mut files = Vec::new();
+    for entry in walker.flatten() {
+        if files.len() >= MAX_ENTRIES_CHECK {
+            break;
+        }
+        if entry.file_type().is_some_and(|file_type| file_type.is_file()) {
+            files.push(entry.path().to_path_buf());
+        }
+    }
+    files
+}
+
 /// Recently-changed files from git history, newest first, topological order,
 /// merges skipped — the CLI mirror of wcgw's pygit2 revwalk.
 fn get_recent_git_files(root: &Path, count: usize, existing: &HashSet<&str>) -> Vec<String> {

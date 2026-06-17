@@ -196,6 +196,40 @@ pub fn ensure_directory_exists(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Resolve a user-supplied path string (possibly empty, relative, or `~`) into a
+/// workspace-confined absolute path. Empty input resolves to the workspace root.
+/// Used by the read-only search/glob tools to scope and confine their root.
+pub fn resolve_in_workspace(
+    path: &str,
+    cwd: &Path,
+    workspace_root: &Path,
+) -> Result<PathBuf, PathSecurityError> {
+    if path.trim().is_empty() {
+        return validate_path_in_workspace(workspace_root, workspace_root);
+    }
+    let expanded = expand_user(path);
+    let candidate = if Path::new(&expanded).is_absolute() {
+        PathBuf::from(expanded)
+    } else {
+        cwd.join(expanded)
+    };
+    validate_path_in_workspace(&candidate, workspace_root)
+}
+
+/// Match a glob against a workspace-relative path. `*`/`?` do NOT cross `/`
+/// (so `src/*.ts` matches only direct children — `**` is the recursive form,
+/// matching `find`/`bash` semantics); a bare pattern (e.g. `*.rs`) also matches
+/// the file name at any depth, giving the intuitive "all .rs files".
+pub fn glob_matches(pattern: &glob::Pattern, relative: &Path) -> bool {
+    let opts = glob::MatchOptions { require_literal_separator: true, ..glob::MatchOptions::new() };
+    if pattern.matches_path_with(relative, opts) {
+        return true;
+    }
+    relative
+        .file_name()
+        .is_some_and(|name| pattern.matches_with(name.to_string_lossy().as_ref(), opts))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]

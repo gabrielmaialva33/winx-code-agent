@@ -29,8 +29,8 @@ use crate::errors::WinxError;
 use crate::state::bash_state::generate_thread_id;
 use crate::state::BashState;
 use crate::types::{
-    normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, Initialize, ReadFiles,
-    ReadImage,
+    normalize_thread_id, BashCommand, ContextSave, FileWriteOrEdit, Glob, Initialize, ReadFiles,
+    ReadImage, SearchFiles,
 };
 
 /// Map a domain [`WinxError`] to the right JSON-RPC error kind.
@@ -266,6 +266,19 @@ const CONTEXT_SAVE_DESCRIPTION: &str =
      - Provide random 3 word unqiue id or whatever user provided. \
      - Leave project path as empty string if no project path";
 
+const SEARCH_FILES_DESCRIPTION: &str =
+    "- Search file contents with a regular expression (Rust regex syntax) — a structured `grep`/`rg`. \
+     - Prefer this over running `rg`/`grep` through BashCommand: it is gitignore-aware, workspace-confined, token-budgeted, and works in every mode (including architect/code_writer, where shell search is blocked). \
+     - `pattern` is required. Scope with `path` (directory or file; defaults to the whole workspace) and `glob` (e.g. `**/*.rs`; a bare `*.rs` matches at any depth). \
+     - Set `ignore_case` for case-insensitive matching, `context_lines` for surrounding lines, and `max_results` to cap matches. \
+     - Output is the file path, then `line:matched text` (context lines use `line-text`).";
+
+const GLOB_DESCRIPTION: &str =
+    "- Find files by glob pattern (e.g. `**/*.rs`, `src/**/*.ts`, `Cargo.toml`) — a gitignore-aware `find`. \
+     - Prefer this over `find`/`ls` through BashCommand: it is gitignore-aware, workspace-confined, ranked by relevance, and works in every mode. \
+     - `pattern` is required (a bare name like `Cargo.toml` matches at any depth). Scope with `path`; cap with `max_results`. \
+     - Returns workspace-relative paths, best-first.";
+
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
 static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();
 
@@ -303,6 +316,16 @@ fn build_winx_tools() -> Vec<Tool> {
         mcp_tool::<ReadImage>(
             "ReadImage",
             "Read an image from the shell.",
+            ToolAnnotations::new().read_only(true).open_world(false),
+        ),
+        mcp_tool::<SearchFiles>(
+            "SearchFiles",
+            SEARCH_FILES_DESCRIPTION,
+            ToolAnnotations::new().read_only(true).open_world(false),
+        ),
+        mcp_tool::<Glob>(
+            "Glob",
+            GLOB_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
         ),
     ]
@@ -652,6 +675,8 @@ impl ServerHandler for WinxService {
             "FileWriteOrEdit" => self.handle_file_write_or_edit(args_value).await,
             "ContextSave" => self.handle_context_save(args_value).await,
             "ReadImage" => self.handle_read_image(args_value).await,
+            "SearchFiles" => self.handle_search_files(args_value).await,
+            "Glob" => self.handle_glob(args_value).await,
             _ => Err(McpError::invalid_request(format!("Unknown tool: {tool}"), None)),
         };
 
@@ -695,6 +720,8 @@ fn audit_summary(tool: &str, args: Option<&Value>) -> String {
         }
         "Initialize" => format!("ws={} mode={}", s("any_workspace_path"), s("mode_name")),
         "ContextSave" => format!("id={}", s("id")),
+        "SearchFiles" => format!("pattern={:?}", clip(s("pattern"))),
+        "Glob" => format!("pattern={}", s("pattern")),
         _ => String::new(),
     }
 }
@@ -961,6 +988,36 @@ impl WinxService {
                 Ok(CallToolResult::success(vec![Content::image(base64_data, mime_type)]))
             }
             Err(e) => Err(to_mcp_error("ReadImage", &e)),
+        }
+    }
+
+    async fn handle_search_files(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let search: SearchFiles = Self::lenient_from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid SearchFiles parameters: {e}"), None)
+        })?;
+
+        // Read-only: no persist_state (nothing in the session changes).
+        let (slot, _session_guard) =
+            self.session_for(&normalize_thread_id(&search.thread_id)).await;
+        match crate::tools::search_files::handle_tool_call(&slot, search).await {
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
+            Err(e) => Err(to_mcp_error("SearchFiles", &e)),
+        }
+    }
+
+    async fn handle_glob(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let glob_args: Glob = Self::lenient_from_value(args).map_err(|e| {
+            McpError::invalid_request(format!("Invalid Glob parameters: {e}"), None)
+        })?;
+
+        // Read-only: no persist_state.
+        let (slot, _session_guard) =
+            self.session_for(&normalize_thread_id(&glob_args.thread_id)).await;
+        match crate::tools::glob::handle_tool_call(&slot, glob_args).await {
+            Ok(result) => Ok(CallToolResult::success(vec![Content::text(result)])),
+            Err(e) => Err(to_mcp_error("Glob", &e)),
         }
     }
 }

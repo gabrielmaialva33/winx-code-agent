@@ -63,6 +63,8 @@ long-running TUIs without leaking output buffers into your token budget.
 | `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks (with optional `@start-end` line anchors to pin a repeated block). Validates file read coverage and freshness before writing, reports any fuzzy tolerances it had to apply, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet. |
 | `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                              |
 | `ReadImage`       | Returns a native MCP image content block (not base64 as text), so multimodal models actually see the image. Confined to the workspace (like `ReadFiles`) and size-capped.                                  |
+| `SearchFiles`     | Structured, gitignore-aware regex search across the workspace — a built-in `rg`. Scope with `path`/`glob`, toggle `ignore_case`, set `context_lines`/`max_results`. Returns the file then `line:match` (context as `line-text`), token-budgeted. Works in `architect`/`code_writer` too, where shelling out to `rg`/`grep` is blocked. |
+| `Glob`            | gitignore-aware file discovery by glob (`**/*.rs`, `src/**/*.ts`, `Cargo.toml`). Returns workspace-relative paths ranked best-first by the embedded relevance model, capped with an "N more" note. Also works in the restricted modes where `find`/`ls` are blocked. |
 
 ## Search/Replace editing
 
@@ -399,8 +401,8 @@ cargo run --release
 
 ### Check it's wired up
 
-List MCP tools in your client. You should see six entries: `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`,
-`ContextSave`, `ReadImage`. The first call always has to be `Initialize` — Winx tracks workspace + mode per thread.
+List MCP tools in your client. You should see eight entries: `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`,
+`ContextSave`, `ReadImage`, `SearchFiles`, `Glob`. The first call always has to be `Initialize` — Winx tracks workspace + mode per thread.
 
 ## Remote access (ChatGPT & other remote MCP clients)
 

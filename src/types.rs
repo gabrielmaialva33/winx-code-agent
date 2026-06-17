@@ -974,6 +974,65 @@ pub struct ReadImage {
     pub thread_id: String,
 }
 
+/// Parameters for the `SearchFiles` tool (structured, gitignore-aware grep).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SearchFiles {
+    /// Regular expression to search for, in Rust `regex` syntax.
+    pub pattern: String,
+
+    /// Directory (or single file) to search under. Relative paths resolve
+    /// against the workspace; leave empty to search the whole workspace.
+    #[serde(default)]
+    pub path: String,
+
+    /// Optional glob restricting which files are searched, e.g. `**/*.rs` or
+    /// `src/**/*.ts` (a bare `*.rs` matches at any depth). Empty searches every
+    /// text file.
+    #[serde(default)]
+    pub glob: String,
+
+    /// Match case-insensitively. Defaults to false (case-sensitive).
+    #[serde(default)]
+    pub ignore_case: bool,
+
+    /// Lines of surrounding context to include on each side of a match.
+    /// Defaults to 0.
+    #[serde(default)]
+    pub context_lines: usize,
+
+    /// Maximum number of matching lines to return. 0 means the default (200).
+    #[serde(default)]
+    pub max_results: usize,
+
+    /// Optional thread ID identifying the shell session to operate on. When
+    /// omitted, the most recently active session is used.
+    #[serde(default)]
+    pub thread_id: String,
+}
+
+/// Parameters for the `Glob` tool (gitignore-aware file discovery).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Glob {
+    /// Glob pattern to match file paths, e.g. `**/*.rs`, `src/**/*.ts` or
+    /// `Cargo.toml` (a bare `Cargo.toml` matches at any depth). Matched against
+    /// workspace-relative paths.
+    pub pattern: String,
+
+    /// Directory to search under. Relative paths resolve against the workspace;
+    /// leave empty to search the whole workspace.
+    #[serde(default)]
+    pub path: String,
+
+    /// Maximum number of paths to return. 0 means the default (200).
+    #[serde(default)]
+    pub max_results: usize,
+
+    /// Optional thread ID identifying the shell session to operate on. When
+    /// omitted, the most recently active session is used.
+    #[serde(default)]
+    pub thread_id: String,
+}
+
 #[cfg(test)]
 mod thread_id_tests {
     use super::normalize_thread_id;
