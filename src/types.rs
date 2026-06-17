@@ -370,9 +370,16 @@ where
                     Ok(Some(config))
                 }
                 Err(e) => {
-                    // Log the error and the value for debugging
+                    // Fail loud. A malformed restricted-mode config must NOT silently
+                    // degrade to `None` — `None` falls back to All commands / All globs,
+                    // so the model would believe the shell is locked down while it is in
+                    // fact wide open. Refuse to initialize instead.
                     tracing::error!("Failed to parse CodeWriterConfig: {}. Value: {}", e, value);
-                    Ok(None) // Fall back to None on parse error
+                    Err(serde::de::Error::custom(format!(
+                        "Invalid code_writer config: {e}. Refusing to start with a permissive \
+                         fallback — fix the allowed_commands / allowed_globs shape (or pass null \
+                         to opt out explicitly)."
+                    )))
                 }
             }
         }
@@ -1044,5 +1051,35 @@ mod allowlist_tests {
     fn list_allows_chain_when_all_parts_permitted() {
         let a = list(&["cargo build", "cargo test"]);
         assert!(a.is_allowed("cargo build && cargo test"));
+    }
+}
+
+#[cfg(test)]
+mod code_writer_config_tests {
+    use super::deserialize_code_writer_config;
+    use serde_json::json;
+
+    #[test]
+    fn explicit_null_opts_out() {
+        assert!(matches!(deserialize_code_writer_config(json!(null)), Ok(None)));
+        assert!(matches!(deserialize_code_writer_config(json!("null")), Ok(None)));
+    }
+
+    #[test]
+    fn valid_config_parses() {
+        let r = deserialize_code_writer_config(json!({
+            "allowed_commands": "all",
+            "allowed_globs": "all",
+        }));
+        assert!(matches!(r, Ok(Some(_))));
+    }
+
+    #[test]
+    fn malformed_config_fails_loud() {
+        // The crux of the fix: a malformed restricted-mode config must ERROR,
+        // not silently degrade to None (None falls back to All/All — wide open,
+        // while the model believes the shell is locked down).
+        let r = deserialize_code_writer_config(json!({ "allowed_commands": 12345 }));
+        assert!(r.is_err(), "malformed code_writer config must error, not become None");
     }
 }

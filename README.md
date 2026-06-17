@@ -62,7 +62,7 @@ long-running TUIs without leaking output buffers into your token budget.
 | `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range. When the token budget is hit it tells you the exact line + `file:N-M` syntax to resume from instead of silently dropping the tail. |
 | `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks (with optional `@start-end` line anchors to pin a repeated block). Validates file read coverage and freshness before writing, reports any fuzzy tolerances it had to apply, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet. |
 | `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                              |
-| `ReadImage`       | Returns a native MCP image content block (not base64 as text), so multimodal models actually see the image.                                                                                               |
+| `ReadImage`       | Returns a native MCP image content block (not base64 as text), so multimodal models actually see the image. Confined to the workspace (like `ReadFiles`) and size-capped.                                  |
 
 ## Search/Replace editing
 
@@ -412,9 +412,10 @@ connectors — Winx can also serve MCP over **Streamable HTTP**:
 winx serve --http --bind 127.0.0.1:8000 --token "$(openssl rand -hex 24)"
 ```
 
-The MCP protocol is served at `/mcp`. Every request must carry the token, either as `Authorization: Bearer <token>` or a
-`?token=<token>` query parameter. Without a token the server refuses to start — serving a shell over the network without
-auth is remote code execution waiting to happen.
+The MCP protocol is served at `/mcp`. Every request must carry the token in the `Authorization: Bearer <token>` header
+(header-only — a `?token=` query parameter would leak the secret into proxy/tunnel access logs and browser history).
+Without a token the server refuses to start — serving a shell over the network without auth is remote code execution
+waiting to happen. The endpoint also caps request bodies (64 MB) and times out stuck requests (120 s).
 
 | Flag             | Purpose                                                                                          |
 |------------------|-------------------------------------------------------------------------------------------------|
@@ -439,8 +440,9 @@ winx serve --http --bind 127.0.0.1:8000 \
 
 In ChatGPT (Settings → Apps → Advanced → **Developer mode**), add a connector with:
 
-- **URL**: `https://<random>.trycloudflare.com/mcp?token=<your-token>`
-- **Authentication**: **None** (the secret rides in the URL)
+- **URL**: `https://<random>.trycloudflare.com/mcp`
+- **Authentication**: bearer / API-key token set to `<your-token>`, so the connector sends it as
+  `Authorization: Bearer <your-token>` (the token is no longer accepted in the URL)
 
 Remote clients are effectively **stateless** — they don't reuse the MCP session between tool calls — so the HTTP
 transport shares one shell session across all requests: the shell `Initialize` creates stays alive for the lifetime of

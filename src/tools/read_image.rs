@@ -14,10 +14,16 @@ use tracing::{debug, error, info, instrument};
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
 use crate::types::ReadImage;
-use crate::utils::path::expand_user;
+use crate::utils::path::{expand_user, validate_path_in_workspace};
 
 /// Supported MIME types for images
 pub const SUPPORTED_MIME_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+/// Refuse to read images larger than this. base64 encoding inflates the
+/// footprint ~1.37×, so a few-hundred-MB file would spike to gigabytes; under
+/// `panic = "abort"` an allocation failure aborts the whole server. Real images
+/// (screenshots, mockups, error PNGs) are orders of magnitude smaller.
+const MAX_IMAGE_BYTES: u64 = 50 * 1024 * 1024;
 
 /// Read an image from the file system
 ///
@@ -39,7 +45,11 @@ pub const SUPPORTED_MIME_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/g
 ///
 /// Returns an error if the file cannot be accessed or read
 #[instrument(level = "debug", skip(file_path))]
-fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)> {
+fn read_image_from_path(
+    file_path: &str,
+    cwd: &Path,
+    workspace_root: &Path,
+) -> Result<(String, String)> {
     debug!("Reading image: {}", file_path);
 
     // Expand the path
@@ -53,19 +63,27 @@ fn read_image_from_path(file_path: &str, cwd: &Path) -> Result<(String, String)>
         cwd.join(&file_path)
     };
 
-    // Check if path exists
-    if !path.exists() {
-        return Err(WinxError::FileAccessError {
-            path: path.clone(),
-            message: "File does not exist".to_string(),
-        });
-    }
+    // Confine to the workspace and resolve symlinks BEFORE touching the file —
+    // the same guarantee ReadFiles/ContextSave give. Without this, ReadImage is
+    // an arbitrary-file read primitive (`/etc/shadow`, `~/.ssh/*`), and over the
+    // network-reachable HTTP transport that means remote exfiltration.
+    let path = validate_path_in_workspace(&path, workspace_root)
+        .map_err(|e| WinxError::PathSecurityError { path: path.clone(), message: e.to_string() })?;
 
-    // Ensure it's a file
+    // Ensure it's a regular file (also rejects a path that doesn't exist).
     if !path.is_file() {
         return Err(WinxError::FileAccessError {
             path: path.clone(),
-            message: "Path exists but is not a file".to_string(),
+            message: "File does not exist or is not a regular file".to_string(),
+        });
+    }
+
+    // Cap the size before reading it into memory + base64-encoding it.
+    let size = std::fs::metadata(&path).map_or(0, |m| m.len());
+    if size > MAX_IMAGE_BYTES {
+        return Err(WinxError::FileAccessError {
+            path: path.clone(),
+            message: format!("Image too large: {size} bytes (max {MAX_IMAGE_BYTES} bytes)"),
         });
     }
 
@@ -129,6 +147,7 @@ pub async fn handle_tool_call(
     // We need to extract data from the bash state before awaiting
     // to avoid holding the MutexGuard across await points
     let cwd: PathBuf;
+    let workspace_root: PathBuf;
 
     // Lock bash state to extract data
     {
@@ -142,8 +161,40 @@ pub async fn handle_tool_call(
 
         // Extract needed data
         cwd = bash_state.cwd.clone();
+        workspace_root = bash_state.workspace_root.clone();
     }
 
     // Read the image file
-    read_image_from_path(&read_image.file_path, &cwd)
+    read_image_from_path(&read_image.file_path, &cwd, &workspace_root)
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use std::fs;
+    use tempfile::TempDir;
+
+    #[test]
+    fn reads_image_inside_workspace() {
+        let ws = TempDir::new().unwrap();
+        let img = ws.path().join("shot.png");
+        fs::write(&img, b"\x89PNG\r\n\x1a\nfake").unwrap();
+        let (mime, b64) =
+            read_image_from_path(img.to_str().unwrap(), ws.path(), ws.path()).unwrap();
+        assert_eq!(mime, "image/png");
+        assert!(!b64.is_empty());
+    }
+
+    #[test]
+    fn rejects_image_outside_workspace() {
+        // The exfil case: an absolute path outside the workspace must be refused,
+        // not read (this is what made ReadImage an arbitrary-file-read primitive).
+        let ws = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let secret = outside.path().join("secret.png");
+        fs::write(&secret, b"\x89PNG secret").unwrap();
+        let err = read_image_from_path(secret.to_str().unwrap(), ws.path(), ws.path());
+        assert!(matches!(err, Err(WinxError::PathSecurityError { .. })));
+    }
 }

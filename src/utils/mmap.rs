@@ -22,8 +22,15 @@ pub const MAX_SEGMENTED_MMAP_SIZE: u64 = 4_000_000_000;
 pub const SEGMENT_SIZE: u64 = 256_000_000;
 
 const DIRECT_READ_CHUNK_SIZE: usize = 1_048_576;
-const MMAP_PARALLEL_CHUNK_SIZE: usize = 1_048_576;
 const STREAMING_CHUNK_SIZE: usize = 4_194_304;
+
+/// Upper bound on the up-front `Vec::with_capacity` hint derived from (untrusted)
+/// file metadata. A sparse or racing file can report a size far larger than the
+/// bytes it will actually yield; pre-allocating that size lets a caller force a
+/// multi-GB allocation before a single byte is read, and under `panic = "abort"`
+/// an allocation failure takes down the whole server. We cap the hint and let
+/// the `Vec` grow as bytes actually arrive (this mirrors `read_streaming`).
+const MAX_PREALLOC_BYTES: usize = 64 * 1024 * 1024;
 
 /// Read file contents optimally based on file size
 ///
@@ -104,7 +111,7 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
     // For very small files (< 1MB), use an optimized approach
     if file_size < 1_000_000 {
         // Pre-allocate an exact-sized buffer
-        let mut buffer = Vec::with_capacity(file_size as usize);
+        let mut buffer = Vec::with_capacity(min(file_size as usize, MAX_PREALLOC_BYTES));
 
         // Create a mutable file handle and seek to the beginning
         let mut file_handle = file.try_clone().map_err(|e| WinxError::FileAccessError {
@@ -213,44 +220,13 @@ fn read_mmap(file: &File, path: &Path) -> Result<Vec<u8>> {
         message: format!("Failed to memory-map file: {e}"),
     })?;
 
-    // Use Rayon for parallel processing if the file is large enough
-    if mmap.len() > 10_000_000 {
-        // 10MB threshold for parallel processing
-        debug!("Using parallel processing for large mmap file: {}", path.display());
-
-        // Process in parallel chunks
-        let chunk_count = mmap.len().div_ceil(MMAP_PARALLEL_CHUNK_SIZE);
-        let mut result = vec![0; mmap.len()];
-
-        // Process in parallel with Rayon - use collect for parallel map
-        let chunks: Vec<_> = (0..chunk_count)
-            .into_par_iter()
-            .map(|i| {
-                let start = i * MMAP_PARALLEL_CHUNK_SIZE;
-                let end = min((i + 1) * MMAP_PARALLEL_CHUNK_SIZE, mmap.len());
-
-                if start < mmap.len() {
-                    // Extract chunk from mmap
-                    let src = &mmap[start..end];
-                    (start, end, src.to_vec())
-                } else {
-                    (start, start, Vec::new())
-                }
-            })
-            .collect();
-
-        // Now apply all chunks to the result sequentially
-        for (start, end, chunk) in chunks {
-            if start < end {
-                result[start..end].copy_from_slice(&chunk);
-            }
-        }
-
-        Ok(result)
-    } else {
-        // For smaller files, just copy the entire map to a Vec
-        Ok(mmap.to_vec())
-    }
+    // Copy the mapped bytes into an owned Vec. Copying out of an mmap is
+    // bandwidth-bound (a memcpy), so the old Rayon "parallel" path bought
+    // nothing: it allocated the file twice — a zero-filled `result` plus a
+    // Vec of per-chunk `to_vec()`s — only to memcpy between them. `to_vec()`
+    // allocates exactly `mmap.len()` (the real mapped size, not an untrusted
+    // metadata hint) and copies once.
+    Ok(mmap.to_vec())
 }
 
 /// Read large file with segmented memory mapping
@@ -281,8 +257,8 @@ fn read_segmented_mmap(file: &File, file_size: u64, path: &Path) -> Result<Vec<u
         SEGMENT_SIZE / 1_000_000
     );
 
-    // Pre-allocate result vector
-    let mut result = Vec::with_capacity(file_size as usize);
+    // Pre-allocate result vector (capped — see MAX_PREALLOC_BYTES)
+    let mut result = Vec::with_capacity(min(file_size as usize, MAX_PREALLOC_BYTES));
 
     // Process each segment
     for i in 0..segment_count {

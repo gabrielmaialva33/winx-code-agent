@@ -1,6 +1,6 @@
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use tree_sitter::{Node, Parser};
 
@@ -82,7 +82,7 @@ pub fn syntax_warning(path: &Path, content: &str) -> Option<String> {
         // tree-sitter-python grammar silently accepts IndentationError and py2
         // `print` statements, and indentation is *the* classic Python mistake —
         // verified empirically that tree-sitter misses those, compile() catches them.
-        "py" | "pyi" => python_warning(path),
+        "py" | "pyi" => python_warning(path, content),
         _ if matches!(file_name, "Dockerfile" | "Makefile") => None,
         _ => None,
     }
@@ -156,17 +156,43 @@ fn error_context(content: &str, error_row: usize) -> String {
 /// *this* wrapper — the model should see only the error in its own file.
 const PY_SYNTAX_CHECK: &str = concat!(
     "import sys\n",
+    // The content arrives on stdin; argv[1] is only the display name for error
+    // messages. Reading stdin instead of re-opening argv[1] removes a TOCTOU /
+    // symlink-swap window — we check exactly the bytes we already validated and
+    // are about to write, not whatever is on disk at this path right now.
+    "name = sys.argv[1] if len(sys.argv) > 1 else '<file>'\n",
     "try:\n",
-    "    compile(open(sys.argv[1], encoding='utf-8').read(), sys.argv[1], 'exec')\n",
+    "    compile(sys.stdin.read(), name, 'exec')\n",
     "except SyntaxError as e:\n",
     "    print(f'{e.msg} (line {e.lineno})', file=sys.stderr)\n",
     "    sys.exit(1)\n",
 );
 
-fn python_warning(path: &Path) -> Option<String> {
+fn python_warning(path: &Path, content: &str) -> Option<String> {
     let python = python_interpreter()?;
 
-    let output = Command::new(python).args(["-c", PY_SYNTAX_CHECK]).arg(path).output().ok()?;
+    let mut child = Command::new(python)
+        .args(["-c", PY_SYNTAX_CHECK])
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+
+    // Feed the content from a separate thread so a large file can't deadlock on
+    // a full pipe buffer while the child is still being scheduled.
+    let mut stdin = child.stdin.take()?;
+    let owned = content.to_owned();
+    let writer = std::thread::spawn(move || {
+        use std::io::Write;
+        let _ = stdin.write_all(owned.as_bytes());
+        // `stdin` is dropped here, closing the pipe so the child sees EOF.
+    });
+
+    let output = child.wait_with_output().ok()?;
+    let _ = writer.join();
+
     (!output.status.success()).then(|| {
         let stderr = String::from_utf8_lossy(&output.stderr);
         format!("Syntax warning: Python parser reported: {}", stderr.trim())

@@ -731,7 +731,11 @@ async fn execute_command(
     // without wrapping in `bash -lc '...'`.
     let command = command.trim();
     if !allow_multi {
-        crate::utils::bash_parser::assert_single_statement(command)?;
+        // The `bash -n -c` fallback inside the parser spawns a shell; only allow
+        // that probe in trusted (wcgw) mode. In restricted modes tree-sitter is
+        // the sole arbiter so we never shell out to vet a command.
+        let allow_shell_probe = matches!(bash_state.mode, crate::types::Modes::Wcgw);
+        crate::utils::bash_parser::assert_single_statement(command, allow_shell_probe)?;
     }
 
     // If background execution requested, start new shell - matches WCGW Python is_background handling

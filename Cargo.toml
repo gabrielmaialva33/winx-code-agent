@@ -20,6 +20,9 @@ rmcp = { version = "1.7.0", features = [
 
 # HTTP server for the optional remote MCP transport (ChatGPT custom connector etc.)
 axum = "0.8"
+# Tower middleware for the HTTP transport: request body-size cap + per-request
+# timeout on the network-reachable RCE endpoint.
+tower-http = { version = "0.6", features = ["limit", "timeout"] }
 
 # Schema generation for MCP tools
 schemars = "1.2"

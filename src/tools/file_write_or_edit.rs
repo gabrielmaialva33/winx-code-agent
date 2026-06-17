@@ -285,6 +285,23 @@ fn split_lines(content: &str) -> Vec<String> {
 /// The temp file inherits the target's permissions when it already exists, so an
 /// edit doesn't silently flip a 0644 file to the temp's default mode. Non-Unix
 /// targets fall back to `tempfile`'s cross-platform persist.
+/// Create `path`'s parent directories if missing (`mkdir -p`). `path` is already
+/// workspace-confined by `validate_path_in_workspace`, and the components being
+/// created are fresh, so they stay inside the workspace. A residual symlink-swap
+/// TOCTOU on an intermediate dir is the same window `write_no_follow` documents
+/// for the leaf — acceptable on a single-user local server.
+fn ensure_parent_dirs(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            fs::create_dir_all(parent).map_err(|e| WinxError::FileAccessError {
+                path: path.to_path_buf(),
+                message: format!("Failed to create parent directories: {e}"),
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn write_no_follow(path: &Path, content: &[u8]) -> std::io::Result<()> {
     use std::io::Error;
 
@@ -987,6 +1004,9 @@ pub async fn handle_tool_call(
             });
         }
     }
+
+    // `mkdir -p` for new files (no-op for edits, whose parent already exists).
+    ensure_parent_dirs(&path)?;
 
     let result = if uses_search_replace {
         let original_content = fs::read_to_string(&path)?;

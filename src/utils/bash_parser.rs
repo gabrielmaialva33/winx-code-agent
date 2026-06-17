@@ -2,7 +2,15 @@ use tree_sitter::{Node, Parser};
 
 use crate::errors::{Result, WinxError};
 
-pub fn assert_single_statement(command: &str) -> Result<()> {
+/// Validate that `command` is a single top-level bash statement.
+///
+/// `allow_shell_probe` controls the tree-sitter-error fallback: when the
+/// embedded grammar flags an error, we *can* ask the real `bash -n -c` whether
+/// the syntax is actually valid (the grammar lags real bash). That spawns a
+/// shell on the request path, so it's gated to trusted (`wcgw`) mode only — in
+/// restricted modes (`code_writer`/`architect`) we must not spawn `bash` to
+/// vet a command, so tree-sitter's verdict is final there.
+pub fn assert_single_statement(command: &str, allow_shell_probe: bool) -> Result<()> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return Ok(());
@@ -24,11 +32,7 @@ pub fn assert_single_statement(command: &str) -> Result<()> {
     })?;
     let root = tree.root_node();
 
-    if root.has_error() {
-        if bash_accepts_syntax(trimmed) {
-            return Ok(());
-        }
-
+    if root.has_error() && !rescued_by_shell_probe(trimmed, allow_shell_probe) {
         return Err(WinxError::CommandExecutionError(
             "Command contains invalid bash syntax. If this is a complex script, pass it as multiline bash, avoid NUL bytes, or set allow_multi=true after verifying the quoting.".to_string(),
         ));
@@ -43,6 +47,15 @@ pub fn assert_single_statement(command: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// When tree-sitter flags a syntax error we *may* defer to the real `bash -n`
+/// (the embedded grammar lags real bash). That probe spawns a shell, so it only
+/// runs in trusted (wcgw) mode — `allow_shell_probe` gates it. In restricted
+/// modes (`code_writer`/`architect`) the grammar's verdict is final and we never
+/// shell out to vet a command.
+fn rescued_by_shell_probe(command: &str, allow_shell_probe: bool) -> bool {
+    allow_shell_probe && bash_accepts_syntax(command)
 }
 
 fn bash_accepts_syntax(command: &str) -> bool {
@@ -235,34 +248,52 @@ mod tests {
 
     #[test]
     fn accepts_shell_chains_as_single_statement() {
-        assert!(assert_single_statement("cargo test && cargo clippy").is_ok());
+        assert!(assert_single_statement("cargo test && cargo clippy", true).is_ok());
     }
 
     #[test]
     fn accepts_heredocs_as_single_statement() {
         let command = "cat <<'EOF'\nhello\nEOF";
-        assert!(assert_single_statement(command).is_ok());
+        assert!(assert_single_statement(command, true).is_ok());
     }
 
     #[test]
     fn accepts_for_loop_as_single_compound_statement() {
-        assert!(assert_single_statement("for i in 1 2 3; do echo tick; sleep 1; done").is_ok());
+        assert!(
+            assert_single_statement("for i in 1 2 3; do echo tick; sleep 1; done", true).is_ok()
+        );
     }
 
     #[test]
     fn rejects_semicolon_separated_top_level_statements() {
-        assert!(assert_single_statement("pwd; ls").is_err());
+        assert!(assert_single_statement("pwd; ls", true).is_err());
     }
 
     #[test]
     fn accepts_multiline_scripts() {
-        assert!(assert_single_statement("pwd\nls").is_ok());
+        assert!(assert_single_statement("pwd\nls", true).is_ok());
     }
 
     #[test]
     fn accepts_bash_lc_script_when_tree_sitter_reports_error() {
         let command = "bash -lc 'printf \"%s\\n\" \"-- drm connectors --\"; for s in /sys/class/drm/card*-*/status; do [ -e \"$s\" ] || continue; c=${s%/status}; printf \"%s: %s\" \"${c##*/}\" \"$(cat \"$s\")\"; done'";
-        assert!(assert_single_statement(command).is_ok());
+        assert!(assert_single_statement(command, true).is_ok());
+    }
+
+    #[test]
+    fn shell_probe_is_gated_to_trusted_mode() {
+        use super::rescued_by_shell_probe;
+        // The probe (`bash -n`) only runs in trusted (wcgw) mode. Tested on the
+        // pure decision so it doesn't depend on finding a command the embedded
+        // grammar happens to reject — which is the whole point of the gate.
+        //
+        // Probe ON: a command real bash accepts is rescued past a tree-sitter error.
+        assert!(rescued_by_shell_probe("echo hi", true));
+        // Probe OFF (restricted modes): NOT rescued, even though bash would accept
+        // it — and crucially we never spawn a shell to find out.
+        assert!(!rescued_by_shell_probe("echo hi", false));
+        // Probe ON but genuinely broken syntax: bash rejects too, so no rescue.
+        assert!(!rescued_by_shell_probe("echo )(", true));
     }
 
     #[test]
@@ -290,7 +321,7 @@ mod tests {
 
     #[test]
     fn rejects_nul_with_actionable_message() {
-        let error = match assert_single_statement("printf '\0'") {
+        let error = match assert_single_statement("printf '\0'", true) {
             Ok(()) => String::new(),
             Err(error) => error.to_string(),
         };
