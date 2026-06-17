@@ -314,22 +314,38 @@ impl PtyShell {
         // This prevents blocking the main thread
         thread::spawn(move || {
             let mut buf = [0u8; 4096];
+            // Bytes of an incomplete trailing UTF-8 char held back for the next
+            // read. Without this, a multibyte glyph split across a 4096-byte read
+            // boundary would decode to two U+FFFDs — corrupting the output buffer
+            // and the prompt/CWD detection that runs over it.
+            let mut carry: Vec<u8> = Vec::new();
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        // EOF - PTY closed
+                        // EOF - PTY closed. Flush any held bytes lossily.
+                        if !carry.is_empty() {
+                            let _ = output_tx.send(String::from_utf8_lossy(&carry).into_owned());
+                        }
                         break;
                     }
                     Ok(n) => {
                         // Tap the raw bytes into the live emulator first (brief
                         // lock; feed is O(chunk len)). Feeding bytes — not the
                         // lossy String — keeps the persistent VTE parser exact
-                        // across chunk boundaries.
-                        if let Ok(mut emu) = live_reader.lock() {
+                        // across chunk boundaries. Recover from a poisoned lock
+                        // instead of dropping the feed silently.
+                        {
+                            let mut emu = live_reader
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner);
                             emu.feed(&buf[..n]);
                         }
-                        let chunk = String::from_utf8_lossy(&buf[..n]).to_string();
-                        if output_tx.send(chunk).is_err() {
+                        // Decode the longest valid prefix; carry an incomplete
+                        // trailing char into the next read.
+                        carry.extend_from_slice(&buf[..n]);
+                        let (chunk, rest) = decode_keep_incomplete(&carry);
+                        carry = rest;
+                        if !chunk.is_empty() && output_tx.send(chunk).is_err() {
                             // Receiver dropped, exit thread
                             break;
                         }
@@ -757,32 +773,32 @@ impl PtyShell {
     /// stripped. `max_lines` of 0 returns the full screen buffer. This is the
     /// foundation for piloting interactive TUIs (the `claude` CLI, vim, ...).
     pub fn live_snapshot(&self, max_lines: usize) -> Vec<String> {
-        match self.live.lock() {
-            Ok(emu) => emu.snapshot(max_lines),
-            Err(_) => Vec::new(),
-        }
+        // Recover from a poisoned lock instead of returning a blank screen
+        // forever — a single panic while holding `live` would otherwise wedge
+        // every future snapshot (and `wait_for_turn`/`screen` with it).
+        self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).snapshot(max_lines)
     }
 
     /// Whether the live terminal is currently on the alternate screen buffer
     /// (a full-screen app like vim/htop/less is running).
     pub fn live_in_alt_screen(&self) -> bool {
-        self.live.lock().is_ok_and(|emu| emu.in_alt_screen())
+        self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).in_alt_screen()
     }
 
     /// Cursor position `(row, col)` on the live screen (0-based), so a piloting
     /// agent knows where focus is in a menu/form. `(0, 0)` if the lock is poisoned.
     pub fn live_cursor_position(&self) -> (u16, u16) {
-        self.live.lock().map_or((0, 0), |emu| emu.cursor_position())
+        self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).cursor_position()
     }
 
     /// Diff the live screen against what the client last saw, returning only the
     /// changed lines when the change is small (huge token savings over many
     /// polls). Updates the baseline as a side effect. See [`ScreenUpdate`].
     pub fn live_snapshot_diff(&self, max_lines: usize, threshold: usize) -> ScreenUpdate {
-        match self.live.lock() {
-            Ok(mut emu) => emu.snapshot_diff(max_lines, threshold),
-            Err(_) => ScreenUpdate::Full(Vec::new()),
-        }
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .snapshot_diff(max_lines, threshold)
     }
 
     /// Resize the terminal
@@ -794,9 +810,7 @@ impl PtyShell {
         self.master.resize(new_size).context("Failed to resize PTY")?;
 
         // Keep the live emulator's viewport in lockstep with the PTY size.
-        if let Ok(mut emu) = self.live.lock() {
-            emu.resize(rows, cols);
-        }
+        self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).resize(rows, cols);
 
         self.size = new_size;
         Ok(())
@@ -822,10 +836,87 @@ pub fn create_shared_pty(initial_dir: &Path, restricted_mode: bool) -> Result<Sh
     Ok(Arc::new(Mutex::new(Some(shell))))
 }
 
+/// Split a byte slice into the longest valid-UTF-8 prefix (decoded) and the
+/// trailing bytes of an incomplete final char (to carry into the next read).
+/// Genuinely invalid sequences become a single U+FFFD and are consumed, so the
+/// carry only ever holds a recoverable incomplete tail and never grows unbounded.
+///
+/// Iterative on purpose: a recursive version blows the reader thread's stack on
+/// a burst of invalid bytes (e.g. `cat`-ing a binary), which aborts under
+/// `panic = "abort"`. This stays O(1) in stack depth regardless of input.
+fn decode_keep_incomplete(bytes: &[u8]) -> (String, Vec<u8>) {
+    let mut decoded = String::new();
+    let mut rest = bytes;
+    loop {
+        match std::str::from_utf8(rest) {
+            Ok(text) => {
+                decoded.push_str(text);
+                return (decoded, Vec::new());
+            }
+            Err(error) => {
+                let valid = error.valid_up_to();
+                // `rest[..valid]` is valid UTF-8 by construction (no allocation
+                // for the borrowed case).
+                decoded.push_str(&String::from_utf8_lossy(&rest[..valid]));
+                match error.error_len() {
+                    // Incomplete final char: keep the tail for the next read.
+                    None => return (decoded, rest[valid..].to_vec()),
+                    // Genuinely invalid run: emit one replacement and skip past it.
+                    Some(bad) => {
+                        decoded.push('\u{FFFD}');
+                        rest = &rest[valid + bad..];
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn decode_passes_clean_utf8_through() {
+        let (text, carry) = decode_keep_incomplete("hello ✓ café".as_bytes());
+        assert_eq!(text, "hello ✓ café");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn decode_carries_incomplete_trailing_char_across_reads() {
+        // "é" is 0xC3 0xA9; a read boundary splits it. The first half must NOT
+        // turn into U+FFFD — it's held and completed on the next read.
+        let (text1, carry1) = decode_keep_incomplete(&[b'a', 0xC3]);
+        assert_eq!(text1, "a");
+        assert_eq!(carry1, vec![0xC3]);
+
+        let mut next = carry1;
+        next.push(0xA9); // continuation byte arrives in the next read
+        let (text2, carry2) = decode_keep_incomplete(&next);
+        assert_eq!(text2, "é");
+        assert!(carry2.is_empty());
+    }
+
+    #[test]
+    fn decode_replaces_genuinely_invalid_bytes() {
+        // 0xFF is never valid UTF-8 and is not an incomplete prefix.
+        let (text, carry) = decode_keep_incomplete(&[b'x', 0xFF, b'y']);
+        assert_eq!(text, "x\u{FFFD}y");
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn decode_handles_large_invalid_burst_without_overflow() {
+        // Regression: the first (recursive) version blew the stack — one frame
+        // per invalid byte — and aborted under panic="abort" on a binary dump.
+        // The iterative version must handle far more than the 4KB reader buffer.
+        let big = vec![0xFFu8; 200_000];
+        let (text, carry) = decode_keep_incomplete(&big);
+        assert!(carry.is_empty());
+        assert_eq!(text.chars().filter(|&c| c == '\u{FFFD}').count(), 200_000);
+    }
 
     #[test]
     fn prompt_detection_is_suffix_anchored() {

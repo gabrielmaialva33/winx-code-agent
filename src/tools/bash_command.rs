@@ -567,9 +567,9 @@ async fn execute_bash_action(
         | BashCommandAction::Screen { bg_command_id, .. }
         | BashCommandAction::WaitForTurn { bg_command_id, .. } => {
             if let Some(id) = bg_command_id {
-                let mut manager = BG_SHELL_MANAGER.lock().map_err(|e| {
-                    WinxError::BashStateLockError(format!("Failed to lock bg manager: {e}"))
-                })?;
+                // Use the recovery helper (poison -> into_inner) like every other
+                // call site, rather than hard-failing this one path on poison.
+                let mut manager = lock_bg_manager();
                 manager.prune_finished_shells();
 
                 if let Some(shell) = manager.get_shell(id) {
@@ -802,6 +802,12 @@ async fn execute_command(
 
         bash.output_buffer.clear();
         bash.output_truncated = false;
+        // Mirror send_command's full reset. This foreground path hand-rolls the
+        // field mutation (it chunks the send for WCGW parity) and used to drop
+        // these two: a stale exit code or dedup hash would then leak into the
+        // next status_check — wrong `exit code`, or a false "no new output".
+        bash.last_exit_code = None;
+        bash.last_returned_hash = None;
         // Send in chunks - matches WCGW Python: for i in range(0, len(command), 64)
         send_utf8_in_byte_chunks(bash, command, COMMAND_CHUNK_SIZE)?;
 
