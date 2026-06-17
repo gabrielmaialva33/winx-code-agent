@@ -310,6 +310,7 @@ fn get_status(
     bg_id: Option<&str>,
     is_running: bool,
     running_for: Option<&str>,
+    exit_code: Option<i32>,
 ) -> String {
     let mut status = "\n\n---\n\n".to_string();
 
@@ -326,6 +327,11 @@ fn get_status(
         }
     } else {
         status.push_str("status = process exited\n");
+        // Exit code of the just-finished command, parsed from the prompt marker
+        // (`──➤<nonce>:<code>`). Lets the agent see failure without grepping stderr.
+        if let Some(code) = exit_code {
+            let _ = writeln!(status, "exit code = {code}");
+        }
     }
 
     let _ = writeln!(status, "cwd = {}", bash_state.cwd.display());
@@ -952,8 +958,15 @@ async fn wait_for_output(
     let running_for =
         if complete { None } else { Some(format!("{} seconds", start.elapsed().as_secs())) };
 
+    // Surface the just-finished command's exit code (parsed from the prompt
+    // marker) so the agent sees failure without grepping stderr.
+    let mut exit_code = None;
+    if complete {
+        exit_code = shell_arc.lock().await.as_ref().and_then(|shell| shell.last_exit_code);
+    }
+
     // Add status - matches WCGW Python get_status
-    let status = get_status(bash_state, is_bg, bg_id, !complete, running_for.as_deref());
+    let status = get_status(bash_state, is_bg, bg_id, !complete, running_for.as_deref(), exit_code);
     Ok(format!("{rendered}{status}"))
 }
 
@@ -1055,7 +1068,7 @@ async fn execute_status_check(
         if let Some(bash) = guard.as_mut() {
             let fingerprint = PtyShell::fingerprint(body);
             if Some(fingerprint) == bash.last_returned_hash {
-                let status = get_status(bash_state, is_bg, bg_id, is_running, None);
+                let status = get_status(bash_state, is_bg, bg_id, is_running, None, None);
                 return Ok(format!("no new output since last check{status}"));
             }
             bash.last_returned_hash = Some(fingerprint);
@@ -1116,7 +1129,7 @@ async fn execute_screen(
         };
         let (crow, ccol) = cursor;
         let alt = if in_alt { " [alt-screen]" } else { "" };
-        let status = get_status(bash_state, is_bg, bg_id, is_running, None);
+        let status = get_status(bash_state, is_bg, bg_id, is_running, None, None);
         let body = match update {
             ScreenUpdate::Unchanged => "(no change since last screen)".to_string(),
             ScreenUpdate::Diff(changed) => {
@@ -1161,7 +1174,7 @@ async fn execute_screen(
     };
     let alt = if in_alt { " [alt-screen]" } else { "" };
     let (crow, ccol) = cursor;
-    let status = get_status(bash_state, is_bg, bg_id, is_running, None);
+    let status = get_status(bash_state, is_bg, bg_id, is_running, None, None);
     Ok(format!("--- live screen{alt} [cursor row={crow} col={ccol}] ---\n{body}{status}"))
 }
 
@@ -1269,7 +1282,7 @@ async fn execute_wait_for_turn(
                 start.elapsed().as_secs_f64(),
                 alt
             );
-            let status = get_status(bash_state, is_bg, bg_id, running, None);
+            let status = get_status(bash_state, is_bg, bg_id, running, None, None);
             return Ok(format!("{header}\n{body}{status}"));
         }
 
@@ -1528,7 +1541,7 @@ async fn execute_in_background(
 
     let _ = timeout_s;
     let _ = shell_arc;
-    Ok(get_status(bash_state, true, Some(&bg_id), true, None))
+    Ok(get_status(bash_state, true, Some(&bg_id), true, None, None))
 }
 
 #[cfg(test)]

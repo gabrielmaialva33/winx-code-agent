@@ -184,6 +184,10 @@ pub struct PtyShell {
     pub output_buffer: String,
     /// Whether a command is currently running
     pub command_running: bool,
+    /// Exit code of the last completed foreground command, parsed from the prompt
+    /// marker (`──➤<nonce>:<code>`). `None` until a command finishes, and reset
+    /// to `None` while one is running.
+    pub last_exit_code: Option<i32>,
     /// Maximum output size before truncation
     max_output_size: usize,
     /// Flag for output truncation
@@ -281,7 +285,12 @@ impl PtyShell {
         let nonce = format!("{:016x}", rand::random::<u64>());
         // WCGW-style prompt for command completion detection
         // Note: removed \r\e[2K which was erasing the prompt before it could be detected
-        cmd.env("PROMPT_COMMAND", format!(r#"printf "◉ %s──➤{nonce} " "$PWD""#));
+        // `__winx_ec=$?` captures the user command's exit status as the very
+        // first thing PROMPT_COMMAND does, then we print it after the marker.
+        cmd.env(
+            "PROMPT_COMMAND",
+            format!(r#"__winx_ec=$?; printf "◉ %s──➤{nonce}:%s " "$PWD" "$__winx_ec""#),
+        );
         cmd.cwd(initial_dir);
 
         // Spawn bash in the PTY slave
@@ -344,6 +353,7 @@ impl PtyShell {
             last_command: String::new(),
             output_buffer: String::new(),
             command_running: false,
+            last_exit_code: None,
             max_output_size: MAX_OUTPUT_SIZE,
             output_truncated: false,
             ring: LineRing::new(RING_BUFFER_LINES, MAX_PARTIAL_LINE_BYTES),
@@ -375,11 +385,11 @@ impl PtyShell {
             // prompt via that array, so redefining `precmd` alone leaves their
             // prompt in place and our `──➤` marker never ends the line.
             format!(
-                r#"export GIT_PAGER=cat PAGER=cat; precmd_functions=(); preexec_functions=(); PROMPT=''; RPROMPT=''; precmd() {{ printf "◉ %s──➤{nonce} " "$PWD" }}"#
+                r#"export GIT_PAGER=cat PAGER=cat; precmd_functions=(); preexec_functions=(); PROMPT=''; RPROMPT=''; precmd() {{ local __winx_ec=$?; printf "◉ %s──➤{nonce}:%s " "$PWD" "$__winx_ec" }}"#
             )
         } else {
             format!(
-                r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='printf "◉ %s──➤{nonce} " "$PWD"'; PS1=''"#
+                r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='__winx_ec=$?; printf "◉ %s──➤{nonce}:%s " "$PWD" "$__winx_ec"'; PS1=''"#
             )
         };
 
@@ -468,6 +478,7 @@ impl PtyShell {
         self.output_truncated = false;
         self.last_command = command.to_string();
         self.command_running = true;
+        self.last_exit_code = None;
         // A new command means the next status_check should return whatever
         // shows up — drop the dedup hash so we don't elide the first response.
         self.last_returned_hash = None;
@@ -581,6 +592,8 @@ impl PtyShell {
 
         if complete || prompt_detected_at.is_some() {
             self.command_running = false;
+            self.last_exit_code =
+                Self::parse_prompt_exit_code(&self.output_buffer, &self.prompt_end_marker);
             complete = true;
         }
 
@@ -629,6 +642,8 @@ impl PtyShell {
         }
         if prompt_seen {
             self.command_running = false;
+            self.last_exit_code =
+                Self::parse_prompt_exit_code(&self.output_buffer, &self.prompt_end_marker);
         }
         prompt_seen
     }
@@ -641,13 +656,27 @@ impl PtyShell {
     /// even a forged `◉ x──➤ ` at end of line — can't be mistaken for the prompt
     /// and truncate output or end the command early.
     fn check_prompt_complete(text: &str, prompt_end: &str) -> bool {
-        text.lines().rev().find(|line| !line.trim().is_empty()).is_some_and(|last| {
-            // Strip ANSI so a trailing erase/cursor sequence after the arrow
-            // (e.g. "──➤ \x1b[K") doesn't defeat the suffix check.
-            let clean = crate::state::terminal::strip_ansi_codes(last);
-            let clean = clean.trim_end();
-            clean.contains(WCGW_PROMPT_PATTERN) && clean.ends_with(prompt_end)
-        })
+        Self::parse_prompt_exit_code(text, prompt_end).is_some()
+    }
+
+    /// If the last non-empty line is this shell's completion prompt
+    /// (`◉ <pwd>──➤<nonce>:<code>`), return the exit code that follows the
+    /// marker. Returns `None` when the prompt isn't present — which is exactly
+    /// "the command is still running". The per-shell nonce plus the structured
+    /// `:<digits>` suffix keep command output from forging completion.
+    fn parse_prompt_exit_code(text: &str, prompt_end: &str) -> Option<i32> {
+        let last = text.lines().rev().find(|line| !line.trim().is_empty())?;
+        // Strip ANSI so a trailing erase/cursor sequence after the code
+        // (e.g. ":0 \x1b[K") doesn't defeat the suffix check.
+        let clean = crate::state::terminal::strip_ansi_codes(last);
+        let clean = clean.trim_end();
+        if !clean.contains(WCGW_PROMPT_PATTERN) {
+            return None;
+        }
+        // Everything after the last "──➤<nonce>" must be ":<digits>" and nothing
+        // else — this confirms the prompt ends the line AND yields the code.
+        let after = clean.rsplit_once(prompt_end)?.1;
+        after.strip_prefix(':')?.trim().parse::<i32>().ok()
     }
 
     /// Send Ctrl+C (interrupt) to the PTY
@@ -800,25 +829,38 @@ mod tests {
 
     #[test]
     fn prompt_detection_is_suffix_anchored() {
-        // Per-shell nonce appended after the arrow.
+        // Per-shell nonce + exit code after the arrow: `──➤<nonce>:<code>`.
         let end = "──➤deadbeefcafe0001";
         // real prompt on the last line -> complete
-        assert!(PtyShell::check_prompt_complete("out\nmore\n◉ /home/x──➤deadbeefcafe0001 ", end));
+        assert!(PtyShell::check_prompt_complete("out\nmore\n◉ /home/x──➤deadbeefcafe0001:0 ", end));
         // prompt with trailing ANSI erase -> still complete
-        assert!(PtyShell::check_prompt_complete("◉ /home/x──➤deadbeefcafe0001 \u{1b}[K", end));
+        assert!(PtyShell::check_prompt_complete("◉ /home/x──➤deadbeefcafe0001:0 \u{1b}[K", end));
         // the bug: ◉ and ──➤ appear MID-output, last line is normal -> NOT complete
         assert!(!PtyShell::check_prompt_complete(
             "menu: ◉ start ──➤deadbeefcafe0001 stop\nstill running",
             end
         ));
-        // command echoed after the arrow (not the waiting prompt) -> not complete
-        assert!(!PtyShell::check_prompt_complete("◉ /home/x──➤deadbeefcafe0001 ls -la", end));
+        // command echoed after the prompt (not the waiting prompt) -> not complete
+        assert!(!PtyShell::check_prompt_complete("◉ /home/x──➤deadbeefcafe0001:0 ls -la", end));
         // no prompt at all
         assert!(!PtyShell::check_prompt_complete("just some output\n", end));
         // the nonce's payoff: output that forges the bare glyphs but NOT the
-        // nonce must not be mistaken for the prompt.
+        // nonce (or omits the exit code) must not be mistaken for the prompt.
         assert!(!PtyShell::check_prompt_complete("◉ /fake──➤ ", end));
-        assert!(!PtyShell::check_prompt_complete("◉ /fake──➤wrongnonce ", end));
+        assert!(!PtyShell::check_prompt_complete("◉ /fake──➤wrongnonce:0 ", end));
+        assert!(!PtyShell::check_prompt_complete("◉ /home/x──➤deadbeefcafe0001 ", end));
+    }
+
+    #[test]
+    fn parses_exit_code_from_prompt_marker() {
+        let end = "──➤cafe1234";
+        assert_eq!(PtyShell::parse_prompt_exit_code("ok\n◉ /x──➤cafe1234:0 ", end), Some(0));
+        assert_eq!(PtyShell::parse_prompt_exit_code("oops\n◉ /x──➤cafe1234:1 ", end), Some(1));
+        assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤cafe1234:42 ", end), Some(42));
+        // still running (no completion prompt yet) -> None
+        assert_eq!(PtyShell::parse_prompt_exit_code("building...", end), None);
+        // forged with the wrong nonce -> None
+        assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤wrong:0 ", end), None);
     }
 
     #[test]
