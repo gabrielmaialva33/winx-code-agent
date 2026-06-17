@@ -863,6 +863,32 @@ mod tests {
         assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤wrong:0 ", end), None);
     }
 
+    use proptest::prelude::*;
+
+    proptest! {
+        // Exit-code parsing runs on untrusted program output — arbitrary text
+        // (and a forgeable marker) must never panic, only ever return None or a
+        // parsed i32.
+        #[test]
+        fn parse_prompt_exit_code_never_panics(
+            text in prop::collection::vec(any::<char>(), 0..256),
+            nonce in "[0-9a-f]{0,16}",
+        ) {
+            let s: String = text.into_iter().collect();
+            let end = format!("{WCGW_PROMPT_END}{nonce}");
+            // Must not panic; any Option<i32> is acceptable.
+            let _ = PtyShell::parse_prompt_exit_code(&s, &end);
+        }
+
+        // A well-formed marker round-trips the embedded code for any i32.
+        #[test]
+        fn parse_prompt_exit_code_round_trips(code in any::<i32>(), nonce in "[0-9a-f]{1,16}") {
+            let end = format!("{WCGW_PROMPT_END}{nonce}");
+            let line = format!("output line\n{WCGW_PROMPT_PATTERN} /home/x{end}:{code} ");
+            prop_assert_eq!(PtyShell::parse_prompt_exit_code(&line, &end), Some(code));
+        }
+    }
+
     #[test]
     fn test_pty_shell_creation() -> Result<()> {
         let temp_dir = TempDir::new()?;

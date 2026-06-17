@@ -227,4 +227,29 @@ mod tests {
         assert_eq!(normalize_lf_to_crlf("a\r\nb"), b"a\r\nb");
         assert_eq!(normalize_lf_to_crlf("plain"), b"plain");
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // Any input — including malformed/partial escape sequences and raw ESC
+        // bytes — must be stripped to leave no ESC behind, and never panic.
+        #[test]
+        fn strip_ansi_codes_leaves_no_esc(text in prop::collection::vec(any::<char>(), 0..256)) {
+            let s: String = text.into_iter().collect();
+            let out = strip_ansi_codes(&s);
+            prop_assert!(!out.contains('\u{1b}'), "ESC survived stripping: {out:?}");
+        }
+
+        // ESC-free input is returned verbatim (the fast path must not mangle).
+        #[test]
+        fn strip_ansi_codes_is_identity_without_esc(
+            text in prop::collection::vec(
+                any::<char>().prop_filter("no esc", |c| *c != '\u{1b}'),
+                0..256,
+            ),
+        ) {
+            let s: String = text.into_iter().collect();
+            prop_assert_eq!(strip_ansi_codes(&s), s);
+        }
+    }
 }

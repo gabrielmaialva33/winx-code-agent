@@ -212,4 +212,61 @@ mod tests {
         // More than `threshold` lines changed -> full frame, not a giant diff.
         assert!(matches!(t.snapshot_diff(0, 1), ScreenUpdate::Full(_)));
     }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        // The live tap is fed untrusted program output. Feeding arbitrary byte
+        // chunks (split anywhere, so escape sequences straddle boundaries) must
+        // never panic and must keep snapshot/cursor inside the fixed viewport.
+        #[test]
+        fn feed_arbitrary_bytes_never_panics_and_stays_bounded(
+            rows in 1u16..40,
+            cols in 1u16..120,
+            chunks in prop::collection::vec(prop::collection::vec(any::<u8>(), 0..48), 0..24),
+        ) {
+            let mut t = LiveTerminal::new(rows, cols);
+            for chunk in &chunks {
+                t.feed(chunk);
+            }
+            // Snapshot never exceeds the viewport height.
+            let full = t.snapshot(0);
+            prop_assert!(full.len() <= rows as usize, "snapshot {} rows > viewport {rows}", full.len());
+            // No visible line is wider than the column count (vt100 wraps).
+            for line in &full {
+                prop_assert!(
+                    line.chars().count() <= cols as usize,
+                    "line wider than {cols} cols: {line:?}"
+                );
+            }
+            // Cursor stays inside the grid (col may rest at `cols` on a pending wrap).
+            let (cr, cc) = t.cursor_position();
+            prop_assert!(cr < rows, "cursor row {cr} >= rows {rows}");
+            prop_assert!(cc <= cols, "cursor col {cc} > cols {cols}");
+            // `max_lines` is honored.
+            prop_assert!(t.snapshot(3).len() <= 3);
+            // Diffing never panics and respects the threshold cap.
+            let _ = t.snapshot_diff(0, 4);
+            if let ScreenUpdate::Diff(changed) = t.snapshot_diff(0, 4) {
+                prop_assert!(changed.len() <= 4);
+            }
+        }
+
+        // Resizing to arbitrary dimensions (including row/col swaps) after a
+        // feed never panics and re-bounds the snapshot to the new viewport.
+        #[test]
+        fn resize_after_feed_never_panics(
+            r1 in 1u16..30, c1 in 1u16..80,
+            r2 in 1u16..30, c2 in 1u16..80,
+            data in prop::collection::vec(any::<u8>(), 0..256),
+        ) {
+            let mut t = LiveTerminal::new(r1, c1);
+            t.feed(&data);
+            t.resize(r2, c2);
+            prop_assert!(t.snapshot(0).len() <= r2 as usize);
+            // Feeding again after the resize is still bounded by the new height.
+            t.feed(&data);
+            prop_assert!(t.snapshot(0).len() <= r2 as usize);
+        }
+    }
 }
