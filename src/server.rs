@@ -307,7 +307,8 @@ const FIND_REFERENCES_DESCRIPTION: &str =
     "- Find where a symbol is defined and referenced (called/used) across the codebase, by name — a name-based semantic lookup via tree-sitter. \
      - Prefer this over grepping an identifier: it counts only real symbol occurrences, never matches inside strings or comments. \
      - `name` is required (exact identifier). Scope with `path` (file or directory; empty = whole workspace); cap with `max_results`. \
-     - Output lists definitions first, then references, as `def|ref  file:line  kind  name`. gitignore-aware, workspace-confined, works in every mode. Same 11 languages as Outline.";
+     - Output lists definitions first, then references, as `def|ref  file:line  kind  name`. gitignore-aware, workspace-confined, works in every mode. Same 11 languages as Outline. \
+     - Note: C/C++ grammars tag definitions only (no call sites), so `references` reads 0 for `.c`/`.h`/`.cpp` — use it for \"where is this defined\", not call counts, in those languages.";
 
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
 static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();
