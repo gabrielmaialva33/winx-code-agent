@@ -141,6 +141,7 @@ async fn pilot_claude_repl_through_winx() -> Result<()> {
                 screen: true,
                 bg_command_id: Some(bg.clone()),
                 lines: None,
+                diff: false,
             },
             None,
         ),

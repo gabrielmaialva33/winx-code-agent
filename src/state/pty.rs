@@ -22,7 +22,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
 use crate::state::line_ring::LineRing;
-use crate::state::live_terminal::LiveTerminal;
+use crate::state::live_terminal::{LiveTerminal, ScreenUpdate};
 
 /// Default terminal dimensions (columns x rows)
 pub const DEFAULT_COLS: u16 = 200;
@@ -738,6 +738,22 @@ impl PtyShell {
     /// (a full-screen app like vim/htop/less is running).
     pub fn live_in_alt_screen(&self) -> bool {
         self.live.lock().is_ok_and(|emu| emu.in_alt_screen())
+    }
+
+    /// Cursor position `(row, col)` on the live screen (0-based), so a piloting
+    /// agent knows where focus is in a menu/form. `(0, 0)` if the lock is poisoned.
+    pub fn live_cursor_position(&self) -> (u16, u16) {
+        self.live.lock().map_or((0, 0), |emu| emu.cursor_position())
+    }
+
+    /// Diff the live screen against what the client last saw, returning only the
+    /// changed lines when the change is small (huge token savings over many
+    /// polls). Updates the baseline as a side effect. See [`ScreenUpdate`].
+    pub fn live_snapshot_diff(&self, max_lines: usize, threshold: usize) -> ScreenUpdate {
+        match self.live.lock() {
+            Ok(mut emu) => emu.snapshot_diff(max_lines, threshold),
+            Err(_) => ScreenUpdate::Full(Vec::new()),
+        }
     }
 
     /// Resize the terminal

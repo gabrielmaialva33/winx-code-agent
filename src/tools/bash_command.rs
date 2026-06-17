@@ -18,6 +18,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
+use crate::state::live_terminal::ScreenUpdate;
 use crate::state::pty::PtyShell;
 use crate::state::terminal::{render_terminal_output, strip_ansi_codes};
 use crate::types::{normalize_thread_id, BashCommand, BashCommandAction, SpecialKey};
@@ -63,6 +64,10 @@ const MAX_OUTPUT_TOKENS: usize = 25_000;
 /// typed text first, so `submit: true` reliably submits. ~40ms is imperceptible
 /// yet enough for the event loop to flush; harmless for plain shells.
 const SUBMIT_NUDGE_DELAY: Duration = Duration::from_millis(40);
+
+/// `screen` diff mode emits a per-line delta only when at most this many lines
+/// changed; beyond that the full frame is cheaper to read than a giant diff.
+const SCREEN_DIFF_THRESHOLD: usize = 10;
 
 /// Tail of `text` at most `max_len` bytes long, snapped up to a char boundary so
 /// we never slice through a multibyte UTF-8 sequence (which would panic).
@@ -640,8 +645,8 @@ async fn execute_bash_action(
             )
             .await
         }
-        BashCommandAction::Screen { lines, .. } => {
-            execute_screen(bash_state, bg_shell, is_bg, bg_id.as_deref(), *lines).await
+        BashCommandAction::Screen { lines, diff, .. } => {
+            execute_screen(bash_state, bg_shell, is_bg, bg_id.as_deref(), *lines, *diff).await
         }
         BashCommandAction::WaitForTurn { recognizer, quiet_ms, timeout_seconds, lines, .. } => {
             execute_wait_for_turn(
@@ -1091,17 +1096,60 @@ async fn execute_screen(
     is_bg: bool,
     bg_id: Option<&str>,
     lines: Option<usize>,
+    diff: bool,
 ) -> Result<String> {
     let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
     let max_lines = lines.unwrap_or(0);
 
-    let (snapshot, is_running, in_alt) = {
+    if diff {
+        let (update, is_running, in_alt, cursor) = {
+            let guard = shell_arc.lock().await;
+            match guard.as_ref() {
+                Some(bash) => (
+                    bash.live_snapshot_diff(max_lines, SCREEN_DIFF_THRESHOLD),
+                    bash.command_running,
+                    bash.live_in_alt_screen(),
+                    bash.live_cursor_position(),
+                ),
+                None => (ScreenUpdate::Full(Vec::new()), false, false, (0, 0)),
+            }
+        };
+        let (crow, ccol) = cursor;
+        let alt = if in_alt { " [alt-screen]" } else { "" };
+        let status = get_status(bash_state, is_bg, bg_id, is_running, None);
+        let body = match update {
+            ScreenUpdate::Unchanged => "(no change since last screen)".to_string(),
+            ScreenUpdate::Diff(changed) => {
+                let mut out = String::from("(changed lines only)\n");
+                for (row, content) in changed {
+                    let _ = writeln!(out, "{row:>4}: {content}");
+                }
+                out
+            }
+            ScreenUpdate::Full(snap) => {
+                let joined = snap.join("\n");
+                if joined.trim().is_empty() {
+                    "(screen is empty)".to_string()
+                } else {
+                    truncate_to_token_budget(&joined, MAX_OUTPUT_TOKENS).into_owned()
+                }
+            }
+        };
+        return Ok(format!(
+            "--- live screen{alt} [cursor row={crow} col={ccol}] (diff) ---\n{body}{status}"
+        ));
+    }
+
+    let (snapshot, is_running, in_alt, cursor) = {
         let guard = shell_arc.lock().await;
         match guard.as_ref() {
-            Some(bash) => {
-                (bash.live_snapshot(max_lines), bash.command_running, bash.live_in_alt_screen())
-            }
-            None => (Vec::new(), false, false),
+            Some(bash) => (
+                bash.live_snapshot(max_lines),
+                bash.command_running,
+                bash.live_in_alt_screen(),
+                bash.live_cursor_position(),
+            ),
+            None => (Vec::new(), false, false, (0, 0)),
         }
     };
 
@@ -1112,8 +1160,9 @@ async fn execute_screen(
         truncate_to_token_budget(&joined, MAX_OUTPUT_TOKENS).into_owned()
     };
     let alt = if in_alt { " [alt-screen]" } else { "" };
+    let (crow, ccol) = cursor;
     let status = get_status(bash_state, is_bg, bg_id, is_running, None);
-    Ok(format!("--- live screen{alt} ---\n{body}{status}"))
+    Ok(format!("--- live screen{alt} [cursor row={crow} col={ccol}] ---\n{body}{status}"))
 }
 
 /// Execute `WaitForTurn` — block until an interactive TUI finishes its turn.

@@ -16,10 +16,26 @@
 
 use vt100::Parser;
 
+/// What changed on the live screen since the client last looked. Lets
+/// `status_check` ship only the delta when piloting a TUI over many polls —
+/// far fewer tokens than re-sending the whole frame each time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScreenUpdate {
+    /// No baseline yet (first look) or too much changed — the full screen.
+    Full(Vec<String>),
+    /// Only these `(1-based row, new content)` lines changed since the last look.
+    Diff(Vec<(usize, String)>),
+    /// Nothing changed since the last look.
+    Unchanged,
+}
+
 /// A continuously-fed terminal emulator with a fixed viewport. Wraps a
 /// `vt100::Parser` and exposes just what the PTY live tap needs.
 pub struct LiveTerminal {
     parser: Parser,
+    /// Snapshot the client saw on its last look — the baseline the next
+    /// [`LiveTerminal::snapshot_diff`] diffs against.
+    last_snapshot: Option<Vec<String>>,
 }
 
 impl LiveTerminal {
@@ -28,7 +44,7 @@ impl LiveTerminal {
     /// Scrollback is left at 0: the snapshot only needs the visible viewport,
     /// and the PTY keeps its own raw `line_ring` for deeper scrollback.
     pub fn new(rows: u16, cols: u16) -> Self {
-        Self { parser: Parser::new(rows.max(1), cols.max(1), 0) }
+        Self { parser: Parser::new(rows.max(1), cols.max(1), 0), last_snapshot: None }
     }
 
     /// Feed raw PTY bytes. The parser is persistent, so escape sequences split
@@ -62,6 +78,49 @@ impl LiveTerminal {
         }
         lines
     }
+
+    /// Cursor position as `(row, col)`, 0-based, from the live screen — tells the
+    /// agent where focus sits in a menu/form it's piloting.
+    pub fn cursor_position(&self) -> (u16, u16) {
+        self.parser.screen().cursor_position()
+    }
+
+    /// Diff the current screen against the snapshot the client last saw, update
+    /// the baseline, and return only what changed. Positional (the terminal is a
+    /// grid that redraws in place), 1-based rows to match the rest of winx.
+    /// Returns the full screen on the first look or when more than `threshold`
+    /// lines changed (a diff that big isn't worth the framing).
+    pub fn snapshot_diff(&mut self, max_lines: usize, threshold: usize) -> ScreenUpdate {
+        let current = self.snapshot(max_lines);
+        let update = match self.last_snapshot.as_ref() {
+            Some(previous) => {
+                let changed = diff_lines(previous, &current);
+                if changed.is_empty() {
+                    ScreenUpdate::Unchanged
+                } else if changed.len() <= threshold {
+                    ScreenUpdate::Diff(changed)
+                } else {
+                    ScreenUpdate::Full(current.clone())
+                }
+            }
+            None => ScreenUpdate::Full(current.clone()),
+        };
+        self.last_snapshot = Some(current);
+        update
+    }
+}
+
+/// Positional line diff: each `(1-based row, new content)` where the two frames
+/// differ. A blanked/removed line shows up as that row with empty content.
+fn diff_lines(previous: &[String], current: &[String]) -> Vec<(usize, String)> {
+    let rows = previous.len().max(current.len());
+    (0..rows)
+        .filter_map(|i| {
+            let was = previous.get(i).map_or("", String::as_str);
+            let now = current.get(i).map_or("", String::as_str);
+            (was != now).then(|| (i + 1, now.to_string()))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -112,5 +171,45 @@ mod tests {
         let mut t = LiveTerminal::new(10, 40);
         t.feed(b"a\r\nb\r\nc\r\nd\r\n");
         assert_eq!(t.snapshot(2), vec!["c".to_string(), "d".to_string()]);
+    }
+
+    #[test]
+    fn cursor_position_tracks_feed() {
+        let mut t = LiveTerminal::new(10, 40);
+        t.feed(b"abc");
+        assert_eq!(t.cursor_position(), (0, 3), "cursor should sit after 'abc' on row 0");
+    }
+
+    #[test]
+    fn snapshot_diff_full_then_unchanged_then_one_line() {
+        let mut t = LiveTerminal::new(5, 40);
+        t.feed(b"alpha\r\nbeta\r\ngamma\r\n");
+        // First look: no baseline -> full frame.
+        assert!(matches!(t.snapshot_diff(0, 10), ScreenUpdate::Full(_)));
+        // Nothing fed since -> Unchanged.
+        assert_eq!(t.snapshot_diff(0, 10), ScreenUpdate::Unchanged);
+        // Overwrite row 2 (1-based) in place -> a single-line diff.
+        t.feed(b"\x1b[2;1Hbeta2");
+        let update = t.snapshot_diff(0, 10);
+        assert!(
+            matches!(&update, ScreenUpdate::Diff(changed) if changed.len() == 1),
+            "expected a one-line diff, got {update:?}"
+        );
+        if let ScreenUpdate::Diff(changed) = &update {
+            assert_eq!(changed.first().map(|c| c.0), Some(2), "1-based row 2");
+            assert!(changed.first().is_some_and(|c| c.1.contains("beta2")), "got {changed:?}");
+        }
+    }
+
+    #[test]
+    fn snapshot_diff_big_change_falls_back_to_full() {
+        let mut t = LiveTerminal::new(10, 40);
+        t.feed(b"seed\r\n");
+        let _ = t.snapshot_diff(0, 1); // establish baseline
+        for i in 0..8 {
+            t.feed(format!("line{i}\r\n").as_bytes());
+        }
+        // More than `threshold` lines changed -> full frame, not a giant diff.
+        assert!(matches!(t.snapshot_diff(0, 1), ScreenUpdate::Full(_)));
     }
 }

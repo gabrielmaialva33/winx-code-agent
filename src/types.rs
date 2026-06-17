@@ -641,6 +641,11 @@ pub enum BashCommandAction {
         /// Last N visible lines to return (0 or omitted = full screen buffer).
         #[serde(default)]
         lines: Option<usize>,
+        /// When true, return only the lines that CHANGED since the last `screen`
+        /// look (big token savings when polling a TUI frame-by-frame) instead of
+        /// the whole frame. First look, or a large change, still returns full.
+        #[serde(default)]
+        diff: bool,
     },
 
     /// Block until an interactive TUI finishes its turn and is ready for input.
