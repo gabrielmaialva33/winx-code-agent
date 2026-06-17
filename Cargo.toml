@@ -97,15 +97,19 @@ tempfile = "3.14"
 # Property-based fuzzing of the terminal/ANSI parsers and pure helpers.
 proptest = "1.5"
 
-# `loom` model-checks the lock-free pin counter (SessionPin) under every
-# thread interleaving. Only pulled in under `--cfg loom`, so normal builds and
-# `cargo test` stay loom-free. Run with:
-#   RUSTFLAGS="--cfg loom" cargo test --lib loom_
-[target.'cfg(loom)'.dependencies]
-loom = "0.7"
+[dependencies.loom]
+# Model-checks the lock-free pin counter (SessionPin) under every thread
+# interleaving. Gated behind the `loom` feature (NOT a global `--cfg loom`):
+# tokio self-disables `tokio::net` under `cfg(loom)`, which would break axum, so
+# we keep loom scoped to just our atomics. Run with:
+#   cargo test --features loom --lib loom_
+version = "0.7"
+optional = true
 
 [features]
 default = []
+# Swap the SessionPin atomics to loom's instrumented versions for model-checking.
+loom = ["dep:loom"]
 
 # Clippy lints for quality
 [lints.clippy]
@@ -125,14 +129,11 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [lints.rust]
-# `loom` is a custom cfg set only via RUSTFLAGS="--cfg loom" for model-checking
-# the session pin counter; declare it so normal builds don't warn it's unknown.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 # Note: unsafe_code is allowed in specific modules (mmap.rs, bash_state.rs) for I/O operations
 # unsafe_code = "deny"  # Re-enable when refactoring complete
 # Allow unused code in library - some functions are for public API or future use
 dead_code = "allow"
-unused = { level = "allow", priority = -1 }
+unused = "allow"
 
 [profile.release]
 lto = true

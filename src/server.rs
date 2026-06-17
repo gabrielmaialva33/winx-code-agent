@@ -22,11 +22,11 @@ use std::process::Command;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 
-// The session pin counter swaps to loom's instrumented atomics under `--cfg
-// loom` so it can be model-checked, while every normal build stays on std.
-#[cfg(loom)]
+// The session pin counter swaps to loom's instrumented atomics under the `loom`
+// feature so it can be model-checked, while every normal build stays on std.
+#[cfg(feature = "loom")]
 use loom::sync::{atomic::AtomicUsize as PinAtomic, Arc as PinArc};
-#[cfg(not(loom))]
+#[cfg(not(feature = "loom"))]
 use std::sync::{atomic::AtomicUsize as PinAtomic, Arc as PinArc};
 use std::time::Instant;
 use tokio::sync::Mutex;
@@ -374,9 +374,9 @@ struct SessionRegistry {
 /// Lock-free pin counter for one session. A live [`SessionGuard`] keeps the
 /// count `> 0`, which marks the session as in-flight so LRU eviction skips it.
 /// Clones share the same counter — the registry hands a clone to each
-/// concurrent call. Atomics are loom-instrumented under `--cfg loom` so the
-/// acquire/release races (the `Drop` runs *outside* the registry lock) can be
-/// model-checked; see the `loom_tests` module.
+/// concurrent call. Atomics are loom-instrumented under the `loom` feature so
+/// the acquire/release races (the `Drop` runs *outside* the registry lock) can
+/// be model-checked; see the `loom_tests` module.
 #[derive(Clone)]
 struct SessionPin {
     count: PinArc<PinAtomic>,
@@ -1142,10 +1142,10 @@ mod error_mapping_tests {
 /// concurrent eviction may be reading it). Loom can't model the surrounding
 /// `tokio::Mutex`, so we isolate and exhaustively check the lock-free counter.
 ///
-/// Built only under `--cfg loom`; the normal suite would panic here because
-/// loom atomics must run inside `loom::model`. Run with:
-///   RUSTFLAGS="--cfg loom" cargo test --lib loom_
-#[cfg(all(test, loom))]
+/// Built only under the `loom` feature; the normal suite would panic here
+/// because loom atomics must run inside `loom::model`. Run with:
+///   cargo test --features loom --lib loom_
+#[cfg(all(test, feature = "loom"))]
 mod loom_tests {
     use super::{Ordering, SessionPin};
 
