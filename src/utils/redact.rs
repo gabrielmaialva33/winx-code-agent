@@ -110,6 +110,37 @@ pub fn redact_json(value: &mut serde_json::Value) {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// A known secret isolated by separators is ALWAYS redacted, wrapped in any
+        /// surrounding punctuation/whitespace — the raw value never survives into
+        /// output and a marker is emitted.
+        #[test]
+        fn isolated_secret_never_survives(
+            before in "[ \t=:;,(]{1,8}",
+            after in "[ \t=:;,)\n]{1,8}",
+            which in 0usize..2,
+        ) {
+            let secret = [
+                "AKIAIOSFODNN7EXAMPLE",
+                "ghp_0123456789012345678901234567890123456",
+            ][which];
+            let input = format!("{before}{secret}{after}");
+            let out = redact(&input);
+            prop_assert!(!out.contains(secret), "secret leaked: {out:?}");
+            prop_assert!(out.contains("[REDACTED:"), "no marker emitted: {out:?}");
+        }
+
+        /// Redaction is idempotent: scrubbing already-scrubbed text changes nothing
+        /// (the `[REDACTED:..]` markers must not themselves match any rule).
+        #[test]
+        fn redaction_is_idempotent(s in "[ -~]{0,80}") {
+            let once = redact(&s).into_owned();
+            let twice = redact(&once).into_owned();
+            prop_assert_eq!(once, twice);
+        }
+    }
 
     #[test]
     fn redacts_known_credentials() {
