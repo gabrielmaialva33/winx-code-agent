@@ -181,8 +181,12 @@ pub fn is_symlink(path: &Path) -> bool {
 /// Expands a path that starts with ~ to the user's home directory
 pub fn expand_user(path: &str) -> String {
     if path.starts_with('~') {
-        if let Some(home_dir) = home::home_dir() {
-            return path.replacen('~', home_dir.to_str().unwrap_or(""), 1);
+        // Only expand when home is known AND valid UTF-8. The old `to_str()
+        // .unwrap_or("")` mapped `~/x` to `/x` (the filesystem root!) on a
+        // non-UTF-8 $HOME — silently pointing at the wrong place. Leaving the
+        // literal `~` is the safe failure.
+        if let Some(home_str) = home::home_dir().as_deref().and_then(Path::to_str) {
+            return path.replacen('~', home_str, 1);
         }
     }
     path.to_string()
@@ -236,6 +240,24 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::TempDir;
+
+    #[test]
+    fn expand_user_leaves_non_tilde_paths_untouched() {
+        assert_eq!(expand_user("/abs/path"), "/abs/path");
+        assert_eq!(expand_user("rel/path"), "rel/path");
+    }
+
+    #[test]
+    fn expand_user_never_maps_tilde_to_root() {
+        // Regression: a non-UTF-8 (or unknown) $HOME used to turn `~/sub` into
+        // `/sub` (the filesystem root). It must expand to a home-prefixed path or
+        // stay literal — never collapse to root.
+        let out = expand_user("~/sub");
+        assert_ne!(out, "/sub", "~/sub must not become the filesystem root");
+        if let Some(home) = home::home_dir().and_then(|h| h.to_str().map(String::from)) {
+            assert_eq!(out, format!("{home}/sub"));
+        }
+    }
 
     #[test]
     fn allows_existing_file_in_workspace() {

@@ -68,7 +68,13 @@ pub struct FileWhitelistDataSnapshot {
 }
 
 pub fn get_state_dir() -> Result<PathBuf> {
-    let home = home::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let home = home::home_dir().unwrap_or_else(|| {
+        warn!(
+            "$HOME is not set; persisting bash session state under /tmp \
+             (ephemeral across reboots, and shared if multiple users hit the same thread_id)"
+        );
+        PathBuf::from("/tmp")
+    });
     let bash_state_dir = home.join(".local/share/wcgw/bash_state");
     if !bash_state_dir.exists() {
         fs::create_dir_all(&bash_state_dir)?;
