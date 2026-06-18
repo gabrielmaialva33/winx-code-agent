@@ -404,6 +404,21 @@ pub enum Modes {
     CodeWriter,
 }
 
+/// Convert the wire-level `ModeName` (parsed from the `Initialize` request, with
+/// its alias spellings) into the runtime `Modes`. Done as `From` rather than a
+/// hand-written `convert_mode_name` so the compiler enforces that every `ModeName`
+/// variant maps to a `Modes` one — adding a variant to either enum without the
+/// other becomes a compile error here.
+impl From<&ModeName> for Modes {
+    fn from(name: &ModeName) -> Self {
+        match name {
+            ModeName::Wcgw => Modes::Wcgw,
+            ModeName::Architect => Modes::Architect,
+            ModeName::CodeWriter => Modes::CodeWriter,
+        }
+    }
+}
+
 impl std::fmt::Display for Modes {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

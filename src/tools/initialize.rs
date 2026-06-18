@@ -11,19 +11,10 @@ use crate::errors::{Result, WinxError};
 use crate::state::bash_state::{generate_thread_id, BashState};
 use crate::types::{
     normalize_thread_id, AllowedCommands, AllowedGlobs, BashCommandMode, BashMode,
-    CodeWriterConfig, FileEditMode, Initialize, InitializeType, ModeName, Modes, WriteIfEmptyMode,
+    CodeWriterConfig, FileEditMode, Initialize, InitializeType, Modes, WriteIfEmptyMode,
 };
 use crate::utils::mmap::read_file_to_string;
 use crate::utils::path::{ensure_directory_exists, expand_user, validate_path_in_workspace};
-
-#[inline]
-fn convert_mode_name(mode_name: &ModeName) -> Modes {
-    match mode_name {
-        ModeName::Wcgw => Modes::Wcgw,
-        ModeName::Architect => Modes::Architect,
-        ModeName::CodeWriter => Modes::CodeWriter,
-    }
-}
 
 /// Create a unique scratch workspace under the system temp dir, used when the
 /// caller initializes without a workspace path.
@@ -233,7 +224,7 @@ pub async fn handle_tool_call(
     let thread_id = initialize_thread_id(&initialize);
 
     let mut bash_state_guard = bash_state_arc.lock().await;
-    let mode = convert_mode_name(&initialize.mode_name);
+    let mode = Modes::from(&initialize.mode_name);
     let (bash_command_mode, file_edit_mode, write_if_empty_mode) =
         mode_to_state(mode, initialize.code_writer_config.as_ref(), &folder_to_start)?;
 

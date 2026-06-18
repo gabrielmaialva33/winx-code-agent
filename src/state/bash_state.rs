@@ -83,14 +83,6 @@ impl FileWhitelistData {
         self.line_ranges_read.push((start, end));
     }
 
-    pub fn get_read_error_message(&self, file_path: &Path) -> String {
-        format!(
-            "File {} needs more reading. Coverage: {:.1}%",
-            file_path.display(),
-            self.get_percentage_read()
-        )
-    }
-
     pub fn needs_more_reading(&self) -> bool {
         !self.is_read_enough()
     }
@@ -221,10 +213,6 @@ impl BashState {
     pub fn is_file_write_allowed(&self, path: &str) -> bool {
         self.write_if_empty_mode.allowed_globs.is_allowed(path)
     }
-    pub fn get_mode_violation_message(&self, op: &str, _target: &str) -> String {
-        format!("Operation {op} not allowed")
-    }
-
     pub fn save_state_to_disk(&self) -> Result<()> {
         let snapshot = self.snapshot();
         save_state_file(&self.current_thread_id, &snapshot)?;
