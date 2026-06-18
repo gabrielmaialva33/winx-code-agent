@@ -793,20 +793,18 @@ async fn execute_command(
     // appended to whatever was hanging on stdin.
     {
         let needs_reset = {
-            let mut bash_guard = bash_state.pty_shell.lock().await;
-            match bash_guard.as_mut() {
-                Some(bash) => match bash.clear_to_run(DEFAULT_TIMEOUT as f32) {
-                    Ok(true) => false,
-                    Ok(false) => {
-                        warn!("clear_to_run: shell still busy after Ctrl-C, resetting it");
-                        true
-                    }
-                    Err(e) => {
-                        warn!("clear_to_run failed ({e}), resetting shell");
-                        true
-                    }
-                },
-                None => false,
+            // Only when a shell exists. clear_to_run_async drains/interrupts WITHOUT
+            // holding the lock across a blocking sleep (was bash.clear_to_run, which
+            // slept up to DEFAULT_TIMEOUT seconds inside the tokio mutex).
+            if bash_state.pty_shell.lock().await.is_some() {
+                if clear_to_run_async(&bash_state.pty_shell, DEFAULT_TIMEOUT).await {
+                    false
+                } else {
+                    warn!("clear_to_run: shell still busy after Ctrl-C, resetting it");
+                    true
+                }
+            } else {
+                false
             }
         };
         // wcgw parity: a shell that won't return to a prompt even after Ctrl-C is
