@@ -25,13 +25,42 @@ pub struct FileWhitelistData {
     pub total_lines: usize,
 }
 
+/// Clamp ranges to `1..=total_lines`, drop inverted/empty ones, and sort. Shared
+/// by the coverage queries so both tolerate overlapping/out-of-bounds ranges.
+fn clamped_sorted(ranges: &[(usize, usize)], total_lines: usize) -> Vec<(usize, usize)> {
+    let mut v: Vec<(usize, usize)> = ranges
+        .iter()
+        .map(|&(s, e)| (s.max(1), e.min(total_lines)))
+        .filter(|&(s, e)| s <= e)
+        .collect();
+    v.sort_unstable();
+    v
+}
+
+/// Count distinct lines covered by (possibly overlapping) `ranges`, clamped to
+/// `1..=total_lines`, via a single sort+sweep — O(k log k) in the range count.
+fn covered_line_count(ranges: &[(usize, usize)], total_lines: usize) -> usize {
+    let mut covered = 0usize;
+    let mut last_end = 0usize; // highest line already counted (0 = none)
+    for (s, e) in clamped_sorted(ranges, total_lines) {
+        let s = s.max(last_end + 1);
+        if s <= e {
+            covered += e - s + 1;
+            last_end = e;
+        }
+    }
+    covered
+}
+
 impl FileWhitelistData {
     pub fn new(
         file_hash: String,
         line_ranges_read: Vec<(usize, usize)>,
         total_lines: usize,
     ) -> Self {
-        Self { file_hash, line_ranges_read, total_lines }
+        let mut data = Self { file_hash, line_ranges_read: Vec::new(), total_lines };
+        data.merge_ranges(line_ranges_read);
+        data
     }
 
     pub fn is_read_enough(&self) -> bool {
@@ -42,45 +71,54 @@ impl FileWhitelistData {
         if self.total_lines == 0 {
             return 100.0;
         }
-        let mut lines_read = std::collections::HashSet::new();
-        for (start, end) in &self.line_ranges_read {
-            for line in *start..=*end {
-                lines_read.insert(line);
-            }
-        }
-        (lines_read.len() as f64 / self.total_lines as f64) * 100.0
+        // Sort+sweep over the ranges (O(k log k) in the range count) instead of
+        // building an O(total_lines) HashSet on every call. Robust to overlapping
+        // or out-of-range entries from older un-merged snapshots.
+        let covered = covered_line_count(&self.line_ranges_read, self.total_lines);
+        (covered as f64 / self.total_lines as f64) * 100.0
     }
 
     pub fn get_unread_ranges(&self) -> Vec<(usize, usize)> {
         if self.total_lines == 0 {
             return vec![];
         }
-        let mut lines_read = std::collections::HashSet::new();
-        for (start, end) in &self.line_ranges_read {
-            for line in *start..=*end {
-                lines_read.insert(line);
-            }
-        }
+        let sorted = clamped_sorted(&self.line_ranges_read, self.total_lines);
         let mut unread = vec![];
-        let mut start_range = None;
-        for i in 1..=self.total_lines {
-            if !lines_read.contains(&i) {
-                if start_range.is_none() {
-                    start_range = Some(i);
-                }
-            } else if let Some(start) = start_range {
-                unread.push((start, i - 1));
-                start_range = None;
+        let mut next = 1usize; // next line not yet known-read
+        for (s, e) in sorted {
+            if s > next {
+                unread.push((next, s - 1));
             }
+            next = next.max(e.saturating_add(1));
         }
-        if let Some(start) = start_range {
-            unread.push((start, self.total_lines));
+        if next <= self.total_lines {
+            unread.push((next, self.total_lines));
         }
         unread
     }
 
+    /// Record `[start, end]` as read, merging it into the existing intervals so
+    /// `line_ranges_read` stays a bounded set of disjoint ranges. Without the
+    /// merge, re-reading a file appended duplicate ranges forever (unbounded
+    /// memory per session).
     pub fn add_range(&mut self, start: usize, end: usize) {
-        self.line_ranges_read.push((start, end));
+        self.merge_ranges(std::iter::once((start, end)));
+    }
+
+    /// Merge `new` ranges into `line_ranges_read`, keeping it sorted and disjoint
+    /// (adjacent inclusive ranges like `(1,3)` and `(4,5)` collapse to `(1,5)`).
+    pub fn merge_ranges(&mut self, new: impl IntoIterator<Item = (usize, usize)>) {
+        self.line_ranges_read.extend(new);
+        self.line_ranges_read.retain(|(s, e)| s <= e);
+        self.line_ranges_read.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(self.line_ranges_read.len());
+        for (s, e) in self.line_ranges_read.drain(..) {
+            match merged.last_mut() {
+                Some(last) if s <= last.1.saturating_add(1) => last.1 = last.1.max(e),
+                _ => merged.push((s, e)),
+            }
+        }
+        self.line_ranges_read = merged;
     }
 
     pub fn needs_more_reading(&self) -> bool {
@@ -275,4 +313,54 @@ impl BashState {
 pub fn generate_thread_id() -> String {
     let mut rng = rand::rng();
     format!("tid_{:x}", rng.random::<u64>())
+}
+
+#[cfg(test)]
+mod whitelist_range_tests {
+    use super::FileWhitelistData;
+
+    fn wl(ranges: &[(usize, usize)], total: usize) -> FileWhitelistData {
+        FileWhitelistData::new("h".to_string(), ranges.to_vec(), total)
+    }
+
+    #[test]
+    fn merge_collapses_overlap_and_adjacency() {
+        // (1,3)+(4,5) are adjacent (inclusive) -> (1,5); (7,9)+(8,12) overlap -> (7,12).
+        let w = wl(&[(4, 5), (1, 3), (8, 12), (7, 9)], 20);
+        assert_eq!(w.line_ranges_read, vec![(1, 5), (7, 12)]);
+    }
+
+    #[test]
+    fn re_reading_does_not_grow_unbounded() {
+        let mut w = wl(&[(1, 10)], 100);
+        for _ in 0..1000 {
+            w.merge_ranges(std::iter::once((1, 10)));
+            w.merge_ranges(std::iter::once((5, 15)));
+        }
+        // 1000 re-reads collapse to a single interval, not 2000 entries.
+        assert_eq!(w.line_ranges_read, vec![(1, 15)]);
+    }
+
+    #[test]
+    fn percentage_counts_distinct_lines_with_overlap() {
+        // lines 1..=5 and 3..=8 cover 1..=8 = 8 of 10 = 80%.
+        let w = wl(&[(1, 5), (3, 8)], 10);
+        assert!((w.get_percentage_read() - 80.0).abs() < 1e-9);
+        assert!(wl(&[(1, 10)], 10).is_read_enough());
+    }
+
+    #[test]
+    fn unread_ranges_are_the_gaps() {
+        // read 2..=4 and 7..=8 of 10 -> unread 1, 5..=6, 9..=10.
+        let w = wl(&[(2, 4), (7, 8)], 10);
+        assert_eq!(w.get_unread_ranges(), vec![(1, 1), (5, 6), (9, 10)]);
+    }
+
+    #[test]
+    fn out_of_range_entries_are_clamped() {
+        // A (0, 999) range on a 10-line file counts as full coverage, not a panic.
+        let w = wl(&[(0, 999)], 10);
+        assert!((w.get_percentage_read() - 100.0).abs() < 1e-9);
+        assert!(w.get_unread_ranges().is_empty());
+    }
 }

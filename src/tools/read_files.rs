@@ -322,7 +322,9 @@ pub async fn handle_tool_call(
                 .and_modify(|existing| {
                     existing.file_hash.clone_from(&file_hash);
                     existing.total_lines = total_lines;
-                    existing.line_ranges_read.extend(ranges.iter().copied());
+                    // Merge (not extend): re-reading a file must not append duplicate
+                    // ranges forever. Keeps line_ranges_read bounded + disjoint.
+                    existing.merge_ranges(ranges.iter().copied());
                 })
                 .or_insert_with(|| {
                     crate::state::bash_state::FileWhitelistData::new(file_hash, ranges, total_lines)
