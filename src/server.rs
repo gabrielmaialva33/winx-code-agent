@@ -1225,6 +1225,30 @@ mod schema_tests {
         let blob = serde_json::to_string(&*schema).unwrap_or_default();
         assert!(!blob.contains("\"title\""), "tool schema still contains titles: {blob}");
     }
+
+    #[test]
+    fn initialize_schema_has_no_dangling_refs() {
+        // The Initialize input embeds ModeName. A manual JsonSchema impl used to
+        // emit a `$ref` to `#/definitions/ModeName` that was never populated —
+        // strict MCP clients (Cline, and likely ChatGPT) reject the tool call
+        // with "Reference not found: #/definitions/ModeName". Guard against any
+        // dangling/definitions-style ref reappearing.
+        let schema = schema_to_input_schema::<crate::types::Initialize>();
+        let blob = serde_json::to_string(&*schema).unwrap_or_default();
+        assert!(
+            !blob.contains("#/definitions/"),
+            "schema has a draft-07 #/definitions ref (dangling for 2020-12 clients): {blob}"
+        );
+        assert!(
+            !blob.contains("definitions/ModeName"),
+            "ModeName is referenced but never defined: {blob}"
+        );
+        // mode_name must be a concrete, self-contained string enum.
+        assert!(
+            blob.contains("wcgw") && blob.contains("architect") && blob.contains("code_writer"),
+            "mode_name enum not inlined: {blob}"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -123,14 +123,23 @@ impl<'de> Deserialize<'de> for ModeName {
     }
 }
 
-// Implement schema generation for JSON schema since we removed the derive
+// Custom JsonSchema (we removed the derive for the hand-written ser/de above).
+// Emit the concrete string enum INLINE — a previous version returned a `$ref` to
+// `#/definitions/ModeName`, a node that was never populated. Lenient clients
+// (Claude Code) ignored the dangling ref, but strict MCP clients (Cline, and
+// likely ChatGPT) reject the whole tool call: "Reference not found:
+// #/definitions/ModeName". The variants mirror the Serialize impl above.
 impl JsonSchema for ModeName {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "ModeName".into()
     }
 
     fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::Schema::new_ref("#/definitions/ModeName".to_string())
+        schemars::json_schema!({
+            "type": "string",
+            "enum": ["wcgw", "architect", "code_writer"],
+            "description": "Shell mode: wcgw (full), architect (read-only), code_writer (custom)"
+        })
     }
 }
 
@@ -429,14 +438,18 @@ impl std::fmt::Display for Modes {
     }
 }
 
-// Implement schema generation for Modes
+// Inline string enum, same reasoning as `ModeName` above: a `$ref` to
+// `#/definitions/Modes` was dangling and breaks strict MCP clients.
 impl JsonSchema for Modes {
     fn schema_name() -> std::borrow::Cow<'static, str> {
         "Modes".into()
     }
 
     fn json_schema(_gen: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::Schema::new_ref("#/definitions/Modes".to_string())
+        schemars::json_schema!({
+            "type": "string",
+            "enum": ["wcgw", "architect", "code_writer"]
+        })
     }
 }
 
