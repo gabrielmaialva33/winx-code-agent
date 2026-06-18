@@ -35,7 +35,10 @@ fn rules() -> &'static [(&'static str, Regex)] {
             ("anthropic-key", r"sk-ant-[A-Za-z0-9_-]{20,200}"),
             ("openai-key", r"sk-(?:proj-)?[A-Za-z0-9_-]{20,200}"),
             ("github-pat", r"github_pat_[A-Za-z0-9_]{22,90}"),
-            ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,80}\b"),
+            // Upper bound 255: new-format `ghs_`/`gho_` tokens run well past the
+            // 40-char classic length, and an 80-char cap let the tail of a longer
+            // token leak past `[REDACTED]` into output and ContextSave memory.
+            ("github-token", r"gh[pousr]_[A-Za-z0-9]{36,255}\b"),
             ("slack-token", r"xox[baprs]-[A-Za-z0-9-]{10,}"),
             ("google-api-key", r"AIza[0-9A-Za-z_-]{35}"),
             ("aws-access-key", r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
@@ -46,7 +49,19 @@ fn rules() -> &'static [(&'static str, Regex)] {
             // not mistaken for a token; the rest allows the token68 alphabet.
             ("bearer-token", r"(?i)bearer\s+[A-Za-z0-9_-][A-Za-z0-9._~+/-]{15,}={0,2}"),
         ];
-        specs.iter().filter_map(|(name, pat)| Regex::new(pat).ok().map(|re| (*name, re))).collect()
+        // `.expect`, not `.ok()`: these patterns are compile-time literals. A
+        // silently-dropped rule (the old `filter_map(... .ok())`) would let that
+        // entire credential class — private keys, JWTs — flow through unredacted
+        // with no log or error. Failing loud at first use is the safe default;
+        // `redact_rules_compile` below also catches a bad pattern in CI.
+        #[allow(clippy::expect_used)]
+        specs
+            .iter()
+            .map(|(name, pat)| {
+                let re = Regex::new(pat).expect("redaction rule pattern must compile");
+                (*name, re)
+            })
+            .collect()
     })
 }
 
@@ -65,10 +80,13 @@ pub fn redact(text: &str) -> Cow<'_, str> {
     let mut owned: Option<String> = None;
     for (name, re) in rules() {
         let current: &str = owned.as_deref().unwrap_or(text);
-        if re.is_match(current) {
-            let replaced =
-                re.replace_all(current, |_: &regex::Captures| format!("[REDACTED:{name}]"));
-            owned = Some(replaced.into_owned());
+        // `replace_all` already returns `Cow::Borrowed` when nothing matched, so the
+        // separate `is_match` pre-check just doubled the regex passes on every MCP
+        // response. Drive off the returned Cow instead — one scan per rule.
+        if let Cow::Owned(replaced) =
+            re.replace_all(current, |_: &regex::Captures| format!("[REDACTED:{name}]"))
+        {
+            owned = Some(replaced);
         }
     }
     owned.map_or(Cow::Borrowed(text), Cow::Owned)
@@ -142,6 +160,28 @@ mod tests {
         assert!(red.contains("export GITHUB_TOKEN="));
         assert!(red.contains("[REDACTED:github-token]"));
         assert!(red.contains("# ci"));
+    }
+
+    #[test]
+    fn redact_rules_compile() {
+        // Forces `rules()` to build every pattern. If any literal regresses into an
+        // invalid pattern, this fails in CI instead of panicking in production on
+        // the first redact() call (or, pre-fix, silently dropping the rule).
+        let names: Vec<&str> = rules().iter().map(|(n, _)| *n).collect();
+        assert!(names.contains(&"private-key"));
+        assert!(names.contains(&"github-token"));
+        assert_eq!(names.len(), 11, "rule count changed — update this assertion");
+    }
+
+    #[test]
+    fn redacts_long_github_token() {
+        // A 120-char ghs_ token must be redacted whole — no tail leaking past the
+        // marker (the old {36,80} bound truncated the match).
+        let tok = format!("ghs_{}", "a".repeat(120));
+        let line = format!("token={tok} done");
+        let red = redact(&line);
+        assert!(red.contains("[REDACTED:github-token]"), "not redacted: {red}");
+        assert!(!red.contains("aaaaaaaaaa"), "token tail leaked: {red}");
     }
 
     #[test]
