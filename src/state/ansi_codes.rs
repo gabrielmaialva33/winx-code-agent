@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::OnceLock;
 
-static ANSI_REGEX: OnceLock<std::result::Result<Regex, regex::Error>> = OnceLock::new();
+static ANSI_REGEX: OnceLock<Regex> = OnceLock::new();
 const BASIC_COLORS: &[(&str, u8)] = &[
     ("black", 0),
     ("red", 1),
@@ -29,8 +29,15 @@ const BASIC_COLORS: &[(&str, u8)] = &[
     ("brightwhite", 15),
 ];
 
-fn ansi_regex() -> Option<&'static Regex> {
-    ANSI_REGEX.get_or_init(|| Regex::new(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")).as_ref().ok()
+fn ansi_regex() -> &'static Regex {
+    // `.expect`, not `.ok()`: a compile-time-literal regex that fails is a dev bug.
+    // The old `OnceLock<Result<..>>` + `.ok()` froze the error on first use, then
+    // silently disabled all ANSI stripping for the rest of the process (poisoning
+    // every subsequent output with raw escape sequences). Fail loud instead.
+    #[allow(clippy::expect_used)]
+    ANSI_REGEX.get_or_init(|| {
+        Regex::new(r"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])").expect("ANSI regex must compile")
+    })
 }
 
 /// Basic ANSI control codes
@@ -511,9 +518,7 @@ impl TermColor {
 ///
 /// A vector of (position, sequence) tuples
 pub fn parse_ansi_sequences(text: &str) -> Vec<(usize, String)> {
-    ansi_regex().map_or_else(Vec::new, |regex| {
-        regex.find_iter(text).map(|m| (m.start(), m.as_str().to_string())).collect()
-    })
+    ansi_regex().find_iter(text).map(|m| (m.start(), m.as_str().to_string())).collect()
 }
 
 /// Color name to ANSI code mapping
@@ -633,7 +638,7 @@ pub fn format_ansi_text(
 ///
 /// The text with all ANSI sequences removed
 pub fn strip_ansi_codes(text: &str) -> String {
-    ansi_regex().map_or_else(|| text.to_string(), |regex| regex.replace_all(text, "").to_string())
+    ansi_regex().replace_all(text, "").to_string()
 }
 
 /// Extract structured style information from ANSI-formatted text

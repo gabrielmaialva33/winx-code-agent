@@ -723,6 +723,13 @@ impl PtyShell {
         prompt_seen
     }
 
+    /// Snapshot of the accumulated output buffer — the same text `read_output`
+    /// returns. Lets callers poll non-blocking (`poll_output_nonblocking`) and
+    /// grab the buffer once at the end instead of cloning it on every slice.
+    pub fn output_snapshot(&self) -> String {
+        self.output_buffer.clone()
+    }
+
     /// Check if the output ends with this shell's prompt.
     ///
     /// `prompt_end` is the per-shell `──➤<nonce>` suffix. Anchoring on the LAST
@@ -821,7 +828,11 @@ impl PtyShell {
         );
         let head = self.output_buffer[..cut].to_owned();
         self.offload_dropped_head(&head);
-        self.output_buffer = format!("\n(...output truncated...)\n{}", &self.output_buffer[cut..]);
+        // Replace the dropped head in place instead of `format!`-ing a brand-new
+        // String: `replace_range` shifts the kept tail down once and reuses the
+        // buffer's allocation. `cut` is already a char boundary (above), and 0 is
+        // always one, so the range is valid.
+        self.output_buffer.replace_range(..cut, "\n(...output truncated...)\n");
     }
 
     /// Send Ctrl+C (interrupt) to the PTY

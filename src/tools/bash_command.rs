@@ -36,9 +36,14 @@ const TIMEOUT_WHILE_OUTPUT: f64 = 20.0;
 /// Number of iterations to wait without new output before giving up - matches WCGW Python `Config.output_wait_patience`
 const OUTPUT_WAIT_PATIENCE: i32 = 3;
 
-/// Polling slice for adaptive output reads. We read in chunks this long and
-/// return as soon as the prompt returns, instead of sleeping the full budget.
-const POLL_SLICE_SECS: f64 = 0.5;
+/// Async poll interval for adaptive output reads. We drain whatever the reader
+/// thread has queued (non-blocking), release the shell lock, then `await` this
+/// long — yielding the executor instead of pinning it on a blocking sleep.
+const POLL_INTERVAL_MS: u64 = 20;
+
+/// Grace period after the prompt is seen, to capture bytes that land just after
+/// it (mirrors the old `read_output` post-prompt drain) — awaited, not blocked.
+const POST_PROMPT_DRAIN_MS: u64 = 100;
 
 /// Chunk size for sending commands (characters) - matches WCGW Python (64 chars)
 const COMMAND_CHUNK_SIZE: usize = 64;
@@ -382,9 +387,14 @@ fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> String {
 }
 
 fn extract_prompt_cwd(output: &str) -> Option<PathBuf> {
-    static PROMPT_RE: std::sync::OnceLock<Option<Regex>> = std::sync::OnceLock::new();
-    let prompt_regex =
-        PROMPT_RE.get_or_init(|| Regex::new(r"◉ (?P<cwd>[^\r\n]*?)──➤").ok()).as_ref()?;
+    static PROMPT_RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    // `.expect`, not `.ok()`: a compile-time-literal regex that fails to build is a
+    // dev bug, not a runtime condition. The old `OnceLock<Option<Regex>>` froze
+    // `None` forever on the first failure, silently disabling all CWD tracking for
+    // the rest of the process. Fail loud instead.
+    #[allow(clippy::expect_used)]
+    let prompt_regex = PROMPT_RE
+        .get_or_init(|| Regex::new(r"◉ (?P<cwd>[^\r\n]*?)──➤").expect("prompt regex must compile"));
     let stripped = strip_ansi_codes(output);
 
     prompt_regex
@@ -508,7 +518,15 @@ pub async fn handle_tool_call(
     // Verify thread ID matches - matches WCGW Python thread_id check
     if thread_id != bash_state.current_thread_id {
         // Try to load state from thread_id - matches WCGW Python load_state_from_thread_id
-        if !bash_state.load_state_from_disk(&thread_id).unwrap_or(false) {
+        // Distinguish "no state for this id" (Ok(false)) from a real load failure
+        // (Err: permission denied, corrupt JSON). The old `.unwrap_or(false)`
+        // collapsed both into the misleading "initialize first" message.
+        let loaded = bash_state.load_state_from_disk(&thread_id).map_err(|e| {
+            WinxError::CommandExecutionError(format!(
+                "Failed to load saved bash state for thread_id `{thread_id}`: {e}"
+            ))
+        })?;
+        if !loaded {
             return Err(WinxError::ThreadIdMismatch(format!(
                 "Error: No saved bash state found for thread_id `{thread_id}`. Please initialize first with this ID."
             )));
@@ -832,6 +850,24 @@ async fn execute_command(
 
 /// Wait for command output with WCGW-style patience handling - matches WCGW Python expect/wait logic.
 ///
+/// Non-blocking drain of queued shell output under the lock; returns whether the
+/// command has completed. The lock is released before returning so the caller can
+/// `await` a poll interval without pinning the executor — unlike the old
+/// `read_output`, which slept (blocking) inside this lock.
+async fn poll_shell(shell_arc: &SharedPtyShell) -> bool {
+    let mut guard = shell_arc.lock().await;
+    match guard.as_mut() {
+        Some(bash) => bash.poll_output_nonblocking(),
+        None => true,
+    }
+}
+
+/// Snapshot the shell's accumulated output buffer in one lock acquisition.
+async fn snapshot_shell(shell_arc: &SharedPtyShell) -> String {
+    let mut guard = shell_arc.lock().await;
+    guard.as_mut().map_or_else(String::new, |bash| bash.output_snapshot())
+}
+
 /// `shell_arc` selects which shell to read from (main shell or a bg shell handle).
 async fn wait_for_output(
     bash_state: &mut BashState,
@@ -853,28 +889,28 @@ async fn wait_for_output(
     // dropping fast-command latency from seconds to ~100ms. Long-running
     // commands still consume the whole budget, since we loop until `complete`
     // or `wait` elapses — identical upper-bound behavior, far snappier floor.
+    // Drain non-blocking, release the lock, then `await` the poll interval. The
+    // old `read_output(slice)` slept up to ~0.5s of blocking `thread::sleep` WHILE
+    // holding this tokio mutex — pinning the worker thread (starving every other
+    // task on it) and the shell lock the whole time. poll + `await` frees both.
     let mut output = String::new();
     loop {
-        let elapsed = start.elapsed().as_secs_f64();
-        if elapsed >= wait {
+        if start.elapsed().as_secs_f64() >= wait {
             break;
         }
-        let slice = (wait - elapsed).clamp(0.1, POLL_SLICE_SECS);
-        let (out, done) = {
-            let mut bash_guard = shell_arc.lock().await;
-            match bash_guard.as_mut() {
-                Some(bash) => bash.read_output(slice as f32).map_err(|e| {
-                    WinxError::CommandExecutionError(format!("Failed to read output: {e}"))
-                })?,
-                None => (String::new(), true),
-            }
-        };
-        output = out;
-        complete = done;
+        complete = poll_shell(shell_arc).await;
         if complete {
             break;
         }
+        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
+    // Post-prompt grace drain (awaited, no lock held), then one buffer snapshot —
+    // the old read_output cloned the whole buffer on every slice (performance-2).
+    if complete {
+        sleep(Duration::from_millis(POST_PROMPT_DRAIN_MS)).await;
+        poll_shell(shell_arc).await;
+    }
+    output = snapshot_shell(shell_arc).await;
 
     // If not complete and this is a status check, use WCGW-style patience waiting.
     //
@@ -903,17 +939,11 @@ async fn wait_for_output(
             }
             sleep(Duration::from_secs_f64(iter_wait_secs.min(remaining))).await;
 
-            let (new_output, done) = {
-                let mut bash_guard = shell_arc.lock().await;
-
-                if let Some(bash) = bash_guard.as_mut() {
-                    bash.read_output(0.5).map_err(|e| {
-                        WinxError::CommandExecutionError(format!("Failed to read output: {e}"))
-                    })?
-                } else {
-                    (String::new(), true)
-                }
-            };
+            // The patience `sleep(iter_wait_secs)` above already elapsed, so the
+            // last half-second of output is queued — drain it non-blocking (was
+            // read_output(0.5) holding the lock across its own internal sleep).
+            let done = poll_shell(shell_arc).await;
+            let new_output = snapshot_shell(shell_arc).await;
 
             if done {
                 complete = true;
