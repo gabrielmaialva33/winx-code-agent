@@ -406,10 +406,11 @@ async fn test_08_arrow_keys() -> Result<()> {
 
     let arrow_result = tools::bash_command::handle_tool_call(&bash_state_arc, arrow_cmd).await;
 
-    match arrow_result {
-        Ok(response) => {}
-        Err(e) => {}
-    }
+    // Previously both arms were empty, so the test asserted nothing — a regression
+    // in arrow-key handling passed silently. A KeyUp against an idle shell must come
+    // back Ok (the `?` fails the test otherwise) with real terminal output.
+    let response = arrow_result?;
+    assert!(!response.is_empty(), "KeyUp should return terminal output, got empty: {response:?}");
 
     Ok(())
 }
