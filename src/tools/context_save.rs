@@ -1,7 +1,7 @@
 use glob::glob;
 use std::fmt::Write as FmtWrite;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -257,6 +257,42 @@ fn memory_token_budget() -> usize {
 /// shows a usable head of each one rather than a useless few tokens.
 const MIN_PER_FILE_SAVE_TOKENS: usize = 500;
 
+/// Byte ceiling for reading a single context file off disk. `cap_file_to_tokens`
+/// trims the result to a few KB of tokens anyway, so there's no point pulling more
+/// than this into memory — and a glob that matches a 50 MB `.log` would otherwise
+/// read the whole thing (blocking + GBs of churn) just to drop almost all of it.
+const MAX_CONTEXT_READ_BYTES: u64 = 2 * 1024 * 1024;
+
+/// Read a file's text for context saving, bounded to `MAX_CONTEXT_READ_BYTES`.
+/// Small files go through `read_to_string` unchanged (exact binary detection via
+/// `InvalidData`); oversized files read only the capped head, keeping the valid
+/// UTF-8 prefix when the byte cap lands mid-codepoint, and still report a
+/// genuinely-binary file (invalid from byte 0) as `InvalidData`.
+fn read_text_for_context(path: &Path) -> std::io::Result<String> {
+    let len = fs::metadata(path)?.len();
+    if len <= MAX_CONTEXT_READ_BYTES {
+        return fs::read_to_string(path);
+    }
+    let mut buf = Vec::new();
+    File::open(path)?.take(MAX_CONTEXT_READ_BYTES).read_to_end(&mut buf)?;
+    match String::from_utf8(buf) {
+        Ok(s) => Ok(s),
+        Err(e) => {
+            let valid = e.utf8_error().valid_up_to();
+            if valid == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                ));
+            }
+            // The byte cap split a multibyte char; the prefix up to `valid` is
+            // valid UTF-8 by construction, so from_utf8_lossy inserts nothing.
+            let bytes = e.into_bytes();
+            Ok(String::from_utf8_lossy(&bytes[..valid]).into_owned())
+        }
+    }
+}
+
 /// Keep the first `max_tokens` of a file's content and note what was dropped.
 /// Used so a single large file in a `ContextSave` glob doesn't crowd out the rest.
 fn cap_file_to_tokens(content: &str, max_tokens: usize) -> String {
@@ -488,8 +524,9 @@ fn read_files_content(file_paths: &[PathBuf], max_files: usize) -> Result<String
     let per_file_tokens = (memory_token_budget() / shown).max(MIN_PER_FILE_SAVE_TOKENS);
 
     for (i, path) in file_paths.iter().take(max_files).enumerate() {
-        // Try to read as UTF-8 text, skip binary files
-        match fs::read_to_string(path) {
+        // Try to read as UTF-8 text (capped, so a giant file can't OOM/block the
+        // executor), skip binary files.
+        match read_text_for_context(path) {
             Ok(file_content) => {
                 let _ = writeln!(result, "--- File {}: {} ---", i + 1, path.display());
                 result.push_str(&cap_file_to_tokens(&file_content, per_file_tokens));
@@ -649,7 +686,35 @@ fn sanitize_filename(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{cap_file_to_tokens, relativize_glob};
+    #![allow(clippy::unwrap_used)]
+    use super::{
+        cap_file_to_tokens, read_text_for_context, relativize_glob, MAX_CONTEXT_READ_BYTES,
+    };
+
+    #[test]
+    fn read_text_for_context_small_file_reads_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("small.txt");
+        std::fs::write(&p, "hello\nworld\n").unwrap();
+        assert_eq!(read_text_for_context(&p).unwrap(), "hello\nworld\n");
+    }
+
+    #[test]
+    fn read_text_for_context_binary_is_invalid_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("bin");
+        std::fs::write(&p, [0xff, 0xfe, 0x00, 0x01]).unwrap();
+        assert_eq!(read_text_for_context(&p).unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn read_text_for_context_caps_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("big.txt");
+        std::fs::write(&p, vec![b'a'; MAX_CONTEXT_READ_BYTES as usize + 4096]).unwrap();
+        // Reads only the capped head, not the whole oversized file.
+        assert_eq!(read_text_for_context(&p).unwrap().len() as u64, MAX_CONTEXT_READ_BYTES);
+    }
 
     #[test]
     fn relativize_glob_makes_absolute_portable() {
