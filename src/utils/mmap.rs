@@ -136,8 +136,12 @@ fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
         return Ok(buffer);
     }
 
-    // For larger files, use a chunked reading approach with progress tracking
-    let mut buffer = Vec::with_capacity(file_size as usize);
+    // For larger files, use a chunked reading approach with progress tracking.
+    // Cap the up-front hint to MAX_PREALLOC_BYTES like the small-file branch above
+    // (line 114) and read_streaming: file_size comes from untrusted metadata and a
+    // sparse/racing file can report a size far bigger than it yields, turning this
+    // into a forced multi-GB allocation (OOM = abort under panic = "abort").
+    let mut buffer = Vec::with_capacity(min(file_size as usize, MAX_PREALLOC_BYTES));
 
     // Create a mutable file handle and seek to the beginning
     let mut file_handle = file.try_clone().map_err(|e| WinxError::FileAccessError {
@@ -317,8 +321,12 @@ fn read_streaming(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
         path.display()
     );
 
-    // For extreme files, pre-allocate a reasonably sized vector and grow as needed
-    let initial_capacity = min(file_size as usize, 1_000_000_000); // 1GB initial max
+    // For extreme files, pre-allocate a bounded vector and grow as bytes arrive.
+    // Cap at MAX_PREALLOC_BYTES (not file_size, not 1GB): file_size is untrusted
+    // metadata, and a multi-GB up-front Vec is exactly the OOM-via-abort vector the
+    // cap exists to close. The extra reallocs on a genuinely huge file are rare and
+    // cheap next to crashing the server.
+    let initial_capacity = min(file_size as usize, MAX_PREALLOC_BYTES);
     let mut buffer = Vec::with_capacity(initial_capacity);
 
     let mut reader = BufReader::with_capacity(STREAMING_CHUNK_SIZE, file);
