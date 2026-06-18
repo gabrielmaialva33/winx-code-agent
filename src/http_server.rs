@@ -149,13 +149,20 @@ fn request_has_token(request: &Request, expected: &str) -> bool {
         .is_some_and(|presented| constant_time_eq(presented.trim(), expected))
 }
 
-/// Length-aware byte comparison that avoids early-exit on the first mismatch.
+/// Constant-time token comparison.
+///
+/// Comparing the raw bytes directly leaks the *length* of the expected token: an
+/// early `a.len() != b.len()` return (or a fold whose iteration count depends on
+/// the inputs) lets an attacker time responses to learn how long the secret is,
+/// shrinking the brute-force space. Instead we hash both sides to fixed 32-byte
+/// SHA-256 digests and compare those: the comparison always runs over 32 bytes
+/// regardless of input length, and hashing the (fixed) secret takes constant time.
+/// A digest match implies an input match by collision resistance.
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    use sha2::{Digest, Sha256};
+    let ha = Sha256::digest(a.as_bytes());
+    let hb = Sha256::digest(b.as_bytes());
+    ha.iter().zip(hb.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 #[cfg(test)]
