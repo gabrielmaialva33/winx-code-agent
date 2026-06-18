@@ -175,11 +175,20 @@ fn ranked_supported_files(root: &Path, workspace_root: &Path) -> Vec<(PathBuf, S
     // Pre-sort alphabetically so equal-score ties resolve deterministically
     // (stable sort keeps this order).
     files.sort_by(|a, b| a.1.cmp(&b.1));
-    let rels: Vec<String> = files.iter().map(|(_, r)| r.clone()).collect();
-    if let Some(scores) = score_paths(&rels) {
-        let mut indexed: Vec<(usize, f64)> = scores.into_iter().enumerate().collect();
-        indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        files = indexed.into_iter().map(|(i, _)| files[i].clone()).collect();
+    // Score the names borrowed as &str — no per-path String clone (score_paths is
+    // generic over AsRef<str>). Scope `rels` so its borrow of `files` ends before
+    // we move `files` below.
+    let ranking = {
+        let rels: Vec<&str> = files.iter().map(|(_, r)| r.as_str()).collect();
+        score_paths(&rels)
+    };
+    if let Some(weights) = ranking {
+        // Pair each file with its weight and sort by weight desc, MOVING the files
+        // (no per-entry clone of the old reindex). Stable sort preserves the
+        // alphabetical pre-sort for equal weights.
+        let mut pairs: Vec<(f64, (PathBuf, String))> = weights.into_iter().zip(files).collect();
+        pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        files = pairs.into_iter().map(|(_, f)| f).collect();
     }
     files
 }

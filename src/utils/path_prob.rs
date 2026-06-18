@@ -62,11 +62,11 @@ fn analyzer() -> Option<&'static PathAnalyzer> {
 ///
 /// Returns `None` if the model failed to load, so callers can fall back to a
 /// heuristic ordering instead of silently mis-ranking everything.
-pub fn score_paths(paths: &[String]) -> Option<Vec<f64>> {
+pub fn score_paths<S: AsRef<str>>(paths: &[S]) -> Option<Vec<f64>> {
     let analyzer = analyzer()?;
     let scores = paths
         .iter()
-        .map(|path| match analyzer.tokenizer.encode(path.as_str(), false) {
+        .map(|path| match analyzer.tokenizer.encode(path.as_ref(), false) {
             Ok(encoding) => analyzer.sum_log_prob(encoding.get_tokens()),
             // Unencodable path sinks to the bottom rather than poisoning the batch.
             Err(_) => f64::MIN,
