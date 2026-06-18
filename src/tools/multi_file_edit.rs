@@ -22,7 +22,7 @@ use tracing::instrument;
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
 use crate::tools::file_write_or_edit::{commit_edit, plan_edit};
-use crate::types::{normalize_thread_id, MultiFileEdit};
+use crate::types::{normalize_thread_id, FileEditEntry, MultiFileEdit};
 
 /// Upper bound on files per batch. The whole batch holds the `bash_state` lock
 /// across its (synchronous) file IO, so a huge batch would block the executor
@@ -36,13 +36,15 @@ pub async fn handle_tool_call(
     multi: MultiFileEdit,
 ) -> Result<String> {
     let mut bash_state_guard = bash_state_arc.lock().await;
-    let bash_state = bash_state_guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
 
-    let thread_id = normalize_thread_id(&multi.thread_id);
-    if thread_id != bash_state.current_thread_id {
-        return Err(WinxError::ThreadIdMismatch(thread_id));
+    // Cheap validation up front (needs only the current thread id).
+    {
+        let bash_state = bash_state_guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+        let thread_id = normalize_thread_id(&multi.thread_id);
+        if thread_id != bash_state.current_thread_id {
+            return Err(WinxError::ThreadIdMismatch(thread_id));
+        }
     }
-
     if multi.files.len() < 2 {
         return Err(WinxError::ArgumentParseError(
             "MultiFileEdit needs at least 2 files; use FileWriteOrEdit for a single file."
@@ -57,10 +59,31 @@ pub async fn handle_tool_call(
         )));
     }
 
+    // Move the state onto the blocking pool for the synchronous plan+commit IO
+    // (reading every file, then writing every file). The guard is held throughout,
+    // so the slot stays locked — mutual exclusion is preserved; `take` just lets us
+    // own the value across spawn_blocking. This frees the tokio worker instead of
+    // pinning it on up to MAX_FILES_PER_BATCH file reads/writes.
+    let mut state = bash_state_guard.take().ok_or(WinxError::BashStateNotInitialized)?;
+    let files = multi.files;
+    let (state, result) = tokio::task::spawn_blocking(move || {
+        let r = apply_batch(&mut state, &files);
+        (state, r)
+    })
+    .await
+    .map_err(|e| WinxError::CommandExecutionError(format!("MultiFileEdit task failed: {e}")))?;
+    *bash_state_guard = Some(state);
+    result
+}
+
+/// Plan every file (all-or-nothing at the compute stage), reject duplicate
+/// targets, then commit sequentially. Synchronous (file IO) — runs on the
+/// blocking pool, never on a tokio worker.
+fn apply_batch(bash_state: &mut BashState, files: &[FileEditEntry]) -> Result<String> {
     // PHASE 1: plan every file (validate + compute new content) with NO writes.
     // Any failure aborts the whole batch having touched nothing on disk.
-    let mut planned = Vec::with_capacity(multi.files.len());
-    for (index, entry) in multi.files.iter().enumerate() {
+    let mut planned = Vec::with_capacity(files.len());
+    for (index, entry) in files.iter().enumerate() {
         let edit = plan_edit(
             bash_state,
             &entry.file_path,
