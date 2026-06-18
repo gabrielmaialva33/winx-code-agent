@@ -1,6 +1,31 @@
+use std::borrow::Cow;
+
 use tree_sitter::{Node, Parser};
 
 use crate::errors::{Result, WinxError};
+
+/// Replace supplementary-plane code points (>= U+10000, i.e. 4-byte UTF-8) with
+/// U+FFFD before handing text to tree-sitter-bash.
+///
+/// The grammar's C external scanner reads out of bounds on a supplementary-plane
+/// char next to brace context and SIGSEGVs the process — a fatal, NON-deterministic
+/// crash (verified by fuzzing: BMP input never triggered it; supplementary input
+/// crashed ~64% of the time). Under `panic = "abort"` that segfault takes the whole
+/// MCP server down, so a single crafted `BashCommand` is a remote denial of service.
+///
+/// We only parse for *structure* (statement count, command names), so swapping these
+/// rare chars for U+FFFD is invisible to the caller: `bash -n` and the actual
+/// execution still see the original command (emoji and all). Returns `Cow::Borrowed`
+/// for the overwhelmingly common all-BMP case, so there's no cost on the hot path.
+fn neutralize_supplementary(command: &str) -> Cow<'_, str> {
+    if command.chars().any(|c| c as u32 >= 0x1_0000) {
+        Cow::Owned(
+            command.chars().map(|c| if c as u32 >= 0x1_0000 { '\u{FFFD}' } else { c }).collect(),
+        )
+    } else {
+        Cow::Borrowed(command)
+    }
+}
 
 /// Validate that `command` is a single top-level bash statement.
 ///
@@ -21,13 +46,18 @@ pub fn assert_single_statement(command: &str, allow_shell_probe: bool) -> Result
         ));
     }
 
+    // Parse a copy with supplementary-plane chars neutralized (see
+    // `neutralize_supplementary`): tree-sitter-bash segfaults on them. `bash -n`
+    // below and the eventual execution still see the original `trimmed`.
+    let parse_src = neutralize_supplementary(trimmed);
+
     let mut parser = Parser::new();
     let language: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
     parser.set_language(&language).map_err(|error| {
         WinxError::CommandExecutionError(format!("Failed to load bash parser: {error}"))
     })?;
 
-    let tree = parser.parse(trimmed, None).ok_or_else(|| {
+    let tree = parser.parse(parse_src.as_ref(), None).ok_or_else(|| {
         WinxError::CommandExecutionError("Failed to parse bash command".to_string())
     })?;
     let root = tree.root_node();
@@ -38,7 +68,8 @@ pub fn assert_single_statement(command: &str, allow_shell_probe: bool) -> Result
         ));
     }
 
-    let statement_count = top_level_statement_count(trimmed, root);
+    // `parse_src` (not `trimmed`): the node byte offsets index the parsed string.
+    let statement_count = top_level_statement_count(parse_src.as_ref(), root);
 
     if statement_count > 1 && !trimmed.contains('\n') {
         return Err(WinxError::CommandExecutionError(
@@ -162,13 +193,19 @@ pub fn extract_command_texts(command: &str) -> Result<Vec<String>> {
         return Err(WinxError::CommandExecutionError("Command contains a NUL byte.".to_string()));
     }
 
+    // See `neutralize_supplementary`: parse a sanitized copy so a supplementary
+    // code point can't segfault tree-sitter. The extracted command texts feed the
+    // allowlist, which keys on the (ASCII) command name, so a U+FFFD standing in
+    // for an emoji in some argument doesn't change enforcement.
+    let parse_src = neutralize_supplementary(trimmed);
+
     let mut parser = Parser::new();
     let language: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
     parser.set_language(&language).map_err(|error| {
         WinxError::CommandExecutionError(format!("Failed to load bash parser: {error}"))
     })?;
 
-    let tree = parser.parse(trimmed, None).ok_or_else(|| {
+    let tree = parser.parse(parse_src.as_ref(), None).ok_or_else(|| {
         WinxError::CommandExecutionError("Failed to parse bash command".to_string())
     })?;
     let root = tree.root_node();
@@ -179,7 +216,7 @@ pub fn extract_command_texts(command: &str) -> Result<Vec<String>> {
     }
 
     let mut texts = Vec::new();
-    collect_command_texts(root, trimmed.as_bytes(), &mut texts);
+    collect_command_texts(root, parse_src.as_ref().as_bytes(), &mut texts);
     Ok(texts)
 }
 
@@ -233,6 +270,46 @@ mod tests {
     use super::assert_single_statement;
     use super::detect_allowlist_bypass;
     use super::extract_command_texts;
+    use proptest::prelude::*;
+
+    proptest! {
+        /// This gate parses untrusted LLM command strings with tree-sitter; under
+        /// panic=abort, any panic here crashes the server. It must only ever return
+        /// Ok/Err — never panic — for ANY input (incl. multiline, control chars, junk).
+        #[test]
+        fn assert_single_statement_never_panics(cmd in "[\\s\\S]{0,80}") {
+            let _ = assert_single_statement(&cmd, false);
+            let _ = assert_single_statement(&cmd, true);
+        }
+
+        #[test]
+        fn extract_command_texts_never_panics(cmd in "[\\s\\S]{0,80}") {
+            let _ = extract_command_texts(&cmd);
+        }
+    }
+
+    #[test]
+    fn supplementary_plane_input_does_not_segfault_the_parser() {
+        // Regression: `{` followed by a supplementary-plane code point (>= U+10000)
+        // made tree-sitter-bash's C scanner read out of bounds and SIGSEGV the whole
+        // process (a fatal, non-deterministic DoS under panic=abort). Both parse paths
+        // must now return cleanly. Run the minimal trigger many times to beat the
+        // non-determinism, plus a few representative supplementary chars.
+        for c in ['\u{10FFFF}', '\u{4E980}', '\u{1F574}', '\u{100000}'] {
+            for _ in 0..40 {
+                let cmd = format!("{{{c}");
+                let _ = assert_single_statement(&cmd, false);
+                let _ = extract_command_texts(&cmd);
+            }
+        }
+    }
+
+    #[test]
+    fn emoji_command_still_validates_as_single_statement() {
+        // The fix sanitizes ONLY the parsed copy, so a legit command carrying an
+        // emoji is still accepted (not rejected) and seen as one statement.
+        assert!(assert_single_statement("git commit -m \"\u{1F680} ship it\"", false).is_ok());
+    }
 
     #[test]
     fn extracts_nested_commands_for_allowlist() {
