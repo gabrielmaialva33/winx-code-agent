@@ -1169,13 +1169,24 @@ mod tests {
 
         shell
             .send_command(&format!("sleep 300 & echo $! > {} ; echo spawned", pidfile.display()))?;
-        let (out, _) = shell.read_output(3.0)?;
-        assert!(out.contains("spawned"), "command did not run: {out}");
 
-        let child_pid: i32 = std::fs::read_to_string(&pidfile)?
-            .trim()
-            .parse()
-            .map_err(|e| anyhow!("bad pid file: {e}"))?;
+        // The PTY echoes the input line, so `out` containing "spawned" only proves
+        // the line was sent - not that bash ran it. Under CI load bash can lag, so
+        // poll the pidfile (it only appears once `echo $! > pidfile` executes) while
+        // draining the PTY, instead of trusting the echo and racing the redirect.
+        let mut child_pid = None;
+        for _ in 0..150 {
+            let _ = shell.read_output(0.1);
+            if let Some(pid) = std::fs::read_to_string(&pidfile)
+                .ok()
+                .and_then(|c| c.trim().parse::<i32>().ok())
+            {
+                child_pid = Some(pid);
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let child_pid = child_pid.ok_or_else(|| anyhow!("background child pid never materialized"))?;
         assert!(pid_alive(child_pid), "background child should be running before drop");
 
         drop(shell);
