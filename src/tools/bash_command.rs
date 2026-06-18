@@ -704,12 +704,19 @@ fn strip_tail_pipe(command: &str) -> String {
 /// Pure core of [`strip_tail_pipe`], split out so both modes are unit-testable
 /// without touching process-wide env vars (tests run concurrently).
 fn strip_tail_pipe_impl(command: &str, keep: bool) -> String {
-    static RE: std::sync::OnceLock<Option<regex::Regex>> = std::sync::OnceLock::new();
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     if keep {
         return command.to_string();
     }
-    let re = RE.get_or_init(|| regex::Regex::new(r"\|\s*tail(?:\s+(?:-n\s*|-)?(\d+))?\s*$").ok());
-    match re.as_ref().and_then(|re| re.find(command)) {
+    // `.expect`, not `.ok()`: a compile-time-literal regex that fails to build is
+    // a dev bug. The old `OnceLock<Option<Regex>>` + `.ok()` would freeze `None`
+    // and silently stop stripping `| tail` for the whole process.
+    #[allow(clippy::expect_used)]
+    let re = RE.get_or_init(|| {
+        regex::Regex::new(r"\|\s*tail(?:\s+(?:-n\s*|-)?(\d+))?\s*$")
+            .expect("tail-pipe regex must compile")
+    });
+    match re.find(command) {
         Some(matched) => command[..matched.start()].trim_end().to_string(),
         None => command.to_string(),
     }
@@ -866,6 +873,45 @@ async fn poll_shell(shell_arc: &SharedPtyShell) -> bool {
 async fn snapshot_shell(shell_arc: &SharedPtyShell) -> String {
     let mut guard = shell_arc.lock().await;
     guard.as_mut().map_or_else(String::new, |bash| bash.output_snapshot())
+}
+
+/// Poll-drain the shell until its prompt returns or `budget_secs` elapses; returns
+/// whether the prompt was seen (i.e. the shell is idle). The lock is released
+/// between polls and the wait is awaited, so the executor is never blocked.
+async fn drain_until_prompt(shell_arc: &SharedPtyShell, budget_secs: f64) -> bool {
+    let start = Instant::now();
+    loop {
+        if poll_shell(shell_arc).await {
+            return true;
+        }
+        if start.elapsed().as_secs_f64() >= budget_secs {
+            return false;
+        }
+        sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
+    }
+}
+
+/// Async replacement for `PtyShell::clear_to_run`: drain leftover output, and if
+/// the shell still looks busy, send Ctrl-C and re-drain — returning whether the
+/// shell reached an idle prompt. The old sync method ran `read_output` (a blocking
+/// `thread::sleep` loop, up to DEFAULT_TIMEOUT seconds) WHILE the caller held the
+/// tokio mutex, pinning the worker on every foreground command. This holds the
+/// lock only for the instantaneous poll/interrupt, never across a wait.
+async fn clear_to_run_async(shell_arc: &SharedPtyShell, max_wait_secs: f64) -> bool {
+    // Phase 1: a quick drain — return the moment the prompt is already back.
+    if drain_until_prompt(shell_arc, max_wait_secs.min(0.5)).await {
+        return true;
+    }
+    // Still busy: interrupt (lock held only for the send), then re-drain.
+    {
+        let mut guard = shell_arc.lock().await;
+        if let Some(bash) = guard.as_mut() {
+            if let Err(e) = bash.send_interrupt() {
+                warn!("clear_to_run: failed to send Ctrl-C: {e}");
+            }
+        }
+    }
+    drain_until_prompt(shell_arc, max_wait_secs).await
 }
 
 /// `shell_arc` selects which shell to read from (main shell or a bg shell handle).

@@ -179,7 +179,7 @@ fn normalize_lf_to_crlf(text: &str) -> Vec<u8> {
 
 /// Strip ANSI escape codes from a string using a robust regex
 pub fn strip_ansi_codes(input: &str) -> String {
-    static RE: std::sync::OnceLock<Option<Regex>> = std::sync::OnceLock::new();
+    static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
 
     // Fast path: no ESC byte means nothing to strip.
     if !input.contains('\u{1b}') {
@@ -195,16 +195,19 @@ pub fn strip_ansi_codes(input: &str) -> String {
     // Without OSC/CSI-cursor coverage the scrollback leaked raw bracketed-paste
     // and `]0;user@host` noise into the model's view. Cached so we don't
     // recompile the pattern on every rendered line.
+    // `.expect`, not `.ok()`: a compile-time-literal regex that fails is a dev
+    // bug. The old `OnceLock<Option<Regex>>` + `.ok()` froze `None` on first use
+    // and then silently stopped stripping CSI/OSC params for the rest of the
+    // process — leaking raw escape sequences into the model's view. This is the
+    // production strip used by bash_command/pty; fail loud instead.
+    #[allow(clippy::expect_used)]
     let re = RE.get_or_init(|| {
         Regex::new(
             r"\x1b\[[0-9;:?<>=!]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[=>MNcD78]",
         )
-        .ok()
+        .expect("ANSI strip regex must compile")
     });
-    let cleaned = match re {
-        Some(re) => re.replace_all(input, "").into_owned(),
-        None => input.to_string(),
-    };
+    let cleaned = re.replace_all(input, "").into_owned();
     // Defensive: drop any stray ESC the pattern didn't consume (partial seqs).
     cleaned.replace('\u{1b}', "")
 }
