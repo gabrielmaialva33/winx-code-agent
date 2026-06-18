@@ -892,7 +892,7 @@ async fn drain_until_prompt(shell_arc: &SharedPtyShell, budget_secs: f64) -> boo
 /// Async replacement for `PtyShell::clear_to_run`: drain leftover output, and if
 /// the shell still looks busy, send Ctrl-C and re-drain — returning whether the
 /// shell reached an idle prompt. The old sync method ran `read_output` (a blocking
-/// `thread::sleep` loop, up to DEFAULT_TIMEOUT seconds) WHILE the caller held the
+/// `thread::sleep` loop, up to `DEFAULT_TIMEOUT` seconds) WHILE the caller held the
 /// tokio mutex, pinning the worker on every foreground command. This holds the
 /// lock only for the instantaneous poll/interrupt, never across a wait.
 async fn clear_to_run_async(shell_arc: &SharedPtyShell, max_wait_secs: f64) -> bool {

@@ -719,8 +719,7 @@ impl ServerHandler for WinxService {
                 // The error message is returned to the client/model verbatim and
                 // often echoes a path, env value, or command output that can carry
                 // a secret — scrub it the same as success content.
-                error.message =
-                    crate::utils::redact::redact(&error.message).into_owned().into();
+                error.message = crate::utils::redact::redact(&error.message).into_owned().into();
                 Err(error)
             }
         };
