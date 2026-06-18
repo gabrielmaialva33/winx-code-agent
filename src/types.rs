@@ -1158,16 +1158,6 @@ pub struct ReferencesOutput {
     pub hits: Vec<ReferenceHit>,
 }
 
-/// Structured output of the `CodeMap` tool: an outline result or a references
-/// result, depending on the `operation`. Untagged so the structured content is
-/// just the inner object (matching what the underlying handler emits).
-#[derive(Debug, Clone, Serialize, JsonSchema)]
-#[serde(untagged)]
-pub enum CodeMapOutput {
-    Outline(OutlineOutput),
-    References(ReferencesOutput),
-}
-
 #[cfg(test)]
 mod thread_id_tests {
     use super::normalize_thread_id;
