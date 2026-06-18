@@ -638,7 +638,11 @@ pub fn format_ansi_text(
 ///
 /// The text with all ANSI sequences removed
 pub fn strip_ansi_codes(text: &str) -> String {
-    ansi_regex().replace_all(text, "").to_string()
+    // Delegate to the terminal module's stripper, which also handles OSC sequences
+    // and stray ESC bytes. Keeping two divergent implementations meant this weaker
+    // one (CSI-only) could silently under-strip if a caller picked it. Single source
+    // of truth now.
+    crate::state::terminal::strip_ansi_codes(text)
 }
 
 /// Extract structured style information from ANSI-formatted text
