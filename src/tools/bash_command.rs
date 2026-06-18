@@ -160,17 +160,17 @@ impl BackgroundShellManager {
     }
 
     /// Start a new background shell and return its command ID
-    pub fn start_new_shell(&mut self, working_dir: &Path, restricted_mode: bool) -> Result<String> {
+    /// Register an already-built shell and return its id.
+    ///
+    /// The caller builds the `PtyShell` BEFORE taking the manager lock —
+    /// `PtyShell::new` forks+execs and does a ~300ms blocking prompt init, which
+    /// must not run under the global `std::Mutex` (it would serialize every other
+    /// background-shell op behind one slow spawn).
+    pub fn register_shell(&mut self, shell: PtyShell) -> String {
         let cid = format!("{:010x}", rand::rng().random::<u32>());
-
-        let shell = PtyShell::new(working_dir, restricted_mode).map_err(|e| {
-            WinxError::CommandExecutionError(format!("Failed to start background shell: {e}"))
-        })?;
-
         self.shells.insert(cid.clone(), Arc::new(Mutex::new(Some(shell))));
-
         info!("Started background shell with id: {}", cid);
-        Ok(cid)
+        cid
     }
 
     /// Get a background shell by its command ID
@@ -1635,9 +1635,20 @@ async fn execute_in_background(
     let restricted_mode =
         matches!(bash_state.bash_command_mode.bash_mode, crate::types::BashMode::RestrictedMode);
 
+    // Build the shell OFF the tokio worker AND outside the manager lock:
+    // PtyShell::new forks+execs and blocks ~300ms on prompt init. The old
+    // start_new_shell did all of that under the std::Mutex on the executor thread.
     let bg_id = {
-        let mut manager = lock_bg_manager();
-        manager.start_new_shell(&bash_state.cwd, restricted_mode)?
+        let cwd = bash_state.cwd.clone();
+        let shell = tokio::task::spawn_blocking(move || PtyShell::new(&cwd, restricted_mode))
+            .await
+            .map_err(|e| {
+                WinxError::CommandExecutionError(format!("bg shell init task failed: {e}"))
+            })?
+            .map_err(|e| {
+                WinxError::CommandExecutionError(format!("Failed to start background shell: {e}"))
+            })?;
+        lock_bg_manager().register_shell(shell)
     };
 
     // Get the shell

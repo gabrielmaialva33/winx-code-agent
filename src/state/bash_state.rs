@@ -224,8 +224,16 @@ impl BashState {
     }
 
     pub async fn init_pty_shell(&mut self) -> Result<()> {
-        let shell =
-            PtyShell::new(&self.cwd, self.bash_command_mode.bash_mode == BashMode::RestrictedMode)?;
+        let cwd = self.cwd.clone();
+        let restricted = self.bash_command_mode.bash_mode == BashMode::RestrictedMode;
+        // PtyShell::new forks+execs a shell and does a ~300ms blocking prompt init
+        // (thread::sleep + drain_output busy-wait). Run it on the blocking pool so
+        // it never pins a tokio worker thread.
+        let shell = tokio::task::spawn_blocking(move || PtyShell::new(&cwd, restricted))
+            .await
+            .map_err(|e| {
+            crate::errors::WinxError::ShellInitializationError(format!("PTY init task failed: {e}"))
+        })??;
         *self.pty_shell.lock().await = Some(shell);
         Ok(())
     }
