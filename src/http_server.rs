@@ -9,8 +9,10 @@
 //! winx exposes arbitrary shell execution and filesystem access. Serving it over
 //! the network is effectively remote code execution on this machine. Therefore:
 //! - a non-empty bearer token is **required**; every request must present it via
-//!   the `Authorization: Bearer <token>` header (header-only — a `?token=` query
-//!   parameter would leak the secret into proxy/tunnel logs and browser history);
+//!   the `Authorization: Bearer <token>` header. A `?token=` query parameter is
+//!   rejected by default (it would leak the secret into proxy/tunnel logs and
+//!   browser history) unless the operator opts in with `--allow-query-token`, the
+//!   escape hatch for URL-only clients like ChatGPT;
 //! - bind to a loopback address and put an authenticated HTTPS tunnel in front —
 //!   never expose this straight to `0.0.0.0` on an untrusted network;
 //! - turn it off when you're done testing.
@@ -64,6 +66,7 @@ pub async fn start_http_server(
     bind: &str,
     token: String,
     extra_hosts: Vec<String>,
+    allow_query_token: bool,
 ) -> Result<(), BoxError> {
     if token.trim().is_empty() {
         return Err("refusing to start HTTP transport without a token (RCE exposure)".into());
@@ -97,9 +100,10 @@ pub async fn start_http_server(
     // Layer order: the LAST `.layer()` is the outermost, so the body-size limit
     // runs first (it can reject an oversized POST before auth even looks at it),
     // then the timeout, then the token check, then the MCP service.
+    let auth = Arc::new(AuthConfig { token, allow_query: allow_query_token });
     let app = Router::new()
         .nest_service("/mcp", mcp_service)
-        .layer(middleware::from_fn_with_state(Arc::new(token), require_token))
+        .layer(middleware::from_fn_with_state(auth, require_token))
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
 
@@ -108,20 +112,36 @@ pub async fn start_http_server(
         "winx remote MCP transport on http://{bind}/mcp — shell/file access is now \
          network-reachable. Keep it behind an HTTPS tunnel and shut it down when done."
     );
+    if allow_query_token {
+        tracing::warn!(
+            "--allow-query-token is ON: clients may authenticate via ?token=<secret> in the URL. \
+             Convenient for clients that only take a URL (ChatGPT), but the token will appear in \
+             tunnel/proxy access logs and browser history. Use only on ephemeral/trusted tunnels."
+        );
+    }
     // `into_make_service_with_connect_info` puts the peer address in request
     // extensions so the auth middleware can log who is hammering the endpoint.
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
 }
 
+/// Auth state shared with the token middleware.
+#[derive(Clone)]
+struct AuthConfig {
+    token: String,
+    /// When true, also accept the token via a `?token=` query parameter (opt-in,
+    /// for URL-only clients like ChatGPT). Off by default — see [`request_has_token`].
+    allow_query: bool,
+}
+
 /// Reject any request that doesn't carry the shared token.
 async fn require_token(
-    State(token): State<Arc<String>>,
+    State(auth): State<Arc<AuthConfig>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: Request,
     next: Next,
 ) -> Response {
-    if request_has_token(&request, &token) {
+    if request_has_token(&request, &auth.token, auth.allow_query) {
         next.run(request).await
     } else {
         // Log the peer (never the token) so brute-force attempts on this
@@ -134,19 +154,34 @@ async fn require_token(
     }
 }
 
-/// True if the request presents the token via `Authorization: Bearer`.
+/// True if the request presents the token via `Authorization: Bearer`, or — only
+/// when `allow_query` is set — via a `?token=` query parameter.
 ///
-/// Header-only by design: a `?token=` query parameter would leak the secret into
-/// proxy/tunnel access logs, browser history, and `Referer` headers. Clients
-/// that need it (ChatGPT connectors, etc.) all support the `Authorization`
-/// header.
-fn request_has_token(request: &Request, expected: &str) -> bool {
-    request
+/// The header is the default and preferred path. A `?token=` query parameter
+/// leaks the secret into proxy/tunnel access logs, browser history, and `Referer`
+/// headers, so it stays OFF unless the operator explicitly opts in with
+/// `--allow-query-token` (the escape hatch for URL-only clients like ChatGPT).
+fn request_has_token(request: &Request, expected: &str, allow_query: bool) -> bool {
+    let header_ok = request
         .headers()
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|presented| constant_time_eq(presented.trim(), expected))
+        .is_some_and(|presented| constant_time_eq(presented.trim(), expected));
+    if header_ok {
+        return true;
+    }
+    allow_query
+        && query_token(request).is_some_and(|presented| constant_time_eq(presented, expected))
+}
+
+/// Extract the raw `token=` value from the request's query string, if present.
+///
+/// Minimal parser (no percent-decoding): winx tokens are hex (`openssl rand
+/// -hex`), so they never contain reserved characters. Compared constant-time by
+/// the caller.
+fn query_token(request: &Request) -> Option<&str> {
+    request.uri().query()?.split('&').find_map(|pair| pair.strip_prefix("token="))
 }
 
 /// Constant-time token comparison.
@@ -190,20 +225,33 @@ mod tests {
 
     #[test]
     fn accepts_valid_bearer_header() {
-        assert!(request_has_token(&req("/mcp", Some("Bearer s3cret")), "s3cret"));
+        // Header works regardless of the query-token toggle.
+        assert!(request_has_token(&req("/mcp", Some("Bearer s3cret")), "s3cret", false));
+        assert!(request_has_token(&req("/mcp", Some("Bearer s3cret")), "s3cret", true));
     }
 
     #[test]
     fn rejects_missing_and_wrong_header() {
-        assert!(!request_has_token(&req("/mcp", None), "s3cret"));
-        assert!(!request_has_token(&req("/mcp", Some("Bearer nope")), "s3cret"));
-        assert!(!request_has_token(&req("/mcp", Some("s3cret")), "s3cret")); // no "Bearer "
+        assert!(!request_has_token(&req("/mcp", None), "s3cret", false));
+        assert!(!request_has_token(&req("/mcp", Some("Bearer nope")), "s3cret", false));
+        assert!(!request_has_token(&req("/mcp", Some("s3cret")), "s3cret", false));
+        // no "Bearer "
     }
 
     #[test]
-    fn query_token_is_rejected_now() {
-        // Header-only: a `?token=` query param must NOT authenticate (it would
-        // leak the secret into proxy/tunnel logs).
-        assert!(!request_has_token(&req("/mcp?token=s3cret", None), "s3cret"));
+    fn query_token_rejected_when_not_allowed() {
+        // Default (allow_query=false): a `?token=` query param must NOT
+        // authenticate (it would leak the secret into proxy/tunnel logs).
+        assert!(!request_has_token(&req("/mcp?token=s3cret", None), "s3cret", false));
+    }
+
+    #[test]
+    fn query_token_accepted_only_when_opted_in() {
+        // With --allow-query-token, the query param authenticates...
+        assert!(request_has_token(&req("/mcp?token=s3cret", None), "s3cret", true));
+        // ...among other params, and still rejects a wrong value.
+        assert!(request_has_token(&req("/mcp?a=1&token=s3cret&b=2", None), "s3cret", true));
+        assert!(!request_has_token(&req("/mcp?token=nope", None), "s3cret", true));
+        assert!(!request_has_token(&req("/mcp", None), "s3cret", true));
     }
 }

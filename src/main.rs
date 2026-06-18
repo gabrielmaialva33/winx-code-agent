@@ -43,9 +43,9 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1:8000")]
         bind: String,
 
-        /// Shared secret required on every HTTP request
-        /// (`Authorization: Bearer <token>` or `?token=<token>`).
-        /// Falls back to the `WINX_HTTP_TOKEN` env var.
+        /// Shared secret required on every HTTP request, sent as
+        /// `Authorization: Bearer <token>`. Falls back to the `WINX_HTTP_TOKEN`
+        /// env var.
         #[arg(long)]
         token: Option<String>,
 
@@ -53,6 +53,14 @@ enum Commands {
         /// abc.trycloudflare.com). Repeatable. Loopback is always allowed.
         #[arg(long = "allowed-host")]
         allowed_host: Vec<String>,
+
+        /// Also accept the token via a `?token=<token>` query parameter, for
+        /// clients that only take a URL (e.g. `ChatGPT` MCP connectors). OFF by
+        /// default: the header is preferred because a query token leaks into
+        /// tunnel/proxy access logs and browser history. Use only on
+        /// ephemeral/trusted tunnels.
+        #[arg(long)]
+        allow_query_token: bool,
     },
 }
 
@@ -107,9 +115,9 @@ async fn async_main(cli: Cli) -> Result<()> {
     });
 
     match cli.command {
-        Some(Commands::Serve { http: true, bind, token, allowed_host, .. }) => {
-            run_http_server(bind, token, allowed_host).await
-        }
+        Some(Commands::Serve {
+            http: true, bind, token, allowed_host, allow_query_token, ..
+        }) => run_http_server(bind, token, allowed_host, allow_query_token).await,
         // Default: stdio transport for local MCP clients.
         None | Some(Commands::Serve { .. }) => run_server().await,
     }
@@ -120,11 +128,12 @@ async fn run_http_server(
     bind: String,
     token: Option<String>,
     allowed_hosts: Vec<String>,
+    allow_query_token: bool,
 ) -> Result<()> {
     let token = token.or_else(|| std::env::var("WINX_HTTP_TOKEN").ok()).unwrap_or_default();
     tracing::info!("Starting winx remote MCP (HTTP) v{} on {bind}", env!("CARGO_PKG_VERSION"));
 
-    winx_code_agent::http_server::start_http_server(&bind, token, allowed_hosts)
+    winx_code_agent::http_server::start_http_server(&bind, token, allowed_hosts, allow_query_token)
         .await
         .map_err(|e| WinxError::ShellInitializationError(format!("HTTP server failed: {e}")))
 }
