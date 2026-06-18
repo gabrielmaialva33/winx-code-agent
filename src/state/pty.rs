@@ -1177,16 +1177,16 @@ mod tests {
         let mut child_pid = None;
         for _ in 0..150 {
             let _ = shell.read_output(0.1);
-            if let Some(pid) = std::fs::read_to_string(&pidfile)
-                .ok()
-                .and_then(|c| c.trim().parse::<i32>().ok())
+            if let Some(pid) =
+                std::fs::read_to_string(&pidfile).ok().and_then(|c| c.trim().parse::<i32>().ok())
             {
                 child_pid = Some(pid);
                 break;
             }
             thread::sleep(Duration::from_millis(20));
         }
-        let child_pid = child_pid.ok_or_else(|| anyhow!("background child pid never materialized"))?;
+        let child_pid =
+            child_pid.ok_or_else(|| anyhow!("background child pid never materialized"))?;
         assert!(pid_alive(child_pid), "background child should be running before drop");
 
         drop(shell);
