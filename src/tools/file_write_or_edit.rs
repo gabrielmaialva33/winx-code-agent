@@ -848,7 +848,12 @@ fn not_found_error(block: &SearchReplaceBlock, lines: &[String], offset: usize) 
 /// (stale read) reads very differently from a 20% one (wrong file/block).
 fn closest_snippet(lines: &[String], offset: usize, search: &[String]) -> (String, f64) {
     let window = search.len().max(1);
-    if lines.is_empty() || offset >= lines.len() {
+    // A SEARCH block longer than the whole file can't match anywhere; bail before
+    // the loop slices `lines[start..start + window]` past the end and panics. Under
+    // `panic = "abort"` that slice-panic is a one-tool-call DoS of the MCP server
+    // (e.g. a 2-line SEARCH against a 1-line file: max_start saturates to 0, the
+    // loop still fires once and indexes `lines[0..2]`).
+    if lines.is_empty() || offset >= lines.len() || window > lines.len() {
         return (String::new(), 0.0);
     }
 
@@ -1018,8 +1023,14 @@ pub(crate) fn plan_edit(
     // search/replace input, and the post-edit diff. Reading it twice opened a
     // TOCTOU window where an external write between the hash check and the edit
     // would apply the edit to (and diff against) content the hash never vetted.
-    let pre_write_content: Option<String> =
-        if path.exists() { Some(fs::read_to_string(&path)?) } else { None };
+    let pre_write_content: Option<String> = if path.exists() {
+        Some(fs::read_to_string(&path).map_err(|e| WinxError::FileAccessError {
+            path: path.clone(),
+            message: format!("reading existing file before edit: {e}"),
+        })?)
+    } else {
+        None
+    };
 
     if let Some(original_content) = pre_write_content.as_deref() {
         let whitelist =
@@ -1237,6 +1248,27 @@ mod indentation_tests {
     // The indent fixer used to byte-slice over indentation that can contain
     // multibyte whitespace (ideographic space U+3000, NBSP) — a guaranteed
     // panic. These pin the char-based behavior.
+
+    #[test]
+    fn closest_snippet_search_longer_than_file_does_not_panic() {
+        // Regression for the DoS: a SEARCH block longer than the file made the
+        // loop slice `lines[0..window]` past the end and panic (panic = abort).
+        let lines = vec!["the only line".to_string()];
+        let search = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let (snippet, similarity) = closest_snippet(&lines, 0, &search);
+        assert!(snippet.is_empty());
+        assert!(similarity.abs() < f64::EPSILON, "expected 0.0 similarity, got {similarity}");
+    }
+
+    #[test]
+    fn closest_snippet_normal_case_still_finds_a_window() {
+        // The early-return must not swallow legitimate matches: window <= len.
+        let lines = vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()];
+        let search = vec!["beta".to_string()];
+        let (snippet, similarity) = closest_snippet(&lines, 0, &search);
+        assert!(snippet.contains("beta"));
+        assert!(similarity > 0.0);
+    }
 
     #[test]
     fn fix_indentation_adds_multibyte_indent_without_panic() {
