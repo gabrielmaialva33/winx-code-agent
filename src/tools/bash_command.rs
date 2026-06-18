@@ -531,6 +531,14 @@ pub async fn handle_tool_call(
                 "Error: No saved bash state found for thread_id `{thread_id}`. Please initialize first with this ID."
             )));
         }
+        // Promote the loaded state back to the shared slot. The old code only wrote
+        // `cwd` back at the end, so switching thread_id silently dropped the loaded
+        // whitelist/mode/thread_id — the next command re-cloned the stale state.
+        // load_state_from_disk doesn't touch pty_shell (shells aren't serialized),
+        // so the live shell Arc is preserved through the clone.
+        if let Some(state) = bash_state_arc.lock().await.as_mut() {
+            *state = bash_state.clone();
+        }
     }
 
     // Calculate effective timeout - matches WCGW Python
