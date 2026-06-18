@@ -49,6 +49,7 @@ async fn wait_turn(
                 quiet_ms: Some(800),
                 timeout_seconds: Some(timeout),
                 lines: None,
+                wait_through_busy: true,
             },
             Some(timeout + 5.0),
         ),

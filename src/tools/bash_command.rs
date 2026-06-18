@@ -680,7 +680,14 @@ async fn execute_bash_action(
         BashCommandAction::Screen { lines, diff, .. } => {
             execute_screen(bash_state, bg_shell, is_bg, bg_id.as_deref(), *lines, *diff).await
         }
-        BashCommandAction::WaitForTurn { recognizer, quiet_ms, timeout_seconds, lines, .. } => {
+        BashCommandAction::WaitForTurn {
+            recognizer,
+            quiet_ms,
+            timeout_seconds,
+            lines,
+            wait_through_busy,
+            ..
+        } => {
             execute_wait_for_turn(
                 bash_state,
                 bg_shell,
@@ -690,6 +697,7 @@ async fn execute_bash_action(
                 *quiet_ms,
                 *timeout_seconds,
                 *lines,
+                *wait_through_busy,
             )
             .await
         }
@@ -1297,12 +1305,64 @@ async fn execute_screen(
     Ok(format!("--- live screen{alt} [cursor row={crow} col={ccol}] ---\n{body}{status}"))
 }
 
-/// Execute `WaitForTurn` — block until an interactive TUI finishes its turn.
+/// Why [`execute_wait_for_turn`] should stop polling, or `None` to keep waiting.
+///
+/// Extracted as a pure function so the (subtle) exit logic is unit-testable
+/// without driving a real PTY. `busy_for` is how long we've read `Busy`
+/// *continuously*: a TUI that is actively working never holds a stable screen
+/// (its spinner repaints every frame), so we confirm `Busy` by elapsed duration,
+/// not by `stable_for` — that was exactly why a busy child used to pin the caller
+/// for the whole `hard_cap` (up to 600s).
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)]
+fn wait_turn_outcome(
+    state: crate::state::turn::TurnState,
+    alive: bool,
+    activity: bool,
+    seen_busy: bool,
+    stable_for: Duration,
+    busy_for: Duration,
+    settle: Duration,
+    quiet: Duration,
+    timed_out: bool,
+    wait_through_busy: bool,
+) -> Option<&'static str> {
+    use crate::state::turn::TurnState;
+    if !alive {
+        return Some("exited");
+    }
+    let ready = match state {
+        TurnState::Busy => false,
+        // A short settle is enough once we saw it go Busy; otherwise wait the
+        // full quiet window so a slow first token isn't read as "done".
+        TurnState::AwaitingInput | TurnState::AwaitingApproval => {
+            activity && stable_for >= if seen_busy { settle } else { quiet }
+        }
+        TurnState::Unknown => activity && stable_for >= quiet,
+    };
+    if ready {
+        return Some("ready");
+    }
+    // Early-out on a confirmed-busy turn instead of blocking until the hard cap.
+    // A settled `busy` reading is a valid answer on its own (the tool documents
+    // `busy` as a return state); the caller can poll again to keep watching. This
+    // is the fix for a parent that "waits forever" on a long-running child.
+    if !wait_through_busy && state == TurnState::Busy && busy_for >= settle {
+        return Some("busy");
+    }
+    if timed_out {
+        return Some("timeout");
+    }
+    None
+}
+
+/// Execute `WaitForTurn` — wait for an interactive TUI's turn.
 ///
 /// Polls the live screen, combining a per-app recognizer (claude/codex/auto)
 /// with a generic quiescence window: the turn is "ready" when the recognizer
 /// reports awaiting-input/approval (after a short settle) or, for an unknown
-/// TUI, when the screen simply stops changing for `quiet`. Returns the stable
+/// TUI, when the screen simply stops changing for `quiet`. By default it also
+/// returns as soon as `Busy` is confirmed (see [`wait_turn_outcome`]); pass
+/// `wait_through_busy` to block through busy until ready. Returns the stable
 /// snapshot plus the detected state.
 #[allow(clippy::too_many_arguments)]
 async fn execute_wait_for_turn(
@@ -1314,6 +1374,7 @@ async fn execute_wait_for_turn(
     quiet_ms: Option<u64>,
     timeout_seconds: Option<f32>,
     lines: Option<usize>,
+    wait_through_busy: bool,
 ) -> Result<String> {
     use crate::state::turn::{recognizer_for, TurnState};
 
@@ -1334,6 +1395,7 @@ async fn execute_wait_for_turn(
     let mut initial_hash: Option<u64> = None;
     let mut stable_since = Instant::now();
     let mut seen_busy = false;
+    let mut busy_since: Option<Instant> = None;
 
     loop {
         let (snapshot, in_alt, alive, running) = {
@@ -1361,31 +1423,31 @@ async fn execute_wait_for_turn(
         let state = recognizer.detect(&snapshot);
         if state == TurnState::Busy {
             seen_busy = true;
+            if busy_since.is_none() {
+                busy_since = Some(Instant::now());
+            }
+        } else {
+            busy_since = None;
         }
+        let busy_for = busy_since.map_or(Duration::ZERO, |since| since.elapsed());
         let stable_for = stable_since.elapsed();
         // Don't call it "done" until something actually happened since we began
         // waiting: the app went Busy, the screen changed from the first frame we
         // saw, or the warmup elapsed (instant reply / nothing to do).
         let activity = seen_busy || Some(hash) != initial_hash || start.elapsed() >= warmup;
-        let ready = match state {
-            TurnState::Busy => false,
-            // A short settle is enough once we saw it go Busy; otherwise wait the
-            // full quiet window so a slow first token isn't read as "done".
-            TurnState::AwaitingInput | TurnState::AwaitingApproval => {
-                activity && stable_for >= if seen_busy { settle } else { quiet }
-            }
-            TurnState::Unknown => activity && stable_for >= quiet,
-        };
-
         let timed_out = start.elapsed() >= hard_cap;
-        if ready || !alive || timed_out {
-            let reason = if !alive {
-                "exited"
-            } else if ready {
-                "ready"
-            } else {
-                "timeout"
-            };
+        if let Some(reason) = wait_turn_outcome(
+            state,
+            alive,
+            activity,
+            seen_busy,
+            stable_for,
+            busy_for,
+            settle,
+            quiet,
+            timed_out,
+            wait_through_busy,
+        ) {
             let joined = snapshot.join("\n");
             let body = if joined.trim().is_empty() {
                 "(screen is empty)".to_string()
@@ -1676,6 +1738,103 @@ async fn execute_in_background(
     let _ = timeout_s;
     let _ = shell_arc;
     Ok(get_status(bash_state, true, Some(&bg_id), true, None, None))
+}
+
+#[cfg(test)]
+mod wait_turn_tests {
+    use super::wait_turn_outcome;
+    use crate::state::turn::TurnState;
+    use std::time::Duration;
+
+    const SETTLE: Duration = Duration::from_millis(300);
+    const QUIET: Duration = Duration::from_millis(600);
+
+    fn call(
+        state: TurnState,
+        busy_for: Duration,
+        stable_for: Duration,
+        seen_busy: bool,
+        timed_out: bool,
+        wait_through_busy: bool,
+    ) -> Option<&'static str> {
+        // `activity` is true in these cases (something happened) unless noted.
+        wait_turn_outcome(
+            state,
+            true,
+            true,
+            seen_busy,
+            stable_for,
+            busy_for,
+            SETTLE,
+            QUIET,
+            timed_out,
+            wait_through_busy,
+        )
+    }
+
+    #[test]
+    fn confirmed_busy_returns_early_instead_of_blocking_to_timeout() {
+        // The bug: a busy child used to pin the caller until hard_cap. Now a
+        // busy reading held for >= settle returns "busy" with NO timeout.
+        let out = call(TurnState::Busy, SETTLE, Duration::ZERO, true, false, false);
+        assert_eq!(out, Some("busy"));
+    }
+
+    #[test]
+    fn busy_not_yet_confirmed_keeps_waiting() {
+        // Seen busy for less than settle (one-frame flicker): keep polling.
+        let out =
+            call(TurnState::Busy, Duration::from_millis(100), Duration::ZERO, true, false, false);
+        assert_eq!(out, None);
+    }
+
+    #[test]
+    fn wait_through_busy_blocks_through_busy_until_timeout() {
+        // Opt-out preserves the old contract: busy never returns early...
+        let out = call(TurnState::Busy, SETTLE * 10, Duration::ZERO, true, false, true);
+        assert_eq!(out, None);
+        // ...only the hard cap ends it.
+        let out = call(TurnState::Busy, SETTLE * 10, Duration::ZERO, true, true, true);
+        assert_eq!(out, Some("timeout"));
+    }
+
+    #[test]
+    fn awaiting_input_after_busy_is_ready_on_short_settle() {
+        let out = call(TurnState::AwaitingInput, Duration::ZERO, SETTLE, true, false, false);
+        assert_eq!(out, Some("ready"));
+    }
+
+    #[test]
+    fn awaiting_input_without_prior_busy_needs_full_quiet() {
+        // No prior busy: a short settle is not enough, must wait the quiet window.
+        let short = call(TurnState::AwaitingInput, Duration::ZERO, SETTLE, false, false, false);
+        assert_eq!(short, None);
+        let full = call(TurnState::AwaitingInput, Duration::ZERO, QUIET, false, false, false);
+        assert_eq!(full, Some("ready"));
+    }
+
+    #[test]
+    fn dead_shell_reports_exited_even_if_busy() {
+        let out = wait_turn_outcome(
+            TurnState::Busy,
+            false,
+            true,
+            true,
+            Duration::ZERO,
+            SETTLE,
+            SETTLE,
+            QUIET,
+            false,
+            false,
+        );
+        assert_eq!(out, Some("exited"));
+    }
+
+    #[test]
+    fn nothing_happening_keeps_waiting() {
+        let out = call(TurnState::Unknown, Duration::ZERO, Duration::ZERO, false, false, false);
+        assert_eq!(out, None);
+    }
 }
 
 #[cfg(test)]

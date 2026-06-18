@@ -692,6 +692,14 @@ pub enum BashCommandAction {
         /// Visible lines to return in the final snapshot (0 or omitted = full).
         #[serde(default)]
         lines: Option<usize>,
+        /// By default `wait_for_turn` returns as soon as it confirms the app is
+        /// actively working (`busy`), instead of blocking until the turn ends or
+        /// `timeout_seconds` elapses — so a long-running child never pins the
+        /// caller for the whole cap (poll again to keep watching). Set this to
+        /// true for the old behavior: block *through* `busy` until the app is
+        /// ready for input (or the timeout fires).
+        #[serde(default)]
+        wait_through_busy: bool,
     },
 }
 
