@@ -688,7 +688,10 @@ impl ServerHandler for WinxService {
         // Audit trail: one structured line per tool call, including the outcome
         // and wall-clock. Successes were previously silent — only errors logged —
         // which made debugging remote (ChatGPT) sessions guesswork.
-        let summary = audit_summary(&tool, args_value.as_ref());
+        // Redact the audit line too: it embeds tool arguments (a BashCommand's
+        // command line, a file path) that can carry secrets into the logs.
+        let summary =
+            crate::utils::redact::redact(&audit_summary(&tool, args_value.as_ref())).into_owned();
         let started = std::time::Instant::now();
 
         let result = match tool.as_str() {
@@ -712,17 +715,21 @@ impl ServerHandler for WinxService {
                 redact_result(&mut call);
                 Ok(call)
             }
-            err => err,
+            Err(mut error) => {
+                // The error message is returned to the client/model verbatim and
+                // often echoes a path, env value, or command output that can carry
+                // a secret — scrub it the same as success content.
+                error.message =
+                    crate::utils::redact::redact(&error.message).into_owned().into();
+                Err(error)
+            }
         };
 
         let ms = started.elapsed().as_millis();
         match &result {
             Ok(_) => info!(tool = %tool, ms, "tool call ok — {summary}"),
-            Err(error) => warn!(
-                tool = %tool, ms,
-                "tool call error — {summary}: {}",
-                crate::utils::redact::redact(&error.message)
-            ),
+            // error.message was already redacted above.
+            Err(error) => warn!(tool = %tool, ms, "tool call error — {summary}: {}", error.message),
         }
         result
     }
