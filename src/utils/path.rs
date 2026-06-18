@@ -238,8 +238,46 @@ pub fn glob_matches(pattern: &glob::Pattern, relative: &Path) -> bool {
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
+    use proptest::prelude::*;
     use std::fs;
     use tempfile::TempDir;
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        /// The containment invariant the whole file-safety story rests on: no
+        /// relative path string — however many `..`/`.`/odd segments — can make
+        /// resolve_in_workspace return Ok pointing OUTSIDE the workspace. Either it
+        /// errors, or the result is contained. (Uses the real /tmp as a stand-in
+        /// workspace so each case is read-only and cheap.)
+        #[test]
+        fn resolve_in_workspace_ok_implies_contained(
+            segments in prop::collection::vec(
+                prop_oneof![Just("..".to_string()), Just(".".to_string()), "[a-zA-Z0-9_]{1,5}"],
+                0..10,
+            )
+        ) {
+            let ws = std::env::temp_dir().canonicalize().unwrap();
+            let rel = segments.join("/");
+            if let Ok(resolved) = resolve_in_workspace(&rel, &ws, &ws) {
+                prop_assert!(
+                    resolved.starts_with(&ws),
+                    "resolve_in_workspace({rel:?}) escaped to {resolved:?}"
+                );
+            }
+        }
+
+        /// Same invariant at the lower layer, for ANY input string (incl. absolute
+        /// paths, traversal, junk): validate_path_in_workspace must never accept a
+        /// path that escapes, and must never panic.
+        #[test]
+        fn validate_ok_implies_contained_any_input(s in ".*") {
+            let ws = std::env::temp_dir().canonicalize().unwrap();
+            if let Ok(p) = validate_path_in_workspace(Path::new(&s), &ws) {
+                prop_assert!(p.starts_with(&ws), "accepted escaping path {p:?} from input {s:?}");
+            }
+        }
+    }
 
     #[test]
     fn expand_user_leaves_non_tilde_paths_untouched() {
