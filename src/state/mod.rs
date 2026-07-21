@@ -4,6 +4,7 @@ pub mod line_ring;
 pub mod live_terminal;
 pub mod persistence;
 pub mod pty;
+pub mod task_state;
 pub mod terminal;
 pub mod turn;
 
