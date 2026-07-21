@@ -1198,6 +1198,23 @@ pub struct ReferencesOutput {
     pub hits: Vec<ReferenceHit>,
 }
 
+/// JSON Schema advertised for `CodeMap.structuredContent`.
+///
+/// `CodeMap` has two operations with different payloads. Their shared
+/// `truncated` field is required; operation-specific fields are optional so the
+/// single object schema accepts both the outline and references result shapes.
+#[derive(Debug, Clone, JsonSchema)]
+pub struct CodeMapStructuredOutput {
+    pub truncated: bool,
+    pub mode: Option<String>,
+    pub files_shown: Option<usize>,
+    pub files: Option<Vec<OutlineFile>>,
+    pub name: Option<String>,
+    pub definitions: Option<usize>,
+    pub references: Option<usize>,
+    pub hits: Option<Vec<ReferenceHit>>,
+}
+
 #[cfg(test)]
 mod thread_id_tests {
     use super::normalize_thread_id;
