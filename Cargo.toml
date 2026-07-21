@@ -12,7 +12,7 @@ categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 # MCP SDK - Official Rust SDK for Model Context Protocol
-rmcp = { version = "1.7.0", features = [
+rmcp = { version = "1.8.0", features = [
     "transport-io",
     "transport-streamable-http-server",
     "server",
@@ -49,6 +49,7 @@ base64 = "0.22"
 glob = "0.3"
 regex = "1.11"
 mime_guess = "2.0"
+percent-encoding = "2.3"
 memmap2 = "0.9"
 tempfile = "3.14"
 toml = "1.1"

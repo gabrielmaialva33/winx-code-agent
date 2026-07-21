@@ -2731,6 +2731,7 @@ dependencies = [
  "loom",
  "memmap2",
  "mime_guess",
+ "percent-encoding",
  "portable-pty",
  "proptest",
  "rand 0.10.2",
