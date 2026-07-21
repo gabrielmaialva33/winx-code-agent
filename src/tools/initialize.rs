@@ -84,7 +84,9 @@ fn mode_to_state(
         Modes::Architect => Ok((
             BashCommandMode {
                 bash_mode: BashMode::RestrictedMode,
-                allowed_commands: AllowedCommands::All("all".to_string()),
+                allowed_commands: AllowedCommands::List(
+                    crate::utils::bash_parser::architect_allowed_commands(),
+                ),
             },
             FileEditMode { allowed_globs: AllowedGlobs::List(vec![]) },
             WriteIfEmptyMode { allowed_globs: AllowedGlobs::List(vec![]) },

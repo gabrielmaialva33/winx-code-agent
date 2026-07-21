@@ -147,7 +147,7 @@ async fn test_initialize_architect_mode() -> Result<()> {
         init_type: InitializeType::FirstCall,
         mode_name: ModeName::Architect,
         any_workspace_path: temp_dir.path().to_string_lossy().to_string(),
-        thread_id: String::new(),
+        thread_id: "architectreadonly".to_string(),
         code_writer_config: None,
         initial_files_to_read: vec![],
         task_id_to_resume: String::new(),
@@ -161,6 +161,50 @@ async fn test_initialize_architect_mode() -> Result<()> {
     let state = bash_state_arc.lock().await;
     let bash_state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
     assert!(bash_state.initialized);
+    drop(state);
+
+    let marker = temp_dir.path().join("architect-must-not-write");
+    let denied = BashCommand {
+        action_json: BashCommandAction::Command {
+            command: format!("touch {}", marker.display()),
+            is_background: false,
+            allow_multi: false,
+        },
+        wait_for_seconds: Some(0.2),
+        thread_id: "architectreadonly".to_string(),
+    };
+    let result =
+        winx_code_agent::tools::bash_command::handle_tool_call(&bash_state_arc, denied).await;
+    assert!(matches!(result, Err(WinxError::CommandNotAllowed(_))));
+    assert!(!marker.exists(), "architect mode must not mutate the workspace");
+
+    let redirect_denied = BashCommand {
+        action_json: BashCommandAction::Command {
+            command: format!("echo bypass > {}", marker.display()),
+            is_background: false,
+            allow_multi: false,
+        },
+        wait_for_seconds: Some(0.2),
+        thread_id: "architectreadonly".to_string(),
+    };
+    let result =
+        winx_code_agent::tools::bash_command::handle_tool_call(&bash_state_arc, redirect_denied)
+            .await;
+    assert!(matches!(result, Err(WinxError::CommandNotAllowed(_))));
+    assert!(!marker.exists(), "architect mode must reject shell output redirects");
+
+    let allowed = BashCommand {
+        action_json: BashCommandAction::Command {
+            command: "pwd".to_string(),
+            is_background: false,
+            allow_multi: false,
+        },
+        wait_for_seconds: Some(1.0),
+        thread_id: "architectreadonly".to_string(),
+    };
+    let output =
+        winx_code_agent::tools::bash_command::handle_tool_call(&bash_state_arc, allowed).await?;
+    assert!(output.contains(&temp_dir.path().canonicalize()?.display().to_string()));
 
     Ok(())
 }

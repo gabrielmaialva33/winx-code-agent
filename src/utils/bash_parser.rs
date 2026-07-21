@@ -245,6 +245,130 @@ pub const SHELL_SPAWNING_COMMANDS: &[&str] = &[
     "perl", "ruby", "node", "deno", "awk", "gawk", "php", "lua",
 ];
 
+/// Commands exposed by architect mode. This deliberately omits general-purpose
+/// interpreters and utilities with write/exec primitives (`sed`, `awk`, `find`,
+/// `tee`, ...). Bash restricted mode is only defense in depth: it does not make
+/// ordinary commands such as `touch` or `rm` read-only.
+pub const ARCHITECT_COMMANDS: &[&str] = &[
+    "pwd",
+    "ls",
+    "rg",
+    "grep",
+    "head",
+    "tail",
+    "wc",
+    "stat",
+    "file",
+    "readlink",
+    "realpath",
+    "basename",
+    "dirname",
+    "printf",
+    "echo",
+    "type",
+    "which",
+    "uname",
+    "date",
+    "id",
+    "whoami",
+    "du",
+    "df",
+    "tree",
+    "git status",
+    "git diff",
+    "git log",
+    "git show",
+    "git ls-files",
+    "git grep",
+    "git rev-parse",
+    "git branch --show-current",
+];
+
+pub fn architect_allowed_commands() -> Vec<String> {
+    ARCHITECT_COMMANDS.iter().map(|command| (*command).to_string()).collect()
+}
+
+/// Fail-closed read-only policy for architect shell commands.
+///
+/// The normal allowlist checks every nested command, but a few nominally
+/// read-only programs have options that execute helpers or write files. Validate
+/// those options here as well so `rg --pre`, `git diff --ext-diff`, and
+/// `git show --output=...` cannot turn the architect shell into a mutation path.
+pub fn is_architect_command_allowed(command_line: &str) -> bool {
+    if contains_file_redirect(command_line) {
+        return false;
+    }
+    let Ok(commands) = extract_command_texts(command_line) else { return false };
+    !commands.is_empty() && commands.iter().all(|command| architect_command_is_safe(command))
+}
+
+/// Reject shell-managed file redirects in architect mode. Even a harmless
+/// command such as `echo` or `git diff` becomes a write primitive when followed
+/// by `> file`; checking command names alone cannot see that side effect.
+fn contains_file_redirect(command: &str) -> bool {
+    let parse_src = neutralize_supplementary(command.trim());
+    let mut parser = Parser::new();
+    let language: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
+    if parser.set_language(&language).is_err() {
+        return true;
+    }
+    let Some(tree) = parser.parse(parse_src.as_ref(), None) else { return true };
+    let root = tree.root_node();
+    root.has_error() || node_tree_contains_kind(root, "file_redirect")
+}
+
+fn node_tree_contains_kind(node: Node<'_>, kind: &str) -> bool {
+    if node.kind() == kind {
+        return true;
+    }
+    let mut cursor = node.walk();
+    let found = node.children(&mut cursor).any(|child| node_tree_contains_kind(child, kind));
+    found
+}
+
+fn architect_command_is_safe(command: &str) -> bool {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let Some(program) = words.first().copied() else { return false };
+
+    if program == "git" {
+        let Some(subcommand) = words.get(1).copied() else { return false };
+        if subcommand == "branch" {
+            return words.as_slice() == ["git", "branch", "--show-current"];
+        }
+        if !matches!(
+            subcommand,
+            "status" | "diff" | "log" | "show" | "ls-files" | "grep" | "rev-parse"
+        ) {
+            return false;
+        }
+        return !words.iter().skip(2).any(|word| {
+            word.starts_with("--output")
+                || *word == "--ext-diff"
+                || *word == "--textconv"
+                || word.starts_with("--open-files-in-pager")
+        });
+    }
+
+    let allowed = ARCHITECT_COMMANDS
+        .iter()
+        .filter(|entry| !entry.starts_with("git "))
+        .any(|entry| *entry == program);
+    if !allowed {
+        return false;
+    }
+
+    if program == "rg" {
+        return !words.iter().skip(1).any(|word| {
+            word == &"--pre"
+                || word.starts_with("--pre=")
+                || word == &"--hostname-bin"
+                || word.starts_with("--hostname-bin=")
+        });
+    }
+
+    true
+}
+
 /// Return the deduplicated allowlist entries that make a `code_writer` allowlist
 /// bypassable (see [`SHELL_SPAWNING_COMMANDS`]).
 ///
@@ -270,6 +394,7 @@ mod tests {
     use super::assert_single_statement;
     use super::detect_allowlist_bypass;
     use super::extract_command_texts;
+    use super::is_architect_command_allowed;
     use proptest::prelude::*;
 
     proptest! {
@@ -309,6 +434,38 @@ mod tests {
         // The fix sanitizes ONLY the parsed copy, so a legit command carrying an
         // emoji is still accepted (not rejected) and seen as one statement.
         assert!(assert_single_statement("git commit -m \"\u{1F680} ship it\"", false).is_ok());
+    }
+
+    #[test]
+    fn architect_policy_allows_read_only_exploration() {
+        for command in [
+            "pwd",
+            "rg -n TODO src | head -20",
+            "git status --short",
+            "git diff -- src/lib.rs",
+            "git branch --show-current",
+        ] {
+            assert!(is_architect_command_allowed(command), "should allow: {command}");
+        }
+    }
+
+    #[test]
+    fn architect_policy_blocks_mutation_and_helper_execution() {
+        for command in [
+            "touch owned",
+            "rm file",
+            "sed -i s/a/b/ file",
+            "git checkout -- file",
+            "git diff --output=leak.patch",
+            "git branch --show-current --delete main",
+            "rg --pre 'touch owned' pattern",
+            "rg pattern $(touch owned)",
+            "echo owned > marker",
+            "git diff >> marker",
+            "ls 2> marker",
+        ] {
+            assert!(!is_architect_command_allowed(command), "should reject: {command}");
+        }
     }
 
     #[test]

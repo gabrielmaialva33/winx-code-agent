@@ -249,7 +249,11 @@ impl BashState {
     }
 
     pub fn is_command_allowed(&self, command: &str) -> bool {
-        self.bash_command_mode.allowed_commands.is_allowed(command)
+        if self.mode == Modes::Architect {
+            crate::utils::bash_parser::is_architect_command_allowed(command)
+        } else {
+            self.bash_command_mode.allowed_commands.is_allowed(command)
+        }
     }
 
     pub fn is_file_edit_allowed(&self, path: &str) -> bool {
