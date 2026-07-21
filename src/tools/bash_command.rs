@@ -136,15 +136,22 @@ const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can
 /// a `status_check`) can return the trailing output before the entry is gone.
 #[derive(Debug, Clone)]
 pub struct ExitedShellInfo {
+    pub owner_thread_id: String,
     pub last_command: String,
     pub final_output: String,
     pub exited_at: Instant,
 }
 
+#[derive(Debug)]
+struct BackgroundShellEntry {
+    owner_thread_id: String,
+    shell: SharedPtyShell,
+}
+
 /// Manages background shell sessions - matches WCGW Python's `background_shells` dict
 #[derive(Debug, Default)]
 pub struct BackgroundShellManager {
-    shells: HashMap<String, SharedPtyShell>,
+    shells: HashMap<String, BackgroundShellEntry>,
     /// Recently exited shells that still owe their final output to the caller.
     /// Entries are consumed the first time the caller queries the id, then dropped.
     tombstones: HashMap<String, ExitedShellInfo>,
@@ -153,6 +160,8 @@ pub struct BackgroundShellManager {
 impl BackgroundShellManager {
     /// Tombstones older than this are garbage-collected on the next prune pass.
     const TOMBSTONE_TTL: Duration = Duration::from_secs(300);
+    const MAX_SHELLS: usize = 32;
+    const MAX_SHELLS_PER_THREAD: usize = 8;
 
     /// Create a new background shell manager
     pub fn new() -> Self {
@@ -166,22 +175,52 @@ impl BackgroundShellManager {
     /// `PtyShell::new` forks+execs and does a ~300ms blocking prompt init, which
     /// must not run under the global `std::Mutex` (it would serialize every other
     /// background-shell op behind one slow spawn).
-    pub fn register_shell(&mut self, shell: PtyShell) -> String {
-        let cid = format!("{:010x}", rand::rng().random::<u32>());
-        self.shells.insert(cid.clone(), Arc::new(Mutex::new(Some(shell))));
+    pub fn register_shell(&mut self, owner_thread_id: &str, shell: PtyShell) -> Result<String> {
+        self.prune_finished_shells();
+        self.ensure_capacity(owner_thread_id)?;
+
+        let cid = format!("{:016x}", rand::rng().random::<u64>());
+        self.shells.insert(
+            cid.clone(),
+            BackgroundShellEntry {
+                owner_thread_id: owner_thread_id.to_string(),
+                shell: Arc::new(Mutex::new(Some(shell))),
+            },
+        );
         info!("Started background shell with id: {}", cid);
-        cid
+        Ok(cid)
+    }
+
+    fn ensure_capacity(&self, owner_thread_id: &str) -> Result<()> {
+        let owned =
+            self.shells.values().filter(|entry| entry.owner_thread_id == owner_thread_id).count();
+        if owned >= Self::MAX_SHELLS_PER_THREAD {
+            return Err(WinxError::CommandExecutionError(format!(
+                "Background shell limit reached for this thread ({}). Reuse or stop an existing shell.",
+                Self::MAX_SHELLS_PER_THREAD
+            )));
+        }
+        if self.shells.len() >= Self::MAX_SHELLS {
+            return Err(WinxError::CommandExecutionError(format!(
+                "Global background shell limit reached ({}). Wait for an existing shell to exit.",
+                Self::MAX_SHELLS
+            )));
+        }
+        Ok(())
     }
 
     /// Get a background shell by its command ID
-    pub fn get_shell(&self, bg_command_id: &str) -> Option<SharedPtyShell> {
-        self.shells.get(bg_command_id).cloned()
+    pub fn get_shell(&self, owner_thread_id: &str, bg_command_id: &str) -> Option<SharedPtyShell> {
+        self.shells
+            .get(bg_command_id)
+            .filter(|entry| entry.owner_thread_id == owner_thread_id)
+            .map(|entry| entry.shell.clone())
     }
 
     /// Remove and cleanup a background shell
     pub fn remove_shell(&mut self, bg_command_id: &str) -> bool {
-        if let Some(shell_arc) = self.shells.remove(bg_command_id) {
-            if let Ok(mut guard) = shell_arc.try_lock() {
+        if let Some(entry) = self.shells.remove(bg_command_id) {
+            if let Ok(mut guard) = entry.shell.try_lock() {
                 *guard = None;
             }
             info!("Removed background shell: {}", bg_command_id);
@@ -198,8 +237,8 @@ impl BackgroundShellManager {
 
         let mut finished: Vec<(String, Option<ExitedShellInfo>)> = Vec::new();
 
-        for (id, shell_arc) in &self.shells {
-            let Ok(mut guard) = shell_arc.try_lock() else {
+        for (id, entry) in &self.shells {
+            let Ok(mut guard) = entry.shell.try_lock() else {
                 continue;
             };
 
@@ -210,6 +249,7 @@ impl BackgroundShellManager {
 
             if !shell.is_alive() {
                 let tombstone = ExitedShellInfo {
+                    owner_thread_id: entry.owner_thread_id.clone(),
                     last_command: shell.last_command.clone(),
                     final_output: std::mem::take(&mut shell.output_buffer),
                     exited_at: now,
@@ -235,6 +275,7 @@ impl BackgroundShellManager {
 
             if !shell.command_running {
                 let tombstone = ExitedShellInfo {
+                    owner_thread_id: entry.owner_thread_id.clone(),
                     last_command: shell.last_command.clone(),
                     final_output: std::mem::take(&mut shell.output_buffer),
                     exited_at: now,
@@ -257,21 +298,31 @@ impl BackgroundShellManager {
     /// `prune_finished_shells`), so repeated `status_check` calls on the same
     /// `bg_command_id` keep returning the cached final output instead of
     /// flipping to "shell not found" after the first read.
-    pub fn peek_tombstone(&self, bg_command_id: &str) -> Option<ExitedShellInfo> {
-        self.tombstones.get(bg_command_id).cloned()
+    pub fn peek_tombstone(
+        &self,
+        owner_thread_id: &str,
+        bg_command_id: &str,
+    ) -> Option<ExitedShellInfo> {
+        self.tombstones
+            .get(bg_command_id)
+            .filter(|entry| entry.owner_thread_id == owner_thread_id)
+            .cloned()
     }
 
     /// Get info about all running background shells - matches WCGW Python `get_bg_running_commandsinfo`
-    pub fn get_running_info(&mut self) -> String {
+    pub fn get_running_info(&mut self, owner_thread_id: &str) -> String {
         self.prune_finished_shells();
 
-        if self.shells.is_empty() {
+        if !self.shells.values().any(|entry| entry.owner_thread_id == owner_thread_id) {
             return "No command running in background.\n".to_string();
         }
 
         let mut running = Vec::new();
-        for (id, shell_arc) in &self.shells {
-            if let Ok(guard) = shell_arc.try_lock() {
+        for (id, entry) in &self.shells {
+            if entry.owner_thread_id != owner_thread_id {
+                continue;
+            }
+            if let Ok(guard) = entry.shell.try_lock() {
                 if let Some(bash) = guard.as_ref() {
                     if bash.command_running {
                         running
@@ -304,6 +355,37 @@ lazy_static::lazy_static! {
 /// recovering the inner guard is safe.
 fn lock_bg_manager() -> std::sync::MutexGuard<'static, BackgroundShellManager> {
     BG_SHELL_MANAGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Drain one background shell even when the client never polls it, then turn it
+/// into a short-lived tombstone. Without this task, a completed `is_background`
+/// command leaves a bash process, PTY and reader thread alive until some later
+/// foreground status happens to prune the global manager.
+fn spawn_background_reaper(owner_thread_id: String, bg_command_id: String) {
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_millis(100)).await;
+            let shell_arc = {
+                let manager = lock_bg_manager();
+                manager.get_shell(&owner_thread_id, &bg_command_id)
+            };
+            let Some(shell_arc) = shell_arc else {
+                return;
+            };
+
+            let finished = {
+                let mut guard = shell_arc.lock().await;
+                match guard.as_mut() {
+                    Some(shell) => shell.poll_output_nonblocking() || !shell.is_alive(),
+                    None => true,
+                }
+            };
+            if finished {
+                lock_bg_manager().prune_finished_shells();
+                return;
+            }
+        }
+    });
 }
 
 // ==================== WCGW-Style Helper Functions ====================
@@ -346,7 +428,7 @@ fn get_status(
         {
             let mut manager = lock_bg_manager();
             status.push_str("This is the main shell. ");
-            status.push_str(&manager.get_running_info());
+            status.push_str(&manager.get_running_info(&bash_state.current_thread_id));
         }
     }
 
@@ -474,9 +556,26 @@ async fn submit_enter(shell_arc: &SharedPtyShell) -> Result<()> {
     tokio::time::sleep(SUBMIT_NUDGE_DELAY).await;
     let mut guard = shell_arc.lock().await;
     let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
+    ensure_interactive_target(bash)?;
     bash.send_special_key("Enter")
         .map_err(|e| WinxError::CommandExecutionError(format!("Failed to submit: {e}")))?;
     Ok(())
+}
+
+/// Interactive bytes are input for an already-running foreground program, not
+/// an alternate command-execution API. Drain first so a prompt that arrived just
+/// before this call marks the command complete; otherwise text submitted to an
+/// idle shell would bypass the mode's command allowlist entirely.
+fn ensure_interactive_target(shell: &mut PtyShell) -> Result<()> {
+    shell.poll_output_nonblocking();
+    if shell.command_running {
+        Ok(())
+    } else {
+        Err(WinxError::CommandExecutionError(
+            "No interactive command is running. Start an allowed command first; send_text/send_ascii/send_specials cannot execute commands in an idle shell."
+                .to_string(),
+        ))
+    }
 }
 
 // ==================== Main Tool Handler ====================
@@ -490,7 +589,16 @@ pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     bash_command: BashCommand,
 ) -> Result<String> {
-    info!("BashCommand tool called with: {:?}", bash_command);
+    let action_kind = match &bash_command.action_json {
+        BashCommandAction::Command { .. } => "command",
+        BashCommandAction::StatusCheck { .. } => "status_check",
+        BashCommandAction::SendText { .. } => "send_text",
+        BashCommandAction::SendSpecials { .. } => "send_specials",
+        BashCommandAction::SendAscii { .. } => "send_ascii",
+        BashCommandAction::Screen { .. } => "screen",
+        BashCommandAction::WaitForTurn { .. } => "wait_for_turn",
+    };
+    info!(thread_id = %bash_command.thread_id, action = action_kind, "BashCommand tool called");
 
     let thread_id = normalize_thread_id(&bash_command.thread_id);
 
@@ -598,11 +706,13 @@ async fn execute_bash_action(
                 let mut manager = lock_bg_manager();
                 manager.prune_finished_shells();
 
-                if let Some(shell) = manager.get_shell(id) {
+                if let Some(shell) = manager.get_shell(&bash_state.current_thread_id, id) {
                     is_bg = true;
                     bg_id = Some(id.clone());
                     Some(shell)
-                } else if let Some(tombstone) = manager.peek_tombstone(id) {
+                } else if let Some(tombstone) =
+                    manager.peek_tombstone(&bash_state.current_thread_id, id)
+                {
                     // Shell already exited. For a status check we can hand back the
                     // final cached output exactly once. For anything else (send_text,
                     // send_specials, send_ascii) tell the caller the shell is gone
@@ -614,7 +724,7 @@ async fn execute_bash_action(
                     let error = format!(
                         "No shell found running with command id {}.\n{}",
                         id,
-                        manager.get_running_info()
+                        manager.get_running_info(&bash_state.current_thread_id)
                     );
                     return Err(WinxError::CommandExecutionError(error));
                 }
@@ -757,11 +867,11 @@ async fn execute_command(
     // wcgw strips a trailing `| tail` before anything else (model_validator).
     let stripped_command = strip_tail_pipe(command);
     let command = stripped_command.as_str();
-    debug!("Processing Command action: {command:?} (allow_multi={allow_multi})");
+    debug!(bytes = command.len(), allow_multi, "Processing Command action");
 
     // Check mode permissions - matches WCGW Python bash_command_mode check
     if !bash_state.is_command_allowed(command) {
-        error!("Command '{}' not allowed in current mode", command);
+        error!(bytes = command.len(), "Command not allowed in current mode");
         return Err(WinxError::CommandNotAllowed(
             "Error: BashCommand not allowed in current mode".to_string(),
         ));
@@ -1178,7 +1288,7 @@ async fn execute_status_check(
             "No command is currently running, so there's nothing to check. The previous \
              command already finished and its output was returned when it completed. Start a \
              new command, or pass a bg_command_id if you launched one in the background.\n{}",
-            manager.get_running_info()
+            manager.get_running_info(&bash_state.current_thread_id)
         );
         return Err(WinxError::CommandExecutionError(error));
     }
@@ -1243,14 +1353,17 @@ async fn execute_screen(
 
     if diff {
         let (update, is_running, in_alt, cursor) = {
-            let guard = shell_arc.lock().await;
-            match guard.as_ref() {
-                Some(bash) => (
-                    bash.live_snapshot_diff(max_lines, SCREEN_DIFF_THRESHOLD),
-                    bash.command_running,
-                    bash.live_in_alt_screen(),
-                    bash.live_cursor_position(),
-                ),
+            let mut guard = shell_arc.lock().await;
+            match guard.as_mut() {
+                Some(bash) => {
+                    bash.poll_output_nonblocking();
+                    (
+                        bash.live_snapshot_diff(max_lines, SCREEN_DIFF_THRESHOLD),
+                        bash.command_running,
+                        bash.live_in_alt_screen(),
+                        bash.live_cursor_position(),
+                    )
+                }
                 None => (ScreenUpdate::Full(Vec::new()), false, false, (0, 0)),
             }
         };
@@ -1281,14 +1394,17 @@ async fn execute_screen(
     }
 
     let (snapshot, is_running, in_alt, cursor) = {
-        let guard = shell_arc.lock().await;
-        match guard.as_ref() {
-            Some(bash) => (
-                bash.live_snapshot(max_lines),
-                bash.command_running,
-                bash.live_in_alt_screen(),
-                bash.live_cursor_position(),
-            ),
+        let mut guard = shell_arc.lock().await;
+        match guard.as_mut() {
+            Some(bash) => {
+                bash.poll_output_nonblocking();
+                (
+                    bash.live_snapshot(max_lines),
+                    bash.command_running,
+                    bash.live_in_alt_screen(),
+                    bash.live_cursor_position(),
+                )
+            }
             None => (Vec::new(), false, false, (0, 0)),
         }
     };
@@ -1402,7 +1518,10 @@ async fn execute_wait_for_turn(
             let mut guard = shell_arc.lock().await;
             match guard.as_mut() {
                 Some(bash) => (
-                    bash.live_snapshot(max_lines),
+                    {
+                        bash.poll_output_nonblocking();
+                        bash.live_snapshot(max_lines)
+                    },
                     bash.live_in_alt_screen(),
                     bash.is_alive(),
                     bash.command_running,
@@ -1481,7 +1600,7 @@ async fn execute_send_text(
     bg_id: Option<&str>,
     timeout_s: f64,
 ) -> Result<String> {
-    debug!("Processing SendText action: {text:?} (submit={submit})");
+    debug!(bytes = text.len(), submit, "Processing SendText action");
 
     // Validate - matches WCGW Python
     if text.is_empty() {
@@ -1498,6 +1617,7 @@ async fn execute_send_text(
         let mut guard = shell_arc.lock().await;
 
         let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
+        ensure_interactive_target(bash)?;
 
         // Send in chunks - matches WCGW Python: for i in range(0, len(command_data.send_text), 128)
         send_utf8_in_byte_chunks(bash, text, TEXT_CHUNK_SIZE)?;
@@ -1540,6 +1660,7 @@ async fn execute_send_specials(
         let mut guard = shell_arc.lock().await;
 
         let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
+        ensure_interactive_target(bash)?;
 
         // Send each special key - matches WCGW Python exactly
         for key in keys {
@@ -1632,7 +1753,7 @@ async fn execute_send_ascii(
     bg_id: Option<&str>,
     timeout_s: f64,
 ) -> Result<String> {
-    debug!("Processing SendAscii action: {ascii_codes:?} (submit={submit})");
+    debug!(bytes = ascii_codes.len(), submit, "Processing SendAscii action");
 
     // Validate - matches WCGW Python
     if ascii_codes.is_empty() {
@@ -1648,6 +1769,7 @@ async fn execute_send_ascii(
         let mut guard = shell_arc.lock().await;
 
         let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
+        ensure_interactive_target(bash)?;
 
         // Send each ASCII code - matches WCGW Python
         for &code in ascii_codes {
@@ -1691,7 +1813,7 @@ async fn execute_in_background(
     command: &str,
     timeout_s: f64,
 ) -> Result<String> {
-    debug!("Executing command in background: {}", command);
+    debug!(bytes = command.len(), "Executing command in background");
 
     // Start a new background shell - matches WCGW Python bash_state.start_new_bg_shell
     let restricted_mode =
@@ -1710,13 +1832,13 @@ async fn execute_in_background(
             .map_err(|e| {
                 WinxError::CommandExecutionError(format!("Failed to start background shell: {e}"))
             })?;
-        lock_bg_manager().register_shell(shell)
+        lock_bg_manager().register_shell(&bash_state.current_thread_id, shell)?
     };
 
     // Get the shell
     let shell_arc = {
         let manager = lock_bg_manager();
-        manager.get_shell(&bg_id).ok_or_else(|| {
+        manager.get_shell(&bash_state.current_thread_id, &bg_id).ok_or_else(|| {
             WinxError::CommandExecutionError("Failed to get background shell".to_string())
         })?
     };
@@ -1734,6 +1856,8 @@ async fn execute_in_background(
         })?;
     }
     debug!("bg[{}]: send_command returned, replying with bg_command_id", bg_id);
+
+    spawn_background_reaper(bash_state.current_thread_id.clone(), bg_id.clone());
 
     let _ = timeout_s;
     let _ = shell_arc;
@@ -1839,7 +1963,40 @@ mod wait_turn_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::strip_tail_pipe_impl;
+    use super::{strip_tail_pipe_impl, BackgroundShellEntry, BackgroundShellManager};
+    use crate::errors::WinxError;
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    fn empty_entry(owner_thread_id: &str) -> BackgroundShellEntry {
+        BackgroundShellEntry {
+            owner_thread_id: owner_thread_id.to_string(),
+            shell: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[test]
+    fn background_capacity_is_bounded_per_thread_and_globally() {
+        let mut manager = BackgroundShellManager::new();
+        for index in 0..BackgroundShellManager::MAX_SHELLS_PER_THREAD {
+            manager.shells.insert(format!("owned-{index}"), empty_entry("owner"));
+        }
+        assert!(matches!(
+            manager.ensure_capacity("owner"),
+            Err(WinxError::CommandExecutionError(message)) if message.contains("this thread")
+        ));
+        assert!(manager.ensure_capacity("another-owner").is_ok());
+
+        for index in manager.shells.len()..BackgroundShellManager::MAX_SHELLS {
+            manager
+                .shells
+                .insert(format!("global-{index}"), empty_entry(&format!("owner-{index}")));
+        }
+        assert!(matches!(
+            manager.ensure_capacity("new-owner"),
+            Err(WinxError::CommandExecutionError(message)) if message.contains("Global")
+        ));
+    }
 
     #[test]
     fn strips_trailing_tail_by_default() {

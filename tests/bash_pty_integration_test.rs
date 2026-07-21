@@ -380,20 +380,29 @@ async fn test_07_multiple_commands_sequence() -> Result<()> {
 async fn test_08_arrow_keys() -> Result<()> {
     let (bash_state_arc, _temp_dir) = setup_bash_state("i2238-arrows").await?;
 
-    // First run a command to have something in history
+    // Capture three bytes from a real interactive program in raw terminal mode.
+    // Special keys are program input; sending them to an idle shell is rejected
+    // because it would bypass the command allowlist.
     let cmd1 = BashCommand {
         action_json: BashCommandAction::Command {
-            command: "echo 'first command'".to_string(),
+            command:
+                "python3 -c 'import os, tty; tty.setraw(0); print(os.read(0, 3).hex(), flush=True)'"
+                    .to_string(),
             is_background: false,
             allow_multi: false,
         },
-        wait_for_seconds: Some(5.0),
+        wait_for_seconds: Some(0.0),
         thread_id: "i2238-arrows".to_string(),
     };
 
-    let _ = tools::bash_command::handle_tool_call(&bash_state_arc, cmd1).await?;
+    let initial = tools::bash_command::handle_tool_call(&bash_state_arc, cmd1).await?;
+    assert!(
+        initial.contains("status = still running"),
+        "capture program should be active: {initial}"
+    );
+    sleep(Duration::from_millis(100)).await;
 
-    // Send Up arrow (should recall previous command in history)
+    // Up is ESC [ A (1b 5b 41).
     let arrow_cmd = BashCommand {
         action_json: BashCommandAction::SendSpecials {
             send_specials: vec![SpecialKey::KeyUp],
@@ -404,13 +413,8 @@ async fn test_08_arrow_keys() -> Result<()> {
         thread_id: "i2238-arrows".to_string(),
     };
 
-    let arrow_result = tools::bash_command::handle_tool_call(&bash_state_arc, arrow_cmd).await;
-
-    // Previously both arms were empty, so the test asserted nothing — a regression
-    // in arrow-key handling passed silently. A KeyUp against an idle shell must come
-    // back Ok (the `?` fails the test otherwise) with real terminal output.
-    let response = arrow_result?;
-    assert!(!response.is_empty(), "KeyUp should return terminal output, got empty: {response:?}");
+    let response = tools::bash_command::handle_tool_call(&bash_state_arc, arrow_cmd).await?;
+    assert!(response.contains("1b5b41"), "KeyUp bytes should reach the program: {response}");
 
     Ok(())
 }

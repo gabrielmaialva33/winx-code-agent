@@ -119,6 +119,82 @@ async fn tail_pipe_stripped_from_json() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn send_text_cannot_execute_in_an_idle_shell() -> Result<()> {
+    let thread_id = "pty-idle-send-guard";
+    let (bash_state_arc, temp_dir) = setup_bash_state(thread_id).await?;
+    let marker = temp_dir.path().join("idle-send-must-not-run");
+
+    let result = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        BashCommand {
+            action_json: BashCommandAction::SendText {
+                send_text: format!("touch {}", marker.display()),
+                bg_command_id: None,
+                submit: true,
+            },
+            wait_for_seconds: Some(0.2),
+            thread_id: thread_id.to_string(),
+        },
+    )
+    .await;
+
+    assert!(matches!(result, Err(WinxError::CommandExecutionError(_))));
+    sleep(Duration::from_millis(100)).await;
+    assert!(!marker.exists(), "send_text must not become an idle-shell command path");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_ids_are_owned_by_their_thread() -> Result<()> {
+    let owner = "pty-bg-owner";
+    let intruder = "pty-bg-intruder";
+    let (owner_state, _owner_dir) = setup_bash_state(owner).await?;
+    let (intruder_state, _intruder_dir) = setup_bash_state(intruder).await?;
+
+    let bg_response = run_command(&owner_state, owner, "sleep 10", true).await?;
+    let bg_id = bg_command_id(&bg_response).ok_or_else(|| {
+        WinxError::CommandExecutionError("background response should include id".to_string())
+    })?;
+
+    let result = tools::bash_command::handle_tool_call(
+        &intruder_state,
+        serde_json::from_value(json!({
+            "action_json": { "type": "status_check", "bg_command_id": bg_id },
+            "wait_for_seconds": 0.1,
+            "thread_id": intruder
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await;
+    let error = match result {
+        Err(error) => error,
+        Ok(response) => {
+            return Err(WinxError::CommandExecutionError(format!(
+                "another thread resolved the owner's background id: {response}"
+            )))
+        }
+    };
+    let message = error.to_string();
+    assert!(!message.contains("sleep 10"), "error must not disclose another command: {message}");
+
+    let _ = tools::bash_command::handle_tool_call(
+        &owner_state,
+        serde_json::from_value(json!({
+            "action_json": {
+                "type": "send_specials",
+                "send_specials": ["Ctrl-c"],
+                "bg_command_id": bg_id
+            },
+            "wait_for_seconds": 0.2,
+            "thread_id": owner
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn completed_background_shell_is_pruned_from_main_status() -> Result<()> {
     let thread_id = "pty-bg-prune-regression";
     let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
@@ -163,10 +239,8 @@ async fn exited_bg_shell_status_check_returns_cached_output() -> Result<()> {
 
     sleep(Duration::from_millis(400)).await;
 
-    // First, run a foreground command to trigger pruning of the finished bg shell.
-    let _ = run_command(&bash_state_arc, thread_id, "true", false).await?;
-
-    // Tombstone should still let one status_check pull the cached output.
+    // The background reaper should have converted the completed shell into a
+    // tombstone without needing an unrelated foreground command to trigger GC.
     let status_response: String = tools::bash_command::handle_tool_call(
         &bash_state_arc,
         serde_json::from_value(json!({
@@ -321,5 +395,51 @@ async fn cd_updates_status_and_persisted_cwd() -> Result<()> {
     let bash_state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
     assert_eq!(bash_state.cwd, target);
 
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn screen_drains_the_bounded_pty_queue() -> Result<()> {
+    let thread_id = "pty-screen-drain";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+    let command = BashCommand {
+        action_json: BashCommandAction::Command {
+            command: "python3 -c 'import os; [os.write(1, b\"x\" * 4096) for _ in range(2048)]'"
+                .to_string(),
+            is_background: false,
+            allow_multi: false,
+        },
+        // Return before consuming output so the 1024-chunk channel can fill.
+        wait_for_seconds: Some(0.0),
+        thread_id: thread_id.to_string(),
+    };
+    let initial = tools::bash_command::handle_tool_call(&bash_state_arc, command).await?;
+    assert!(initial.contains("status = still running"), "expected an active producer: {initial}");
+
+    sleep(Duration::from_millis(150)).await;
+    let mut exited = false;
+    for _ in 0..20 {
+        let screen = tools::bash_command::handle_tool_call(
+            &bash_state_arc,
+            BashCommand {
+                action_json: BashCommandAction::Screen {
+                    screen: true,
+                    bg_command_id: None,
+                    lines: Some(5),
+                    diff: false,
+                },
+                wait_for_seconds: Some(0.0),
+                thread_id: thread_id.to_string(),
+            },
+        )
+        .await?;
+        if screen.contains("status = process exited") {
+            exited = true;
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+
+    assert!(exited, "screen polling must drain output so a verbose child can finish");
     Ok(())
 }
