@@ -5,22 +5,23 @@ use rand::RngExt;
 use rmcp::{
     model::{
         Annotated, CallToolRequestParams, CallToolResult, CancelTaskParams, CancelTaskResult,
-        Content, CreateTaskResult, GetPromptRequestParams, GetPromptResult, GetTaskInfoParams,
-        GetTaskPayloadResult, GetTaskResult, GetTaskResultParams, Implementation,
-        ListPromptsResult, ListResourcesResult, ListTasksResult, ListToolsResult,
-        PaginatedRequestParams, Prompt, PromptMessage, PromptMessageRole, ProtocolVersion,
-        RawResource, ReadResourceRequestParams, ReadResourceResult, ResourceContents,
-        ServerCapabilities, ServerInfo, Task, TaskStatus, TaskSupport, TasksCapability, Tool,
-        ToolAnnotations, ToolExecution,
+        ClientJsonRpcMessage, ClientRequest, Content, CreateTaskResult, ErrorCode,
+        GetPromptRequestParams, GetPromptResult, GetTaskInfoParams, GetTaskPayloadResult,
+        GetTaskResult, GetTaskResultParams, Implementation, ListPromptsResult, ListResourcesResult,
+        ListTasksResult, ListToolsResult, PaginatedRequestParams, Prompt, PromptMessage,
+        PromptMessageRole, ProtocolVersion, RawResource, ReadResourceRequestParams,
+        ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo, ServerJsonRpcMessage,
+        Task, TaskStatus, TaskSupport, TasksCapability, Tool, ToolAnnotations, ToolExecution,
     },
     service::{NotificationContext, RequestContext, RoleServer},
-    transport::stdio,
+    transport::{async_rw::AsyncRwTransport, stdio, Transport},
     ErrorData as McpError, ServerHandler, ServiceExt,
 };
 use schemars::schema_for;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
+use std::future::Future;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -95,6 +96,67 @@ fn to_mcp_error(tool: &str, err: &WinxError) -> McpError {
 
 /// Type alias for the shared bash state - uses `tokio::sync::Mutex` for async safety
 pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
+
+/// Preserve the legacy 2025-11-25 handshake when a newer client probes with
+/// `server/discover` first. The draft stateless protocol requires legacy
+/// servers to answer `Method not found`, after which the client falls back to
+/// `initialize`; rmcp 1.8 otherwise treats the probe as a fatal init error.
+struct LegacyDiscoveryFallback<T> {
+    inner: T,
+}
+
+impl<T> LegacyDiscoveryFallback<T> {
+    fn new(inner: T) -> Self {
+        Self { inner }
+    }
+}
+
+impl<T> Transport<RoleServer> for LegacyDiscoveryFallback<T>
+where
+    T: Transport<RoleServer>,
+{
+    type Error = T::Error;
+
+    fn send(
+        &mut self,
+        item: ServerJsonRpcMessage,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
+        self.inner.send(item)
+    }
+
+    async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
+        loop {
+            let message = self.inner.receive().await?;
+            let discovery_id = match &message {
+                ClientJsonRpcMessage::Request(request)
+                    if matches!(
+                        &request.request,
+                        ClientRequest::CustomRequest(custom)
+                            if custom.method == "server/discover"
+                    ) =>
+                {
+                    Some(request.id.clone())
+                }
+                _ => None,
+            };
+
+            let Some(id) = discovery_id else {
+                return Some(message);
+            };
+
+            let error = McpError::new(ErrorCode::METHOD_NOT_FOUND, "Method not found", None);
+            if let Err(error) = self.inner.send(ServerJsonRpcMessage::error(error, Some(id))).await
+            {
+                warn!(%error, "failed to answer server/discover compatibility probe");
+                return None;
+            }
+        }
+    }
+
+    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        self.inner.close()
+    }
+}
 
 /// Helper function to create JSON schema from schemars Schema
 fn schema_to_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, Value>> {
@@ -1625,7 +1687,9 @@ impl WinxService {
 pub async fn start_winx_server() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Winx MCP Server");
     let service = WinxService::new();
-    let server = service.serve(stdio()).await?;
+    let (stdin, stdout) = stdio();
+    let transport = AsyncRwTransport::new_server(stdin, stdout);
+    let server = service.serve(LegacyDiscoveryFallback::new(transport)).await?;
     server.waiting().await?;
     Ok(())
 }
@@ -1862,6 +1926,69 @@ mod schema_tests {
         );
         assert_eq!(root_uri_to_path("file://remote.example/tmp/project"), None);
         assert_eq!(root_uri_to_path("https://example.com/project"), None);
+    }
+}
+
+#[cfg(test)]
+mod discovery_compat_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::{LegacyDiscoveryFallback, WinxService};
+    use rmcp::{transport::async_rw::AsyncRwTransport, ServiceExt};
+    use serde_json::{json, Value};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn discover_probe_falls_back_without_closing_legacy_handshake() {
+        let (client, server) = tokio::io::duplex(32 * 1024);
+        let (server_read, server_write) = tokio::io::split(server);
+        let transport = AsyncRwTransport::new_server(server_read, server_write);
+        let task = tokio::spawn(async move {
+            let running = WinxService::new()
+                .serve(LegacyDiscoveryFallback::new(transport))
+                .await
+                .expect("server should accept initialize after discovery fallback");
+            running.waiting().await.expect("server should shut down cleanly");
+        });
+
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut client_read = BufReader::new(client_read);
+
+        client_write
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{}}\n",
+            )
+            .await
+            .expect("write discovery probe");
+        let mut line = String::new();
+        client_read.read_line(&mut line).await.expect("read discovery response");
+        let response: Value = serde_json::from_str(&line).expect("valid discovery response");
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["error"]["code"], -32601);
+
+        line.clear();
+        let initialize = json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {},
+                "clientInfo": { "name": "discovery-fallback-test", "version": "1" }
+            }
+        });
+        client_write
+            .write_all(format!("{initialize}\n").as_bytes())
+            .await
+            .expect("write initialize request");
+        client_read.read_line(&mut line).await.expect("read initialize response");
+        let response: Value = serde_json::from_str(&line).expect("valid initialize response");
+        assert_eq!(response["id"], 2);
+        assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
+
+        drop(client_read);
+        drop(client_write);
+        task.await.expect("server task");
     }
 }
 
