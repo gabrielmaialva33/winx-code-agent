@@ -105,9 +105,31 @@ fn schema_to_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<Stri
     // signal. Strip it — context-aware, so a user data field literally named
     // "title" is never touched.
     strip_schema_titles(&mut value);
+    strip_unsupported_schema_formats(&mut value);
     match value {
         Value::Object(map) => Arc::new(map),
         _ => Arc::new(serde_json::Map::new()),
+    }
+}
+
+/// Remove integer formats that are valid JSON Schema annotations but rejected
+/// by some MCP clients (notably Claude Code's schema compiler).
+fn strip_unsupported_schema_formats(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            if map.get("format").and_then(Value::as_str) == Some("uint") {
+                map.remove("format");
+            }
+            for child in map.values_mut() {
+                strip_unsupported_schema_formats(child);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                strip_unsupported_schema_formats(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -154,6 +176,11 @@ fn mcp_tool<T: schemars::JsonSchema>(
     annotations: ToolAnnotations,
 ) -> Tool {
     Tool::new(name, description, schema_to_input_schema::<T>()).with_annotations(annotations)
+}
+
+fn with_output_schema<T: schemars::JsonSchema>(mut tool: Tool) -> Tool {
+    tool.output_schema = Some(schema_to_input_schema::<T>());
+    tool
 }
 
 const INITIALIZE_DESCRIPTION: &str =
@@ -345,12 +372,11 @@ fn build_winx_tools() -> Vec<Tool> {
             "Read an image from the shell.",
             ToolAnnotations::new().read_only(true).open_world(false),
         ),
-        mcp_tool::<CodeMap>(
+        with_output_schema::<CodeMapStructuredOutput>(mcp_tool::<CodeMap>(
             "CodeMap",
             CODE_MAP_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
-        )
-        .with_output_schema::<CodeMapStructuredOutput>(),
+        )),
     ]
 }
 
@@ -1820,6 +1846,8 @@ mod schema_tests {
         assert!(output.get("properties").is_some_and(|properties| {
             properties.as_object().is_some_and(|properties| properties.contains_key("truncated"))
         }));
+        let blob = serde_json::to_string(output).unwrap_or_default();
+        assert!(!blob.contains("\"format\":\"uint\""), "unsupported uint format: {blob}");
     }
 
     #[test]
