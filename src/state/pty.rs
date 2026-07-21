@@ -545,7 +545,7 @@ impl PtyShell {
 
     /// Send a command to the shell and start reading output
     pub fn send_command(&mut self, command: &str) -> Result<()> {
-        debug!("PTY sending command: {}", command);
+        debug!(bytes = command.len(), "PTY sending command");
 
         // Clear previous state
         self.output_buffer.clear();
@@ -844,7 +844,7 @@ impl PtyShell {
 
     /// Send text directly to the PTY (for interactive input)
     pub fn send_text(&mut self, text: &str) -> Result<()> {
-        debug!("PTY sending text: {:?}", text);
+        debug!(bytes = text.len(), "PTY sending text");
         self.send_bytes(text.as_bytes()).context("Failed to send text")?;
         Ok(())
     }

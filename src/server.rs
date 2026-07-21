@@ -740,7 +740,6 @@ fn audit_summary(tool: &str, args: Option<&Value>) -> String {
         return "(no args)".to_string();
     };
     let s = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("").to_string();
-    let clip = |text: String| text.chars().take(100).collect::<String>();
     match tool {
         "BashCommand" => {
             let action = args.get("action_json");
@@ -749,7 +748,7 @@ fn audit_summary(tool: &str, args: Option<&Value>) -> String {
                 .and_then(Value::as_str)
                 .or_else(|| args.get("command").and_then(Value::as_str));
             if let Some(cmd) = cmd {
-                format!("cmd={:?}", clip(cmd.to_string()))
+                format!("command bytes={}", cmd.len())
             } else {
                 let kind =
                     action.and_then(|a| a.get("type")).and_then(Value::as_str).unwrap_or("?");
@@ -787,6 +786,26 @@ fn redact_result(result: &mut CallToolResult) {
     }
     if let Some(structured) = result.structured_content.as_mut() {
         crate::utils::redact::redact_json(structured);
+    }
+}
+
+#[cfg(test)]
+mod audit_tests {
+    use super::audit_summary;
+    use serde_json::json;
+
+    #[test]
+    fn bash_audit_summary_never_contains_command_content() {
+        let args = json!({
+            "action_json": {
+                "type": "command",
+                "command": "curl -H 'Authorization: secret-value' https://example.invalid"
+            }
+        });
+        let summary = audit_summary("BashCommand", Some(&args));
+        assert!(summary.starts_with("command bytes="));
+        assert!(!summary.contains("secret-value"));
+        assert!(!summary.contains("example.invalid"));
     }
 }
 

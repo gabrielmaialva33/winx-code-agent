@@ -777,7 +777,7 @@ impl<'de> Deserialize<'de> for BashCommand {
                             // It looks like JSON but has issues, let's try to sanitize it
 
                             // Detailed error for troubleshooting
-                            tracing::debug!("JSON parse error on: {}", s);
+                            tracing::debug!(bytes = s.len(), "JSON parse error in action_json");
 
                             // Common issues: unescaped quotes, newlines, tabs
                             let re_sanitized = s
@@ -807,7 +807,10 @@ impl<'de> Deserialize<'de> for BashCommand {
                         } else {
                             // Assume it's a simple command string
                             // MUST include "type": "command" for serde tagged enum
-                            tracing::info!("Treating as simple command: {}", s);
+                            tracing::info!(
+                                bytes = s.len(),
+                                "Treating action_json as simple command"
+                            );
                             serde_json::json!({"type": "command", "command": sanitize_shell_string(&s)})
                         }
                     }
@@ -821,23 +824,24 @@ impl<'de> Deserialize<'de> for BashCommand {
         // Now deserialize the action_json to our BashCommandAction enum
         let mut action: BashCommandAction =
             serde_json::from_value(action_json.clone()).map_err(|e| {
-// Log both the error and the problematic JSON for debugging
-tracing::error!(
-    "Failed to deserialize action_json to BashCommandAction: {}\nProblematic JSON: {}",
-    e,
-    action_json
-);
+                tracing::error!(
+                    bytes = action_json.to_string().len(),
+                    "Failed to deserialize action_json to BashCommandAction: {}",
+                    e
+                );
 
-// For the SyntaxError: Unexpected token case
-let err_str = e.to_string();
-if err_str.contains("unexpected token") || err_str.contains("Unexpected token") {
-    return serde::de::Error::custom(format!(
-        "JSON syntax error: {e}. Please check your JSON structure. Each field name should be in quotes, and string values should be in quotes."
-    ));
-}
+                // For the SyntaxError: Unexpected token case
+                let err_str = e.to_string();
+                if err_str.contains("unexpected token") || err_str.contains("Unexpected token") {
+                    return serde::de::Error::custom(format!(
+                        "JSON syntax error: {e}. Please check your JSON structure. Each field name should be in quotes, and string values should be in quotes."
+                    ));
+                }
 
-serde::de::Error::custom(format!("Invalid action_json: {e}. Please ensure your JSON is properly formatted."))
-        })?;
+                serde::de::Error::custom(format!(
+                    "Invalid action_json: {e}. Please ensure your JSON is properly formatted."
+                ))
+            })?;
 
         // Return the properly constructed BashCommand
         Ok(BashCommand {
