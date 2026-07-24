@@ -88,6 +88,13 @@ fn bg_command_id(response: &str) -> Option<String> {
     })
 }
 
+fn running_seconds(response: &str) -> Option<u64> {
+    response.lines().find_map(|line| {
+        let duration = line.strip_prefix("running for = ")?.strip_suffix(" seconds")?;
+        duration.parse().ok()
+    })
+}
+
 // wcgw parity: a trailing `| tail` is stripped by default (output is truncated
 // server-side anyway), so the full command output reaches the model. The opt-out
 // (`WINX_KEEP_TAIL_PIPE`) and the regex itself are covered by unit tests in
@@ -293,6 +300,252 @@ async fn exited_bg_shell_status_check_returns_cached_output() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn status_check_returns_output_emitted_after_initial_response() -> Result<()> {
+    let thread_id = "pty-incremental-output";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+
+    let initial = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        BashCommand {
+            action_json: BashCommandAction::Command {
+                command: "sleep 0.4; printf 'late-output\\n'; sleep 5".to_string(),
+                is_background: false,
+                allow_multi: true,
+            },
+            wait_for_seconds: Some(0.1),
+            thread_id: thread_id.to_string(),
+        },
+    )
+    .await?;
+    assert!(!initial.contains("late-output\n"));
+
+    sleep(Duration::from_millis(600)).await;
+    let status = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": { "type": "status_check", "verbose": true },
+            "wait_for_seconds": 0.1,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+    assert!(
+        status.contains("late-output"),
+        "status_check must return bytes emitted since the prior response: {status}"
+    );
+
+    let _ = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": { "type": "send_specials", "send_specials": ["Ctrl-c"] },
+            "wait_for_seconds": 0.2,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn first_background_completion_poll_keeps_final_output() -> Result<()> {
+    let thread_id = "pty-reaper-reader-race";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+
+    let bg_response = run_command(
+        &bash_state_arc,
+        thread_id,
+        "sleep 0.4\nprintf 'final-from-background\\n'",
+        true,
+    )
+    .await?;
+    let bg_id = bg_command_id(&bg_response).ok_or_else(|| {
+        WinxError::CommandExecutionError("background response should include id".to_string())
+    })?;
+
+    let status = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": {
+                "type": "status_check",
+                "bg_command_id": bg_id,
+                "verbose": true
+            },
+            "wait_for_seconds": 1.5,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+
+    assert!(
+        status.contains("final-from-background"),
+        "the in-flight reader must keep ownership of final output: {status}"
+    );
+    assert!(status.contains("status = process exited"), "{status}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_tombstone_keeps_exit_code_and_its_own_cwd() -> Result<()> {
+    let thread_id = "pty-tombstone-metadata";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+    let target = std::env::temp_dir().canonicalize()?;
+
+    let bg_response =
+        run_command(&bash_state_arc, thread_id, &format!("cd {}\nfalse", target.display()), true)
+            .await?;
+    let bg_id = bg_command_id(&bg_response).ok_or_else(|| {
+        WinxError::CommandExecutionError("background response should include id".to_string())
+    })?;
+    sleep(Duration::from_millis(500)).await;
+
+    let status = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": { "type": "status_check", "bg_command_id": bg_id },
+            "wait_for_seconds": 0.1,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+
+    assert!(status.contains("exit code = 1"), "{status}");
+    assert!(status.contains(&format!("cwd = {}", target.display())), "{status}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_completion_does_not_replace_main_shell_cwd() -> Result<()> {
+    let thread_id = "pty-background-cwd-isolation";
+    let (bash_state_arc, temp_dir) = setup_bash_state(thread_id).await?;
+    let main_cwd = temp_dir.path().canonicalize()?;
+    let target = std::env::temp_dir().canonicalize()?;
+
+    let bg_response = run_command(
+        &bash_state_arc,
+        thread_id,
+        &format!("sleep 0.3\ncd {}\nsleep 0.1", target.display()),
+        true,
+    )
+    .await?;
+    let bg_id = bg_command_id(&bg_response).ok_or_else(|| {
+        WinxError::CommandExecutionError("background response should include id".to_string())
+    })?;
+    let status = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": { "type": "status_check", "bg_command_id": bg_id },
+            "wait_for_seconds": 1.5,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+    assert!(status.contains(&format!("cwd = {}", target.display())), "{status}");
+
+    let state_cwd = bash_state_arc
+        .lock()
+        .await
+        .as_ref()
+        .map(|state| state.cwd.clone())
+        .ok_or(WinxError::BashStateNotInitialized)?;
+    assert_eq!(state_cwd, main_cwd, "background cwd leaked into the main session state");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn background_tombstone_keeps_truncated_output_pointer() -> Result<()> {
+    let thread_id = "pty-tombstone-scratch";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+
+    let bg_response =
+        run_command(&bash_state_arc, thread_id, "head -c 1100000 /dev/zero | tr '\\0' x", true)
+            .await?;
+    let bg_id = bg_command_id(&bg_response).ok_or_else(|| {
+        WinxError::CommandExecutionError("background response should include id".to_string())
+    })?;
+    sleep(Duration::from_millis(800)).await;
+
+    let status = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": { "type": "status_check", "bg_command_id": bg_id },
+            "wait_for_seconds": 0.2,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+    assert!(status.contains("Output was truncated to fit context"), "{status}");
+    assert!(status.contains(".winx/scratch/bash-output-"), "{status}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_foreground_commands_do_not_share_output() -> Result<()> {
+    let thread_id = "pty-foreground-gate";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+
+    let command = |marker: &'static str| BashCommand {
+        action_json: BashCommandAction::Command {
+            command: format!("printf '{marker}-start\\n'; sleep 0.3; printf '{marker}-end\\n'"),
+            is_background: false,
+            allow_multi: true,
+        },
+        wait_for_seconds: Some(1.0),
+        thread_id: thread_id.to_string(),
+    };
+    let (first, second) = tokio::join!(
+        tools::bash_command::handle_tool_call(&bash_state_arc, command("first")),
+        tools::bash_command::handle_tool_call(&bash_state_arc, command("second"))
+    );
+    let first = first?;
+    let second = second?;
+
+    assert!(first.contains("first-start") && first.contains("first-end"), "{first}");
+    assert!(!first.contains("second-start"), "{first}");
+    assert!(second.contains("second-start") && second.contains("second-end"), "{second}");
+    assert!(!second.contains("first-start"), "{second}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_d_that_leaves_process_running_is_not_reported_as_failed_interrupt() -> Result<()> {
+    let thread_id = "pty-ctrl-d-is-eof";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+    let initial = run_command(&bash_state_arc, thread_id, "sleep 5", false).await?;
+    assert!(initial.contains("status = still running"), "{initial}");
+
+    let eof = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": { "type": "send_specials", "send_specials": ["Ctrl-d"] },
+            "wait_for_seconds": 0.1,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+    assert!(eof.contains("status = still running"), "{eof}");
+    assert!(!eof.contains("Failure interrupting"), "{eof}");
+
+    let _ = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": { "type": "send_specials", "send_specials": ["Ctrl-c"] },
+            "wait_for_seconds": 0.2,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn idle_status_check_returns_compact_dedup_marker() -> Result<()> {
     let thread_id = "pty-status-dedup";
     let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
@@ -373,6 +626,56 @@ async fn idle_status_check_returns_compact_dedup_marker() -> Result<()> {
         .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
     )
     .await;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn status_check_reports_total_command_runtime() -> Result<()> {
+    let thread_id = "pty-total-runtime";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+
+    let initial = run_command(&bash_state_arc, thread_id, "sleep 5", false).await?;
+    assert!(
+        initial.contains("status = still running"),
+        "sleep should still be active after the initial short wait: {initial}"
+    );
+
+    sleep(Duration::from_millis(1_100)).await;
+    let status = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": { "type": "status_check" },
+            "wait_for_seconds": 0.1,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await?;
+
+    let _ = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        serde_json::from_value(json!({
+            "action_json": {
+                "type": "send_specials",
+                "send_specials": ["Ctrl-c"]
+            },
+            "wait_for_seconds": 0.2,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?,
+    )
+    .await;
+
+    let elapsed = running_seconds(&status).ok_or_else(|| {
+        WinxError::CommandExecutionError(format!(
+            "status should contain the running duration: {status}"
+        ))
+    })?;
+    assert!(
+        elapsed >= 1,
+        "duration should include time before this status_check, got {elapsed}s: {status}"
+    );
 
     Ok(())
 }

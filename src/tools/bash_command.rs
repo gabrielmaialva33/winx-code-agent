@@ -30,11 +30,12 @@ type SharedPtyShell = Arc<Mutex<Option<PtyShell>>>;
 /// Default timeout for command execution (seconds) - matches WCGW Python Config.timeout
 const DEFAULT_TIMEOUT: f64 = 5.0;
 
-/// Extended timeout while output is still being produced - matches WCGW Python `Config.timeout_while_output`
-const TIMEOUT_WHILE_OUTPUT: f64 = 20.0;
-
 /// Number of iterations to wait without new output before giving up - matches WCGW Python `Config.output_wait_patience`
 const OUTPUT_WAIT_PATIENCE: i32 = 3;
+
+fn effective_wait_for_seconds(wait_for_seconds: Option<f32>) -> f64 {
+    wait_for_seconds.map_or(DEFAULT_TIMEOUT, |seconds| f64::from(seconds).max(0.0))
+}
 
 /// Async poll interval for adaptive output reads. We drain whatever the reader
 /// thread has queued (non-blocking), release the shell lock, then `await` this
@@ -138,7 +139,11 @@ const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can
 pub struct ExitedShellInfo {
     pub owner_thread_id: String,
     pub last_command: String,
-    pub final_output: String,
+    pub final_output: Arc<str>,
+    pub exit_code: Option<i32>,
+    pub cwd: PathBuf,
+    pub output_truncated: bool,
+    pub scratch_path: Option<PathBuf>,
     pub exited_at: Instant,
 }
 
@@ -162,6 +167,8 @@ impl BackgroundShellManager {
     const TOMBSTONE_TTL: Duration = Duration::from_secs(300);
     const MAX_SHELLS: usize = 32;
     const MAX_SHELLS_PER_THREAD: usize = 8;
+    const MAX_TOMBSTONES: usize = 32;
+    const MAX_TOMBSTONES_PER_THREAD: usize = 8;
 
     /// Create a new background shell manager
     pub fn new() -> Self {
@@ -238,6 +245,13 @@ impl BackgroundShellManager {
         let mut finished: Vec<(String, Option<ExitedShellInfo>)> = Vec::new();
 
         for (id, entry) in &self.shells {
+            // A routed status/screen/wait call owns another Arc while it reads this
+            // shell. Never turn the shell into a tombstone underneath that caller:
+            // it would observe `None` and return an empty final response while the
+            // real output sat in the newly-created tombstone.
+            if Arc::strong_count(&entry.shell) > 1 {
+                continue;
+            }
             let Ok(mut guard) = entry.shell.try_lock() else {
                 continue;
             };
@@ -248,12 +262,7 @@ impl BackgroundShellManager {
             };
 
             if !shell.is_alive() {
-                let tombstone = ExitedShellInfo {
-                    owner_thread_id: entry.owner_thread_id.clone(),
-                    last_command: shell.last_command.clone(),
-                    final_output: std::mem::take(&mut shell.output_buffer),
-                    exited_at: now,
-                };
+                let tombstone = Self::exited_shell_info(&entry.owner_thread_id, shell, now);
                 finished.push((id.clone(), Some(tombstone)));
                 continue;
             }
@@ -274,12 +283,7 @@ impl BackgroundShellManager {
             }
 
             if !shell.command_running {
-                let tombstone = ExitedShellInfo {
-                    owner_thread_id: entry.owner_thread_id.clone(),
-                    last_command: shell.last_command.clone(),
-                    final_output: std::mem::take(&mut shell.output_buffer),
-                    exited_at: now,
-                };
+                let tombstone = Self::exited_shell_info(&entry.owner_thread_id, shell, now);
                 finished.push((id.clone(), Some(tombstone)));
             }
         }
@@ -287,7 +291,54 @@ impl BackgroundShellManager {
         for (id, tombstone) in finished {
             self.remove_shell(&id);
             if let Some(info) = tombstone {
-                self.tombstones.insert(id, info);
+                self.insert_tombstone(id, info);
+            }
+        }
+    }
+
+    fn exited_shell_info(
+        owner_thread_id: &str,
+        shell: &mut PtyShell,
+        now: Instant,
+    ) -> ExitedShellInfo {
+        ExitedShellInfo {
+            owner_thread_id: owner_thread_id.to_string(),
+            last_command: shell.last_command.clone(),
+            final_output: Arc::from(std::mem::take(&mut shell.output_buffer)),
+            exit_code: shell.last_exit_code,
+            cwd: shell.current_cwd().to_path_buf(),
+            output_truncated: shell.output_truncated,
+            scratch_path: shell.scratch_path().map(Path::to_path_buf),
+            exited_at: now,
+        }
+    }
+
+    fn insert_tombstone(&mut self, id: String, info: ExitedShellInfo) {
+        let owner = info.owner_thread_id.clone();
+        self.tombstones.insert(id, info);
+
+        while self.tombstones.values().filter(|entry| entry.owner_thread_id == owner).count()
+            > Self::MAX_TOMBSTONES_PER_THREAD
+        {
+            let oldest = self
+                .tombstones
+                .iter()
+                .filter(|(_, entry)| entry.owner_thread_id == owner)
+                .min_by_key(|(_, entry)| entry.exited_at)
+                .map(|(id, _)| id.clone());
+            if let Some(id) = oldest {
+                self.tombstones.remove(&id);
+            }
+        }
+
+        while self.tombstones.len() > Self::MAX_TOMBSTONES {
+            let oldest = self
+                .tombstones
+                .iter()
+                .min_by_key(|(_, entry)| entry.exited_at)
+                .map(|(id, _)| id.clone());
+            if let Some(id) = oldest {
+                self.tombstones.remove(&id);
             }
         }
     }
@@ -381,8 +432,18 @@ fn spawn_background_reaper(owner_thread_id: String, bg_command_id: String) {
                 }
             };
             if finished {
-                lock_bg_manager().prune_finished_shells();
-                return;
+                // Drop the reaper's own Arc before pruning. `prune_finished_shells`
+                // uses the strong count to detect an in-flight status/screen reader;
+                // keeping this clone alive would make every finished shell look busy.
+                drop(shell_arc);
+                let removed = {
+                    let mut manager = lock_bg_manager();
+                    manager.prune_finished_shells();
+                    manager.get_shell(&owner_thread_id, &bg_command_id).is_none()
+                };
+                if removed {
+                    return;
+                }
             }
         }
     });
@@ -398,6 +459,7 @@ fn get_status(
     is_running: bool,
     running_for: Option<&str>,
     exit_code: Option<i32>,
+    reported_cwd: Option<&Path>,
 ) -> String {
     let mut status = "\n\n---\n\n".to_string();
 
@@ -421,7 +483,8 @@ fn get_status(
         }
     }
 
-    let _ = writeln!(status, "cwd = {}", bash_state.cwd.display());
+    let cwd = reported_cwd.unwrap_or(&bash_state.cwd);
+    let _ = writeln!(status, "cwd = {}", cwd.display());
 
     if !is_bg {
         // Add background shell info for main shell - matches WCGW Python
@@ -649,12 +712,8 @@ pub async fn handle_tool_call(
         }
     }
 
-    // Calculate effective timeout - matches WCGW Python
-    // SECURITY: Ensure timeout is not negative to prevent unexpected behavior
-    let timeout_s = bash_command
-        .wait_for_seconds
-        .map_or(DEFAULT_TIMEOUT, |t| f64::from(t).max(0.0))
-        .min(TIMEOUT_WHILE_OUTPUT);
+    // Honor the caller's wait budget; only negative values are normalized.
+    let timeout_s = effective_wait_for_seconds(bash_command.wait_for_seconds);
 
     // Execute the action based on type - matches WCGW Python's _execute_bash()
     let result = execute_bash_action(&mut bash_state, &bash_command.action_json, timeout_s).await;
@@ -718,7 +777,7 @@ async fn execute_bash_action(
                     // send_specials, send_ascii) tell the caller the shell is gone
                     // and include the captured output so they can recover state.
                     drop(manager);
-                    return finalize_tombstone(&bash_state.cwd, id, tombstone, action);
+                    return finalize_tombstone(id, tombstone, action);
                 } else {
                     // Error message matches WCGW Python
                     let error = format!(
@@ -894,6 +953,13 @@ async fn execute_command(
         return execute_in_background(bash_state, command, timeout_s).await;
     }
 
+    // `BashState` is cloned per request, so the shell mutex alone did not make
+    // the check below atomic with command submission: two simultaneous requests
+    // could both observe idle, then both write into the same foreground PTY.
+    // Serialize the complete foreground start/wait path across those clones.
+    let foreground_gate = bash_state.foreground_command_gate.clone();
+    let _foreground_guard = foreground_gate.lock_owned().await;
+
     // Check if a command is already running - matches WCGW Python state check
     {
         let bash_guard = bash_state.pty_shell.lock().await;
@@ -962,6 +1028,7 @@ async fn execute_command(
         // next status_check — wrong `exit code`, or a false "no new output".
         bash.last_exit_code = None;
         bash.last_returned_hash = None;
+        bash.mark_output_delivered("");
         // Send in chunks - matches WCGW Python: for i in range(0, len(command), 64)
         send_utf8_in_byte_chunks(bash, command, COMMAND_CHUNK_SIZE)?;
 
@@ -972,6 +1039,7 @@ async fn execute_command(
 
         bash.last_command = command.to_string();
         bash.command_running = true;
+        bash.mark_command_started();
     }
 
     // Wait for output with WCGW-style patience handling
@@ -1048,8 +1116,11 @@ async fn wait_for_output(
     is_status_check: bool,
 ) -> Result<String> {
     let start = Instant::now();
-    let wait = timeout_s.min(TIMEOUT_WHILE_OUTPUT);
-    let mut last_pending_output = String::new();
+    let wait = timeout_s;
+    let previously_delivered = {
+        let guard = shell_arc.lock().await;
+        guard.as_ref().map(PtyShell::delivered_output).unwrap_or_default()
+    };
     let mut complete = false;
 
     // Adaptive polling instead of a blind sleep. wcgw sleeps the full `wait`
@@ -1084,18 +1155,15 @@ async fn wait_for_output(
 
     // If not complete and this is a status check, use WCGW-style patience waiting.
     //
-    // Treat `timeout_s` (== caller's `wait_for_seconds`, capped at
-    // `TIMEOUT_WHILE_OUTPUT`) as the hard upper bound on the TOTAL wall-clock
-    // spent inside this call. wcgw computes `remaining = TIMEOUT_WHILE_OUTPUT
-    // - wait`, which makes a 2-second `wait_for_seconds` block for almost 20s
-    // on a TUI that keeps emitting spinner frames. We diverge from wcgw here
-    // because driving agents expect their wait budget to be respected.
+    // Treat `timeout_s` (the caller's `wait_for_seconds`) as the hard upper
+    // bound on the TOTAL wall-clock spent inside this call. Driving agents rely
+    // on that contract when they deliberately choose a long poll.
     if !complete && is_status_check {
-        let budget_secs = timeout_s.min(TIMEOUT_WHILE_OUTPUT);
+        let budget_secs = timeout_s;
         let iter_wait_secs = 0.5_f64;
         let mut patience = OUTPUT_WAIT_PATIENCE;
 
-        let incremental = wcgw_incremental_text(&output, &last_pending_output);
+        let incremental = wcgw_incremental_text(&output, &previously_delivered);
         if incremental.is_empty() {
             patience -= 1;
         }
@@ -1122,7 +1190,7 @@ async fn wait_for_output(
             }
 
             // Check if output changed - matches WCGW Python patience logic
-            let new_incremental = wcgw_incremental_text(&new_output, &last_pending_output);
+            let new_incremental = wcgw_incremental_text(&new_output, &previously_delivered);
             if new_incremental == last_incremental {
                 patience -= 1;
             } else {
@@ -1132,21 +1200,25 @@ async fn wait_for_output(
 
             output = new_output;
         }
-
-        if !complete {
-            // Update pending output - matches WCGW Python bash_state.set_pending(text)
-            last_pending_output = output.clone();
-        }
     }
 
-    if complete {
+    if complete && !is_bg {
         if let Some(cwd) = extract_prompt_cwd(&output) {
             bash_state.cwd = cwd;
         }
     }
 
     // Process output through terminal emulation - matches WCGW Python _incremental_text
-    let rendered = wcgw_incremental_text(&output, &last_pending_output);
+    let rendered = wcgw_incremental_text(&output, &previously_delivered);
+    // Advance the delivery cursor only AFTER rendering. The old code assigned the
+    // current snapshot first and then diffed it against itself, hiding every new
+    // byte emitted while a process was still running (even with verbose=true).
+    {
+        let mut guard = shell_arc.lock().await;
+        if let Some(shell) = guard.as_mut() {
+            shell.mark_output_delivered(&output);
+        }
+    }
 
     // Conscious compression: collapse mechanical repetition (identical line runs,
     // blank-line blocks) before truncating, to save tokens without dropping any
@@ -1169,42 +1241,49 @@ async fn wait_for_output(
     // Truncate if needed - matches WCGW Python token truncation
     let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
 
-    // Calculate running duration for status
-    let running_for =
-        if complete { None } else { Some(format!("{} seconds", start.elapsed().as_secs())) };
-
-    // Surface the just-finished command's exit code (parsed from the prompt
-    // marker) so the agent sees failure without grepping stderr.
-    // Exit code (parsed from the prompt) plus a pointer to any offloaded output
-    // scratch file, read in one lock acquisition.
-    let (exit_code, scratch_pointer) = read_completion_extras(shell_arc, complete).await;
+    // Read command age, exit code, and scratch pointer in one lock acquisition.
+    let (running_for, exit_code, shell_cwd, scratch_pointer) =
+        read_status_extras(shell_arc, complete).await;
+    let running_for = running_for.map(|elapsed| format!("{} seconds", elapsed.as_secs()));
 
     // Add status - matches WCGW Python get_status
-    let status = get_status(bash_state, is_bg, bg_id, !complete, running_for.as_deref(), exit_code);
+    let status = get_status(
+        bash_state,
+        is_bg,
+        bg_id,
+        !complete,
+        running_for.as_deref(),
+        exit_code,
+        shell_cwd.as_deref(),
+    );
     Ok(format!("{rendered}{status}{scratch_pointer}"))
 }
 
-/// Pull the just-finished command's exit code and, if its output overflowed and
-/// the dropped head was offloaded, a pointer message to the scratch file - in a
-/// single lock acquisition so callers don't lock the shell twice.
-async fn read_completion_extras(
+/// Pull command age, exit code, and any output-offload pointer in one lock.
+async fn read_status_extras(
     shell_arc: &SharedPtyShell,
     complete: bool,
-) -> (Option<i32>, String) {
+) -> (Option<Duration>, Option<i32>, Option<PathBuf>, String) {
     let guard = shell_arc.lock().await;
     let Some(shell) = guard.as_ref() else {
-        return (None, String::new());
+        return (None, None, None, String::new());
     };
+    let running_for = if complete { None } else { shell.command_elapsed() };
     let exit_code = if complete { shell.last_exit_code } else { None };
-    let pointer = match (shell.output_truncated, shell.scratch_path()) {
+    let cwd = Some(shell.current_cwd().to_path_buf());
+    let pointer = scratch_pointer(shell.output_truncated, shell.scratch_path());
+    (running_for, exit_code, cwd, pointer)
+}
+
+fn scratch_pointer(output_truncated: bool, scratch_path: Option<&Path>) -> String {
+    match (output_truncated, scratch_path) {
         (true, Some(path)) => format!(
             "\n\n---\n[Output was truncated to fit context. The earlier (dropped) output was \
              saved to:\n{}\nRead it with ReadFiles or grep it via BashCommand.]\n---",
             path.display()
         ),
         _ => String::new(),
-    };
-    (exit_code, pointer)
+    }
 }
 
 /// Render the final cached output of an exited background shell.
@@ -1214,26 +1293,37 @@ async fn read_completion_extras(
 /// `send_ascii`) cannot interact with a dead shell, so we return an explicit
 /// error that still includes the captured output so the agent can recover state.
 fn finalize_tombstone(
-    cwd: &Path,
     id: &str,
     tombstone: ExitedShellInfo,
     action: &BashCommandAction,
 ) -> Result<String> {
-    let ExitedShellInfo { last_command, final_output, .. } = tombstone;
+    let ExitedShellInfo {
+        last_command,
+        final_output,
+        exit_code,
+        cwd,
+        output_truncated,
+        scratch_path,
+        ..
+    } = tombstone;
     match action {
         // A dead shell's turn is over: Screen/WaitForTurn hand back the final
         // captured output as the snapshot, exactly like a status check.
         BashCommandAction::StatusCheck { .. }
         | BashCommandAction::Screen { .. }
         | BashCommandAction::WaitForTurn { .. } => {
-            let rendered = wcgw_incremental_text(&final_output, "");
+            let rendered = wcgw_incremental_text(final_output.as_ref(), "");
             let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
             // Build a compact status block matching `get_status` for a finished bg shell.
             let mut status = "\n\n---\n\n".to_string();
             let _ = writeln!(status, "bg_command_id = {id}");
             status.push_str("status = process exited\n");
+            if let Some(code) = exit_code {
+                let _ = writeln!(status, "exit code = {code}");
+            }
             let _ = writeln!(status, "cwd = {}", cwd.display());
-            Ok(format!("{rendered}{}", status.trim_end()))
+            let pointer = scratch_pointer(output_truncated, scratch_path.as_deref());
+            Ok(format!("{rendered}{}{pointer}", status.trim_end()))
         }
         BashCommandAction::SendText { .. }
         | BashCommandAction::SendSpecials { .. }
@@ -1296,16 +1386,27 @@ async fn execute_status_check(
     // Read output with patience handling - this IS a status check
     let response = wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, true).await?;
 
-    // Inter-call dedup: hash only the response *body* (the chunk before the
-    // `\n\n---\n` status footer). The footer contains a live "running for"
-    // counter that would otherwise defeat the comparison.
-    let body = response.split("\n\n---\n").next().unwrap_or(&response);
+    // Inter-call dedup hashes the cumulative PTY buffer, while the response body
+    // itself stays incremental. Hashing the incremental body made the first empty
+    // poll after real output look "different" again and emit a blank response.
     if !verbose && scrollback_lines.is_none() {
         let mut guard = shell_arc.lock().await;
         if let Some(bash) = guard.as_mut() {
-            let fingerprint = PtyShell::fingerprint(body);
+            let fingerprint = PtyShell::fingerprint(&bash.output_snapshot());
             if Some(fingerprint) == bash.last_returned_hash {
-                let status = get_status(bash_state, is_bg, bg_id, is_running, None, None);
+                let running_for =
+                    bash.command_elapsed().map(|elapsed| format!("{} seconds", elapsed.as_secs()));
+                let running = bash.command_running;
+                let exit_code = (!running).then_some(bash.last_exit_code).flatten();
+                let status = get_status(
+                    bash_state,
+                    is_bg,
+                    bg_id,
+                    running,
+                    running_for.as_deref(),
+                    exit_code,
+                    Some(bash.current_cwd()),
+                );
                 return Ok(format!("no new output since last check{status}"));
             }
             bash.last_returned_hash = Some(fingerprint);
@@ -1314,7 +1415,7 @@ async fn execute_status_check(
         // Still record the hash so subsequent non-scrollback calls can dedup.
         let mut guard = shell_arc.lock().await;
         if let Some(bash) = guard.as_mut() {
-            bash.last_returned_hash = Some(PtyShell::fingerprint(body));
+            bash.last_returned_hash = Some(PtyShell::fingerprint(&bash.output_snapshot()));
         }
     }
 
@@ -1352,24 +1453,37 @@ async fn execute_screen(
     let max_lines = lines.unwrap_or(0);
 
     if diff {
-        let (update, is_running, in_alt, cursor) = {
+        let (update, is_running, in_alt, cursor, running_for, exit_code, cwd) = {
             let mut guard = shell_arc.lock().await;
             match guard.as_mut() {
                 Some(bash) => {
                     bash.poll_output_nonblocking();
+                    let running = bash.command_running;
                     (
                         bash.live_snapshot_diff(max_lines, SCREEN_DIFF_THRESHOLD),
-                        bash.command_running,
+                        running,
                         bash.live_in_alt_screen(),
                         bash.live_cursor_position(),
+                        running.then(|| bash.command_elapsed()).flatten(),
+                        (!running).then_some(bash.last_exit_code).flatten(),
+                        Some(bash.current_cwd().to_path_buf()),
                     )
                 }
-                None => (ScreenUpdate::Full(Vec::new()), false, false, (0, 0)),
+                None => (ScreenUpdate::Full(Vec::new()), false, false, (0, 0), None, None, None),
             }
         };
         let (crow, ccol) = cursor;
         let alt = if in_alt { " [alt-screen]" } else { "" };
-        let status = get_status(bash_state, is_bg, bg_id, is_running, None, None);
+        let running_for = running_for.map(|elapsed| format!("{} seconds", elapsed.as_secs()));
+        let status = get_status(
+            bash_state,
+            is_bg,
+            bg_id,
+            is_running,
+            running_for.as_deref(),
+            exit_code,
+            cwd.as_deref(),
+        );
         let body = match update {
             ScreenUpdate::Unchanged => "(no change since last screen)".to_string(),
             ScreenUpdate::Diff(changed) => {
@@ -1393,19 +1507,23 @@ async fn execute_screen(
         ));
     }
 
-    let (snapshot, is_running, in_alt, cursor) = {
+    let (snapshot, is_running, in_alt, cursor, running_for, exit_code, cwd) = {
         let mut guard = shell_arc.lock().await;
         match guard.as_mut() {
             Some(bash) => {
                 bash.poll_output_nonblocking();
+                let running = bash.command_running;
                 (
                     bash.live_snapshot(max_lines),
-                    bash.command_running,
+                    running,
                     bash.live_in_alt_screen(),
                     bash.live_cursor_position(),
+                    running.then(|| bash.command_elapsed()).flatten(),
+                    (!running).then_some(bash.last_exit_code).flatten(),
+                    Some(bash.current_cwd().to_path_buf()),
                 )
             }
-            None => (Vec::new(), false, false, (0, 0)),
+            None => (Vec::new(), false, false, (0, 0), None, None, None),
         }
     };
 
@@ -1417,7 +1535,16 @@ async fn execute_screen(
     };
     let alt = if in_alt { " [alt-screen]" } else { "" };
     let (crow, ccol) = cursor;
-    let status = get_status(bash_state, is_bg, bg_id, is_running, None, None);
+    let running_for = running_for.map(|elapsed| format!("{} seconds", elapsed.as_secs()));
+    let status = get_status(
+        bash_state,
+        is_bg,
+        bg_id,
+        is_running,
+        running_for.as_deref(),
+        exit_code,
+        cwd.as_deref(),
+    );
     Ok(format!("--- live screen{alt} [cursor row={crow} col={ccol}] ---\n{body}{status}"))
 }
 
@@ -1514,19 +1641,23 @@ async fn execute_wait_for_turn(
     let mut busy_since: Option<Instant> = None;
 
     loop {
-        let (snapshot, in_alt, alive, running) = {
+        let (snapshot, in_alt, alive, running, running_for, exit_code, cwd) = {
             let mut guard = shell_arc.lock().await;
             match guard.as_mut() {
-                Some(bash) => (
-                    {
-                        bash.poll_output_nonblocking();
-                        bash.live_snapshot(max_lines)
-                    },
-                    bash.live_in_alt_screen(),
-                    bash.is_alive(),
-                    bash.command_running,
-                ),
-                None => (Vec::new(), false, false, false),
+                Some(bash) => {
+                    bash.poll_output_nonblocking();
+                    let running = bash.command_running;
+                    (
+                        bash.live_snapshot(max_lines),
+                        bash.live_in_alt_screen(),
+                        bash.is_alive(),
+                        running,
+                        running.then(|| bash.command_elapsed()).flatten(),
+                        (!running).then_some(bash.last_exit_code).flatten(),
+                        Some(bash.current_cwd().to_path_buf()),
+                    )
+                }
+                None => (Vec::new(), false, false, false, None, None, None),
             }
         };
 
@@ -1582,7 +1713,16 @@ async fn execute_wait_for_turn(
                 start.elapsed().as_secs_f64(),
                 alt
             );
-            let status = get_status(bash_state, is_bg, bg_id, running, None, None);
+            let running_for = running_for.map(|elapsed| format!("{} seconds", elapsed.as_secs()));
+            let status = get_status(
+                bash_state,
+                is_bg,
+                bg_id,
+                running,
+                running_for.as_deref(),
+                exit_code,
+                cwd.as_deref(),
+            );
             return Ok(format!("{header}\n{body}{status}"));
         }
 
@@ -1703,11 +1843,11 @@ async fn execute_send_specials(
                     is_interrupt = true;
                 }
                 SpecialKey::CtrlD => {
-                    // matches WCGW Python: bash_state.sendintr() - same as Ctrl+C in WCGW
+                    // Ctrl-D is EOF, not an interrupt. A process may legitimately
+                    // stay alive after EOF, so do not emit "Failure interrupting".
                     bash.send_eof().map_err(|e| {
                         WinxError::CommandExecutionError(format!("Failed to send Ctrl+D: {e}"))
                     })?;
-                    is_interrupt = true;
                 }
                 SpecialKey::CtrlZ => {
                     // Ctrl+Z = SIGTSTP (suspend) - ASCII 0x1a
@@ -1845,15 +1985,26 @@ async fn execute_in_background(
 
     // Send command via the same PTY path used by foreground execute_command.
     let scratch_root = bash_state.workspace_root.clone();
-    {
+    let send_result = {
         let mut guard = shell_arc.lock().await;
-        let bash = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
-        // Offload an over-long bg output's dropped head too (send_command resets
-        // the per-command scratch state; this points it at the workspace).
-        bash.set_scratch_root(&scratch_root);
-        bash.send_command(command).map_err(|e| {
-            WinxError::CommandExecutionError(format!("Failed to send bg command: {e}"))
-        })?;
+        guard.as_mut().map(|bash| {
+            // Offload an over-long bg output's dropped head too (send_command resets
+            // the per-command scratch state; this points it at the workspace).
+            bash.set_scratch_root(&scratch_root);
+            bash.send_command(command)
+        })
+    };
+    let Some(send_result) = send_result else {
+        lock_bg_manager().remove_shell(&bg_id);
+        return Err(WinxError::BashStateNotInitialized);
+    };
+    if let Err(error) = send_result {
+        // Registration consumes a capacity slot before the PTY write. Roll it
+        // back on failure; no reaper has been spawned yet to clean it for us.
+        lock_bg_manager().remove_shell(&bg_id);
+        return Err(WinxError::CommandExecutionError(format!(
+            "Failed to send bg command: {error}"
+        )));
     }
     debug!("bg[{}]: send_command returned, replying with bg_command_id", bg_id);
 
@@ -1861,7 +2012,7 @@ async fn execute_in_background(
 
     let _ = timeout_s;
     let _ = shell_arc;
-    Ok(get_status(bash_state, true, Some(&bg_id), true, None, None))
+    Ok(get_status(bash_state, true, Some(&bg_id), true, None, None, Some(&bash_state.cwd)))
 }
 
 #[cfg(test)]
@@ -1963,15 +2114,33 @@ mod wait_turn_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::{strip_tail_pipe_impl, BackgroundShellEntry, BackgroundShellManager};
+    use super::{
+        effective_wait_for_seconds, strip_tail_pipe_impl, BackgroundShellEntry,
+        BackgroundShellManager, ExitedShellInfo,
+    };
     use crate::errors::WinxError;
+    use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::Instant;
     use tokio::sync::Mutex;
 
     fn empty_entry(owner_thread_id: &str) -> BackgroundShellEntry {
         BackgroundShellEntry {
             owner_thread_id: owner_thread_id.to_string(),
             shell: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn tombstone(owner_thread_id: &str) -> ExitedShellInfo {
+        ExitedShellInfo {
+            owner_thread_id: owner_thread_id.to_string(),
+            last_command: "true".to_string(),
+            final_output: Arc::from("done"),
+            exit_code: Some(0),
+            cwd: PathBuf::from("/tmp"),
+            output_truncated: false,
+            scratch_path: None,
+            exited_at: Instant::now(),
         }
     }
 
@@ -1999,6 +2168,23 @@ mod tests {
     }
 
     #[test]
+    fn tombstone_capacity_is_bounded_per_thread_and_globally() {
+        let mut manager = BackgroundShellManager::new();
+        for index in 0..BackgroundShellManager::MAX_TOMBSTONES_PER_THREAD + 3 {
+            manager.insert_tombstone(format!("owned-{index}"), tombstone("owner"));
+        }
+        assert_eq!(
+            manager.tombstones.values().filter(|entry| entry.owner_thread_id == "owner").count(),
+            BackgroundShellManager::MAX_TOMBSTONES_PER_THREAD
+        );
+
+        for index in 0..BackgroundShellManager::MAX_TOMBSTONES + 5 {
+            manager.insert_tombstone(format!("global-{index}"), tombstone(&format!("o-{index}")));
+        }
+        assert_eq!(manager.tombstones.len(), BackgroundShellManager::MAX_TOMBSTONES);
+    }
+
+    #[test]
     fn strips_trailing_tail_by_default() {
         assert_eq!(strip_tail_pipe_impl("seq 1 5 | tail -2", false), "seq 1 5");
         assert_eq!(strip_tail_pipe_impl("cat log | tail -n 20", false), "cat log");
@@ -2022,5 +2208,11 @@ mod tests {
         // WINX_KEEP_TAIL_PIPE behavior: command passes through untouched.
         assert_eq!(strip_tail_pipe_impl("seq 1 5 | tail -2", true), "seq 1 5 | tail -2");
         assert_eq!(strip_tail_pipe_impl("cat log | tail -n 20", true), "cat log | tail -n 20");
+    }
+
+    #[test]
+    fn requested_wait_is_not_silently_capped() {
+        assert!((effective_wait_for_seconds(Some(120.0)) - 120.0).abs() < f64::EPSILON);
+        assert!((effective_wait_for_seconds(Some(150.0)) - 150.0).abs() < f64::EPSILON);
     }
 }

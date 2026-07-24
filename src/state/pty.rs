@@ -189,6 +189,11 @@ pub struct PtyShell {
     pub output_buffer: String,
     /// Whether a command is currently running
     pub command_running: bool,
+    /// Last cwd observed in this shell's nonce-bearing prompt.
+    current_cwd: PathBuf,
+    /// Monotonic start time of the current or most recently completed command.
+    /// Status polling uses this instead of restarting the clock per tool call.
+    command_started_at: Option<Instant>,
     /// Exit code of the last completed foreground command, parsed from the prompt
     /// marker (`──➤<nonce>:<code>`). `None` until a command finishes, and reset
     /// to `None` while one is running.
@@ -204,6 +209,9 @@ pub struct PtyShell {
     /// Hash of the last rendered output we shipped to the caller. Used by the
     /// delta path in `status_check` to elide repeats when the screen is idle.
     pub last_returned_hash: Option<u64>,
+    /// Cumulative PTY snapshot already delivered to the caller. Incremental
+    /// status polling diffs against this value, then advances it after rendering.
+    delivered_output: String,
     /// Optional command a human can run to attach to the same terminal session.
     pub attach_hint: Option<String>,
     /// The exact suffix that ends this shell's prompt: `──➤<nonce>`. The nonce is
@@ -238,6 +246,7 @@ impl std::fmt::Debug for PtyShell {
             .field("size", &format!("{}x{}", self.size.cols, self.size.rows))
             .field("last_command", &self.last_command)
             .field("command_running", &self.command_running)
+            .field("current_cwd", &self.current_cwd)
             .field("output_truncated", &self.output_truncated)
             .field("output_buffer_len", &self.output_buffer.len())
             .field("attach_hint", &self.attach_hint)
@@ -447,11 +456,14 @@ impl PtyShell {
             last_command: String::new(),
             output_buffer: String::new(),
             command_running: false,
+            current_cwd: initial_dir.to_path_buf(),
+            command_started_at: None,
             last_exit_code: None,
             max_output_size: MAX_OUTPUT_SIZE,
             output_truncated: false,
             ring: LineRing::new(RING_BUFFER_LINES, MAX_PARTIAL_LINE_BYTES),
             last_returned_hash: None,
+            delivered_output: String::new(),
             attach_hint,
             prompt_end_marker: format!("{WCGW_PROMPT_END}{nonce}"),
             live,
@@ -553,15 +565,43 @@ impl PtyShell {
         self.reset_scratch();
         self.last_command = command.to_string();
         self.command_running = true;
+        self.mark_command_started();
         self.last_exit_code = None;
         // A new command means the next status_check should return whatever
         // shows up — drop the dedup hash so we don't elide the first response.
         self.last_returned_hash = None;
+        self.delivered_output.clear();
 
         // Write the command
         self.write_command(command)?;
 
         Ok(())
+    }
+
+    /// Start the monotonic runtime clock for a newly submitted command.
+    pub fn mark_command_started(&mut self) {
+        self.command_started_at = Some(Instant::now());
+    }
+
+    /// Elapsed runtime since the current command was submitted.
+    pub fn command_elapsed(&self) -> Option<Duration> {
+        self.command_started_at.map(|started_at| started_at.elapsed())
+    }
+
+    /// Current working directory last reported by this shell's prompt.
+    pub fn current_cwd(&self) -> &Path {
+        &self.current_cwd
+    }
+
+    /// Snapshot used as the left-hand side of incremental output rendering.
+    pub fn delivered_output(&self) -> String {
+        self.delivered_output.clone()
+    }
+
+    /// Mark the cumulative output snapshot as delivered after rendering it.
+    pub fn mark_output_delivered(&mut self, output: &str) {
+        self.delivered_output.clear();
+        self.delivered_output.push_str(output);
     }
 
     /// Return up to `lines` recent lines from the scrollback ring, oldest
@@ -656,6 +696,7 @@ impl PtyShell {
             self.command_running = false;
             self.last_exit_code =
                 Self::parse_prompt_exit_code(&self.output_buffer, &self.prompt_end_marker);
+            self.update_current_cwd_from_prompt();
             complete = true;
         }
 
@@ -696,8 +737,32 @@ impl PtyShell {
             self.command_running = false;
             self.last_exit_code =
                 Self::parse_prompt_exit_code(&self.output_buffer, &self.prompt_end_marker);
+            self.update_current_cwd_from_prompt();
         }
-        prompt_seen
+        // Completion is state, not an edge. Another consumer (notably the
+        // background reaper) may have drained the prompt first; a later poll
+        // must still report the already-idle shell as complete even when this
+        // particular drain saw no new prompt bytes.
+        !self.command_running
+    }
+
+    fn update_current_cwd_from_prompt(&mut self) {
+        let Some(last) =
+            self.output_buffer.lines().rev().find(|line| line.contains(&self.prompt_end_marker))
+        else {
+            return;
+        };
+        let clean = crate::state::terminal::strip_ansi_codes(last);
+        let Some((before_marker, _)) = clean.rsplit_once(&self.prompt_end_marker) else {
+            return;
+        };
+        let Some((_, cwd)) = before_marker.rsplit_once("◉ ") else {
+            return;
+        };
+        let cwd = cwd.trim();
+        if !cwd.is_empty() {
+            self.current_cwd = PathBuf::from(cwd);
+        }
     }
 
     /// Snapshot of the accumulated output buffer — the same text `read_output`
@@ -782,7 +847,10 @@ impl PtyShell {
             return;
         };
         match crate::utils::scratch_file::append_scratch(&path, head.as_bytes()) {
-            Ok(()) => self.scratch_bytes = self.scratch_bytes.saturating_add(head.len() as u64),
+            Ok(0) if self.scratch_bytes == 0 => self.scratch_path = None,
+            Ok(written) => {
+                self.scratch_bytes = self.scratch_bytes.saturating_add(written as u64);
+            }
             Err(e) => debug!("scratch: append to {} failed: {e}", path.display()),
         }
     }
@@ -1114,6 +1182,25 @@ mod tests {
         let (output, _complete) = shell.read_output(2.0)?;
 
         assert!(output.contains("hello pty"), "Output should contain 'hello pty': {output}");
+        Ok(())
+    }
+
+    #[test]
+    fn completed_nonblocking_poll_is_level_triggered() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut shell = PtyShell::new(temp_dir.path(), false)?;
+
+        shell.send_command("true")?;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline && !shell.poll_output_nonblocking() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(!shell.command_running, "shell did not complete before the deadline");
+        assert!(
+            shell.poll_output_nonblocking(),
+            "a later consumer must still observe the completed state"
+        );
         Ok(())
     }
 

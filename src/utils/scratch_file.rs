@@ -16,7 +16,10 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex,
+};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tracing::debug;
@@ -27,9 +30,14 @@ const SCRATCH_SUBDIR: &str = ".winx/scratch";
 /// that ask for a path within the same nanosecond can't collide on the timestamp
 /// and interleave their output into one file.
 static SCRATCH_SEQ: AtomicU64 = AtomicU64::new(0);
+static SCRATCH_IO_LOCK: Mutex<()> = Mutex::new(());
 
 /// Scratch files older than this are pruned when a new one is created.
 const SCRATCH_MAX_AGE: Duration = Duration::from_secs(3600);
+/// Hard workspace-wide quota for Bash output scratch files.
+const SCRATCH_MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+/// Make room for one command's full per-file allowance before assigning a path.
+const SCRATCH_FILE_RESERVE_BYTES: u64 = 50 * 1024 * 1024;
 
 fn scratch_dir(workspace_root: &Path) -> PathBuf {
     workspace_root.join(SCRATCH_SUBDIR)
@@ -39,27 +47,50 @@ fn scratch_dir(workspace_root: &Path) -> PathBuf {
 /// if needed and pruning stale files first so the dir does not grow without
 /// bound. Returns `None` on any IO error (offload is best-effort).
 pub fn new_scratch_path(workspace_root: &Path) -> Option<PathBuf> {
+    let _guard = SCRATCH_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = scratch_dir(workspace_root);
     if let Err(e) = fs::create_dir_all(&dir) {
         debug!("scratch: create_dir_all {} failed: {e}", dir.display());
         return None;
     }
-    prune_scratch_dir(workspace_root, SCRATCH_MAX_AGE);
+    prune_scratch_dir_unlocked(workspace_root, SCRATCH_MAX_AGE);
+    prune_scratch_to_size(&dir, SCRATCH_MAX_TOTAL_BYTES - SCRATCH_FILE_RESERVE_BYTES);
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO).as_nanos();
     let seq = SCRATCH_SEQ.fetch_add(1, Ordering::Relaxed);
     Some(dir.join(format!("bash-output-{}-{nonce:x}-{seq:x}.txt", std::process::id())))
 }
 
 /// Append `bytes` to the scratch file, creating it if absent.
-pub fn append_scratch(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub fn append_scratch(path: &Path, bytes: &[u8]) -> std::io::Result<usize> {
+    let _guard = SCRATCH_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(dir) = path.parent() else {
+        return Ok(0);
+    };
+    let used = scratch_dir_size(dir);
+    let writable = allowed_append_len(used, bytes.len());
+    if writable == 0 {
+        return Ok(0);
+    }
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    file.write_all(bytes)
+    file.write_all(&bytes[..writable])?;
+    Ok(writable)
+}
+
+fn allowed_append_len(used: u64, requested: usize) -> usize {
+    usize::try_from(SCRATCH_MAX_TOTAL_BYTES.saturating_sub(used))
+        .unwrap_or(usize::MAX)
+        .min(requested)
 }
 
 /// Remove scratch files whose mtime is older than `max_age`. Best-effort:
 /// per-entry failures are logged at debug and skipped, and a missing dir is a
 /// no-op.
 pub fn prune_scratch_dir(workspace_root: &Path, max_age: Duration) {
+    let _guard = SCRATCH_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    prune_scratch_dir_unlocked(workspace_root, max_age);
+}
+
+fn prune_scratch_dir_unlocked(workspace_root: &Path, max_age: Duration) {
     let dir = scratch_dir(workspace_root);
     let Ok(entries) = fs::read_dir(&dir) else { return };
     let cutoff = SystemTime::now().checked_sub(max_age).unwrap_or(UNIX_EPOCH);
@@ -71,6 +102,38 @@ pub fn prune_scratch_dir(workspace_root: &Path, max_age: Duration) {
             if let Err(e) = fs::remove_file(&path) {
                 debug!("scratch: prune remove {} failed: {e}", path.display());
             }
+        }
+    }
+}
+
+fn scratch_dir_size(dir: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(dir) else { return 0 };
+    entries
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok())
+        .filter(std::fs::Metadata::is_file)
+        .fold(0_u64, |total, metadata| total.saturating_add(metadata.len()))
+}
+
+fn prune_scratch_to_size(dir: &Path, target_bytes: u64) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let metadata = entry.metadata().ok()?;
+            metadata
+                .is_file()
+                .then(|| (entry.path(), metadata.modified().unwrap_or(UNIX_EPOCH), metadata.len()))
+        })
+        .collect();
+    let mut total = files.iter().fold(0_u64, |sum, (_, _, len)| sum.saturating_add(*len));
+    files.sort_by_key(|(_, modified, _)| *modified);
+    for (path, _, len) in files {
+        if total <= target_bytes {
+            break;
+        }
+        if fs::remove_file(&path).is_ok() {
+            total = total.saturating_sub(len);
         }
     }
 }
@@ -132,5 +195,12 @@ mod tests {
         // A workspace root that cannot hold a child dir must yield None, not panic.
         let path = new_scratch_path(Path::new("/proc/winx-nonexistent-xyz"));
         assert!(path.is_none(), "expected None for unwritable root");
+    }
+
+    #[test]
+    fn workspace_quota_caps_each_append() {
+        assert_eq!(allowed_append_len(SCRATCH_MAX_TOTAL_BYTES, 1024), 0);
+        assert_eq!(allowed_append_len(SCRATCH_MAX_TOTAL_BYTES - 7, 1024), 7);
+        assert_eq!(allowed_append_len(0, 1024), 1024);
     }
 }

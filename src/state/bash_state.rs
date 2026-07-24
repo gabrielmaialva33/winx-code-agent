@@ -162,6 +162,9 @@ pub struct BashState {
     pub write_if_empty_mode: WriteIfEmptyMode,
     pub whitelist_for_overwrite: HashMap<String, FileWhitelistData>,
     pub pty_shell: Arc<Mutex<Option<PtyShell>>>,
+    /// Serializes foreground command startup across cloned request-local states.
+    /// Status/input actions remain concurrent so callers can drive a running TUI.
+    pub foreground_command_gate: Arc<Mutex<()>>,
     pub initialized: bool,
     /// In-memory ring of recent edit checkpoints for `UndoEdit` (newest at the
     /// back). Deliberately not part of `BashStateSnapshot`: undo is for immediate
@@ -193,6 +196,7 @@ impl BashState {
             },
             whitelist_for_overwrite: HashMap::new(),
             pty_shell: Arc::new(Mutex::new(None)),
+            foreground_command_gate: Arc::new(Mutex::new(())),
             initialized: false,
             edit_checkpoints: VecDeque::new(),
         }
