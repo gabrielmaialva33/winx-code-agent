@@ -7,9 +7,9 @@ use rmcp::{
         Annotated, CallToolRequestParams, CallToolResult, CancelTaskParams, CancelTaskResult,
         ClientJsonRpcMessage, ClientRequest, Content, CreateTaskResult, ErrorCode,
         GetPromptRequestParams, GetPromptResult, GetTaskInfoParams, GetTaskPayloadResult,
-        GetTaskResult, GetTaskResultParams, Implementation, ListPromptsResult, ListResourcesResult,
-        ListTasksResult, ListToolsResult, PaginatedRequestParams, Prompt, PromptMessage,
-        PromptMessageRole, ProtocolVersion, RawResource, ReadResourceRequestParams,
+        GetTaskResult, GetTaskResultParams, Icon, Implementation, ListPromptsResult,
+        ListResourcesResult, ListTasksResult, ListToolsResult, PaginatedRequestParams, Prompt,
+        PromptMessage, PromptMessageRole, ProtocolVersion, RawResource, ReadResourceRequestParams,
         ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo, ServerJsonRpcMessage,
         Task, TaskStatus, TaskSupport, TasksCapability, Tool, ToolAnnotations, ToolExecution,
     },
@@ -902,6 +902,18 @@ fn root_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
     path.is_absolute().then_some(path)
 }
 
+/// Server icon (96x96 PNG) as a self-contained data URI, per the 2025-11-25
+/// icons revision. A data URI works over stdio and HTTP alike — no extra
+/// endpoint or auth exemption needed for clients to fetch it.
+fn server_icon_data_uri() -> &'static str {
+    static URI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    URI.get_or_init(|| {
+        use base64::Engine as _;
+        let png = include_bytes!("../.github/assets/icon-96.png");
+        format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png))
+    })
+}
+
 /// `ServerHandler` implementation
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
@@ -915,7 +927,10 @@ impl ServerHandler for WinxService {
         )
         .with_server_info(
             Implementation::new("winx-mcp-server", self.version.clone())
-                .with_title("Winx High-Performance MCP"),
+                .with_title("Winx High-Performance MCP")
+                .with_icons(vec![Icon::new(server_icon_data_uri())
+                    .with_mime_type("image/png")
+                    .with_sizes(vec!["96x96".to_string()])]),
         )
         // Tasks were added in the stable 2025-11-25 revision. rmcp negotiates
         // with older clients during initialize, so raising the server ceiling
