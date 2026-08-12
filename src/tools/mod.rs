@@ -4,6 +4,7 @@
 //! image, context save). The live service that wires them to the MCP protocol
 //! is [`crate::server::WinxService`].
 
+pub mod background_shell;
 pub mod bash_command;
 pub mod code_map;
 pub mod context_save;
