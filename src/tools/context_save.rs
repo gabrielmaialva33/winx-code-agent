@@ -296,6 +296,9 @@ fn read_text_for_context(path: &Path) -> std::io::Result<String> {
 /// Keep the first `max_tokens` of a file's content and note what was dropped.
 /// Used so a single large file in a `ContextSave` glob doesn't crowd out the rest.
 fn cap_file_to_tokens(content: &str, max_tokens: usize) -> String {
+    if crate::utils::encoder::definitely_fits_token_budget(content, max_tokens) {
+        return content.to_string();
+    }
     match crate::utils::encoder::encode_ids(content) {
         Some(ids) if ids.len() > max_tokens => {
             let omitted = ids.len() - max_tokens;
@@ -311,6 +314,9 @@ fn cap_file_to_tokens(content: &str, max_tokens: usize) -> String {
 /// root and the plan/status live) and appending a marker. Falls back to the
 /// untouched text if the tokenizer is unavailable.
 fn truncate_memory_to_tokens(text: String, max_tokens: usize) -> String {
+    if crate::utils::encoder::definitely_fits_token_budget(&text, max_tokens) {
+        return text;
+    }
     let Some(ids) = crate::utils::encoder::encode_ids(&text) else {
         return text;
     };

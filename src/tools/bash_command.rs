@@ -52,9 +52,7 @@ const COMMAND_CHUNK_SIZE: usize = 64;
 /// Chunk size for sending text input (characters) - matches WCGW Python (128 chars)
 const TEXT_CHUNK_SIZE: usize = 128;
 
-/// Cheap byte-level safety net. We never even consider token counting if the
-/// raw payload is smaller than this — tokenizing is fast but not free, and
-/// the vast majority of responses are tiny status updates.
+/// Byte cap used only when exact tokenization or decoding is unavailable.
 const MAX_OUTPUT_LENGTH: usize = 100_000;
 
 /// Token budget reserved for a single PTY response when token-aware truncation
@@ -96,7 +94,7 @@ fn char_safe_tail(text: &str, max_len: usize) -> &str {
 /// tokens and prepend a "(...truncated)" marker — exactly what wcgw does in
 /// `_incremental_text`.
 fn truncate_to_token_budget(text: &str, max_tokens: usize) -> std::borrow::Cow<'_, str> {
-    if text.len() <= MAX_OUTPUT_LENGTH {
+    if crate::utils::encoder::definitely_fits_token_budget(text, max_tokens) {
         return std::borrow::Cow::Borrowed(text);
     }
 
@@ -1868,5 +1866,17 @@ mod tests {
     fn requested_wait_is_not_silently_capped() {
         assert!((effective_wait_for_seconds(Some(120.0)) - 120.0).abs() < f64::EPSILON);
         assert!((effective_wait_for_seconds(Some(150.0)) - 150.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn token_budget_applies_below_the_byte_fallback_cap() {
+        let input = "alpha beta gamma delta ".repeat(100);
+        let rendered = truncate_to_token_budget(&input, 20);
+
+        assert!(rendered.starts_with("(...truncated)\n"));
+        assert_ne!(rendered.as_ref(), input);
+        let tail = rendered.strip_prefix("(...truncated)\n").unwrap_or_default();
+        let tail_tokens = crate::utils::encoder::encode_ids(tail);
+        assert!(tail_tokens.as_ref().is_some_and(|tokens| tokens.len() <= 19));
     }
 }

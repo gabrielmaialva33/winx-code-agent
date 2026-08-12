@@ -104,16 +104,6 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(cli: Cli) -> Result<()> {
-    // Pre-warm the embedded Claude tokenizer off the hot path. Deserializing
-    // tokenizer.json takes a beat; without this the FIRST real `count_tokens`
-    // (a ReadFiles/ContextSave the agent is waiting on) would eat that latency.
-    // Fire-and-forget on a blocking thread while the transport comes up.
-    tokio::task::spawn_blocking(|| {
-        let started = std::time::Instant::now();
-        let _ = winx_code_agent::utils::encoder::count_tokens("");
-        tracing::debug!("tokenizer pre-warmed in {:?}", started.elapsed());
-    });
-
     match cli.command {
         Some(Commands::Serve {
             http: true, bind, token, allowed_host, allow_query_token, ..

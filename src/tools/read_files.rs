@@ -117,12 +117,19 @@ async fn read_file(
 
     let mut truncated = false;
     let max_tokens = max_tokens.unwrap_or_else(|| select_max_tokens(file_path));
-    // Tokenize once; reuse the ids for both the count and the truncation below,
-    // instead of encoding the (possibly large) content a second time on truncate.
-    let token_ids = crate::utils::encoder::encode_ids(&result_content);
-    let tokens_count = token_ids
-        .as_ref()
-        .map_or_else(|| crate::utils::encoder::estimate_tokens(&result_content), Vec::len);
+    // Byte-level BPE emits at most one token per input byte. Small payloads are
+    // therefore proven to fit without initializing the tokenizer; larger ones
+    // still get exact counting and token-boundary truncation.
+    let (tokens_count, token_ids) =
+        if crate::utils::encoder::definitely_fits_token_budget(&result_content, max_tokens) {
+            (crate::utils::encoder::estimate_tokens(&result_content), None)
+        } else {
+            let ids = crate::utils::encoder::encode_ids(&result_content);
+            let count = ids
+                .as_ref()
+                .map_or_else(|| crate::utils::encoder::estimate_tokens(&result_content), Vec::len);
+            (count, ids)
+        };
 
     if tokens_count > max_tokens {
         truncate_to_token_budget(&mut result_content, max_tokens, token_ids);

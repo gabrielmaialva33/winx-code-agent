@@ -2,8 +2,9 @@
 //!
 //! WCGW counts tokens with the `Xenova/claude-tokenizer` (Hugging Face `tokenizers`).
 //! We embed that same tokenizer definition in the binary and load it lazily, so token
-//! budgets and truncation match the model that actually runs the agent. If the
-//! tokenizer fails to load we fall back to a cheap character/word estimate.
+//! budgets and truncation match the model that actually runs the agent. Small inputs
+//! use a byte-length upper bound and never initialize it; if loading fails for a larger
+//! input we fall back to a cheap character/word estimate.
 
 use std::sync::OnceLock;
 use tokenizers::Tokenizer;
@@ -44,6 +45,16 @@ pub fn encode_ids(text: &str) -> Option<Vec<u32>> {
 pub fn decode_ids(ids: &[u32]) -> Option<String> {
     let tokenizer = tokenizer()?;
     tokenizer.decode(ids, false).ok()
+}
+
+/// Return `true` when byte length alone proves `text` fits the token budget.
+///
+/// The embedded tokenizer is byte-level BPE without added special tokens, so it
+/// cannot emit more tokens than the number of UTF-8 input bytes. This conservative
+/// fast path avoids loading or running the tokenizer for small payloads while exact
+/// tokenization remains in charge near and above the budget boundary.
+pub fn definitely_fits_token_budget(text: &str, max_tokens: usize) -> bool {
+    text.len() <= max_tokens
 }
 
 /// Read a token-budget override from env var `var` (e.g.
@@ -88,5 +99,30 @@ mod tests {
     #[test]
     fn estimate_is_nonzero_for_words() {
         assert!(estimate_tokens("a b c d") >= 4);
+    }
+
+    #[test]
+    fn byte_length_is_a_safe_token_upper_bound() {
+        for sample in [
+            "plain English prose",
+            "fn main() { println!(\"hello\"); }",
+            "áéíóú 日本語 🚀",
+            "symbols: !@#$%^&*()[]{}",
+            "line one\nline two\nline three",
+        ] {
+            let ids = encode_ids(sample);
+            assert!(
+                ids.as_ref().is_some_and(|ids| ids.len() <= sample.len()),
+                "sample produced more tokens than UTF-8 bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn byte_upper_bound_only_accepts_payloads_proven_to_fit() {
+        assert!(definitely_fits_token_budget("four", 4));
+        assert!(!definitely_fits_token_budget("five!", 4));
+        assert!(!definitely_fits_token_budget("é", 1));
+        assert!(definitely_fits_token_budget("é", 2));
     }
 }
