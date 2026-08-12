@@ -261,7 +261,18 @@ fn heuristic_score(path: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
     use tempfile::TempDir;
+
+    fn git(repo: &Path, args: &[&str]) -> Result<()> {
+        let output = Command::new("git").arg("-C").arg(repo).args(args).output()?;
+        if output.status.success() {
+            return Ok(());
+        }
+        Err(crate::errors::WinxError::CommandExecutionError(
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        ))
+    }
 
     #[test]
     fn builds_repo_context_from_files() -> Result<()> {
@@ -296,6 +307,37 @@ mod tests {
         let files = get_all_files_max_depth(root, true);
         assert!(files.iter().any(|file| file == "kept.rs"));
         assert!(!files.iter().any(|file| file == "ignored.txt"), "gitignore must hide ignored.txt");
+        Ok(())
+    }
+
+    #[test]
+    fn linked_worktree_uses_its_own_root() -> Result<()> {
+        let main_repo = TempDir::new()?;
+        git(main_repo.path(), &["init", "-q"])?;
+        std::fs::write(main_repo.path().join("main-only.txt"), "main\n")?;
+        git(main_repo.path(), &["add", "main-only.txt"])?;
+        git(
+            main_repo.path(),
+            &[
+                "-c",
+                "user.name=Winx Test",
+                "-c",
+                "user.email=winx@example.invalid",
+                "commit",
+                "-qm",
+                "initial",
+            ],
+        )?;
+
+        let worktree_parent = TempDir::new()?;
+        let worktree = worktree_parent.path().join("linked");
+        let worktree_arg = worktree.to_string_lossy().into_owned();
+        git(main_repo.path(), &["worktree", "add", "-q", "-b", "linked-test", &worktree_arg])?;
+        std::fs::write(worktree.join("worktree-only.txt"), "linked\n")?;
+
+        let (context, files) = get_repo_context(&worktree)?;
+        assert!(context.starts_with(&format!("{}/", worktree.display())));
+        assert!(files.iter().any(|file| file == "worktree-only.txt"));
         Ok(())
     }
 }
