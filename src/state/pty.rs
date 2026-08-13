@@ -194,6 +194,9 @@ pub struct PtyShell {
     /// Monotonic start time of the current or most recently completed command.
     /// Status polling uses this instead of restarting the clock per tool call.
     command_started_at: Option<Instant>,
+    /// Monotonic command generation used by daemon journals to distinguish two
+    /// consecutive commands whose terminal bytes happen to be identical.
+    command_generation: u64,
     /// Exit code of the last completed foreground command, parsed from the prompt
     /// marker (`──➤<nonce>:<code>`). `None` until a command finishes, and reset
     /// to `None` while one is running.
@@ -458,6 +461,7 @@ impl PtyShell {
             command_running: false,
             current_cwd: initial_dir.to_path_buf(),
             command_started_at: None,
+            command_generation: 0,
             last_exit_code: None,
             max_output_size: MAX_OUTPUT_SIZE,
             output_truncated: false,
@@ -580,7 +584,12 @@ impl PtyShell {
 
     /// Start the monotonic runtime clock for a newly submitted command.
     pub fn mark_command_started(&mut self) {
+        self.command_generation = self.command_generation.saturating_add(1);
         self.command_started_at = Some(Instant::now());
+    }
+
+    pub fn command_generation(&self) -> u64 {
+        self.command_generation
     }
 
     /// Elapsed runtime since the current command was submitted.
@@ -1004,6 +1013,11 @@ impl PtyShell {
     /// Get current terminal size
     pub fn get_size(&self) -> (u16, u16) {
         (self.size.cols, self.size.rows)
+    }
+
+    /// OS process id of the shell that owns this PTY.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
     }
 
     /// Check if the shell is still alive
