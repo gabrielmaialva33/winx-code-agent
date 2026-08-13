@@ -14,9 +14,9 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use super::background_shell::lock_bg_manager;
 pub use super::background_shell::{BackgroundShellManager, ExitedShellInfo};
 use crate::errors::{Result, WinxError};
+use crate::runtime::{lock_session_store, EmbeddedShellRuntime, ShellRuntime, ShellTarget};
 use crate::state::bash_state::BashState;
 use crate::state::live_terminal::ScreenUpdate;
 use crate::state::pty::PtyShell;
@@ -24,6 +24,60 @@ use crate::state::terminal::{render_terminal_output, strip_ansi_codes};
 use crate::types::{normalize_thread_id, BashCommand, BashCommandAction, SpecialKey};
 
 type SharedPtyShell = Arc<Mutex<Option<PtyShell>>>;
+
+/// Per-adapter delivery state used by daemon guardians. Embedded callers keep
+/// using the cursor stored directly on `PtyShell`, preserving legacy behavior.
+#[derive(Debug, Default)]
+pub(crate) struct ShellDeliveryCursor {
+    generation: Option<u64>,
+    delivered_output: String,
+    last_returned_hash: Option<u64>,
+    screen_snapshot: Option<Vec<String>>,
+}
+
+impl ShellDeliveryCursor {
+    fn sync_generation(&mut self, generation: u64) {
+        if self.generation != Some(generation) {
+            self.generation = Some(generation);
+            self.delivered_output.clear();
+            self.last_returned_hash = None;
+            self.screen_snapshot = None;
+        }
+    }
+
+    fn screen_update(&mut self, current: Vec<String>, threshold: usize) -> ScreenUpdate {
+        let update = match self.screen_snapshot.as_ref() {
+            Some(previous) => {
+                let rows = previous.len().max(current.len());
+                let changed = (0..rows)
+                    .filter_map(|index| {
+                        let before = previous.get(index).map_or("", String::as_str);
+                        let after = current.get(index).map_or("", String::as_str);
+                        (before != after).then(|| (index + 1, after.to_string()))
+                    })
+                    .collect::<Vec<_>>();
+                if changed.is_empty() {
+                    ScreenUpdate::Unchanged
+                } else if changed.len() <= threshold {
+                    ScreenUpdate::Diff(changed)
+                } else {
+                    ScreenUpdate::Full(current.clone())
+                }
+            }
+            None => ScreenUpdate::Full(current.clone()),
+        };
+        self.screen_snapshot = Some(current);
+        update
+    }
+}
+
+fn main_shell(bash_state: &BashState) -> SharedPtyShell {
+    let mut store = lock_session_store();
+    store.bind_main(&bash_state.current_thread_id, &bash_state.pty_shell);
+    store
+        .resolve(&bash_state.current_thread_id, &ShellTarget::Main)
+        .unwrap_or_else(|| bash_state.pty_shell.clone())
+}
 
 // ==================== WCGW-Style Constants ====================
 
@@ -137,7 +191,7 @@ fn spawn_background_reaper(owner_thread_id: String, bg_command_id: String) {
         loop {
             sleep(Duration::from_millis(100)).await;
             let shell_arc = {
-                let manager = lock_bg_manager();
+                let manager = lock_session_store();
                 manager.get_shell(&owner_thread_id, &bg_command_id)
             };
             let Some(shell_arc) = shell_arc else {
@@ -157,7 +211,7 @@ fn spawn_background_reaper(owner_thread_id: String, bg_command_id: String) {
                 // keeping this clone alive would make every finished shell look busy.
                 drop(shell_arc);
                 let removed = {
-                    let mut manager = lock_bg_manager();
+                    let mut manager = lock_session_store();
                     manager.prune_finished_shells();
                     manager.get_shell(&owner_thread_id, &bg_command_id).is_none()
                 };
@@ -209,7 +263,7 @@ fn get_status(
     if !is_bg {
         // Add background shell info for main shell - matches WCGW Python
         {
-            let mut manager = lock_bg_manager();
+            let mut manager = lock_session_store();
             status.push_str("This is the main shell. ");
             status.push_str(&manager.get_running_info(&bash_state.current_thread_id));
         }
@@ -367,10 +421,43 @@ fn ensure_interactive_target(shell: &mut PtyShell) -> Result<()> {
 ///
 /// This function processes the `BashCommand` tool call following WCGW Python's
 /// `execute_bash()` function behavior exactly.
-#[tracing::instrument(level = "info", skip(bash_state_arc, bash_command))]
 pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     bash_command: BashCommand,
+) -> Result<String> {
+    handle_tool_call_with_runtime(&EmbeddedShellRuntime, bash_state_arc, bash_command).await
+}
+
+/// Execute a BashCommand through the selected shell runtime.
+pub async fn handle_tool_call_with_runtime(
+    runtime: &dyn ShellRuntime,
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    bash_command: BashCommand,
+) -> Result<String> {
+    runtime.run_action(bash_state_arc, bash_command).await
+}
+
+pub(crate) async fn handle_embedded_tool_call(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    bash_command: BashCommand,
+) -> Result<String> {
+    handle_embedded_tool_call_inner(bash_state_arc, bash_command, None).await
+}
+
+pub(crate) async fn handle_embedded_tool_call_with_cursor(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    bash_command: BashCommand,
+    delivery_cursor: &Arc<Mutex<ShellDeliveryCursor>>,
+) -> Result<String> {
+    let mut delivery_cursor = delivery_cursor.lock().await;
+    handle_embedded_tool_call_inner(bash_state_arc, bash_command, Some(&mut delivery_cursor)).await
+}
+
+#[tracing::instrument(level = "info", skip(bash_state_arc, bash_command, delivery_cursor))]
+async fn handle_embedded_tool_call_inner(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    bash_command: BashCommand,
+    delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
     let action_kind = match &bash_command.action_json {
         BashCommandAction::Command { .. } => "command",
@@ -432,11 +519,15 @@ pub async fn handle_tool_call(
         }
     }
 
+    lock_session_store().bind_main(&bash_state.current_thread_id, &bash_state.pty_shell);
+
     // Honor the caller's wait budget; only negative values are normalized.
     let timeout_s = effective_wait_for_seconds(bash_command.wait_for_seconds);
 
     // Execute the action based on type - matches WCGW Python's _execute_bash()
-    let result = execute_bash_action(&mut bash_state, &bash_command.action_json, timeout_s).await;
+    let result =
+        execute_bash_action(&mut bash_state, &bash_command.action_json, timeout_s, delivery_cursor)
+            .await;
 
     {
         let mut bash_state_guard = bash_state_arc.lock().await;
@@ -466,6 +557,7 @@ async fn execute_bash_action(
     bash_state: &mut BashState,
     action: &BashCommandAction,
     timeout_s: f64,
+    delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
     let mut is_bg = false;
     let mut bg_id: Option<String> = None;
@@ -482,7 +574,7 @@ async fn execute_bash_action(
             if let Some(id) = bg_command_id {
                 // Use the recovery helper (poison -> into_inner) like every other
                 // call site, rather than hard-failing this one path on poison.
-                let mut manager = lock_bg_manager();
+                let mut manager = lock_session_store();
                 manager.prune_finished_shells();
 
                 if let Some(shell) = manager.get_shell(&bash_state.current_thread_id, id) {
@@ -516,7 +608,15 @@ async fn execute_bash_action(
     // Process based on action type - matches WCGW Python _execute_bash dispatch
     match action {
         BashCommandAction::Command { command, is_background, allow_multi } => {
-            execute_command(bash_state, command, *is_background, *allow_multi, timeout_s).await
+            execute_command(
+                bash_state,
+                command,
+                *is_background,
+                *allow_multi,
+                timeout_s,
+                delivery_cursor,
+            )
+            .await
         }
         BashCommandAction::StatusCheck { scrollback_lines, verbose, .. } => {
             execute_status_check(
@@ -527,6 +627,7 @@ async fn execute_bash_action(
                 timeout_s,
                 *scrollback_lines,
                 *verbose,
+                delivery_cursor,
             )
             .await
         }
@@ -539,6 +640,7 @@ async fn execute_bash_action(
                 is_bg,
                 bg_id.as_deref(),
                 timeout_s,
+                delivery_cursor,
             )
             .await
         }
@@ -551,6 +653,7 @@ async fn execute_bash_action(
                 is_bg,
                 bg_id.as_deref(),
                 timeout_s,
+                delivery_cursor,
             )
             .await
         }
@@ -563,11 +666,21 @@ async fn execute_bash_action(
                 is_bg,
                 bg_id.as_deref(),
                 timeout_s,
+                delivery_cursor,
             )
             .await
         }
         BashCommandAction::Screen { lines, diff, .. } => {
-            execute_screen(bash_state, bg_shell, is_bg, bg_id.as_deref(), *lines, *diff).await
+            execute_screen(
+                bash_state,
+                bg_shell,
+                is_bg,
+                bg_id.as_deref(),
+                *lines,
+                *diff,
+                delivery_cursor,
+            )
+            .await
         }
         BashCommandAction::WaitForTurn {
             recognizer,
@@ -642,6 +755,7 @@ async fn execute_command(
     is_background: bool,
     allow_multi: bool,
     timeout_s: f64,
+    delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
     // wcgw strips a trailing `| tail` before anything else (model_validator).
     let stripped_command = strip_tail_pipe(command);
@@ -670,7 +784,7 @@ async fn execute_command(
 
     // If background execution requested, start new shell - matches WCGW Python is_background handling
     if is_background {
-        return execute_in_background(bash_state, command, timeout_s).await;
+        return execute_in_background(bash_state, command, timeout_s, delivery_cursor).await;
     }
 
     // `BashState` is cloned per request, so the shell mutex alone did not make
@@ -679,10 +793,11 @@ async fn execute_command(
     // Serialize the complete foreground start/wait path across those clones.
     let foreground_gate = bash_state.foreground_command_gate.clone();
     let _foreground_guard = foreground_gate.lock_owned().await;
+    let shell_arc = main_shell(bash_state);
 
     // Check if a command is already running - matches WCGW Python state check
     {
-        let bash_guard = bash_state.pty_shell.lock().await;
+        let bash_guard = shell_arc.lock().await;
 
         if let Some(ref bash) = *bash_guard {
             if bash.command_running {
@@ -692,7 +807,7 @@ async fn execute_command(
     }
 
     // Initialize bash if needed
-    if bash_state.pty_shell.lock().await.is_none() {
+    if shell_arc.lock().await.is_none() {
         bash_state
             .init_pty_shell()
             .await
@@ -708,8 +823,8 @@ async fn execute_command(
             // Only when a shell exists. clear_to_run_async drains/interrupts WITHOUT
             // holding the lock across a blocking sleep (was bash.clear_to_run, which
             // slept up to DEFAULT_TIMEOUT seconds inside the tokio mutex).
-            if bash_state.pty_shell.lock().await.is_some() {
-                if clear_to_run_async(&bash_state.pty_shell, DEFAULT_TIMEOUT).await {
+            if shell_arc.lock().await.is_some() {
+                if clear_to_run_async(&shell_arc, DEFAULT_TIMEOUT).await {
                     false
                 } else {
                     warn!("clear_to_run: shell still busy after Ctrl-C, resetting it");
@@ -732,7 +847,7 @@ async fn execute_command(
     // Send command in chunks of 64 characters - matches WCGW Python exactly
     let scratch_root = bash_state.workspace_root.clone();
     {
-        let mut bash_guard = bash_state.pty_shell.lock().await;
+        let mut bash_guard = shell_arc.lock().await;
 
         let bash = bash_guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
 
@@ -763,8 +878,7 @@ async fn execute_command(
     }
 
     // Wait for output with WCGW-style patience handling
-    let shell_arc = bash_state.pty_shell.clone();
-    wait_for_output(bash_state, &shell_arc, timeout_s, false, None, false).await
+    wait_for_output(bash_state, &shell_arc, timeout_s, false, None, false, delivery_cursor).await
 }
 
 /// Wait for command output with WCGW-style patience handling - matches WCGW Python expect/wait logic.
@@ -834,12 +948,22 @@ async fn wait_for_output(
     is_bg: bool,
     bg_id: Option<&str>,
     is_status_check: bool,
+    mut delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
     let start = Instant::now();
     let wait = timeout_s;
-    let previously_delivered = {
+    let (generation, legacy_delivered) = {
         let guard = shell_arc.lock().await;
-        guard.as_ref().map(PtyShell::delivered_output).unwrap_or_default()
+        guard.as_ref().map_or((0, String::new()), |shell| {
+            (shell.command_generation(), shell.delivered_output())
+        })
+    };
+    let mut previously_delivered = match delivery_cursor.as_deref_mut() {
+        Some(cursor) => {
+            cursor.sync_generation(generation);
+            cursor.delivered_output.clone()
+        }
+        None => legacy_delivered,
     };
     let mut complete = false;
 
@@ -872,6 +996,17 @@ async fn wait_for_output(
         poll_shell(shell_arc).await;
     }
     output = snapshot_shell(shell_arc).await;
+
+    if let Some(cursor) = delivery_cursor.as_deref_mut() {
+        let generation = {
+            let guard = shell_arc.lock().await;
+            guard.as_ref().map_or(0, PtyShell::command_generation)
+        };
+        if cursor.generation != Some(generation) {
+            cursor.sync_generation(generation);
+            previously_delivered.clear();
+        }
+    }
 
     // If not complete and this is a status check, use WCGW-style patience waiting.
     //
@@ -933,7 +1068,9 @@ async fn wait_for_output(
     // Advance the delivery cursor only AFTER rendering. The old code assigned the
     // current snapshot first and then diffed it against itself, hiding every new
     // byte emitted while a process was still running (even with verbose=true).
-    {
+    if let Some(cursor) = delivery_cursor.as_deref_mut() {
+        cursor.delivered_output.clone_from(&output);
+    } else {
         let mut guard = shell_arc.lock().await;
         if let Some(shell) = guard.as_mut() {
             shell.mark_output_delivered(&output);
@@ -1074,12 +1211,13 @@ async fn execute_status_check(
     timeout_s: f64,
     scrollback_lines: Option<usize>,
     verbose: bool,
+    mut delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
     debug!("Processing StatusCheck action (verbose={verbose}, scrollback={scrollback_lines:?})");
 
     // Pick the shell we're going to inspect: bg shell when bg_command_id was provided,
     // otherwise fall back to the main interactive shell.
-    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
+    let shell_arc = bg_shell.unwrap_or_else(|| main_shell(bash_state));
 
     // Check if there's a running command - matches WCGW Python state check
     let is_running = {
@@ -1093,7 +1231,7 @@ async fn execute_status_check(
 
     // If no command running and not background, return error - matches WCGW Python
     if !is_running && !is_bg {
-        let mut manager = lock_bg_manager();
+        let mut manager = lock_session_store();
         let error = format!(
             "No command is currently running, so there's nothing to check. The previous \
              command already finished and its output was returned when it completed. Start a \
@@ -1104,38 +1242,68 @@ async fn execute_status_check(
     }
 
     // Read output with patience handling - this IS a status check
-    let response = wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, true).await?;
+    let response = wait_for_output(
+        bash_state,
+        &shell_arc,
+        timeout_s,
+        is_bg,
+        bg_id,
+        true,
+        delivery_cursor.as_deref_mut(),
+    )
+    .await?;
 
     // Inter-call dedup hashes the cumulative PTY buffer, while the response body
     // itself stays incremental. Hashing the incremental body made the first empty
     // poll after real output look "different" again and emit a blank response.
     if !verbose && scrollback_lines.is_none() {
-        let mut guard = shell_arc.lock().await;
-        if let Some(bash) = guard.as_mut() {
-            let fingerprint = PtyShell::fingerprint(&bash.output_snapshot());
-            if Some(fingerprint) == bash.last_returned_hash {
-                let running_for =
-                    bash.command_elapsed().map(|elapsed| format!("{} seconds", elapsed.as_secs()));
-                let running = bash.command_running;
-                let exit_code = (!running).then_some(bash.last_exit_code).flatten();
-                let status = get_status(
-                    bash_state,
-                    is_bg,
-                    bg_id,
-                    running,
-                    running_for.as_deref(),
-                    exit_code,
-                    Some(bash.current_cwd()),
-                );
-                return Ok(format!("no new output since last check{status}"));
+        let (fingerprint, running_for, running, exit_code, cwd) = {
+            let guard = shell_arc.lock().await;
+            let Some(bash) = guard.as_ref() else {
+                return Err(WinxError::BashStateNotInitialized);
+            };
+            (
+                PtyShell::fingerprint(&bash.output_snapshot()),
+                bash.command_elapsed().map(|elapsed| format!("{} seconds", elapsed.as_secs())),
+                bash.command_running,
+                (!bash.command_running).then_some(bash.last_exit_code).flatten(),
+                bash.current_cwd().to_path_buf(),
+            )
+        };
+        let previous_hash = match delivery_cursor.as_deref_mut() {
+            Some(cursor) => cursor.last_returned_hash.replace(fingerprint),
+            None => {
+                let mut guard = shell_arc.lock().await;
+                guard.as_mut().and_then(|bash| bash.last_returned_hash.replace(fingerprint))
             }
-            bash.last_returned_hash = Some(fingerprint);
+        };
+        if previous_hash == Some(fingerprint) {
+            let status = get_status(
+                bash_state,
+                is_bg,
+                bg_id,
+                running,
+                running_for.as_deref(),
+                exit_code,
+                Some(&cwd),
+            );
+            return Ok(format!("no new output since last check{status}"));
         }
     } else if !verbose {
         // Still record the hash so subsequent non-scrollback calls can dedup.
-        let mut guard = shell_arc.lock().await;
-        if let Some(bash) = guard.as_mut() {
-            bash.last_returned_hash = Some(PtyShell::fingerprint(&bash.output_snapshot()));
+        let fingerprint = {
+            let guard = shell_arc.lock().await;
+            guard.as_ref().map(|bash| PtyShell::fingerprint(&bash.output_snapshot()))
+        };
+        if let Some(fingerprint) = fingerprint {
+            if let Some(cursor) = delivery_cursor.as_deref_mut() {
+                cursor.last_returned_hash = Some(fingerprint);
+            } else {
+                let mut guard = shell_arc.lock().await;
+                if let Some(bash) = guard.as_mut() {
+                    bash.last_returned_hash = Some(fingerprint);
+                }
+            }
         }
     }
 
@@ -1168,8 +1336,9 @@ async fn execute_screen(
     bg_id: Option<&str>,
     lines: Option<usize>,
     diff: bool,
+    mut delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
-    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
+    let shell_arc = bg_shell.unwrap_or_else(|| main_shell(bash_state));
     let max_lines = lines.unwrap_or(0);
 
     if diff {
@@ -1179,8 +1348,14 @@ async fn execute_screen(
                 Some(bash) => {
                     bash.poll_output_nonblocking();
                     let running = bash.command_running;
+                    let update = if let Some(cursor) = delivery_cursor.as_deref_mut() {
+                        cursor.sync_generation(bash.command_generation());
+                        cursor.screen_update(bash.live_snapshot(max_lines), SCREEN_DIFF_THRESHOLD)
+                    } else {
+                        bash.live_snapshot_diff(max_lines, SCREEN_DIFF_THRESHOLD)
+                    };
                     (
-                        bash.live_snapshot_diff(max_lines, SCREEN_DIFF_THRESHOLD),
+                        update,
                         running,
                         bash.live_in_alt_screen(),
                         bash.live_cursor_position(),
@@ -1341,7 +1516,7 @@ async fn execute_wait_for_turn(
 ) -> Result<String> {
     use crate::state::turn::{recognizer_for, TurnState};
 
-    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
+    let shell_arc = bg_shell.unwrap_or_else(|| main_shell(bash_state));
     let recognizer = recognizer_for(recognizer_hint.unwrap_or("auto"));
     let quiet = Duration::from_millis(quiet_ms.unwrap_or(600).clamp(50, 10_000));
     let settle = quiet.min(Duration::from_millis(300));
@@ -1459,6 +1634,7 @@ async fn execute_send_text(
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
+    delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
     debug!(bytes = text.len(), submit, "Processing SendText action");
 
@@ -1470,7 +1646,7 @@ async fn execute_send_text(
     }
 
     // Get the target shell
-    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
+    let shell_arc = bg_shell.unwrap_or_else(|| main_shell(bash_state));
 
     // Send text in chunks of 128 characters - matches WCGW Python exactly
     {
@@ -1491,7 +1667,7 @@ async fn execute_send_text(
     }
 
     // Wait for output
-    wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await
+    wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false, delivery_cursor).await
 }
 
 /// Execute `send_specials` - matches WCGW Python's `SendSpecials` handling exactly
@@ -1503,6 +1679,7 @@ async fn execute_send_specials(
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
+    delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
     debug!("Processing SendSpecials action: {keys:?} (submit={submit})");
 
@@ -1513,7 +1690,7 @@ async fn execute_send_specials(
         ));
     }
 
-    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
+    let shell_arc = bg_shell.unwrap_or_else(|| main_shell(bash_state));
     let mut is_interrupt = false;
 
     {
@@ -1593,7 +1770,8 @@ async fn execute_send_specials(
 
     // Wait for output
     let mut output =
-        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
+        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false, delivery_cursor)
+            .await?;
 
     // Add interrupt failure message if still running - matches WCGW Python exactly
     if is_interrupt && output.contains("status = still running") {
@@ -1612,6 +1790,7 @@ async fn execute_send_ascii(
     is_bg: bool,
     bg_id: Option<&str>,
     timeout_s: f64,
+    delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
     debug!(bytes = ascii_codes.len(), submit, "Processing SendAscii action");
 
@@ -1622,7 +1801,7 @@ async fn execute_send_ascii(
         ));
     }
 
-    let shell_arc = bg_shell.unwrap_or_else(|| bash_state.pty_shell.clone());
+    let shell_arc = bg_shell.unwrap_or_else(|| main_shell(bash_state));
     let mut is_interrupt = false;
 
     {
@@ -1657,7 +1836,8 @@ async fn execute_send_ascii(
 
     // Wait for output
     let mut output =
-        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false).await?;
+        wait_for_output(bash_state, &shell_arc, timeout_s, is_bg, bg_id, false, delivery_cursor)
+            .await?;
 
     // Add interrupt failure message if still running - matches WCGW Python
     if is_interrupt && output.contains("status = still running") {
@@ -1672,6 +1852,7 @@ async fn execute_in_background(
     bash_state: &mut BashState,
     command: &str,
     timeout_s: f64,
+    delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
     debug!(bytes = command.len(), "Executing command in background");
 
@@ -1692,12 +1873,12 @@ async fn execute_in_background(
             .map_err(|e| {
                 WinxError::CommandExecutionError(format!("Failed to start background shell: {e}"))
             })?;
-        lock_bg_manager().register_shell(&bash_state.current_thread_id, shell)?
+        lock_session_store().register_shell(&bash_state.current_thread_id, shell)?
     };
 
     // Get the shell
     let shell_arc = {
-        let manager = lock_bg_manager();
+        let manager = lock_session_store();
         manager.get_shell(&bash_state.current_thread_id, &bg_id).ok_or_else(|| {
             WinxError::CommandExecutionError("Failed to get background shell".to_string())
         })?
@@ -1715,13 +1896,13 @@ async fn execute_in_background(
         })
     };
     let Some(send_result) = send_result else {
-        lock_bg_manager().remove_shell(&bg_id);
+        lock_session_store().remove_shell(&bg_id);
         return Err(WinxError::BashStateNotInitialized);
     };
     if let Err(error) = send_result {
         // Registration consumes a capacity slot before the PTY write. Roll it
         // back on failure; no reaper has been spawned yet to clean it for us.
-        lock_bg_manager().remove_shell(&bg_id);
+        lock_session_store().remove_shell(&bg_id);
         return Err(WinxError::CommandExecutionError(format!(
             "Failed to send bg command: {error}"
         )));
@@ -1730,7 +1911,7 @@ async fn execute_in_background(
 
     spawn_background_reaper(bash_state.current_thread_id.clone(), bg_id.clone());
 
-    let _ = timeout_s;
+    let _ = (timeout_s, delivery_cursor);
     let _ = shell_arc;
     Ok(get_status(bash_state, true, Some(&bg_id), true, None, None, Some(&bash_state.cwd)))
 }

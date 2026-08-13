@@ -37,6 +37,7 @@ use rmcp::transport::streamable_http_server::{
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
+use crate::runtime::{configured_shell_runtime, ShellRuntime};
 use crate::server::{SessionIsolation, WinxService};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -68,12 +69,29 @@ pub async fn start_http_server(
     extra_hosts: Vec<String>,
     allow_query_token: bool,
 ) -> Result<(), BoxError> {
+    start_http_server_with_runtime(
+        bind,
+        token,
+        extra_hosts,
+        allow_query_token,
+        configured_shell_runtime().await?,
+    )
+    .await
+}
+
+pub async fn start_http_server_with_runtime(
+    bind: &str,
+    token: String,
+    extra_hosts: Vec<String>,
+    allow_query_token: bool,
+    shell_runtime: Arc<dyn ShellRuntime>,
+) -> Result<(), BoxError> {
     if token.trim().is_empty() {
         return Err("refusing to start HTTP transport without a token (RCE exposure)".into());
     }
 
     let mut config = StreamableHttpServerConfig::default();
-    config.stateful_mode = true;
+    config.legacy_session_mode = true;
     config.allowed_hosts.extend(extra_hosts);
 
     // One shared WinxService across every request. Remote clients like ChatGPT
@@ -90,7 +108,7 @@ pub async fn start_http_server(
     // clients that deliberately reuse the same explicit `thread_id` still share a
     // shell — real multi-tenant isolation needs per-client tokens, which the
     // single shared-token model doesn't provide.
-    let shared = WinxService::with_isolation(SessionIsolation::Strict);
+    let shared = WinxService::with_runtime(SessionIsolation::Strict, shell_runtime);
     let mcp_service = StreamableHttpService::new(
         move || Ok(shared.clone()),
         Arc::new(LocalSessionManager::default()),

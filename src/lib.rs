@@ -20,8 +20,10 @@
 //! A high-performance Rust implementation of the Model Context Protocol (MCP).
 //! It provides core tools for shell execution and file management with extreme efficiency.
 
+pub mod daemon;
 pub mod errors;
 pub mod http_server;
+pub mod runtime;
 pub mod sandbox;
 pub mod server;
 pub mod state;
@@ -30,4 +32,4 @@ pub mod types;
 pub mod utils;
 
 pub use errors::{Result, WinxError};
-pub use server::{start_winx_server, SharedBashState, WinxService};
+pub use server::{start_winx_server, start_winx_server_with_runtime, SharedBashState, WinxService};

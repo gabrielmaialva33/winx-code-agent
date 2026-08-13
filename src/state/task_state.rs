@@ -1,9 +1,9 @@
-//! In-memory lifecycle state for MCP Tasks.
+//! In-memory lifecycle state for the SEP-2663 MCP Tasks extension.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use rmcp::model::{Task, TaskStatus};
+use rmcp::model::{DetailedTask, JsonObject, Task, TaskPayload, TaskStatus};
 use serde_json::Value;
 use tokio::task::AbortHandle;
 
@@ -11,8 +11,6 @@ use tokio::task::AbortHandle;
 /// different TTL. This is deliberately bounded: Winx task results can contain a
 /// large build log.
 pub const DEFAULT_TASK_TTL_MS: u64 = 5 * 60 * 1_000;
-pub const MIN_TASK_TTL_MS: u64 = 1_000;
-pub const MAX_TASK_TTL_MS: u64 = 24 * 60 * 60 * 1_000;
 pub const MAX_TASKS: usize = 32;
 
 #[derive(Debug)]
@@ -40,7 +38,33 @@ impl TaskEntry {
         self.task.last_updated_at = rmcp::task_manager::current_timestamp();
         self.result = result;
         self.abort_handle = None;
-        self.expires_at = self.task.ttl.map(|ttl| Instant::now() + Duration::from_millis(ttl));
+        self.expires_at = self.task.ttl_ms.map(|ttl| Instant::now() + Duration::from_millis(ttl));
+    }
+
+    pub fn detailed(&self) -> DetailedTask {
+        let payload = match self.task.status {
+            TaskStatus::Working => TaskPayload::Working,
+            TaskStatus::InputRequired => TaskPayload::Failed {
+                error: task_error("Winx BashCommand tasks do not request in-task input"),
+            },
+            TaskStatus::Completed => match self.result.clone() {
+                Some(Value::Object(result)) => TaskPayload::Completed { result },
+                _ => {
+                    TaskPayload::Failed { error: task_error("Completed task has no object result") }
+                }
+            },
+            TaskStatus::Failed => TaskPayload::Failed {
+                error: task_error(
+                    self.task
+                        .status_message
+                        .as_deref()
+                        .unwrap_or("Task failed without a status message"),
+                ),
+            },
+            TaskStatus::Cancelled => TaskPayload::Cancelled,
+            _ => TaskPayload::Failed { error: task_error("Task has an unsupported status") },
+        };
+        DetailedTask::new(self.task.clone(), payload)
     }
 
     fn is_expired(&self, now: Instant) -> bool {
@@ -80,21 +104,13 @@ impl TaskRegistry {
         self.prune();
         self.entries.get_mut(task_id)
     }
-
-    pub fn list(&mut self) -> Vec<Task> {
-        self.prune();
-        let mut tasks = self.entries.values().map(|entry| entry.task.clone()).collect::<Vec<_>>();
-        tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        tasks
-    }
 }
 
-/// Negotiate a bounded result-retention TTL from the task augmentation object.
-pub fn requested_ttl(task: Option<&serde_json::Map<String, Value>>) -> u64 {
-    task.and_then(|metadata| metadata.get("ttl"))
-        .and_then(Value::as_u64)
-        .unwrap_or(DEFAULT_TASK_TTL_MS)
-        .clamp(MIN_TASK_TTL_MS, MAX_TASK_TTL_MS)
+fn task_error(message: &str) -> JsonObject {
+    serde_json::Map::from_iter([
+        ("code".to_string(), Value::from(-32603)),
+        ("message".to_string(), Value::from(message)),
+    ])
 }
 
 #[cfg(test)]
@@ -110,16 +126,7 @@ mod tests {
             "2026-07-21T12:00:00Z".to_string(),
             "2026-07-21T12:00:00Z".to_string(),
         )
-        .with_ttl(ttl)
-    }
-
-    #[test]
-    fn requested_ttl_is_bounded() {
-        let low = serde_json::from_value(serde_json::json!({"ttl": 1})).unwrap();
-        let high = serde_json::from_value(serde_json::json!({"ttl": u64::MAX})).unwrap();
-        assert_eq!(requested_ttl(Some(&low)), MIN_TASK_TTL_MS);
-        assert_eq!(requested_ttl(Some(&high)), MAX_TASK_TTL_MS);
-        assert_eq!(requested_ttl(None), DEFAULT_TASK_TTL_MS);
+        .with_ttl_ms(ttl)
     }
 
     #[test]

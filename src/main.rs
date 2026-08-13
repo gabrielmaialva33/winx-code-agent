@@ -3,7 +3,12 @@
 //! Winx is a high-performance Rust implementation of the Model Context Protocol (MCP).
 //! It provides core tools for shell execution and file management with extreme efficiency.
 
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::Duration;
+
 use clap::Parser;
+use winx_code_agent::daemon::{default_socket_path, DaemonClient};
 use winx_code_agent::{start_winx_server, Result, WinxError};
 
 /// Winx - High Performance MCP Server
@@ -62,6 +67,30 @@ enum Commands {
         #[arg(long)]
         allow_query_token: bool,
     },
+
+    /// List shell sessions owned by winxd
+    List {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+
+    /// Read a session's output using an independent consumer cursor
+    Attach {
+        thread_id: String,
+        #[arg(long, default_value = "cli")]
+        consumer: String,
+        #[arg(long)]
+        follow: bool,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+
+    /// Stop and remove a daemon-owned shell session
+    Kill {
+        thread_id: String,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 /// Logging setup
@@ -108,9 +137,56 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Serve {
             http: true, bind, token, allowed_host, allow_query_token, ..
         }) => run_http_server(bind, token, allowed_host, allow_query_token).await,
+        Some(Commands::List { socket }) => run_list(socket).await,
+        Some(Commands::Attach { thread_id, consumer, follow, socket }) => {
+            run_attach(socket, thread_id, consumer, follow).await
+        }
+        Some(Commands::Kill { thread_id, socket }) => run_kill(socket, thread_id).await,
         // Default: stdio transport for local MCP clients.
         None | Some(Commands::Serve { .. }) => run_server().await,
     }
+}
+
+fn daemon_client(socket: Option<PathBuf>) -> DaemonClient {
+    DaemonClient::new(socket.unwrap_or_else(default_socket_path))
+}
+
+async fn run_list(socket: Option<PathBuf>) -> Result<()> {
+    let sessions = daemon_client(socket).list_sessions().await?;
+    serde_json::to_writer_pretty(std::io::stdout().lock(), &sessions)
+        .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+    writeln!(std::io::stdout().lock())?;
+    Ok(())
+}
+
+async fn run_attach(
+    socket: Option<PathBuf>,
+    thread_id: String,
+    consumer: String,
+    follow: bool,
+) -> Result<()> {
+    let client = daemon_client(socket);
+    loop {
+        let read = client.read_output(&thread_id, &consumer).await?;
+        if read.gap {
+            writeln!(std::io::stderr().lock(), "(...daemon scrollback truncated...)")?;
+        }
+        if !read.output.is_empty() {
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(read.output.as_bytes())?;
+            stdout.flush()?;
+        }
+        if !follow {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn run_kill(socket: Option<PathBuf>, thread_id: String) -> Result<()> {
+    let killed = daemon_client(socket).kill_session(&thread_id).await?;
+    writeln!(std::io::stdout().lock(), "{}", if killed { "killed" } else { "not found" })?;
+    Ok(())
 }
 
 /// Executes the remote MCP server over Streamable HTTP.

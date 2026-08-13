@@ -1,27 +1,25 @@
-//! Winx MCP Server implementation using rmcp 1.8
+//! Winx MCP Server implementation using the official rmcp SDK.
 //! Core MCP tools only - High performance shell and file management
 
 use rand::RngExt;
 use rmcp::{
     model::{
-        Annotated, CallToolRequestParams, CallToolResult, CancelTaskParams, CancelTaskResult,
-        ClientJsonRpcMessage, ClientRequest, Content, CreateTaskResult, ErrorCode,
-        GetPromptRequestParams, GetPromptResult, GetTaskInfoParams, GetTaskPayloadResult,
-        GetTaskResult, GetTaskResultParams, Icon, Implementation, ListPromptsResult,
-        ListResourcesResult, ListTasksResult, ListToolsResult, PaginatedRequestParams, Prompt,
-        PromptMessage, PromptMessageRole, ProtocolVersion, RawResource, ReadResourceRequestParams,
-        ReadResourceResult, ResourceContents, ServerCapabilities, ServerInfo, ServerJsonRpcMessage,
-        Task, TaskStatus, TaskSupport, TasksCapability, Tool, ToolAnnotations, ToolExecution,
+        CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams, ContentBlock,
+        CreateTaskResult, GetPromptRequestParams, GetPromptResponse, GetPromptResult,
+        GetTaskParams, GetTaskResult, Icon, Implementation, ListPromptsResult, ListResourcesResult,
+        ListToolsResult, PaginatedRequestParams, Prompt, PromptMessage, ProtocolVersion,
+        ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+        ResourceContents, Role, ServerCapabilities, ServerInfo, Task, TaskStatus, Tool,
+        ToolAnnotations, UpdateTaskParams,
     },
     service::{NotificationContext, RequestContext, RoleServer},
-    transport::{async_rw::AsyncRwTransport, stdio, Transport},
+    transport::{async_rw::AsyncRwTransport, stdio},
     ErrorData as McpError, ServerHandler, ServiceExt,
 };
 use schemars::schema_for;
 use serde_json::Value;
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
-use std::future::Future;
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -31,8 +29,9 @@ use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::errors::WinxError;
+use crate::runtime::{configured_shell_runtime, EmbeddedShellRuntime, ShellRuntime};
 use crate::state::bash_state::generate_thread_id;
-use crate::state::task_state::{requested_ttl, TaskEntry, TaskRegistry};
+use crate::state::task_state::{TaskEntry, TaskRegistry, DEFAULT_TASK_TTL_MS};
 use crate::state::BashState;
 use crate::types::{
     normalize_thread_id, BashCommand, BashCommandAction, CodeMap, CodeMapStructuredOutput,
@@ -96,67 +95,6 @@ fn to_mcp_error(tool: &str, err: &WinxError) -> McpError {
 
 /// Type alias for the shared bash state - uses `tokio::sync::Mutex` for async safety
 pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
-
-/// Preserve the legacy 2025-11-25 handshake when a newer client probes with
-/// `server/discover` first. The draft stateless protocol requires legacy
-/// servers to answer `Method not found`, after which the client falls back to
-/// `initialize`; rmcp 1.8 otherwise treats the probe as a fatal init error.
-struct LegacyDiscoveryFallback<T> {
-    inner: T,
-}
-
-impl<T> LegacyDiscoveryFallback<T> {
-    fn new(inner: T) -> Self {
-        Self { inner }
-    }
-}
-
-impl<T> Transport<RoleServer> for LegacyDiscoveryFallback<T>
-where
-    T: Transport<RoleServer>,
-{
-    type Error = T::Error;
-
-    fn send(
-        &mut self,
-        item: ServerJsonRpcMessage,
-    ) -> impl Future<Output = Result<(), Self::Error>> + Send + 'static {
-        self.inner.send(item)
-    }
-
-    async fn receive(&mut self) -> Option<ClientJsonRpcMessage> {
-        loop {
-            let message = self.inner.receive().await?;
-            let discovery_id = match &message {
-                ClientJsonRpcMessage::Request(request)
-                    if matches!(
-                        &request.request,
-                        ClientRequest::CustomRequest(custom)
-                            if custom.method == "server/discover"
-                    ) =>
-                {
-                    Some(request.id.clone())
-                }
-                _ => None,
-            };
-
-            let Some(id) = discovery_id else {
-                return Some(message);
-            };
-
-            let error = McpError::new(ErrorCode::METHOD_NOT_FOUND, "Method not found", None);
-            if let Err(error) = self.inner.send(ServerJsonRpcMessage::error(error, Some(id))).await
-            {
-                warn!(%error, "failed to answer server/discover compatibility probe");
-                return None;
-            }
-        }
-    }
-
-    fn close(&mut self) -> impl Future<Output = Result<(), Self::Error>> + Send {
-        self.inner.close()
-    }
-}
 
 /// Helper function to create JSON schema from schemars Schema
 fn schema_to_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, Value>> {
@@ -271,7 +209,7 @@ const BASH_COMMAND_DESCRIPTION: &str =
      - Do not send Ctrl-c before checking for status till 10 minutes or whatever is appropriate for the program to finish. \
      - Only run long running commands in background. Each background command is run in a new non-reusable shell. \
      - On running a bg command you'll get a bg command id that you should use to get status or interact. \
-     - MCP Tasks are also supported for a single foreground `command`: send the protocol-level `task` object and an explicit `thread_id`; poll with tasks/get and fetch the final CallToolResult with tasks/result. Do not combine an MCP Task with `is_background=true`. \
+     - MCP Tasks are supported for a single foreground `command` when the client declares the `io.modelcontextprotocol/tasks` extension. Use an explicit `thread_id`; poll with tasks/get, whose completed state contains the final CallToolResult. Do not combine an MCP Task with `is_background=true`. \
      - Piloting an interactive full-screen TUI (the `claude` CLI, vim, htop, fzf, a REPL)? Run it in the background, then drive it with these two actions: \
      - `screen` ({\"screen\":true,\"bg_command_id\":\"...\",\"lines\":N,\"diff\":true}) returns a STABLE snapshot of the live terminal screen (cursor moves, redraws, alternate-screen and synchronized-output already applied; ANSI stripped), with the cursor position in the header. Use this to read the current frame — unlike `status_check`, it never stacks redraw generations and never waits. Pass \"diff\":true to get back ONLY the lines that changed since your last `screen` look (large token savings when polling a TUI frame-by-frame; first look or a big change still returns the full frame). \
      - `wait_for_turn` ({\"wait_for_turn\":true,\"bg_command_id\":\"...\",\"recognizer\":\"auto|claude|codex|antigravity|generic\",\"quiet_ms\":600,\"timeout_seconds\":30}) waits for the TUI's turn and returns the stable snapshot plus the detected state (busy / awaiting_input / awaiting_approval). By default it returns as soon as it confirms the app is actively working (state=busy) so a long-running child never pins you for the whole timeout — poll again to keep watching; pass \"wait_through_busy\":true to instead block through busy until it is ready for input (or the timeout fires). Typical REPL loop: run the app in bg -> wait_for_turn until awaiting_input -> send_text(submit:true) -> wait_for_turn -> screen, repeat.";
@@ -402,8 +340,7 @@ fn build_winx_tools() -> Vec<Tool> {
             "BashCommand",
             BASH_COMMAND_DESCRIPTION,
             ToolAnnotations::new().destructive(true).open_world(true),
-        )
-        .with_execution(ToolExecution::new().with_task_support(TaskSupport::Optional)),
+        ),
         mcp_tool::<ReadFiles>(
             "ReadFiles",
             READ_FILES_DESCRIPTION,
@@ -567,6 +504,7 @@ pub struct WinxService {
     sessions: Arc<Mutex<SessionRegistry>>,
     tasks: Arc<Mutex<TaskRegistry>>,
     root_bootstrap: Arc<Mutex<()>>,
+    shell_runtime: Arc<dyn ShellRuntime>,
     /// Version information for the service
     pub version: String,
     /// How empty `thread_id`s are resolved (see [`SessionIsolation`]).
@@ -589,11 +527,17 @@ impl WinxService {
     /// Create a `WinxService` with an explicit session-isolation policy. The
     /// HTTP transport uses [`SessionIsolation::Strict`].
     pub fn with_isolation(isolation: SessionIsolation) -> Self {
+        Self::with_runtime(isolation, Arc::new(EmbeddedShellRuntime))
+    }
+
+    /// Create a service with an explicit shell-runtime boundary.
+    pub fn with_runtime(isolation: SessionIsolation, shell_runtime: Arc<dyn ShellRuntime>) -> Self {
         info!(?isolation, "Creating new WinxService instance");
         Self {
             sessions: Arc::new(Mutex::new(SessionRegistry::default())),
             tasks: Arc::new(Mutex::new(TaskRegistry::default())),
             root_bootstrap: Arc::new(Mutex::new(())),
+            shell_runtime,
             version: env!("CARGO_PKG_VERSION").to_string(),
             isolation,
         }
@@ -673,7 +617,6 @@ impl WinxService {
     async fn run_bash_task(
         &self,
         mut request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let args = request
             .arguments
@@ -709,20 +652,19 @@ impl WinxService {
         bash.thread_id.clone_from(&thread_id);
         bash.wait_for_seconds = Some(20.0);
         request.arguments = Some(task_arguments(&bash)?);
-        request.task = None;
 
         let mut output = String::new();
         loop {
-            let result = ServerHandler::call_tool(self, request, context.clone()).await?;
+            let result = self.execute_tool_call(request).await?;
             let chunk = result
                 .content
                 .iter()
-                .filter_map(|content| content.raw.as_text().map(|text| text.text.as_str()))
+                .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
                 .collect::<Vec<_>>()
                 .join("\n");
             append_task_output(&mut output, &chunk);
             if !chunk.contains("status = still running") {
-                return Ok(CallToolResult::success(vec![Content::text(output)]));
+                return Ok(CallToolResult::success(vec![ContentBlock::text(output)]));
             }
 
             let status = BashCommand {
@@ -746,43 +688,8 @@ impl WinxService {
             registry.slots.get(thread_id).cloned()
         };
         let Some(slot) = slot else { return };
-        let shell = {
-            let state = slot.lock().await;
-            state.as_ref().map(|state| state.pty_shell.clone())
-        };
-        let Some(shell) = shell else { return };
-        {
-            let mut guard = shell.lock().await;
-            if let Some(pty) = guard.as_mut() {
-                if let Err(error) = pty.send_interrupt() {
-                    warn!(thread_id, %error, "failed to interrupt cancelled MCP task");
-                    return;
-                }
-            }
-        }
-
-        // Ctrl-C is asynchronous. Drain until the shell's prompt marker arrives
-        // before tasks/cancel returns, otherwise the very next tool call sees
-        // the stale `command_running=true` flag and reports a false conflict.
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while Instant::now() < deadline {
-            let recovered = {
-                let mut guard = shell.lock().await;
-                match guard.as_mut() {
-                    Some(pty) => pty.poll_output_nonblocking() || !pty.command_running,
-                    None => true,
-                }
-            };
-            if recovered {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        {
-            let guard = shell.lock().await;
-            if guard.as_ref().is_some_and(|pty| pty.command_running) {
-                warn!(thread_id, "cancelled MCP task did not return to a prompt within 3 seconds");
-            }
+        if let Err(error) = self.shell_runtime.interrupt(&slot).await {
+            warn!(thread_id, %error, "failed to interrupt cancelled MCP task");
         }
     }
 
@@ -857,6 +764,115 @@ impl WinxService {
             Err(error) => warn!(%error.message, "failed to initialize Winx from MCP Roots"),
         }
     }
+
+    fn bash_task_is_eligible(request: &CallToolRequestParams) -> bool {
+        if request.name != "BashCommand" {
+            return false;
+        }
+        let Some(arguments) = request.arguments.clone() else {
+            return false;
+        };
+        let Ok(bash) = serde_json::from_value::<BashCommand>(Value::Object(arguments)) else {
+            return false;
+        };
+        matches!(bash.action_json, BashCommandAction::Command { is_background: false, .. })
+            && !normalize_thread_id(&bash.thread_id).is_empty()
+    }
+
+    async fn enqueue_bash_task(
+        &self,
+        request: CallToolRequestParams,
+    ) -> Result<CreateTaskResult, McpError> {
+        let args = request
+            .arguments
+            .clone()
+            .ok_or_else(|| McpError::invalid_request("Missing BashCommand arguments", None))?;
+        let bash: BashCommand = serde_json::from_value(Value::Object(args)).map_err(|error| {
+            McpError::invalid_request(format!("Invalid BashCommand task parameters: {error}"), None)
+        })?;
+        let BashCommandAction::Command { is_background, .. } = bash.action_json else {
+            return Err(McpError::invalid_request(
+                "MCP Tasks support BashCommand's foreground command action only",
+                None,
+            ));
+        };
+        if is_background {
+            return Err(McpError::invalid_request(
+                "Do not combine an MCP Task with BashCommand is_background=true",
+                None,
+            ));
+        }
+        let thread_id = normalize_thread_id(&bash.thread_id);
+        if thread_id.is_empty() {
+            return Err(McpError::invalid_request(
+                "Task-augmented BashCommand requires an explicit thread_id",
+                None,
+            ));
+        }
+
+        let task_id = format!("task_{:032x}", rand::rng().random::<u128>());
+        let now = rmcp::task_manager::current_timestamp();
+        let task = Task::new(task_id.clone(), TaskStatus::Working, now.clone(), now)
+            .with_status_message("Running BashCommand")
+            .with_ttl_ms(DEFAULT_TASK_TTL_MS)
+            .with_poll_interval_ms(1_000);
+        self.tasks
+            .lock()
+            .await
+            .insert(task_id.clone(), TaskEntry::working(task.clone(), thread_id.clone()))
+            .map_err(|message| McpError::internal_error(message, None))?;
+
+        let service = self.clone();
+        let worker_task_id = task_id.clone();
+        let handle = tokio::spawn(async move {
+            let outcome =
+                tokio::time::timeout(MAX_TASK_RUNTIME, service.run_bash_task(request)).await;
+
+            let (status, message, result) = match outcome {
+                Ok(Ok(result)) => match serde_json::to_value(result) {
+                    Ok(result) => (
+                        TaskStatus::Completed,
+                        Some("BashCommand completed".to_string()),
+                        Some(result),
+                    ),
+                    Err(error) => (
+                        TaskStatus::Failed,
+                        Some(format!("Failed to serialize task result: {error}")),
+                        None,
+                    ),
+                },
+                Ok(Err(error)) => (
+                    TaskStatus::Failed,
+                    Some(crate::utils::redact::redact(&error.message).into_owned()),
+                    None,
+                ),
+                Err(_) => {
+                    service.interrupt_task_thread(&thread_id).await;
+                    (
+                        TaskStatus::Failed,
+                        Some("BashCommand task exceeded the one-hour runtime limit".to_string()),
+                        None,
+                    )
+                }
+            };
+
+            let mut tasks = service.tasks.lock().await;
+            if let Some(entry) = tasks.get_mut(&worker_task_id) {
+                if entry.task.status == TaskStatus::Working {
+                    entry.finish(status, message, result);
+                }
+            }
+        });
+        let abort_handle = handle.abort_handle();
+        drop(handle);
+        if let Some(entry) = self.tasks.lock().await.get_mut(&task_id) {
+            if entry.task.status == TaskStatus::Working {
+                entry.abort_handle = Some(abort_handle);
+            }
+        }
+
+        Ok(CreateTaskResult::new(task))
+    }
 }
 
 const MAX_TASK_RUNTIME: Duration = Duration::from_secs(60 * 60);
@@ -922,7 +938,7 @@ impl ServerHandler for WinxService {
                 .enable_tools()
                 .enable_resources()
                 .enable_prompts()
-                .enable_tasks_with(TasksCapability::server_default())
+                .enable_tasks()
                 .build(),
         )
         .with_server_info(
@@ -932,10 +948,7 @@ impl ServerHandler for WinxService {
                     .with_mime_type("image/png")
                     .with_sizes(vec!["96x96".to_string()])]),
         )
-        // Tasks were added in the stable 2025-11-25 revision. rmcp negotiates
-        // with older clients during initialize, so raising the server ceiling
-        // preserves compatibility with clients on earlier revisions.
-        .with_protocol_version(ProtocolVersion::V_2025_11_25)
+        .with_protocol_version(ProtocolVersion::V_2026_07_28)
         .with_instructions(
                 "Winx is a high-performance Rust implementation of MCP tools for shell and file management."
         )
@@ -955,172 +968,36 @@ impl ServerHandler for WinxService {
         winx_tools().into_iter().find(|tool| tool.name == name)
     }
 
-    async fn enqueue_task(
+    async fn get_task(
         &self,
-        request: CallToolRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<CreateTaskResult, McpError> {
-        if request.name != "BashCommand" {
-            return Err(McpError::invalid_request(
-                "Only BashCommand advertises MCP Task support",
-                None,
-            ));
-        }
-        let args = request
-            .arguments
-            .clone()
-            .ok_or_else(|| McpError::invalid_request("Missing BashCommand arguments", None))?;
-        let bash: BashCommand = serde_json::from_value(Value::Object(args)).map_err(|error| {
-            McpError::invalid_request(format!("Invalid BashCommand task parameters: {error}"), None)
-        })?;
-        let BashCommandAction::Command { is_background, .. } = bash.action_json else {
-            return Err(McpError::invalid_request(
-                "MCP Tasks support BashCommand's foreground command action only",
-                None,
-            ));
-        };
-        if is_background {
-            return Err(McpError::invalid_request(
-                "Do not combine an MCP Task with BashCommand is_background=true",
-                None,
-            ));
-        }
-        let thread_id = normalize_thread_id(&bash.thread_id);
-        if thread_id.is_empty() {
-            return Err(McpError::invalid_request(
-                "Task-augmented BashCommand requires an explicit thread_id",
-                None,
-            ));
-        }
-
-        let task_id = format!("task_{:032x}", rand::rng().random::<u128>());
-        let ttl = requested_ttl(request.task.as_ref());
-        let now = rmcp::task_manager::current_timestamp();
-        let task = Task::new(task_id.clone(), TaskStatus::Working, now.clone(), now)
-            .with_status_message("Running BashCommand")
-            .with_ttl(ttl)
-            .with_poll_interval(1_000);
-        self.tasks
-            .lock()
-            .await
-            .insert(task_id.clone(), TaskEntry::working(task.clone(), thread_id.clone()))
-            .map_err(|message| McpError::internal_error(message, None))?;
-
-        let service = self.clone();
-        let worker_task_id = task_id.clone();
-        let handle = tokio::spawn(async move {
-            let outcome =
-                tokio::time::timeout(MAX_TASK_RUNTIME, service.run_bash_task(request, context))
-                    .await;
-
-            let (status, message, result) = match outcome {
-                Ok(Ok(result)) => match serde_json::to_value(result) {
-                    Ok(result) => (
-                        TaskStatus::Completed,
-                        Some("BashCommand completed".to_string()),
-                        Some(result),
-                    ),
-                    Err(error) => (
-                        TaskStatus::Failed,
-                        Some(format!("Failed to serialize task result: {error}")),
-                        None,
-                    ),
-                },
-                Ok(Err(error)) => (
-                    TaskStatus::Failed,
-                    Some(crate::utils::redact::redact(&error.message).into_owned()),
-                    None,
-                ),
-                Err(_) => {
-                    service.interrupt_task_thread(&thread_id).await;
-                    (
-                        TaskStatus::Failed,
-                        Some("BashCommand task exceeded the one-hour runtime limit".to_string()),
-                        None,
-                    )
-                }
-            };
-
-            let mut tasks = service.tasks.lock().await;
-            if let Some(entry) = tasks.get_mut(&worker_task_id) {
-                // Cancellation is terminal. A worker racing with tasks/cancel
-                // must never overwrite Cancelled with Completed.
-                if entry.task.status == TaskStatus::Working {
-                    entry.finish(status, message, result);
-                }
-            }
-        });
-        let abort_handle = handle.abort_handle();
-        drop(handle);
-        if let Some(entry) = self.tasks.lock().await.get_mut(&task_id) {
-            if entry.task.status == TaskStatus::Working {
-                entry.abort_handle = Some(abort_handle);
-            }
-        }
-
-        Ok(CreateTaskResult::new(task))
-    }
-
-    async fn list_tasks(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
-    ) -> Result<ListTasksResult, McpError> {
-        let tasks = self.tasks.lock().await.list();
-        let total = tasks.len() as u64;
-        let mut result = ListTasksResult::new(tasks);
-        result.total = Some(total);
-        Ok(result)
-    }
-
-    async fn get_task_info(
-        &self,
-        request: GetTaskInfoParams,
+        request: GetTaskParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<GetTaskResult, McpError> {
         let mut tasks = self.tasks.lock().await;
         let entry = tasks.get(&request.task_id).ok_or_else(|| {
             McpError::invalid_request(format!("Unknown or expired task: {}", request.task_id), None)
         })?;
-        Ok(GetTaskResult { meta: None, task: entry.task.clone() })
+        Ok(GetTaskResult::new(entry.detailed()))
     }
 
-    async fn get_task_result(
+    async fn update_task(
         &self,
-        request: GetTaskResultParams,
+        request: UpdateTaskParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<GetTaskPayloadResult, McpError> {
+    ) -> Result<(), McpError> {
         let mut tasks = self.tasks.lock().await;
-        let entry = tasks.get(&request.task_id).ok_or_else(|| {
+        tasks.get(&request.task_id).ok_or_else(|| {
             McpError::invalid_request(format!("Unknown or expired task: {}", request.task_id), None)
         })?;
-        match entry.task.status {
-            TaskStatus::Completed => entry
-                .result
-                .clone()
-                .map(GetTaskPayloadResult::new)
-                .ok_or_else(|| McpError::internal_error("Completed task has no result", None)),
-            TaskStatus::Working | TaskStatus::InputRequired => Err(McpError::invalid_request(
-                format!("Task {} is not complete", request.task_id),
-                None,
-            )),
-            TaskStatus::Failed | TaskStatus::Cancelled => Err(McpError::invalid_request(
-                entry
-                    .task
-                    .status_message
-                    .clone()
-                    .unwrap_or_else(|| format!("Task {} did not complete", request.task_id)),
-                None,
-            )),
-        }
+        Ok(())
     }
 
     async fn cancel_task(
         &self,
         request: CancelTaskParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<CancelTaskResult, McpError> {
-        let (abort_handle, thread_id, task) = {
+    ) -> Result<(), McpError> {
+        let (abort_handle, thread_id) = {
             let mut tasks = self.tasks.lock().await;
             let entry = tasks.get_mut(&request.task_id).ok_or_else(|| {
                 McpError::invalid_request(
@@ -1139,13 +1016,13 @@ impl ServerHandler for WinxService {
             let abort_handle = entry.abort_handle.take();
             let thread_id = entry.thread_id.clone();
             entry.finish(TaskStatus::Cancelled, Some("Cancelled by client".to_string()), None);
-            (abort_handle, thread_id, entry.task.clone())
+            (abort_handle, thread_id)
         };
         if let Some(abort_handle) = abort_handle {
             abort_handle.abort();
         }
         self.interrupt_task_thread(&thread_id).await;
-        Ok(CancelTaskResult { meta: None, task })
+        Ok(())
     }
 
     async fn list_tools(
@@ -1153,7 +1030,7 @@ impl ServerHandler for WinxService {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult { tools: winx_tools(), next_cursor: None, meta: None })
+        Ok(ListToolsResult::with_all_items(winx_tools()))
     }
 
     async fn list_resources(
@@ -1161,23 +1038,9 @@ impl ServerHandler for WinxService {
         _param: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult {
-            resources: vec![Annotated {
-                raw: RawResource {
-                    uri: "file://readme".into(),
-                    name: "README".into(),
-                    description: Some("Project README documentation".into()),
-                    mime_type: Some("text/markdown".into()),
-                    size: None,
-                    title: None,
-                    icons: None,
-                    meta: None,
-                },
-                annotations: None,
-            }],
-            next_cursor: None,
-            meta: None,
-        })
+        Ok(ListResourcesResult::with_all_items(vec![Resource::new("file://readme", "README")
+            .with_description("Project README documentation")
+            .with_mime_type("text/markdown")]))
     }
 
     async fn list_prompts(
@@ -1185,14 +1048,14 @@ impl ServerHandler for WinxService {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
-        Ok(ListPromptsResult { prompts: winx_prompts(), next_cursor: None, meta: None })
+        Ok(ListPromptsResult::with_all_items(winx_prompts()))
     }
 
     async fn get_prompt(
         &self,
         request: GetPromptRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<GetPromptResult, McpError> {
+    ) -> Result<GetPromptResponse, McpError> {
         if request.name != "KnowledgeTransfer" {
             return Err(McpError::invalid_request(
                 format!("Unknown prompt: {}", request.name),
@@ -1205,15 +1068,16 @@ impl ServerHandler for WinxService {
         let text =
             crate::utils::redact::redact(&self.knowledge_transfer_prompt_text().await).into_owned();
 
-        Ok(GetPromptResult::new(vec![PromptMessage::new_text(PromptMessageRole::User, text)])
-            .with_description("Knowledge transfer handoff prompt"))
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)])
+            .with_description("Knowledge transfer handoff prompt")
+            .into())
     }
 
     async fn read_resource(
         &self,
         param: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
+    ) -> Result<ReadResourceResponse, McpError> {
         let content = match param.uri.as_ref() {
             "file://readme" => match tokio::fs::read_to_string("README.md").await {
                 Ok(content) => vec![ResourceContents::text(
@@ -1233,13 +1097,27 @@ impl ServerHandler for WinxService {
             }
         };
 
-        Ok(ReadResourceResult::new(content))
+        Ok(ReadResourceResult::new(content).into())
     }
 
     async fn call_tool(
         &self,
         param: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        if context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks())
+            && Self::bash_task_is_eligible(&param)
+        {
+            return Ok(CallToolResponse::Task(self.enqueue_bash_task(param).await?));
+        }
+        Ok(self.execute_tool_call(param).await?.into())
+    }
+}
+
+impl WinxService {
+    async fn execute_tool_call(
+        &self,
+        param: CallToolRequestParams,
     ) -> Result<CallToolResult, McpError> {
         let tool = param.name.to_string();
         let args_value = param.arguments.map(Value::Object);
@@ -1334,9 +1212,8 @@ fn audit_summary(tool: &str, args: Option<&Value>) -> String {
 /// content, in place. Central choke point so every tool is covered (see
 /// [`crate::utils::redact`]).
 fn redact_result(result: &mut CallToolResult) {
-    use rmcp::model::RawContent;
     for content in &mut result.content {
-        if let RawContent::Text(text) = &mut content.raw {
+        if let ContentBlock::Text(text) = content {
             if let std::borrow::Cow::Owned(scrubbed) = crate::utils::redact::redact(&text.text) {
                 text.text = scrubbed;
             }
@@ -1527,10 +1404,16 @@ impl WinxService {
         }
         let (slot, _session_guard) = self.session_for(&thread_id).await;
 
-        match crate::tools::initialize::handle_tool_call(&slot, initialize).await {
+        match crate::tools::initialize::handle_tool_call_with_runtime(
+            self.shell_runtime.as_ref(),
+            &slot,
+            initialize,
+        )
+        .await
+        {
             Ok(result) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![Content::text(result)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
             Err(e) => Err(to_mcp_error("Initialize", &e)),
         }
@@ -1560,10 +1443,16 @@ impl WinxService {
                 bash_command.thread_id = thread_id;
             }
         }
-        match crate::tools::bash_command::handle_tool_call(&slot, bash_command).await {
+        match crate::tools::bash_command::handle_tool_call_with_runtime(
+            self.shell_runtime.as_ref(),
+            &slot,
+            bash_command,
+        )
+        .await
+        {
             Ok(output) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![Content::text(output)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
             }
             Err(e) => Err(to_mcp_error("BashCommand", &e)),
         }
@@ -1580,7 +1469,7 @@ impl WinxService {
         match crate::tools::read_files::handle_tool_call(&slot, read_files).await {
             Ok(result) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![Content::text(result)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
             Err(e) => Err(to_mcp_error("ReadFiles", &e)),
         }
@@ -1600,7 +1489,7 @@ impl WinxService {
         match crate::tools::file_write_or_edit::handle_tool_call(&slot, file_write_or_edit).await {
             Ok(result) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![Content::text(result)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
             Err(e) => Err(to_mcp_error("FileWriteOrEdit", &e)),
         }
@@ -1619,7 +1508,7 @@ impl WinxService {
         match crate::tools::multi_file_edit::handle_tool_call(&slot, multi).await {
             Ok(result) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![Content::text(result)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
             Err(e) => Err(to_mcp_error("MultiFileEdit", &e)),
         }
@@ -1635,7 +1524,7 @@ impl WinxService {
         match crate::tools::undo_edit::handle_tool_call(&slot, undo).await {
             Ok(result) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![Content::text(result)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
             Err(e) => Err(to_mcp_error("UndoEdit", &e)),
         }
@@ -1652,7 +1541,7 @@ impl WinxService {
         match crate::tools::context_save::handle_tool_call(&slot, context_save).await {
             Ok(result) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![Content::text(result)]))
+                Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
             Err(e) => Err(to_mcp_error("ContextSave", &e)),
         }
@@ -1670,9 +1559,9 @@ impl WinxService {
             Ok((mime_type, base64_data)) => {
                 self.persist_state(&slot).await;
                 // Return a real image content block (not base64 as text) so the
-                // model can actually see the image. rmcp's `Content::image`
+                // model can actually see the image. rmcp's `ContentBlock::image`
                 // takes (data, mime_type).
-                Ok(CallToolResult::success(vec![Content::image(base64_data, mime_type)]))
+                Ok(CallToolResult::success(vec![ContentBlock::image(base64_data, mime_type)]))
             }
             Err(e) => Err(to_mcp_error("ReadImage", &e)),
         }
@@ -1689,7 +1578,7 @@ impl WinxService {
             self.session_for(&normalize_thread_id(&code_map.thread_id)).await;
         match crate::tools::code_map::handle_tool_call(&slot, code_map).await {
             Ok((text, structured)) => {
-                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
                 result.structured_content = Some(structured);
                 Ok(result)
             }
@@ -1700,11 +1589,18 @@ impl WinxService {
 
 /// Create and start the Winx MCP server
 pub async fn start_winx_server() -> Result<(), Box<dyn std::error::Error>> {
+    start_winx_server_with_runtime(configured_shell_runtime().await?).await
+}
+
+/// Create and start the stdio MCP server with an explicit shell runtime.
+pub async fn start_winx_server_with_runtime(
+    runtime: Arc<dyn ShellRuntime>,
+) -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting Winx MCP Server");
-    let service = WinxService::new();
+    let service = WinxService::with_runtime(SessionIsolation::Lenient, runtime);
     let (stdin, stdout) = stdio();
     let transport = AsyncRwTransport::new_server(stdin, stdout);
-    let server = service.serve(LegacyDiscoveryFallback::new(transport)).await?;
+    let server = service.serve(transport).await?;
     server.waiting().await?;
     Ok(())
 }
@@ -1844,7 +1740,7 @@ mod schema_tests {
     #![allow(clippy::expect_used)]
 
     use super::{root_uri_to_path, schema_to_input_schema, strip_schema_titles, winx_tools};
-    use rmcp::model::{ProtocolVersion, TaskSupport};
+    use rmcp::model::ProtocolVersion;
     use rmcp::ServerHandler;
     use serde_json::json;
     use std::path::PathBuf;
@@ -1905,20 +1801,16 @@ mod schema_tests {
     }
 
     #[test]
-    fn advertises_stable_tasks_protocol_and_capability() {
+    fn advertises_latest_protocol_and_tasks_extension() {
         let info = ServerHandler::get_info(&super::WinxService::new());
-        assert_eq!(info.protocol_version, ProtocolVersion::V_2025_11_25);
-        let tasks = info.capabilities.tasks.expect("tasks capability");
-        assert!(tasks.supports_tools_call());
-        assert!(tasks.supports_list());
-        assert!(tasks.supports_cancel());
+        assert_eq!(info.protocol_version, ProtocolVersion::V_2026_07_28);
+        assert!(info.capabilities.supports_tasks());
     }
 
     #[test]
-    fn bash_task_support_and_code_map_output_schema_are_advertised() {
+    fn bash_command_and_code_map_output_schema_are_advertised() {
         let tools = winx_tools();
-        let bash = tools.iter().find(|tool| tool.name == "BashCommand").expect("BashCommand");
-        assert_eq!(bash.task_support(), TaskSupport::Optional);
+        assert!(tools.iter().any(|tool| tool.name == "BashCommand"));
 
         let code_map = tools.iter().find(|tool| tool.name == "CodeMap").expect("CodeMap");
         let output = code_map.output_schema.as_ref().expect("CodeMap outputSchema");
@@ -1945,24 +1837,24 @@ mod schema_tests {
 }
 
 #[cfg(test)]
-mod discovery_compat_tests {
+mod discovery_protocol_tests {
     #![allow(clippy::expect_used)]
 
-    use super::{LegacyDiscoveryFallback, WinxService};
+    use super::WinxService;
     use rmcp::{transport::async_rw::AsyncRwTransport, ServiceExt};
     use serde_json::{json, Value};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
     #[tokio::test]
-    async fn discover_probe_falls_back_without_closing_legacy_handshake() {
+    async fn discover_probe_negotiates_modern_stateless_lifecycle() {
         let (client, server) = tokio::io::duplex(32 * 1024);
         let (server_read, server_write) = tokio::io::split(server);
         let transport = AsyncRwTransport::new_server(server_read, server_write);
         let task = tokio::spawn(async move {
             let running = WinxService::new()
-                .serve(LegacyDiscoveryFallback::new(transport))
+                .serve(transport)
                 .await
-                .expect("server should accept initialize after discovery fallback");
+                .expect("server should accept modern discovery");
             running.waiting().await.expect("server should shut down cleanly");
         });
 
@@ -1971,7 +1863,7 @@ mod discovery_compat_tests {
 
         client_write
             .write_all(
-                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{}}\n",
+                b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"server/discover\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"discovery-test\",\"version\":\"1\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n",
             )
             .await
             .expect("write discovery probe");
@@ -1979,27 +1871,9 @@ mod discovery_compat_tests {
         client_read.read_line(&mut line).await.expect("read discovery response");
         let response: Value = serde_json::from_str(&line).expect("valid discovery response");
         assert_eq!(response["id"], 1);
-        assert_eq!(response["error"]["code"], -32601);
-
-        line.clear();
-        let initialize = json!({
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-11-25",
-                "capabilities": {},
-                "clientInfo": { "name": "discovery-fallback-test", "version": "1" }
-            }
-        });
-        client_write
-            .write_all(format!("{initialize}\n").as_bytes())
-            .await
-            .expect("write initialize request");
-        client_read.read_line(&mut line).await.expect("read initialize response");
-        let response: Value = serde_json::from_str(&line).expect("valid initialize response");
-        assert_eq!(response["id"], 2);
-        assert_eq!(response["result"]["protocolVersion"], "2025-11-25");
+        assert!(response["result"]["supportedVersions"]
+            .as_array()
+            .is_some_and(|versions| versions.iter().any(|version| version == "2026-07-28")));
 
         drop(client_read);
         drop(client_write);

@@ -8,6 +8,7 @@ use tokio::sync::Mutex;
 use tracing::{debug, info, instrument, warn};
 
 use crate::errors::{Result, WinxError};
+use crate::runtime::{EmbeddedShellRuntime, ShellRuntime, ShellSessionTransition};
 use crate::state::bash_state::{generate_thread_id, BashState};
 use crate::types::{
     normalize_thread_id, AllowedCommands, AllowedGlobs, BashCommandMode, BashMode,
@@ -211,9 +212,17 @@ fn load_guidelines(workspace: &Path) -> String {
     output
 }
 
-#[instrument(level = "info", skip(bash_state_arc, initialize))]
-#[allow(clippy::too_many_lines)]
 pub async fn handle_tool_call(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    initialize: Initialize,
+) -> Result<String> {
+    handle_tool_call_with_runtime(&EmbeddedShellRuntime, bash_state_arc, initialize).await
+}
+
+#[instrument(level = "info", skip(runtime, bash_state_arc, initialize))]
+#[allow(clippy::too_many_lines)]
+pub async fn handle_tool_call_with_runtime(
+    runtime: &dyn ShellRuntime,
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     initialize: Initialize,
 ) -> Result<String> {
@@ -274,14 +283,9 @@ pub async fn handle_tool_call(
                     new_bash_state.update_workspace_root(target)?;
                 }
             }
-            if new_bash_state.cwd.exists() {
-                new_bash_state.init_pty_shell().await?;
-            }
-
-            let attach_hint = {
-                let pty_guard = new_bash_state.pty_shell.lock().await;
-                pty_guard.as_ref().and_then(|shell| shell.attach_hint.clone())
-            };
+            let attach_hint = runtime
+                .configure_session(&mut new_bash_state, ShellSessionTransition::FirstCall)
+                .await?;
 
             *bash_state_guard = Some(new_bash_state);
 
@@ -368,6 +372,7 @@ pub async fn handle_tool_call(
                 state.bash_command_mode = bash_command_mode;
                 state.file_edit_mode = file_edit_mode;
                 state.write_if_empty_mode = write_if_empty_mode;
+                runtime.configure_session(state, ShellSessionTransition::ModeChange).await?;
                 let _ = writeln!(response, "Changed mode to: {mode:?}");
                 let _ = writeln!(
                     response,
@@ -387,7 +392,7 @@ pub async fn handle_tool_call(
                 state.bash_command_mode = bash_command_mode;
                 state.file_edit_mode = file_edit_mode;
                 state.write_if_empty_mode = write_if_empty_mode;
-                state.init_pty_shell().await?;
+                runtime.configure_session(state, ShellSessionTransition::Reset).await?;
                 response.push_str("Reset shell (new PTY created)\n");
             } else {
                 return Err(WinxError::BashStateNotInitialized);
@@ -398,6 +403,9 @@ pub async fn handle_tool_call(
                 if folder_to_start.exists() {
                     state.update_cwd(&folder_to_start)?;
                     state.update_workspace_root(&folder_to_start)?;
+                    runtime
+                        .configure_session(state, ShellSessionTransition::WorkspaceChange)
+                        .await?;
                     let _ =
                         writeln!(response, "Changed workspace to: {}", folder_to_start.display());
                 } else {
