@@ -1,0 +1,30 @@
+=== launch ===
+
+
+---
+
+bg_command_id = <BG_ID>
+status = still running
+cwd = <WORKSPACE>
+=== first read ===
+printf 'tombstone-final\n'; false
+tombstone-final
+◉ <WORKSPACE>──➤<PROMPT_NONCE>:1
+
+---
+
+bg_command_id = <BG_ID>
+status = process exited
+exit code = 1
+cwd = <WORKSPACE>
+=== second read ===
+printf 'tombstone-final\n'; false
+tombstone-final
+◉ <WORKSPACE>──➤<PROMPT_NONCE>:1
+
+---
+
+bg_command_id = <BG_ID>
+status = process exited
+exit code = 1
+cwd = <WORKSPACE>

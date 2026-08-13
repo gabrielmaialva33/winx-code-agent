@@ -1,0 +1,9 @@
+--- turn: unknown (ready, recognizer=generic, waited <SECONDS>s) ---
+turn-ready
+
+---
+
+bg_command_id = <BG_ID>
+status = still running
+running for = <SECONDS> seconds
+cwd = <WORKSPACE>

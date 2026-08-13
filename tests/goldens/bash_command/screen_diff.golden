@@ -1,0 +1,32 @@
+=== full ===
+--- live screen [cursor row=1 col=0] (diff) ---
+screen-alpha
+
+---
+
+bg_command_id = <BG_ID>
+status = still running
+running for = <SECONDS> seconds
+cwd = <WORKSPACE>
+=== unchanged ===
+--- live screen [cursor row=1 col=0] (diff) ---
+(no change since last screen)
+
+---
+
+bg_command_id = <BG_ID>
+status = still running
+running for = <SECONDS> seconds
+cwd = <WORKSPACE>
+=== changed ===
+--- live screen [cursor row=2 col=0] (diff) ---
+(changed lines only)
+   2: screen-beta:payload
+
+
+---
+
+bg_command_id = <BG_ID>
+status = still running
+running for = <SECONDS> seconds
+cwd = <WORKSPACE>

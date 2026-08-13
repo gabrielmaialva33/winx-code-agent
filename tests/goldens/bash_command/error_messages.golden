@@ -1,0 +1,16 @@
+=== idle status ===
+Command execution failed: No command is currently running, so there's nothing to check. The previous command already finished and its output was returned when it completed. Start a new command, or pass a bg_command_id if you launched one in the background.
+No command running in background.
+
+=== unknown background ===
+Command execution failed: No shell found running with command id missing-bg-id.
+No command running in background.
+
+=== empty send_text ===
+Command execution failed: Failure: send_text cannot be empty
+=== dead background input ===
+Command execution failed: Background shell <BG_ID> already exited (last command: printf 'dead-final\n'; false).
+Final captured output:
+printf 'dead-final\n'; false
+\x1b[?2004l\rdead-final
+◉ <WORKSPACE>──➤<PROMPT_NONCE>:1 \x1b]0;<SHELL_IDENTITY>:<WORKSPACE>\x07\x1b[?2004h

@@ -1,0 +1,21 @@
+=== change cwd and fail ===
+
+◉ <WORKSPACE>/nested──➤<PROMPT_NONCE>:1
+
+---
+
+status = process exited
+exit code = 1
+cwd = <WORKSPACE>/nested
+This is the main shell. No command running in background.
+=== next command ===
+
+<WORKSPACE>/nested
+◉ <WORKSPACE>/nested──➤<PROMPT_NONCE>:0
+
+---
+
+status = process exited
+exit code = 0
+cwd = <WORKSPACE>/nested
+This is the main shell. No command running in background.
