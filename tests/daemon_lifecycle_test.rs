@@ -179,7 +179,10 @@ async fn daemon_session_survives_sigkill_of_adapter() -> anyhow::Result<()> {
     assert!(before.command_id.is_some(), "{before:?}");
     assert_eq!(before.shell_pid, after.shell_pid);
     assert_eq!(before.command_id, after.command_id);
-    assert_eq!(after.cwd, workspace.path().join("nested").canonicalize()?.to_string_lossy());
+    assert_eq!(
+        Path::new(&after.cwd).canonicalize()?,
+        workspace.path().join("nested").canonicalize()?
+    );
     assert!(recovered.output.contains("adapter-before"), "{recovered:?}");
     assert!(recovered.output.contains("adapter-after"), "{recovered:?}");
     Ok(())

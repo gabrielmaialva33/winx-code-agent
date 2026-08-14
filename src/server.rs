@@ -1712,10 +1712,14 @@ mod task_lifecycle_tests {
         worker.abort();
         service.interrupt_task_thread("task_cancel_regression").await;
         let interrupted = tokio::time::timeout(Duration::from_secs(5), worker).await;
-        assert!(
-            interrupted.is_ok_and(|joined| joined.is_err_and(|error| error.is_cancelled())),
-            "aborted task worker did not settle"
-        );
+        match interrupted {
+            // A foreground BashCommand may have already returned its documented
+            // incremental "still running" result before abort wins the race.
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) if error.is_cancelled() => {}
+            Ok(Err(error)) => panic!("aborted task worker failed instead of cancelling: {error}"),
+            Err(_) => panic!("aborted task worker did not settle"),
+        }
 
         let recovery = service
             .handle_bash_command(Some(serde_json::json!({
