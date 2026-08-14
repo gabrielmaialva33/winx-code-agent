@@ -13,9 +13,10 @@ use crate::errors::Result;
 use crate::state::bash_state::BashState;
 use crate::types::BashCommand;
 
+#[cfg(unix)]
+pub use selection::ensure_daemon_at;
 pub use selection::{
-    configured_runtime_mode, configured_shell_runtime, ensure_daemon_at, select_runtime_mode,
-    RuntimeMode,
+    configured_runtime_mode, configured_shell_runtime, select_runtime_mode, RuntimeMode,
 };
 pub(crate) use session_store::lock_session_store;
 pub use session_store::{SessionStore, ShellTarget};

@@ -124,10 +124,15 @@ Things the matcher forgives so you don't have to babysit the model:
 cargo install winx-code-agent
 ```
 
-Binary lands in `~/.cargo/bin` - every config snippet below assumes that's on `$PATH`. If your MCP client launches with
-a sterile env, swap `winx-code-agent` for the absolute path (`which winx-code-agent`).
+On Linux/macOS/WSL2 this installs `winx-code-agent`, `winxd`, and `winx-guardian` together in
+`~/.cargo/bin`. Keep the three binaries together: the adapter auto-starts `winxd`, which starts one guardian per shell
+session. Every config snippet below assumes that directory is on `$PATH`; with a sterile client environment, use the
+absolute path returned by `which winx-code-agent`.
 
-Needs Rust 1.75+, Linux/macOS/WSL2, and a real terminal (any modern one - Winx spawns its own PTY).
+Needs Rust 1.88+, bash, and a real terminal. The durable daemon runtime is supported on Linux/macOS/WSL2. Native
+Windows uses the embedded runtime, so its shell sessions remain tied to the MCP server process; WSL2 is recommended.
+GitHub Release downloads for Unix are `.tar.gz` bundles containing all three sibling binaries, while the Windows asset
+remains a standalone embedded-runtime executable.
 
 <details>
 <summary><b>Claude Code (CLI)</b></summary>
@@ -489,9 +494,10 @@ The server also advertises its icon in the `initialize` handshake (`serverInfo.i
 embedded in the binary as a data URI, so it works over stdio and HTTP alike. Source art lives in
 [`.github/assets/icon.png`](.github/assets/icon.png).
 
-Remote clients are effectively **stateless** - they don't reuse the MCP session between tool calls - so the HTTP
-transport shares one shell session across all requests: the shell `Initialize` creates stays alive for the lifetime of
-the server, and later `BashCommand` calls find it. Reuse the same `thread_id` across calls.
+Modern remote clients may send stateless MCP requests, so Winx keys shell ownership by explicit `thread_id`. On Unix,
+the long-lived `winxd`/guardian processes own the PTY: restarting the MCP adapter or dropping the HTTP connection does
+not kill the shell, and a later client can reattach with the same thread ID. Native Windows uses the embedded runtime,
+where sessions live only as long as the MCP server process.
 
 > [!WARNING]
 > The HTTP transport puts arbitrary shell and file access on the network. Anyone with the token (and URL) gets a shell
@@ -507,6 +513,10 @@ All optional - Winx works out of the box without any of these.
 |----------|--------|
 | `RUST_LOG` | Log verbosity, e.g. `winx_code_agent=info`. At `info` you get the per-call **audit trail** (tool name, arg summary, duration, ok/error). |
 | `WINX_HTTP_TOKEN` | Shared secret for the HTTP transport, used if `--token` isn't passed (see [Remote access](#remote-access-chatgpt--other-remote-mcp-clients)). |
+| `WINX_RUNTIME` | Runtime selection on Unix: `daemon` (default) or `embedded`. Native Windows is embedded-only. |
+| `WINX_EMBEDDED` | Truthy value (`1`, `true`, `yes`, `on`) forcing the in-process runtime; useful as a fail-safe kill switch. |
+| `WINX_SOCKET` | Override the Unix socket used to reach `winxd`. |
+| `WINXD_BIN` / `WINX_GUARDIAN_BIN` | Override daemon/guardian executable discovery. Normally unnecessary when the three release binaries remain together. |
 | `WINX_NO_COMPRESS` | Set to `1` to disable output compression and see raw, uncollapsed shell output (the `[winx: ×N]` collapsing is on by default). |
 | `WINX_NO_REDACT` | Set to `1` to disable secret redaction. By default winx scrubs high-confidence credentials (provider API keys, JWTs, PEM private keys, `user:pass@` URLs) from all tool output and saved memory, replacing each with `[REDACTED:<rule>]`. Turn this off only when you knowingly need a raw value. |
 | `WINX_SANDBOX` | Set to `1` to enable an opt-in Landlock filesystem sandbox (Linux 5.13+, EXPERIMENTAL). Confines winx and its shell to write only the workspace (the cwd at startup) plus `/tmp`, and makes the home directory unreadable, so a manipulated agent can't read `~/.ssh`/`~/.aws` or modify files outside the project. Coarse and best-effort: a command needing a path outside the allowlist fails. Degrades to a warning (unsandboxed) on older kernels. |

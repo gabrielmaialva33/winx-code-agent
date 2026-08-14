@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
-use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -623,31 +622,10 @@ fn rpc_error(id: u64, code: i32, message: &str) -> RpcResponse {
     }
 }
 
-#[cfg(target_os = "linux")]
 fn same_uid(stream: &UnixStream) -> Result<bool> {
-    let mut credentials = libc::ucred { pid: 0, uid: 0, gid: 0 };
-    let mut length = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-    // SAFETY: `credentials` and `length` are valid writable buffers for
-    // SO_PEERCRED, and the file descriptor stays owned by `stream` for the call.
-    let status = unsafe {
-        libc::getsockopt(
-            stream.as_raw_fd(),
-            libc::SOL_SOCKET,
-            libc::SO_PEERCRED,
-            std::ptr::addr_of_mut!(credentials).cast(),
-            std::ptr::addr_of_mut!(length),
-        )
-    };
-    if status != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
+    let credentials = stream.peer_cred()?;
     // SAFETY: geteuid has no preconditions and reads process credentials only.
-    Ok(credentials.uid == unsafe { libc::geteuid() })
-}
-
-#[cfg(not(target_os = "linux"))]
-fn same_uid(_stream: &UnixStream) -> Result<bool> {
-    Ok(true)
+    Ok(credentials.uid() == unsafe { libc::geteuid() })
 }
 
 #[cfg(test)]

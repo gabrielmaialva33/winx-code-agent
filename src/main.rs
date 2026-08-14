@@ -3,11 +3,15 @@
 //! Winx is a high-performance Rust implementation of the Model Context Protocol (MCP).
 //! It provides core tools for shell execution and file management with extreme efficiency.
 
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Duration;
 
 use clap::Parser;
+#[cfg(unix)]
 use winx_code_agent::daemon::{default_socket_path, DaemonClient};
 use winx_code_agent::{start_winx_server, Result, WinxError};
 
@@ -69,12 +73,14 @@ enum Commands {
     },
 
     /// List shell sessions owned by winxd
+    #[cfg(unix)]
     List {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
 
     /// Read a session's output using an independent consumer cursor
+    #[cfg(unix)]
     Attach {
         thread_id: String,
         #[arg(long, default_value = "cli")]
@@ -86,6 +92,7 @@ enum Commands {
     },
 
     /// Stop and remove a daemon-owned shell session
+    #[cfg(unix)]
     Kill {
         thread_id: String,
         #[arg(long)]
@@ -137,20 +144,25 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Serve {
             http: true, bind, token, allowed_host, allow_query_token, ..
         }) => run_http_server(bind, token, allowed_host, allow_query_token).await,
+        #[cfg(unix)]
         Some(Commands::List { socket }) => run_list(socket).await,
+        #[cfg(unix)]
         Some(Commands::Attach { thread_id, consumer, follow, socket }) => {
             run_attach(socket, thread_id, consumer, follow).await
         }
+        #[cfg(unix)]
         Some(Commands::Kill { thread_id, socket }) => run_kill(socket, thread_id).await,
         // Default: stdio transport for local MCP clients.
         None | Some(Commands::Serve { .. }) => run_server().await,
     }
 }
 
+#[cfg(unix)]
 fn daemon_client(socket: Option<PathBuf>) -> DaemonClient {
     DaemonClient::new(socket.unwrap_or_else(default_socket_path))
 }
 
+#[cfg(unix)]
 async fn run_list(socket: Option<PathBuf>) -> Result<()> {
     let sessions = daemon_client(socket).list_sessions().await?;
     serde_json::to_writer_pretty(std::io::stdout().lock(), &sessions)
@@ -159,6 +171,7 @@ async fn run_list(socket: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+#[cfg(unix)]
 async fn run_attach(
     socket: Option<PathBuf>,
     thread_id: String,
@@ -183,6 +196,7 @@ async fn run_attach(
     }
 }
 
+#[cfg(unix)]
 async fn run_kill(socket: Option<PathBuf>, thread_id: String) -> Result<()> {
     let killed = daemon_client(socket).kill_session(&thread_id).await?;
     writeln!(std::io::stdout().lock(), "{}", if killed { "killed" } else { "not found" })?;

@@ -22,11 +22,6 @@ pub fn default_socket_path() -> PathBuf {
     if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(runtime_dir).join("winx/winxd.sock");
     }
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: geteuid has no preconditions and reads process credentials only.
-        return PathBuf::from(format!("/tmp/winx-{}/winxd.sock", unsafe { libc::geteuid() }));
-    }
-    #[cfg(not(target_os = "linux"))]
-    PathBuf::from("/tmp/winx/winxd.sock")
+    // SAFETY: geteuid has no preconditions and reads process credentials only.
+    PathBuf::from(format!("/tmp/winx-{}/winxd.sock", unsafe { libc::geteuid() }))
 }

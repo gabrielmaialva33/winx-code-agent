@@ -20,6 +20,7 @@
 //! A high-performance Rust implementation of the Model Context Protocol (MCP).
 //! It provides core tools for shell execution and file management with extreme efficiency.
 
+#[cfg(unix)]
 pub mod daemon;
 pub mod errors;
 pub mod http_server;

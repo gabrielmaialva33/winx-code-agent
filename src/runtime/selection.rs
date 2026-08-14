@@ -1,8 +1,13 @@
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
+
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 use crate::daemon::{default_socket_path, DaemonClient, DaemonShellRuntime};
 use crate::errors::{Result, WinxError};
 
@@ -25,11 +30,26 @@ pub fn select_runtime_mode(
     runtime: Option<&str>,
     sandbox: Option<&str>,
 ) -> Result<RuntimeMode> {
+    select_runtime_mode_for_platform(cfg!(unix), embedded, runtime, sandbox)
+}
+
+fn select_runtime_mode_for_platform(
+    daemon_supported: bool,
+    embedded: Option<&str>,
+    runtime: Option<&str>,
+    sandbox: Option<&str>,
+) -> Result<RuntimeMode> {
     if enabled(sandbox) || enabled(embedded) {
         return Ok(RuntimeMode::Embedded);
     }
     match runtime {
-        None | Some("") | Some("daemon") => Ok(RuntimeMode::Daemon),
+        None | Some("") if daemon_supported => Ok(RuntimeMode::Daemon),
+        None | Some("") => Ok(RuntimeMode::Embedded),
+        Some("daemon") if daemon_supported => Ok(RuntimeMode::Daemon),
+        Some("daemon") => Err(WinxError::ConfigurationError(
+            "WINX_RUNTIME=\"daemon\" requires a Unix platform; use `embedded` on this OS"
+                .to_string(),
+        )),
         Some("embedded") => Ok(RuntimeMode::Embedded),
         Some(other) => Err(WinxError::ConfigurationError(format!(
             "invalid WINX_RUNTIME={other:?}; expected `daemon` or `embedded`"
@@ -47,15 +67,21 @@ pub fn configured_runtime_mode() -> Result<RuntimeMode> {
 pub async fn configured_shell_runtime() -> Result<Arc<dyn ShellRuntime>> {
     match configured_runtime_mode()? {
         RuntimeMode::Embedded => Ok(Arc::new(EmbeddedShellRuntime)),
+        #[cfg(unix)]
         RuntimeMode::Daemon => {
             let socket = default_socket_path();
             let binary = daemon_binary()?;
             ensure_daemon_at(&socket, &binary).await?;
             Ok(Arc::new(DaemonShellRuntime::new(socket)))
         }
+        #[cfg(not(unix))]
+        RuntimeMode::Daemon => Err(WinxError::ConfigurationError(
+            "the daemon runtime requires a Unix platform".to_string(),
+        )),
     }
 }
 
+#[cfg(unix)]
 fn daemon_binary() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("WINXD_BIN") {
         return Ok(PathBuf::from(path));
@@ -77,6 +103,7 @@ fn daemon_binary() -> Result<PathBuf> {
 /// Ensure a compatible daemon is reachable, starting `daemon_binary` only when
 /// the socket cannot be reached. A reachable incompatible daemon is never
 /// replaced or killed.
+#[cfg(unix)]
 pub async fn ensure_daemon_at(socket: &Path, daemon_binary: &Path) -> Result<()> {
     let client = DaemonClient::new(socket);
     match client.hello().await {
@@ -137,4 +164,18 @@ pub async fn ensure_daemon_at(socket: &Path, daemon_binary: &Path) -> Result<()>
         "timed out waiting for winxd at {}",
         socket.display()
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{select_runtime_mode_for_platform, RuntimeMode};
+
+    #[test]
+    fn platform_without_unix_sockets_defaults_to_embedded() {
+        assert_eq!(
+            select_runtime_mode_for_platform(false, None, None, None).unwrap(),
+            RuntimeMode::Embedded
+        );
+        assert!(select_runtime_mode_for_platform(false, None, Some("daemon"), None).is_err());
+    }
 }
