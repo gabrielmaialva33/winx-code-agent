@@ -12,5 +12,5 @@ Command execution failed: Failure: send_text cannot be empty
 Command execution failed: Background shell <BG_ID> already exited (last command: printf 'dead-final\n'; false).
 Final captured output:
 printf 'dead-final\n'; false
-\x1b[?2004l\rdead-final
-◉ <WORKSPACE>──➤<PROMPT_NONCE>:1 \x1b]0;<SHELL_IDENTITY>:<WORKSPACE>\x07\x1b[?2004h
+dead-final
+◉ <WORKSPACE>──➤<PROMPT_NONCE>:1

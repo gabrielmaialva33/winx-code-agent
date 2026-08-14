@@ -139,8 +139,9 @@ fn normalize_volatile(output: &str, workspace: &str, bg_command_ids: &[&str]) ->
             } else {
                 let line = normalize_prompt_nonce(line);
                 let line = normalize_wait_duration(&line);
-                let line = normalize_osc_title(&line);
-                visible_control_characters(&line)
+                let line = remove_optional_terminal_protocol(&line);
+                let line = visible_control_characters(&line);
+                normalize_prompt_spacing(&line)
             }
         })
         .collect::<Vec<_>>()
@@ -179,15 +180,22 @@ fn normalize_wait_duration(line: &str) -> String {
     format!("{}<SECONDS>{}", &line[..value_start], &line[value_end..])
 }
 
-fn normalize_osc_title(line: &str) -> String {
-    let Some(identity_start) = line.find("\x1b]0;").map(|index| index + "\x1b]0;".len()) else {
-        return line.to_string();
-    };
-    let Some(identity_len) = line[identity_start..].find(":<WORKSPACE>\x07") else {
-        return line.to_string();
-    };
-    let identity_end = identity_start + identity_len;
-    format!("{}<SHELL_IDENTITY>{}", &line[..identity_start], &line[identity_end..])
+fn remove_optional_terminal_protocol(line: &str) -> String {
+    let mut normalized =
+        line.replace("\x1b[?2004l\r", "").replace("\x1b[?2004l", "").replace("\x1b[?2004h", "");
+
+    while let Some(start) = normalized.find("\x1b]0;") {
+        let payload_start = start + "\x1b]0;".len();
+        let tail = &normalized[payload_start..];
+        let terminator = tail
+            .find('\x07')
+            .map(|offset| (offset, 1))
+            .or_else(|| tail.find("\x1b\\").map(|offset| (offset, 2)));
+        let Some((offset, terminator_len)) = terminator else { break };
+        normalized.replace_range(start..payload_start + offset + terminator_len, "");
+    }
+
+    normalized
 }
 
 fn visible_control_characters(line: &str) -> String {
@@ -200,6 +208,28 @@ fn visible_control_characters(line: &str) -> String {
         }
         visible
     })
+}
+
+fn normalize_prompt_spacing(line: &str) -> String {
+    if line.starts_with("◉ <WORKSPACE>──➤<PROMPT_NONCE>:") {
+        line.trim_end().to_string()
+    } else {
+        line.to_string()
+    }
+}
+
+#[test]
+fn terminal_protocol_noise_does_not_change_golden_output() {
+    let semantic = "dead-final\n◉ <WORKSPACE>──➤<PROMPT_NONCE>:1";
+    let variants = [
+        "dead-final\n◉ /tmp/winx-golden──➤0123456789abcdef:1 ",
+        "\x1b[?2004l\rdead-final\n◉ /tmp/winx-golden──➤0123456789abcdef:1 \x1b[?2004h",
+        "\x1b[?2004l\rdead-final\n◉ /tmp/winx-golden──➤0123456789abcdef:1 \x1b]0;bash:/tmp/winx-golden\x07\x1b[?2004h",
+    ];
+
+    for variant in variants {
+        assert_eq!(normalize_volatile(variant, "/tmp/winx-golden", &[]), semantic);
+    }
 }
 
 fn assert_golden(actual: &str, expected: &str) {
