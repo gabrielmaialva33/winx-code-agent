@@ -394,7 +394,7 @@ async fn background_tombstone_keeps_exit_code_and_its_own_cwd() -> Result<()> {
     let target = std::env::temp_dir().canonicalize()?;
 
     let bg_response =
-        run_command(&bash_state_arc, thread_id, &format!("cd {}\nfalse", target.display()), true)
+        run_command(&bash_state_arc, thread_id, &format!("cd {} && false", target.display()), true)
             .await?;
     let bg_id = bg_command_id(&bg_response).ok_or_else(|| {
         WinxError::CommandExecutionError("background response should include id".to_string())

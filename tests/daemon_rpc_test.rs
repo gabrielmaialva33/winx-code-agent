@@ -10,6 +10,7 @@ use winx_code_agent::daemon::{DaemonClient, DaemonServer, DaemonShellRuntime};
 use winx_code_agent::errors::{Result, WinxError};
 use winx_code_agent::runtime::EmbeddedShellRuntime;
 use winx_code_agent::state::bash_state::BashState;
+use winx_code_agent::state::terminal::strip_ansi_codes;
 use winx_code_agent::tools;
 use winx_code_agent::types::{
     BashCommand, BashCommandAction, Initialize, InitializeType, ModeName,
@@ -206,7 +207,11 @@ async fn journal_keeps_identical_output_from_consecutive_commands() -> Result<()
         .await?
         .output;
     server_task.abort();
-    assert_eq!(output.matches("\rruntime-parity\r\n").count(), 2, "{output}");
+    assert_eq!(
+        output.lines().filter(|line| strip_ansi_codes(line).trim() == "runtime-parity").count(),
+        2,
+        "{output}"
+    );
     Ok(())
 }
 
