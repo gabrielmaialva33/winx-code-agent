@@ -1,9 +1,9 @@
 name: Rust CI
 
 on:
+  workflow_call:
   push:
     branches: [ main ]
-    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
 
@@ -20,6 +20,10 @@ jobs:
         os: [ ubuntu-latest, macos-latest ]
     steps:
       - uses: actions/checkout@v7
+
+      - name: Validate release workflows
+        if: matrix.os == 'ubuntu-latest'
+        run: ruby .github/scripts/validate_release_workflows.rb
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -45,3 +49,23 @@ jobs:
 
       - name: Test
         run: cargo test --all-features --locked
+
+  windows:
+    name: Windows build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-ci
+
+      - name: Check supported binary
+        run: cargo check --all-features --locked --bin winx-code-agent
+
+      - name: Build supported release binary
+        run: cargo build --release --locked --bin winx-code-agent
