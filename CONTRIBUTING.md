@@ -25,13 +25,14 @@ cargo check --all-features --locked
 
 ## Project Structure
 
-- `src/server.rs`: thin MCP-service facade; focused catalog, handler, session, task, dispatch, and test modules live in `src/server/`.
-- `src/tools/`: MCP tool facades and implementations; `BashCommand` internals are split under `src/tools/bash_command/`.
-- `src/types.rs`: tool schemas and input deserialization.
+- `src/server.rs`: thin MCP-service facade; catalog, handler, principal isolation, session, Task, dispatch, and tests live in `src/server/`.
+- `src/tools/`: MCP tool facades; `BashCommand` and `FileWriteOrEdit` internals are split into focused submodules.
+- `src/config.rs`: typed environment/secret/principal loading.
+- `src/os.rs`: the narrowly audited libc boundary; the rest of the crate denies unsafe code.
 - `src/state/`: shell, PTY, persistence, and terminal state.
 - `src/utils/`: shared file, path, mmap, repo, and command-safety helpers.
-- `tests/`: integration and lifecycle tests.
-- `.github/workflows/`: CI, release, and publish workflows.
+- `tests/`, `benches/`, `fuzz/`: integration tests, Criterion benchmarks, and cargo-fuzz targets.
+- `.github/workflows/`: pinned CI and release automation.
 
 ## Local Checks
 
@@ -42,6 +43,12 @@ cargo fmt --all -- --check
 cargo check --all-features --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-features --locked
+cargo +1.88.0 check --all-features --locked
+cargo package --locked
+cargo bench --bench performance --locked --no-run
+cargo deny --all-features check
+cargo audit --deny warnings
+cargo +nightly fuzz build
 ```
 
 Use `cargo fmt --all` to format changes.
@@ -60,7 +67,9 @@ Use `cargo fmt --all` to format changes.
 - Add focused tests for bug fixes.
 - Add integration tests when changing tool behavior or MCP-facing schemas.
 - For file edits, verify both success behavior and failure atomicity.
-- For shell behavior, account for PTY-sensitive tests that may be ignored in CI.
+- For shell behavior, run the real PTY/TUI tests serially; CI has a dedicated Linux job for them.
+- Add a benchmark when changing a claimed hot path, and add or update a fuzz target for parsers exposed to arbitrary input.
+- Authentication changes must test cross-principal thread and Task isolation.
 
 ## Commit Style
 

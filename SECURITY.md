@@ -31,7 +31,8 @@ We aim to acknowledge reports within 48 hours and provide an assessment within 7
 
 ## Threat Model
 
-Winx is a local MCP server. A connected MCP client can ask it to:
+Winx is primarily a local MCP server and can optionally expose a network-reachable Streamable HTTP transport. An
+authenticated MCP client can ask it to:
 
 - read files;
 - write or edit files;
@@ -51,7 +52,11 @@ This is powerful by design. Only connect Winx to MCP clients and agent workflows
 - Keep secrets out of project files that agents can read.
 - Avoid running Winx with elevated privileges.
 - Treat shell access as equivalent to local user access.
-- Keep the daemon guardian quota and idle TTL enabled on long-lived or network-reachable deployments.
+- Keep HTTP on loopback; use `--allow-non-loopback` only as an explicit, reviewed exception.
+- Store HTTP tokens in regular chmod-600 files, use one principal per remote client, and rotate leaked credentials.
+- Prefer bearer headers. Query-string tokens are opt-in because they leak into URL logs and history.
+- Keep HTTP concurrency/rate limits and the daemon guardian quota/idle TTL enabled.
+- Review redacted configuration with `winx-code-agent doctor`.
 - Review durable sessions with `winx-code-agent list`; use `prune`, `kill <thread_id>`, or `kill --all` when cleanup is needed.
 
 ## Filesystem Safety
@@ -74,16 +79,31 @@ Winx validates workspace paths and tracks read-before-edit state. Security-sensi
 - background command identifiers;
 - clear behavior for interrupts and input forwarding.
 
-## Dependency Security
+## HTTP Authentication and Isolation
 
-Use standard Rust tooling and GitHub dependency alerts when reviewing dependency changes. Dependency updates should pass:
+HTTP bearer tokens must be at least 32 bytes unless the operator explicitly enables weak local-development tokens.
+`--principal-config` assigns each client an independent identity: external thread IDs and MCP Task IDs are scoped before
+they reach the shared service registry, preventing accidental or deliberate cross-principal session reuse.
+
+Authentication is not authorization inside a shell. A principal permitted to use Winx still receives the capabilities of
+the selected Winx mode. Use `architect`, a constrained `code_writer`, containers, and OS-level isolation where needed.
+
+## Dependency and Release Security
+
+Dependency and workflow changes should pass:
 
 ```bash
 cargo fmt --all -- --check
 cargo check --all-features --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-features --locked
+cargo deny --all-features check
+cargo audit --deny warnings
+cargo package --locked
 ```
+
+CI additionally checks the declared MSRV, real PTY/TUI behavior, fuzz-target compilation, pinned GitHub Actions, and the
+release workflow contract. Releases include SHA-256 manifests, a CycloneDX SBOM, and GitHub artifact attestations.
 
 ## Disclosure
 

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Winx is a Rust 2021 MCP server for shell and coding-agent workflows. The binary entry point is `src/main.rs`; library exports live in `src/lib.rs`. `src/server.rs` is the MCP-service facade, with catalog/schema, handler, session, task, and tool-dispatch responsibilities split under `src/server/`; HTTP transport remains in `src/http_server.rs`. Tool facades live under `src/tools/`; the `BashCommand` implementation is split by execution, interaction, output/status, and TUI behavior under `src/tools/bash_command/`. Terminal and persistence logic belongs under `src/state/`, and reusable parsing, path, repository, and safety helpers under `src/utils/`. Integration and lifecycle coverage belongs in `tests/`. Tokenizer and path-ranking model data lives in `assets/`; CI and release automation lives in `.github/workflows/`.
+Winx is a Rust 2021 MCP server for shell and coding-agent workflows. The binary entry point is `src/main.rs`; library exports live in `src/lib.rs`. `src/server.rs` is the MCP-service facade, with catalog/schema, handler, principal isolation, session, Task, dispatch, and tests under `src/server/`; hardened HTTP transport lives in `src/http_server.rs`, and typed secret/config parsing in `src/config.rs`. Tool facades live under `src/tools/`; `BashCommand` and `FileWriteOrEdit` are split into focused submodules. Terminal and persistence logic belongs under `src/state/`, reusable parsing/path/repository/safety helpers under `src/utils/`, and audited libc calls exclusively under `src/os.rs` (the crate otherwise denies unsafe code). Integration tests live in `tests/`, Criterion benchmarks in `benches/`, cargo-fuzz targets in `fuzz/`, model assets in `assets/`, and pinned CI/release automation in `.github/workflows/`.
 
 ## Build, Test, and Development Commands
 
@@ -13,6 +13,11 @@ Winx is a Rust 2021 MCP server for shell and coding-agent workflows. The binary 
 - `cargo clippy --all-targets --all-features --locked -- -D warnings` runs the enforced lint suite.
 - `cargo test --all-features --locked` runs the full normal test suite.
 - `cargo test --features loom --lib loom_` runs the opt-in concurrency model checks.
+- `cargo +1.88.0 check --all-features --locked` verifies the declared MSRV.
+- `cargo package --locked` verifies the crates.io package.
+- `cargo bench --bench performance --locked --no-run` compiles the benchmark suite.
+- `cargo deny --all-features check` and `cargo audit --deny warnings` enforce dependency policy.
+- `cargo +nightly fuzz build` compiles all cargo-fuzz targets.
 
 ## Coding Style & Naming Conventions
 
@@ -20,7 +25,7 @@ Use standard Rust naming: `snake_case` for modules, functions, and tests; `Camel
 
 ## Testing Guidelines
 
-Place public-behavior and lifecycle tests in descriptively named `tests/*_test.rs` files; keep narrow unit tests beside their modules. Every bug fix should include a focused regression test. File-edit changes must exercise success and failure atomicity, while shell changes should account for PTY-sensitive behavior. Property-test regressions are tracked in `proptest-regressions/`. There is no stated numeric coverage target; meaningful behavioral coverage is required.
+Place public-behavior and lifecycle tests in descriptively named `tests/*_test.rs` files; keep narrow unit tests beside their modules. Every bug fix should include a focused regression test. File-edit changes must exercise success and failure atomicity, shell changes must cover real PTY/TUI behavior, authentication changes must prove cross-principal isolation, and parser changes should update a fuzz target. Property-test regressions are tracked in `proptest-regressions/`; measurable hot-path changes should update `benches/performance.rs`. There is no stated numeric coverage target; meaningful behavioral coverage is required.
 
 ## Commit & Pull Request Guidelines
 

@@ -62,9 +62,10 @@ long-running TUIs without leaking output buffers into your token budget.
   are scrubbed from **all** tool output and saved memory before they reach the model (disable with
   `WINX_NO_REDACT=1`). An opt-in Landlock sandbox (`WINX_SANDBOX=1`, Linux) adds a kernel-enforced second
   layer that confines writes to the workspace and hides the home directory.
-- Two transports: **stdio** for local clients, plus an optional token-gated **Streamable HTTP** server
-  (`winx-code-agent serve --http`) for remote MCP clients like ChatGPT - see
-  [Remote access](#remote-access-chatgpt--other-remote-mcp-clients).
+- Two transports: **stdio** for local clients, plus an optional hardened **Streamable HTTP** server
+  (`winx-code-agent serve --http`) for remote MCP clients. HTTP binds to loopback by default, requires a strong bearer
+  token, limits request size/rate/concurrency, and can isolate sessions and MCP Tasks across multiple authenticated
+  principals - see [Remote access](#remote-access-chatgpt--other-remote-mcp-clients).
 
 ## MCP Tools
 
@@ -465,6 +466,9 @@ winx-code-agent prune --idle-seconds 0
 
 # Reload winxd after changing lifecycle environment variables; guardians survive
 winx-code-agent restart-daemon
+
+# Print a redacted configuration/runtime report
+winx-code-agent doctor
 ```
 
 The quota and TTL are enforced by `winxd`, not just by one MCP adapter, so reconnecting clients and multiple adapters
@@ -473,49 +477,74 @@ advertises safe planned restarts; the per-session guardians and their PTYs stay 
 
 ## Remote access (ChatGPT & other remote MCP clients)
 
-By default Winx speaks MCP over **stdio** - the local transport every desktop client (Claude Desktop, Cursor, VS Code)
-uses. For clients that live in the cloud and can't reach your machine over stdio - like ChatGPT's developer-mode custom
-connectors - Winx can also serve MCP over **Streamable HTTP**:
+By default Winx speaks MCP over **stdio**, the local transport used by desktop clients. Remote MCP clients can instead
+use the hardened **Streamable HTTP** endpoint at `/mcp`.
+
+Create a 32-byte-or-longer token in a user-only file, then start Winx on loopback:
 
 ```bash
-winx-code-agent serve --http --bind 127.0.0.1:8000 --token "$(openssl rand -hex 24)"
+install -m 600 /dev/null ~/.config/winx-http-token
+openssl rand -hex 32 > ~/.config/winx-http-token
+
+winx-code-agent serve --http \
+  --bind 127.0.0.1:8000 \
+  --token-file ~/.config/winx-http-token
 ```
 
-The MCP protocol is served at `/mcp`. Every request must carry the token in the `Authorization: Bearer <token>` header.
-For clients that only take a URL and offer no auth field (ChatGPT's developer-mode form, currently), opt in to
-`--allow-query-token` and append `?token=<token>` to the URL - off by default because a query token leaks into
-proxy/tunnel access logs and browser history.
-Without a token the server refuses to start - serving a shell over the network without auth is remote code execution
-waiting to happen. The endpoint also caps request bodies (64 MB) and times out stuck requests (120 s).
+The preferred request credential is `Authorization: Bearer <token>`. Direct `--token` remains available for compatibility
+but exposes the secret in process arguments; `WINX_HTTP_TOKEN` is the environment fallback. Winx rejects tokens shorter
+than 32 bytes unless `--allow-weak-token` is explicitly supplied for local development.
 
-| Flag             | Purpose                                                                                          |
-|------------------|-------------------------------------------------------------------------------------------------|
-| `--http`         | Serve over Streamable HTTP instead of stdio.                                                     |
-| `--bind`         | Listen address. Defaults to `127.0.0.1:8000`. Keep it on loopback.                               |
-| `--token`        | Shared secret required on every request. Falls back to the `WINX_HTTP_TOKEN` env var.            |
-| `--allowed-host` | Extra `Host` authority to accept (your tunnel hostname). Repeatable. Loopback is always allowed. |
-| `--allow-query-token` | Also accept the token as `?token=<token>` in the URL, for clients with no auth field. Off by default. |
+| Flag | Purpose |
+|------|---------|
+| `--http` | Serve over Streamable HTTP instead of stdio. |
+| `--bind` | Listen address, default `127.0.0.1:8000`. Non-loopback addresses are refused unless `--allow-non-loopback` is explicit. |
+| `--token-file` | Read the single bearer token from a regular, non-symlink file; Unix permissions must exclude group/others. |
+| `--principal-config` | Load multiple named principals from TOML. Sessions and MCP Tasks are scoped to the authenticating principal. |
+| `--max-concurrency` | Maximum concurrent HTTP requests, default `32`. |
+| `--requests-per-minute` | Fixed-window request limit per source IP, default `120`. |
+| `--allowed-host` | Extra `Host` authority accepted by the DNS-rebinding guard. Repeatable. |
+| `--allow-query-token` | Also accept `?token=...` for URL-only clients. Off by default because URLs leak into logs/history. |
 
-Remote clients run in the cloud, so the endpoint has to be reachable over HTTPS - put a tunnel in front of the loopback
-listener and allow its hostname through the built-in DNS-rebinding guard:
+A multi-client deployment should use one credential per client:
+
+```toml
+# ~/.config/winx-principals.toml
+[[principals]]
+name = "chatgpt"
+token_file = "/home/alice/.config/winx-chatgpt-token"
+
+[[principals]]
+name = "automation"
+token_env = "WINX_AUTOMATION_TOKEN"
+```
 
 ```bash
-# 1. tunnel first, to learn the public hostname
+chmod 600 ~/.config/winx-principals.toml ~/.config/winx-chatgpt-token
+winx-code-agent serve --http \
+  --principal-config ~/.config/winx-principals.toml
+```
+
+Even if two principals send the same external `thread_id`, Winx maps them to different internal session and Task IDs.
+Responses are translated back before leaving the server, so clients never see the internal principal prefix.
+
+Remote clients normally require HTTPS. Keep Winx on loopback, put an authenticated tunnel or reverse proxy in front, and
+allow its hostname through the DNS-rebinding guard:
+
+```bash
 cloudflared tunnel --url http://localhost:8000
-#    -> https://<random>.trycloudflare.com
 
-# 2. start Winx, allowing that host
-winx-code-agent serve --http --bind 127.0.0.1:8000 \
-     --token "$(openssl rand -hex 24)" \
-     --allowed-host <random>.trycloudflare.com
+winx-code-agent serve --http \
+  --token-file ~/.config/winx-http-token \
+  --allowed-host <random>.trycloudflare.com
 ```
 
-In ChatGPT (Settings → Apps → Advanced → **Developer mode**), add a connector with:
+A client with a bearer/API-key field should use it. For a URL-only client, opt in to `--allow-query-token` and use
+`https://<host>/mcp?token=<token>` only on an ephemeral/trusted tunnel.
 
-- **URL**: `https://<random>.trycloudflare.com/mcp?token=<your-token>` (requires starting Winx with
-  `--allow-query-token`; the developer-mode form has no auth field today)
-- **Authentication**: none. If your client does have a bearer/API-key field, prefer it over the query
-  parameter and skip `--allow-query-token`.
+The endpoint additionally enforces a 64 MB request-body limit, a 120-second request timeout, per-IP rate limiting, and a
+global concurrency cap. Binding to `0.0.0.0`, a LAN address, or any other non-loopback address requires the explicit
+`--allow-non-loopback` acknowledgement.
 
 ### Connector name & description (copy & paste)
 
@@ -533,20 +562,21 @@ The server also advertises its icon in the `initialize` handshake (`serverInfo.i
 embedded in the binary as a data URI, so it works over stdio and HTTP alike. Source art lives in
 [`.github/assets/icon.png`](.github/assets/icon.png).
 
-Modern remote clients may send stateless MCP requests, so Winx keys shell ownership by explicit `thread_id`. On Unix,
-the long-lived `winxd`/guardian processes own the PTY: restarting the MCP adapter or dropping the HTTP connection does
-not kill the shell, and a later client can reattach with the same thread ID. Native Windows uses the embedded runtime,
-where sessions live only as long as the MCP server process.
+Modern remote clients may send stateless MCP requests. On Unix, long-lived `winxd`/guardian processes own each PTY, so
+restarting the MCP adapter or dropping an HTTP connection does not kill the shell. Within one authenticated principal, a
+later request can reattach with the same thread ID. Native Windows uses the embedded runtime, where sessions live only as
+long as the MCP server process.
 
 > [!WARNING]
-> The HTTP transport puts arbitrary shell and file access on the network. Anyone with the token (and URL) gets a shell
-> on your machine as your user - and not just inside the workspace, since `BashCommand` in `wcgw` mode isn't
-> path-restricted. Bind to loopback, keep it behind an authenticated tunnel, prefer `architect`/`code_writer` mode or a
-> container, and shut it down when you're done.
+> The HTTP transport puts arbitrary shell and file access on the network. Anyone holding a configured principal token
+> gets a shell as your local user - and `BashCommand` in `wcgw` mode is not workspace-confined. Keep the listener on
+> loopback, prefer an authenticated tunnel, use `architect`/`code_writer` or a container, rotate leaked tokens, and shut
+> the endpoint down when it is no longer needed.
 
 ## Environment variables
 
-All optional - Winx works out of the box without any of these.
+All optional - Winx works out of the box without any of these. Boolean variables accept the same case-insensitive values:
+`1/true/yes/on` and `0/false/no/off`.
 
 | Variable | Effect |
 |----------|--------|
@@ -571,6 +601,16 @@ All optional - Winx works out of the box without any of these.
 | `WINX_SHELL` | Set to `zsh` to run the session under zsh instead of bash (opt-in; bash stays the default). Falls back to bash if zsh isn't on `PATH` or the mode is restricted. |
 | `WINX_SERVER_INSTRUCTIONS` | Extra operator instructions appended to every `Initialize` response (e.g. house rules for the agent). |
 
+## Verifying releases
+
+Each GitHub release contains the platform artifact, its `.sha256` file, an aggregate `SHA256SUMS`, and a CycloneDX JSON
+SBOM. The workflow also publishes GitHub artifact attestations for the binaries and the SBOM relationship.
+
+```bash
+sha256sum --check winx-linux-amd64.tar.gz.sha256
+sha256sum --check SHA256SUMS
+```
+
 ## Hacking on it
 
 ```bash
@@ -578,10 +618,16 @@ cargo fmt --all -- --check
 cargo check --all-features --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-features --locked
+cargo +1.88.0 check --all-features --locked
+cargo package --locked
+cargo bench --bench performance --locked --no-run
+cargo deny --all-features check
+cargo audit --deny warnings
+cargo +nightly fuzz build
 ```
 
-CI runs the same checks. If you touch `src/state/pty.rs` or anything in `src/tools/bash_command.rs`, the regression suite
-at `tests/bash_pty_regression_test.rs` is what protects against the usual TUI/PTY foot-guns - run it first.
+CI runs these contracts in dedicated jobs, including the ignored real-PTY/TUI tests on Linux. If you touch PTY, terminal,
+BashCommand, file editing, authentication, or persistence, run the focused regression suite before the full matrix.
 
 Robustness is also fuzzed and model-checked:
 
