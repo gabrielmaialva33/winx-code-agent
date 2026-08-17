@@ -145,7 +145,7 @@ async fn send_text_cannot_execute_in_an_idle_shell() -> Result<()> {
     )
     .await;
 
-    assert!(matches!(result, Err(WinxError::CommandExecutionError(_))));
+    assert!(matches!(result, Err(WinxError::InvalidInput(_))));
     sleep(Duration::from_millis(100)).await;
     assert!(!marker.exists(), "send_text must not become an idle-shell command path");
     Ok(())

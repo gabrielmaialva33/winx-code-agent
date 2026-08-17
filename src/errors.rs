@@ -20,9 +20,25 @@ pub enum WinxError {
     #[error("Bash state not initialized. Please call Initialize first with type=\"first_call\" and a valid workspace path.")]
     BashStateNotInitialized,
 
-    /// Error when a command fails to execute
+    /// Error when a command fails for an internal execution reason.
     #[error("Command execution failed: {0}")]
     CommandExecutionError(String),
+
+    /// A status/input action targeted a shell with no running command.
+    #[error("{0}")]
+    NoActiveCommand(String),
+
+    /// A background command identifier is unknown or has already exited.
+    #[error("{0}")]
+    BackgroundSessionNotFound(String),
+
+    /// An interactive input action was supplied without any payload.
+    #[error("Failure: {action} cannot be empty")]
+    EmptyInteractiveInput { action: String },
+
+    /// Interactive bytes were sent to an idle shell instead of a running program.
+    #[error("{0}")]
+    InteractiveTargetNotRunning(String),
 
     /// Error when parsing arguments
     #[error("Failed to parse arguments: {0}")]
@@ -206,6 +222,14 @@ impl Clone for WinxError {
             Self::BashStateLockError(msg) => Self::BashStateLockError(msg.clone()),
             Self::BashStateNotInitialized => Self::BashStateNotInitialized,
             Self::CommandExecutionError(msg) => Self::CommandExecutionError(msg.clone()),
+            Self::NoActiveCommand(msg) => Self::NoActiveCommand(msg.clone()),
+            Self::BackgroundSessionNotFound(msg) => Self::BackgroundSessionNotFound(msg.clone()),
+            Self::EmptyInteractiveInput { action } => {
+                Self::EmptyInteractiveInput { action: action.clone() }
+            }
+            Self::InteractiveTargetNotRunning(msg) => {
+                Self::InteractiveTargetNotRunning(msg.clone())
+            }
             Self::CommandNotAllowed(msg) => Self::CommandNotAllowed(msg.clone()),
             Self::ThreadIdMismatch(msg) => Self::ThreadIdMismatch(msg.clone()),
             Self::ArgumentParseError(msg) => Self::ArgumentParseError(msg.clone()),

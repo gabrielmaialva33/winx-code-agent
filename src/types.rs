@@ -1,18 +1,32 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+pub const MAX_NORMALIZED_THREAD_ID_BYTES: usize = 96;
+const THREAD_ID_HASH_SUFFIX_BYTES: usize = 9;
+
 pub fn normalize_thread_id(thread_id: &str) -> String {
     let filtered: String = thread_id.chars().filter(|c| c.is_alphanumeric() || *c == '_').collect();
-    // If filtering removed characters, distinct ids could collapse to the same
-    // form ("user-1" and "user1" both become "user1"), silently sharing one
-    // session and one state file. Append a short, stable hash of the ORIGINAL so
-    // distinct inputs stay distinct. Already-safe ids (the common case, incl.
-    // generated `tid_*`) and ids that filter to empty are returned unchanged.
-    if filtered.is_empty() || filtered == thread_id {
-        filtered
-    } else {
-        format!("{filtered}_{:08x}", fnv1a_32(thread_id))
+    if filtered.is_empty() {
+        return filtered;
     }
+
+    // Filtering can collapse distinct ids ("user-1" and "user1"), and a caller
+    // can otherwise create pathologically long state-file names. Preserve safe,
+    // short ids verbatim; every changed or oversized id receives a stable hash of
+    // the ORIGINAL input and a UTF-8-safe prefix bounded to 96 bytes total.
+    if filtered == thread_id && filtered.len() <= MAX_NORMALIZED_THREAD_ID_BYTES {
+        return filtered;
+    }
+
+    let prefix_budget = MAX_NORMALIZED_THREAD_ID_BYTES - THREAD_ID_HASH_SUFFIX_BYTES;
+    let mut prefix = String::with_capacity(prefix_budget);
+    for character in filtered.chars() {
+        if prefix.len() + character.len_utf8() > prefix_budget {
+            break;
+        }
+        prefix.push(character);
+    }
+    format!("{prefix}_{:08x}", fnv1a_32(thread_id))
 }
 
 /// Marker strings (literal or regex) that let `wait_for_turn` drive an arbitrary
@@ -822,7 +836,7 @@ impl<'de> Deserialize<'de> for BashCommand {
         };
 
         // Now deserialize the action_json to our BashCommandAction enum
-        let mut action: BashCommandAction =
+        let action: BashCommandAction =
             serde_json::from_value(action_json.clone()).map_err(|e| {
                 tracing::error!(
                     bytes = action_json.to_string().len(),
@@ -1217,7 +1231,7 @@ pub struct CodeMapStructuredOutput {
 
 #[cfg(test)]
 mod thread_id_tests {
-    use super::normalize_thread_id;
+    use super::{normalize_thread_id, MAX_NORMALIZED_THREAD_ID_BYTES};
 
     #[test]
     fn clean_id_is_unchanged() {
@@ -1247,6 +1261,15 @@ mod thread_id_tests {
     fn normalization_is_deterministic() {
         // Same input -> same hash -> same session across restarts.
         assert_eq!(normalize_thread_id("a-b.c"), normalize_thread_id("a-b.c"));
+    }
+
+    #[test]
+    fn oversized_ids_are_utf8_safe_bounded_and_idempotent() {
+        let original = "á".repeat(200);
+        let normalized = normalize_thread_id(&original);
+        assert!(normalized.len() <= MAX_NORMALIZED_THREAD_ID_BYTES);
+        assert!(normalized.is_char_boundary(normalized.len()));
+        assert_eq!(normalize_thread_id(&normalized), normalized);
     }
 }
 

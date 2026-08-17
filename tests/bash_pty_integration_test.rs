@@ -34,7 +34,7 @@ async fn setup_bash_state(thread_id: &str) -> Result<(Arc<Mutex<Option<BashState
         task_id_to_resume: String::new(),
     };
 
-    let response = tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
+    tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     Ok((bash_state_arc, temp_dir))
 }
@@ -116,7 +116,7 @@ async fn test_03_status_check() -> Result<()> {
         thread_id: "i2238-status".to_string(),
     };
 
-    let response = tools::bash_command::handle_tool_call(&bash_state_arc, bash_cmd).await?;
+    tools::bash_command::handle_tool_call(&bash_state_arc, bash_cmd).await?;
 
     // Now do a status check - this should return an error since no command is running
     // after the previous one completed
@@ -173,7 +173,7 @@ async fn test_04_send_text() -> Result<()> {
         thread_id: "i2238-sendtext".to_string(),
     };
 
-    let response = tools::bash_command::handle_tool_call(&bash_state_arc, bash_cmd).await?;
+    tools::bash_command::handle_tool_call(&bash_state_arc, bash_cmd).await?;
 
     // Small delay to let cat start
     sleep(Duration::from_millis(200)).await;
@@ -191,19 +191,15 @@ async fn test_04_send_text() -> Result<()> {
 
     let send_result = tools::bash_command::handle_tool_call(&bash_state_arc, send_text_cmd).await;
 
-    match send_result {
-        Ok(response) => {
-            // Cat should echo back what we sent
-            assert!(
-                response.contains("hello")
-                    || response.contains("send_text")
-                    || response.contains("status"),
-                "Response should contain sent text or status"
-            );
-        }
-        Err(e) => {
-            // If cat already exited, that's OK
-        }
+    if let Ok(response) = send_result {
+        // Cat should echo back what we sent. If cat already exited, cleanup below
+        // remains sufficient and the test continues.
+        assert!(
+            response.contains("hello")
+                || response.contains("send_text")
+                || response.contains("status"),
+            "Response should contain sent text or status"
+        );
     }
 
     // Clean up - send Ctrl+D to end cat
@@ -337,7 +333,7 @@ async fn test_07_multiple_commands_sequence() -> Result<()> {
         thread_id: "i2238-seq".to_string(),
     };
 
-    let response1 = tools::bash_command::handle_tool_call(&bash_state_arc, cmd1).await?;
+    tools::bash_command::handle_tool_call(&bash_state_arc, cmd1).await?;
 
     // Command 2: Read the file
     let cmd2 = BashCommand {
@@ -450,7 +446,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         wait_for_seconds: Some(5.0),
         thread_id: "i2238".to_string(),
     };
-    let r2 = tools::bash_command::handle_tool_call(&bash_state_arc, cmd2).await?;
+    let _r2 = tools::bash_command::handle_tool_call(&bash_state_arc, cmd2).await?;
 
     // 3. Long running command + status check + Ctrl-C
     let cmd3 = BashCommand {
@@ -462,7 +458,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         wait_for_seconds: Some(1.0),
         thread_id: "i2238".to_string(),
     };
-    let r3 = tools::bash_command::handle_tool_call(&bash_state_arc, cmd3).await?;
+    let _r3 = tools::bash_command::handle_tool_call(&bash_state_arc, cmd3).await?;
 
     // Status check
     sleep(Duration::from_millis(500)).await;
@@ -476,7 +472,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         wait_for_seconds: Some(2.0),
         thread_id: "i2238".to_string(),
     };
-    let status_result = tools::bash_command::handle_tool_call(&bash_state_arc, status_cmd).await;
+    let _status_result = tools::bash_command::handle_tool_call(&bash_state_arc, status_cmd).await;
 
     // Send Ctrl+C
     let ctrl_c = BashCommand {
@@ -488,7 +484,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         wait_for_seconds: Some(3.0),
         thread_id: "i2238".to_string(),
     };
-    let r4 = tools::bash_command::handle_tool_call(&bash_state_arc, ctrl_c).await?;
+    let _r4 = tools::bash_command::handle_tool_call(&bash_state_arc, ctrl_c).await?;
 
     // 4. Send text test (using read command)
     let cmd5 = BashCommand {
@@ -500,7 +496,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         wait_for_seconds: Some(1.0),
         thread_id: "i2238".to_string(),
     };
-    let r5 = tools::bash_command::handle_tool_call(&bash_state_arc, cmd5).await?;
+    let _r5 = tools::bash_command::handle_tool_call(&bash_state_arc, cmd5).await?;
 
     // Send input
     sleep(Duration::from_millis(300)).await;
@@ -516,7 +512,7 @@ async fn test_full_workflow_i2238() -> Result<()> {
         wait_for_seconds: Some(3.0),
         thread_id: "i2238".to_string(),
     };
-    let send_result = tools::bash_command::handle_tool_call(&bash_state_arc, send_text).await;
+    let _send_result = tools::bash_command::handle_tool_call(&bash_state_arc, send_text).await;
 
     // 5. Background command
     let bg_cmd = BashCommand {

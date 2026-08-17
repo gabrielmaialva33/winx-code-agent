@@ -11,12 +11,6 @@ use crate::state::bash_state::BashState;
 use crate::state::pty::PtyShell;
 
 const COMMAND_CHUNK_SIZE: usize = 64;
-const WAITING_INPUT_MESSAGE: &str = "A command is already running. NOTE: You can't run multiple shell commands in main shell, likely a previous program hasn't exited.
-1. Get its output using status check.
-2. Use `send_ascii` or `send_specials` to give inputs to the running program OR
-3. kill the previous program by sending ctrl+c first using `send_ascii` or `send_specials`
-4. Interrupt and run the process in background
-";
 
 fn spawn_background_reaper(owner_thread_id: String, background_id: String) {
     tokio::spawn(async move {
@@ -71,10 +65,7 @@ fn strip_tail_pipe_impl(command: &str, keep: bool) -> String {
 }
 
 fn keep_tail_pipe() -> bool {
-    std::env::var("WINX_KEEP_TAIL_PIPE").is_ok_and(|value| {
-        let value = value.trim();
-        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-    })
+    crate::config::env_flag("WINX_KEEP_TAIL_PIPE")
 }
 
 pub(super) async fn execute_command(
@@ -110,8 +101,13 @@ pub(super) async fn execute_command(
     let shell = main_shell(bash_state);
     {
         let guard = shell.lock().await;
-        if guard.as_ref().is_some_and(|shell| shell.command_running) {
-            return Err(WinxError::CommandExecutionError(WAITING_INPUT_MESSAGE.to_string()));
+        if let Some(shell) = guard.as_ref().filter(|shell| shell.command_running) {
+            return Err(WinxError::CommandAlreadyRunning {
+                current_command: shell.last_command.clone(),
+                duration_seconds: shell
+                    .command_elapsed()
+                    .map_or(0.0, |elapsed| elapsed.as_secs_f64()),
+            });
         }
     }
 

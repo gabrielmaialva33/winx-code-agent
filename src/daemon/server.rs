@@ -4,10 +4,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use super::protocol::{
     read_json_frame, write_json_frame, ConfigureSessionParams, ConfigureSessionResult,
@@ -24,15 +24,21 @@ use crate::types::normalize_thread_id;
 
 type SharedState = Arc<Mutex<Option<BashState>>>;
 
+struct TimedEntry<T> {
+    value: T,
+    last_seen: Instant,
+}
+
 struct DaemonSession {
     state: SharedState,
-    completed: Mutex<HashMap<String, RunActionResult>>,
+    completed: Mutex<HashMap<String, TimedEntry<RunActionResult>>>,
     journal: Mutex<OutputJournal>,
     observed: Mutex<HashMap<String, (u64, String)>>,
     background_ids: Mutex<HashSet<String>>,
     command_id: Mutex<Option<String>>,
-    delivery_cursors: Mutex<HashMap<String, Arc<Mutex<ShellDeliveryCursor>>>>,
+    delivery_cursors: Mutex<HashMap<String, TimedEntry<Arc<Mutex<ShellDeliveryCursor>>>>>,
     drainer_started: AtomicBool,
+    activity: Notify,
 }
 
 impl DaemonSession {
@@ -46,18 +52,72 @@ impl DaemonSession {
             command_id: Mutex::new(None),
             delivery_cursors: Mutex::new(HashMap::new()),
             drainer_started: AtomicBool::new(false),
+            activity: Notify::new(),
         }
     }
 }
 
 const MAX_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
+const MAX_SESSION_CACHE_ENTRIES: usize = 256;
+const MAX_IDENTIFIER_BYTES: usize = 256;
+const SESSION_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+const DRAIN_CHANGED_INTERVAL: Duration = Duration::from_millis(20);
+const DRAIN_ACTIVE_INTERVAL: Duration = Duration::from_millis(100);
+const DRAIN_IDLE_INTERVAL: Duration = Duration::from_secs(1);
+
+#[derive(Clone, Copy, Default)]
+struct CaptureState {
+    changed: bool,
+    active: bool,
+}
+
+impl CaptureState {
+    fn merge(&mut self, other: Self) {
+        self.changed |= other.changed;
+        self.active |= other.active;
+    }
+
+    fn next_delay(self) -> Duration {
+        if self.changed {
+            DRAIN_CHANGED_INTERVAL
+        } else if self.active {
+            DRAIN_ACTIVE_INTERVAL
+        } else {
+            DRAIN_IDLE_INTERVAL
+        }
+    }
+}
 
 #[derive(Default)]
 struct OutputJournal {
     chunks: VecDeque<(u64, String)>,
-    cursors: HashMap<String, u64>,
+    cursors: HashMap<String, TimedEntry<u64>>,
     next_seq: u64,
     bytes: usize,
+}
+
+fn prune_timed_entries<T>(entries: &mut HashMap<String, TimedEntry<T>>, now: Instant) {
+    entries.retain(|_, entry| now.duration_since(entry.last_seen) <= SESSION_CACHE_TTL);
+}
+
+fn evict_oldest_if_full<T>(entries: &mut HashMap<String, TimedEntry<T>>, incoming: &str) {
+    if entries.contains_key(incoming) || entries.len() < MAX_SESSION_CACHE_ENTRIES {
+        return;
+    }
+    if let Some(oldest) =
+        entries.iter().min_by_key(|(_, entry)| entry.last_seen).map(|(key, _)| key.clone())
+    {
+        entries.remove(&oldest);
+    }
+}
+
+fn validate_identifier(label: &str, value: &str) -> Result<()> {
+    if value.len() > MAX_IDENTIFIER_BYTES {
+        return Err(WinxError::InvalidInput(format!(
+            "{label} exceeds the {MAX_IDENTIFIER_BYTES}-byte limit"
+        )));
+    }
+    Ok(())
 }
 
 impl OutputJournal {
@@ -76,8 +136,12 @@ impl OutputJournal {
     }
 
     fn read(&mut self, consumer_id: &str) -> JournalRead {
+        let now = Instant::now();
+        prune_timed_entries(&mut self.cursors, now);
+        evict_oldest_if_full(&mut self.cursors, consumer_id);
+
         let oldest = self.chunks.front().map_or(self.next_seq.saturating_add(1), |(seq, _)| *seq);
-        let cursor = self.cursors.get(consumer_id).copied().unwrap_or(0);
+        let cursor = self.cursors.get(consumer_id).map_or(0, |entry| entry.value);
         let gap = cursor.saturating_add(1) < oldest;
         let mut output = String::new();
         let mut next_seq = cursor;
@@ -85,7 +149,8 @@ impl OutputJournal {
             output.push_str(chunk);
             next_seq = *seq;
         }
-        self.cursors.insert(consumer_id.to_string(), next_seq);
+        self.cursors
+            .insert(consumer_id.to_string(), TimedEntry { value: next_seq, last_seen: now });
         JournalRead { output, next_seq, gap }
     }
 }
@@ -244,6 +309,9 @@ async fn dispatch(
                 Ok(params) => params,
                 Err(error) => return rpc_error(request.id, -32602, &error.to_string()),
             };
+            if let Err(error) = validate_identifier("consumer_id", &params.consumer_id) {
+                return rpc_error(request.id, -32602, &error.to_string());
+            }
             let thread_id = normalize_thread_id(&params.thread_id);
             let session = sessions.lock().await.get(&thread_id).cloned();
             match session {
@@ -316,6 +384,7 @@ async fn configure_session(
         }
     };
     ensure_drainer(&session);
+    session.activity.notify_one();
 
     let attach_hint = {
         let mut guard = session.state.lock().await;
@@ -361,6 +430,7 @@ async fn configure_session(
         session.observed.lock().await.remove("main");
     }
     capture_session_outputs(&session).await;
+    session.activity.notify_one();
     Ok(ConfigureSessionResult { attach_hint })
 }
 
@@ -368,6 +438,8 @@ async fn run_action(
     sessions: &Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     params: RunActionParams,
 ) -> Result<RunActionResult> {
+    validate_identifier("request_key", &params.request_key)?;
+    validate_identifier("consumer_id", &params.consumer_id)?;
     let thread_id = normalize_thread_id(&params.command.thread_id);
     if thread_id.is_empty() {
         return Err(WinxError::ThreadIdMismatch(
@@ -380,8 +452,18 @@ async fn run_action(
         sessions.entry(thread_id.clone()).or_insert_with(|| Arc::new(DaemonSession::new())).clone()
     };
     ensure_drainer(&session);
+    session.activity.notify_one();
 
-    if let Some(cached) = session.completed.lock().await.get(&params.request_key).cloned() {
+    let now = Instant::now();
+    let cached = {
+        let mut completed = session.completed.lock().await;
+        prune_timed_entries(&mut completed, now);
+        completed.get_mut(&params.request_key).map(|entry| {
+            entry.last_seen = now;
+            entry.value.clone()
+        })
+    };
+    if let Some(cached) = cached {
         return Ok(cached);
     }
 
@@ -408,16 +490,16 @@ async fn run_action(
     };
     let cursor_key = delivery_cursor_key(&consumer_id, &params.command.action_json);
     let cursor = {
+        let now = Instant::now();
         let mut cursors = session.delivery_cursors.lock().await;
-        if cursors.len() >= 256 && !cursors.contains_key(&cursor_key) {
-            if let Some(oldest) = cursors.keys().next().cloned() {
-                cursors.remove(&oldest);
-            }
-        }
-        cursors
-            .entry(cursor_key)
-            .or_insert_with(|| Arc::new(Mutex::new(ShellDeliveryCursor::default())))
-            .clone()
+        prune_timed_entries(&mut cursors, now);
+        evict_oldest_if_full(&mut cursors, &cursor_key);
+        let entry = cursors.entry(cursor_key).or_insert_with(|| TimedEntry {
+            value: Arc::new(Mutex::new(ShellDeliveryCursor::default())),
+            last_seen: now,
+        });
+        entry.last_seen = now;
+        entry.value.clone()
     };
     let outcome = crate::tools::bash_command::handle_embedded_tool_call_with_cursor(
         &session.state,
@@ -439,10 +521,12 @@ async fn run_action(
     };
 
     let mut completed = session.completed.lock().await;
-    if completed.len() >= 256 {
-        completed.clear();
-    }
-    completed.insert(params.request_key, result.clone());
+    let now = Instant::now();
+    prune_timed_entries(&mut completed, now);
+    evict_oldest_if_full(&mut completed, &params.request_key);
+    completed.insert(params.request_key, TimedEntry { value: result.clone(), last_seen: now });
+    drop(completed);
+    session.activity.notify_one();
     Ok(result)
 }
 
@@ -466,27 +550,31 @@ fn delivery_cursor_key(consumer_id: &str, action: &crate::types::BashCommandActi
 
 fn ensure_drainer(session: &Arc<DaemonSession>) {
     if session.drainer_started.swap(true, Ordering::AcqRel) {
+        session.activity.notify_one();
         return;
     }
     let session = session.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_millis(20)).await;
             if Arc::strong_count(&session) == 1 {
                 return;
             }
-            capture_session_outputs(&session).await;
+            let capture = capture_session_outputs(&session).await;
+            tokio::select! {
+                () = tokio::time::sleep(capture.next_delay()) => {}
+                () = session.activity.notified() => {}
+            }
         }
     });
 }
 
-async fn capture_session_outputs(session: &Arc<DaemonSession>) {
+async fn capture_session_outputs(session: &Arc<DaemonSession>) -> CaptureState {
     let (thread_id, main) = {
         let state = session.state.lock().await;
-        let Some(state) = state.as_ref() else { return };
+        let Some(state) = state.as_ref() else { return CaptureState::default() };
         (state.current_thread_id.clone(), state.pty_shell.clone())
     };
-    capture_shell_output(session, "main", &main).await;
+    let mut capture = capture_shell_output(session, "main", &main).await;
 
     let background_ids = session.background_ids.lock().await.clone();
     for id in background_ids {
@@ -495,21 +583,22 @@ async fn capture_session_outputs(session: &Arc<DaemonSession>) {
             store.resolve(&thread_id, &ShellTarget::Background(id.clone()))
         };
         if let Some(shell) = shell {
-            capture_shell_output(session, &id, &shell).await;
+            capture.merge(capture_shell_output(session, &id, &shell).await);
         }
     }
+    capture
 }
 
 async fn capture_shell_output(
     session: &Arc<DaemonSession>,
     terminal_id: &str,
     shell: &SharedPtyShell,
-) {
-    let (generation, snapshot) = {
+) -> CaptureState {
+    let (generation, snapshot, active) = {
         let mut guard = shell.lock().await;
-        let Some(shell) = guard.as_mut() else { return };
+        let Some(shell) = guard.as_mut() else { return CaptureState::default() };
         shell.poll_output_nonblocking();
-        (shell.command_generation(), shell.output_snapshot())
+        (shell.command_generation(), shell.output_snapshot(), shell.command_running)
     };
     let delta = {
         let mut observed = session.observed.lock().await;
@@ -525,7 +614,11 @@ async fn capture_shell_output(
         previous.clone_from(&snapshot);
         delta
     };
-    session.journal.lock().await.append(delta);
+    let changed = !delta.is_empty();
+    if changed {
+        session.journal.lock().await.append(delta);
+    }
+    CaptureState { changed, active }
 }
 
 async fn session_info(session: &Arc<DaemonSession>) -> Option<SessionInfo> {
@@ -625,8 +718,24 @@ fn to_wire_error(error: WinxError) -> WireShellError {
             WireShellError::ShellInitialization(message)
         }
         WinxError::CommandExecutionError(message) => WireShellError::CommandExecution(message),
+        WinxError::NoActiveCommand(message) => WireShellError::NoActiveCommand(message),
+        WinxError::BackgroundSessionNotFound(message) => {
+            WireShellError::BackgroundSessionNotFound(message)
+        }
+        WinxError::EmptyInteractiveInput { action } => {
+            WireShellError::EmptyInteractiveInput(action)
+        }
+        WinxError::InteractiveTargetNotRunning(message) => {
+            WireShellError::InteractiveTargetNotRunning(message)
+        }
+        WinxError::CommandAlreadyRunning { current_command, duration_seconds } => {
+            WireShellError::CommandAlreadyRunning { current_command, duration_seconds }
+        }
         WinxError::CommandNotAllowed(message) => WireShellError::CommandNotAllowed(message),
         WinxError::ThreadIdMismatch(message) => WireShellError::ThreadIdMismatch(message),
+        WinxError::InvalidInput(message) | WinxError::ArgumentParseError(message) => {
+            WireShellError::InvalidInput(message)
+        }
         other => WireShellError::Other(other.to_string()),
     }
 }
@@ -651,13 +760,12 @@ fn rpc_error(id: u64, code: i32, message: &str) -> RpcResponse {
 
 fn same_uid(stream: &UnixStream) -> Result<bool> {
     let credentials = stream.peer_cred()?;
-    // SAFETY: geteuid has no preconditions and reads process credentials only.
-    Ok(credentials.uid() == unsafe { libc::geteuid() })
+    Ok(credentials.uid() == crate::os::unix::effective_uid())
 }
 
 #[cfg(test)]
 mod tests {
-    use super::OutputJournal;
+    use super::{validate_identifier, CaptureState, OutputJournal, MAX_SESSION_CACHE_ENTRIES};
 
     #[test]
     fn late_consumer_is_told_when_journal_head_was_dropped() {
@@ -668,5 +776,33 @@ mod tests {
         let read = journal.read("late");
         assert!(read.gap);
         assert!(read.output.starts_with('b'));
+    }
+
+    #[test]
+    fn journal_consumer_cursors_are_lru_bounded() {
+        let mut journal = OutputJournal::default();
+        journal.append("output".to_string());
+        for index in 0..(MAX_SESSION_CACHE_ENTRIES + 100) {
+            let _ = journal.read(&format!("consumer-{index}"));
+        }
+        assert_eq!(journal.cursors.len(), MAX_SESSION_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn daemon_identifiers_have_a_small_memory_bound() {
+        assert!(validate_identifier("consumer_id", &"x".repeat(256)).is_ok());
+        assert!(validate_identifier("consumer_id", &"x".repeat(257)).is_err());
+    }
+
+    #[test]
+    fn drainer_backoff_tracks_output_and_command_activity() {
+        assert!(
+            CaptureState { changed: true, active: false }.next_delay()
+                < CaptureState { changed: false, active: true }.next_delay()
+        );
+        assert!(
+            CaptureState { changed: false, active: true }.next_delay()
+                < CaptureState { changed: false, active: false }.next_delay()
+        );
     }
 }

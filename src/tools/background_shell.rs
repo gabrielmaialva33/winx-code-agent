@@ -3,7 +3,7 @@
 use rand::RngExt;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::info;
@@ -270,20 +270,6 @@ impl BackgroundShellManager {
             format!("Following background commands are attached:\n{}\n", running.join("\n"))
         }
     }
-}
-
-// Global background shell manager (thread-safe) - matches WCGW Python's BashState.background_shells
-static BG_SHELL_MANAGER: LazyLock<StdMutex<BackgroundShellManager>> =
-    LazyLock::new(|| StdMutex::new(BackgroundShellManager::new()));
-
-/// Lock the global background-shell manager, recovering from poisoning.
-///
-/// A panic while holding this lock (e.g. in the rendering path during a prune)
-/// must NOT permanently brick all background-shell functionality for the rest of
-/// the server's lifetime. The manager's data stays consistent across a panic, so
-/// recovering the inner guard is safe.
-pub(crate) fn lock_bg_manager() -> std::sync::MutexGuard<'static, BackgroundShellManager> {
-    BG_SHELL_MANAGER.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

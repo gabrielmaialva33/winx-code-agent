@@ -431,25 +431,11 @@ async fn wait_for_process_exit(pid: u32, budget: Duration) -> bool {
 }
 
 fn signal_process(pid: i32, signal: i32) -> Result<()> {
-    // SAFETY: pid and signal are plain values; kill(2) has no pointer preconditions.
-    if unsafe { libc::kill(pid, signal) } == 0 {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(error.into())
-    }
+    crate::os::unix::signal_raw(pid, signal).map_err(Into::into)
 }
 
 fn process_exists(pid: u32) -> bool {
-    let Ok(pid) = i32::try_from(pid) else { return false };
-    // SAFETY: signal 0 performs permission/existence checking only.
-    if unsafe { libc::kill(pid, 0) } == 0 {
-        return true;
-    }
-    std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    crate::os::unix::process_exists(pid)
 }
 
 fn metadata_path(socket: &Path) -> PathBuf {

@@ -39,7 +39,7 @@ pub fn get_repo_context(path: &Path) -> Result<(String, Vec<String>)> {
     let existing: HashSet<&str> = all_files.iter().map(String::as_str).collect();
 
     let recent_git_files = if is_git_repo {
-        let count = std::cmp::max(10, (dynamic_max_files as f64 * 0.2) as usize);
+        let count = std::cmp::max(10, dynamic_max_files / 5);
         get_recent_git_files(&context_dir, count, &existing)
     } else {
         Vec::new()
@@ -51,7 +51,7 @@ pub fn get_repo_context(path: &Path) -> Result<(String, Vec<String>)> {
     // Compose the shown set: active → recent → ranked remainder (no dups).
     let mut top_files: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
-    let mut push = |file: String, top: &mut Vec<String>, seen: &mut HashSet<String>| {
+    let push = |file: String, top: &mut Vec<String>, seen: &mut HashSet<String>| {
         if existing.contains(file.as_str()) && seen.insert(file.clone()) {
             top.push(file);
         }
@@ -215,12 +215,13 @@ fn get_recent_git_files(root: &Path, count: usize, existing: &HashSet<&str>) -> 
 fn calculate_dynamic_file_limit(total_files: usize) -> usize {
     const MIN_FILES: usize = 50;
     const MAX_FILES: usize = 400;
+    const FULL_SCALE_FILES: usize = 30_000;
     if total_files <= MIN_FILES {
         return MIN_FILES;
     }
-    let scale = (MAX_FILES - MIN_FILES) as f64 / (30_000.0 - MIN_FILES as f64);
-    let dynamic = MIN_FILES + ((total_files - MIN_FILES) as f64 * scale) as usize;
-    dynamic.min(MAX_FILES)
+    let numerator = (total_files - MIN_FILES).saturating_mul(MAX_FILES - MIN_FILES);
+    let denominator = FULL_SCALE_FILES - MIN_FILES;
+    MIN_FILES.saturating_add(numerator / denominator).min(MAX_FILES)
 }
 
 /// Order files best-first. Uses the embedded path-probability model; if it

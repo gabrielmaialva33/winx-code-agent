@@ -27,7 +27,7 @@ pub enum RuntimeMode {
 }
 
 fn enabled(value: Option<&str>) -> bool {
-    value.is_some_and(|value| matches!(value, "1" | "true" | "yes" | "on"))
+    value.and_then(crate::config::parse_bool).unwrap_or(false)
 }
 
 /// Pure runtime-mode selection, kept separate from process spawning so its
@@ -196,19 +196,7 @@ async fn restart_control_daemon_from_hello(
 
 #[cfg(unix)]
 fn signal_control_shutdown(pid: u32) -> Result<()> {
-    let pid = i32::try_from(pid).map_err(|_| {
-        WinxError::ConfigurationError("winxd pid does not fit in pid_t".to_string())
-    })?;
-    // SAFETY: the pid came from a same-UID authenticated Unix-socket handshake.
-    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
-        return Ok(());
-    }
-    let error = std::io::Error::last_os_error();
-    if error.raw_os_error() == Some(libc::ESRCH) {
-        Ok(())
-    } else {
-        Err(error.into())
-    }
+    crate::os::unix::signal_process(pid, libc::SIGTERM).map_err(Into::into)
 }
 
 /// Ensure a compatible daemon is reachable, starting `daemon_binary` only when
@@ -230,21 +218,7 @@ pub async fn ensure_daemon_at(socket: &Path, daemon_binary: &Path) -> Result<()>
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: the post-fork hook invokes only the async-signal-safe setsid(2)
-        // before exec, without touching allocator-backed state.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    Err(std::io::Error::last_os_error())
-                } else {
-                    Ok(())
-                }
-            });
-        }
-    }
+    crate::os::unix::configure_detached(&mut command);
     let mut child = command.spawn().map_err(|error| {
         WinxError::ShellInitializationError(format!(
             "failed to auto-start {}: {error}",

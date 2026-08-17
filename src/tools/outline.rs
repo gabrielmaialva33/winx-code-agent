@@ -254,7 +254,6 @@ fn outline_repo(
 mod tests {
     #![allow(clippy::unwrap_used)]
     use super::*;
-    use std::fmt::Write as _;
     use tempfile::TempDir;
 
     fn state_in(dir: &TempDir) -> Arc<Mutex<Option<BashState>>> {

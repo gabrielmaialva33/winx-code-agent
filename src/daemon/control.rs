@@ -309,6 +309,5 @@ fn rpc_error(id: u64, code: i32, message: &str) -> RpcResponse {
 
 fn same_uid(stream: &UnixStream) -> Result<bool> {
     let credentials = stream.peer_cred()?;
-    // SAFETY: geteuid has no preconditions and reads process credentials only.
-    Ok(credentials.uid() == unsafe { libc::geteuid() })
+    Ok(credentials.uid() == crate::os::unix::effective_uid())
 }

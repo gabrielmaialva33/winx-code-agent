@@ -8,9 +8,9 @@ use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{debug, instrument};
 
 use crate::errors::{ErrorRecovery, Result, WinxError};
 use crate::state::bash_state::BashState;

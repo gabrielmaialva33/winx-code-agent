@@ -312,7 +312,21 @@ fn from_wire_error(error: WireShellError) -> WinxError {
         WireShellError::CommandExecution(message) | WireShellError::Other(message) => {
             WinxError::CommandExecutionError(message)
         }
+        WireShellError::NoActiveCommand(message) => WinxError::NoActiveCommand(message),
+        WireShellError::BackgroundSessionNotFound(message) => {
+            WinxError::BackgroundSessionNotFound(message)
+        }
+        WireShellError::EmptyInteractiveInput(action) => {
+            WinxError::EmptyInteractiveInput { action }
+        }
+        WireShellError::InteractiveTargetNotRunning(message) => {
+            WinxError::InteractiveTargetNotRunning(message)
+        }
+        WireShellError::CommandAlreadyRunning { current_command, duration_seconds } => {
+            WinxError::CommandAlreadyRunning { current_command, duration_seconds }
+        }
         WireShellError::CommandNotAllowed(message) => WinxError::CommandNotAllowed(message),
         WireShellError::ThreadIdMismatch(message) => WinxError::ThreadIdMismatch(message),
+        WireShellError::InvalidInput(message) => WinxError::InvalidInput(message),
     }
 }

@@ -65,15 +65,33 @@ pub async fn handle_tool_call(
     // own the value across spawn_blocking. This frees the tokio worker instead of
     // pinning it on up to MAX_FILES_PER_BATCH file reads/writes.
     let mut state = bash_state_guard.take().ok_or(WinxError::BashStateNotInitialized)?;
+    let recovery_state = state.clone();
     let files = multi.files;
-    let (state, result) = tokio::task::spawn_blocking(move || {
-        let r = apply_batch(&mut state, &files);
-        (state, r)
+    let joined = tokio::task::spawn_blocking(move || {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            apply_batch(&mut state, &files)
+        }))
+        .unwrap_or_else(|_| {
+            Err(WinxError::CommandExecutionError(
+                "MultiFileEdit panicked on the blocking worker".to_string(),
+            ))
+        });
+        (state, result)
     })
-    .await
-    .map_err(|e| WinxError::CommandExecutionError(format!("MultiFileEdit task failed: {e}")))?;
-    *bash_state_guard = Some(state);
-    result
+    .await;
+
+    match joined {
+        Ok((state, result)) => {
+            *bash_state_guard = Some(state);
+            result
+        }
+        Err(error) => {
+            *bash_state_guard = Some(recovery_state);
+            Err(WinxError::CommandExecutionError(format!(
+                "MultiFileEdit blocking task failed: {error}"
+            )))
+        }
+    }
 }
 
 /// Plan every file (all-or-nothing at the compute stage), reject duplicate

@@ -251,7 +251,7 @@ async fn execute_bash_action(
                         id,
                         manager.get_running_info(&bash_state.current_thread_id)
                     );
-                    return Err(WinxError::CommandExecutionError(error));
+                    return Err(WinxError::InvalidInput(error));
                 }
             } else {
                 None

@@ -221,17 +221,15 @@ async fn daemon_session_survives_sigkill_of_adapter() -> anyhow::Result<()> {
 
     let recovered = tokio::time::timeout(Duration::from_secs(5), async {
         let mut captured = String::new();
-        let mut next_seq = 0;
         let mut gap = false;
         loop {
             let output = client.read_output(THREAD_ID, "adapter-b").await?;
             captured.push_str(&output.output);
-            next_seq = output.next_seq;
             gap |= output.gap;
             if captured.contains("adapter-after") {
                 return winx_code_agent::Result::Ok(winx_code_agent::daemon::JournalRead {
                     output: captured,
-                    next_seq,
+                    next_seq: output.next_seq,
                     gap,
                 });
             }

@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{debug, info, instrument, warn};
+use tracing::{info, instrument, warn};
 
 use crate::errors::{Result, WinxError};
 use crate::runtime::{EmbeddedShellRuntime, ShellRuntime, ShellSessionTransition};

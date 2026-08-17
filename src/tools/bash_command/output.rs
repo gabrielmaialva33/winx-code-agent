@@ -13,7 +13,7 @@ use crate::state::bash_state::BashState;
 use crate::state::pty::PtyShell;
 use crate::state::terminal::{render_terminal_output, strip_ansi_codes};
 use crate::tools::background_shell::ExitedShellInfo;
-use crate::types::{BashCommandAction, SpecialKey};
+use crate::types::BashCommandAction;
 
 const OUTPUT_WAIT_PATIENCE: i32 = 3;
 const POLL_INTERVAL_MS: u64 = 20;
@@ -149,11 +149,12 @@ fn get_incremental_output(old_output: &[String], new_output: &[String]) -> Vec<S
 
         let mut matched = true;
         for candidate in (0..index).rev() {
-            let old_index = (old_len as i64 - 1 + candidate as i64 - index as i64) as isize;
-            if old_index < 0 {
+            let distance = index - candidate;
+            if distance >= old_len {
                 break;
             }
-            if new_output[candidate] != old_output[old_index as usize] {
+            let old_index = old_len - 1 - distance;
+            if new_output[candidate] != old_output[old_index] {
                 matched = false;
                 break;
             }
@@ -394,7 +395,7 @@ pub(super) fn finalize_tombstone(
         }
         BashCommandAction::SendText { .. }
         | BashCommandAction::SendSpecials { .. }
-        | BashCommandAction::SendAscii { .. } => Err(WinxError::CommandExecutionError(format!(
+        | BashCommandAction::SendAscii { .. } => Err(WinxError::InvalidInput(format!(
             "Background shell {id} already exited (last command: {last_command}).\nFinal captured output:\n{final_output}"
         ))),
         BashCommandAction::Command { .. } => {
@@ -403,6 +404,7 @@ pub(super) fn finalize_tombstone(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_status_check(
     bash_state: &mut BashState,
     background_shell: Option<SharedPtyShell>,
@@ -428,7 +430,7 @@ pub(super) async fn execute_status_check(
              new command, or pass a bg_command_id if you launched one in the background.\n{}",
             manager.get_running_info(&bash_state.current_thread_id)
         );
-        return Err(WinxError::CommandExecutionError(error));
+        return Err(WinxError::InvalidInput(error));
     }
 
     let response = wait_for_output(

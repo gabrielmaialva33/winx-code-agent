@@ -125,7 +125,8 @@ fn collect_statement_nodes(node: Node<'_>, statements: &mut Vec<StatementNode>) 
         });
     }
 
-    for index in 0..node.named_child_count() as u32 {
+    let child_count = u32::try_from(node.named_child_count()).unwrap_or(u32::MAX);
+    for index in 0..child_count {
         if let Some(child) = node.named_child(index) {
             collect_statement_nodes(child, statements);
         }

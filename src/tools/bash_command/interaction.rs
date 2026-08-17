@@ -28,13 +28,14 @@ fn ensure_interactive_target(shell: &mut PtyShell) -> Result<()> {
     if shell.command_running {
         Ok(())
     } else {
-        Err(WinxError::CommandExecutionError(
+        Err(WinxError::InvalidInput(
             "No interactive command is running. Start an allowed command first; send_text/send_ascii/send_specials cannot execute commands in an idle shell."
                 .to_string(),
         ))
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_send_text(
     bash_state: &mut BashState,
     text: &str,
@@ -47,9 +48,7 @@ pub(super) async fn execute_send_text(
 ) -> Result<String> {
     debug!(bytes = text.len(), submit, "Processing SendText action");
     if text.is_empty() {
-        return Err(WinxError::CommandExecutionError(
-            "Failure: send_text cannot be empty".to_string(),
-        ));
+        return Err(WinxError::InvalidInput("send_text cannot be empty".to_string()));
     }
 
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
@@ -75,6 +74,7 @@ pub(super) async fn execute_send_text(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_send_specials(
     bash_state: &mut BashState,
     keys: &[SpecialKey],
@@ -87,9 +87,7 @@ pub(super) async fn execute_send_specials(
 ) -> Result<String> {
     debug!("Processing SendSpecials action: {keys:?} (submit={submit})");
     if keys.is_empty() {
-        return Err(WinxError::CommandExecutionError(
-            "Failure: send_specials cannot be empty".to_string(),
-        ));
+        return Err(WinxError::InvalidInput("send_specials cannot be empty".to_string()));
     }
 
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
@@ -161,6 +159,7 @@ pub(super) async fn execute_send_specials(
     Ok(output)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn execute_send_ascii(
     bash_state: &mut BashState,
     ascii_codes: &[u8],
@@ -173,9 +172,7 @@ pub(super) async fn execute_send_ascii(
 ) -> Result<String> {
     debug!(bytes = ascii_codes.len(), submit, "Processing SendAscii action");
     if ascii_codes.is_empty() {
-        return Err(WinxError::CommandExecutionError(
-            "Failure: send_ascii cannot be empty".to_string(),
-        ));
+        return Err(WinxError::InvalidInput("send_ascii cannot be empty".to_string()));
     }
 
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));

@@ -8,7 +8,7 @@ use crate::state::persistence::BashStateSnapshot;
 use crate::types::BashCommand;
 
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 1;
+pub const PROTOCOL_MINOR: u16 = 2;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -129,8 +129,14 @@ pub(crate) enum WireShellError {
     BashStateNotInitialized,
     ShellInitialization(String),
     CommandExecution(String),
+    NoActiveCommand(String),
+    BackgroundSessionNotFound(String),
+    EmptyInteractiveInput(String),
+    InteractiveTargetNotRunning(String),
+    CommandAlreadyRunning { current_command: String, duration_seconds: f64 },
     CommandNotAllowed(String),
     ThreadIdMismatch(String),
+    InvalidInput(String),
     Other(String),
 }
 
