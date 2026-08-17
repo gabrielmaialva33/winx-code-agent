@@ -428,7 +428,7 @@ pub async fn handle_tool_call(
     handle_tool_call_with_runtime(&EmbeddedShellRuntime, bash_state_arc, bash_command).await
 }
 
-/// Execute a BashCommand through the selected shell runtime.
+/// Execute a `BashCommand` through the selected shell runtime.
 pub async fn handle_tool_call_with_runtime(
     runtime: &dyn ShellRuntime,
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
@@ -941,6 +941,7 @@ async fn clear_to_run_async(shell_arc: &SharedPtyShell, max_wait_secs: f64) -> b
 }
 
 /// `shell_arc` selects which shell to read from (main shell or a bg shell handle).
+#[allow(clippy::too_many_lines)]
 async fn wait_for_output(
     bash_state: &mut BashState,
     shell_arc: &SharedPtyShell,
@@ -1068,7 +1069,7 @@ async fn wait_for_output(
     // Advance the delivery cursor only AFTER rendering. The old code assigned the
     // current snapshot first and then diffed it against itself, hiding every new
     // byte emitted while a process was still running (even with verbose=true).
-    if let Some(cursor) = delivery_cursor.as_deref_mut() {
+    if let Some(cursor) = delivery_cursor {
         cursor.delivered_output.clone_from(&output);
     } else {
         let mut guard = shell_arc.lock().await;
@@ -1270,12 +1271,11 @@ async fn execute_status_check(
                 bash.current_cwd().to_path_buf(),
             )
         };
-        let previous_hash = match delivery_cursor.as_deref_mut() {
-            Some(cursor) => cursor.last_returned_hash.replace(fingerprint),
-            None => {
-                let mut guard = shell_arc.lock().await;
-                guard.as_mut().and_then(|bash| bash.last_returned_hash.replace(fingerprint))
-            }
+        let previous_hash = if let Some(cursor) = delivery_cursor.as_mut() {
+            cursor.last_returned_hash.replace(fingerprint)
+        } else {
+            let mut guard = shell_arc.lock().await;
+            guard.as_mut().and_then(|bash| bash.last_returned_hash.replace(fingerprint))
         };
         if previous_hash == Some(fingerprint) {
             let status = get_status(
@@ -1296,7 +1296,7 @@ async fn execute_status_check(
             guard.as_ref().map(|bash| PtyShell::fingerprint(&bash.output_snapshot()))
         };
         if let Some(fingerprint) = fingerprint {
-            if let Some(cursor) = delivery_cursor.as_deref_mut() {
+            if let Some(cursor) = delivery_cursor {
                 cursor.last_returned_hash = Some(fingerprint);
             } else {
                 let mut guard = shell_arc.lock().await;
@@ -1329,6 +1329,7 @@ async fn execute_status_check(
 /// Execute `Screen` — a stable, point-in-time snapshot of a shell's live
 /// terminal screen (consolidated grid, ANSI stripped). No waiting, no dedup;
 /// the foundation for reading an interactive TUI's current frame.
+#[allow(clippy::too_many_lines)]
 async fn execute_screen(
     bash_state: &BashState,
     bg_shell: Option<SharedPtyShell>,
@@ -1336,7 +1337,7 @@ async fn execute_screen(
     bg_id: Option<&str>,
     lines: Option<usize>,
     diff: bool,
-    mut delivery_cursor: Option<&mut ShellDeliveryCursor>,
+    delivery_cursor: Option<&mut ShellDeliveryCursor>,
 ) -> Result<String> {
     let shell_arc = bg_shell.unwrap_or_else(|| main_shell(bash_state));
     let max_lines = lines.unwrap_or(0);
@@ -1348,7 +1349,7 @@ async fn execute_screen(
                 Some(bash) => {
                     bash.poll_output_nonblocking();
                     let running = bash.command_running;
-                    let update = if let Some(cursor) = delivery_cursor.as_deref_mut() {
+                    let update = if let Some(cursor) = delivery_cursor {
                         cursor.sync_generation(bash.command_generation());
                         cursor.screen_update(bash.live_snapshot(max_lines), SCREEN_DIFF_THRESHOLD)
                     } else {
