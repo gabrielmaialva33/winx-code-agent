@@ -10,7 +10,7 @@ By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 Requirements:
 
-- Rust 1.75 or newer
+- Rust 1.88 or newer
 - Cargo
 - Git
 
@@ -39,9 +39,9 @@ Run these before opening a pull request:
 
 ```bash
 cargo fmt --all -- --check
-cargo check --tests
-cargo clippy --all-targets --all-features
-cargo test --all-features
+cargo check --all-features --locked
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-features --locked
 ```
 
 Use `cargo fmt --all` to format changes.

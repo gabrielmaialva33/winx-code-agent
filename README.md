@@ -19,8 +19,9 @@
   <em>A local MCP server you can hand to a coding agent and stop worrying about the shell.</em>
 </p>
 
-Winx is the MCP server I wanted while running Claude, Codex, and friends against real repos: one process that handles
-the shell, file IO, and PTY-backed interactive sessions, written in Rust so it doesn't fight you on stdio.
+Winx is the MCP server I wanted while running Claude, Codex, and friends against real repos: a small Rust MCP adapter
+for shell, file IO, and code navigation, backed on Unix by durable per-session guardian processes that keep PTYs alive
+across client and adapter restarts.
 
 It started as a Rust port of [WCGW](https://github.com/rusiaaman/wcgw) but isn't a Python wrapper. Everything runs on a
 real PTY (via `portable-pty`), `cd` actually sticks, `Ctrl+C` actually interrupts, and background shells survive
@@ -42,8 +43,9 @@ long-running TUIs without leaking output buffers into your token budget.
 - File writes and SEARCH/REPLACE edits that survive ambiguous matches, indentation drift, and the usual unicode
   quote-mismatches from LLMs. Writes are blocked when the file hasn't been read or the cached content is stale, the
   success message shows a compact diff of what changed, and recent edits are reversible with `UndoEdit`.
-  `MultiFileEdit` applies a change across several files all-or-nothing (validated in memory first, so a failure on the
-  last file leaves the earlier ones untouched).
+  `MultiFileEdit` validates and computes every file before writing any of them, so a validation failure on the last file
+  leaves the earlier ones untouched. The commit phase uses atomic per-file renames; a rare mid-commit I/O failure stops
+  immediately but does not roll back files already written.
 - Tree-sitter code navigation via `CodeMap`: a token-budgeted symbol map of a file or the whole repo, or a
   definition/reference lookup for a symbol name - the semantic view that plain `grep` can't give you, across 11
   languages.
@@ -61,7 +63,7 @@ long-running TUIs without leaking output buffers into your token budget.
   `WINX_NO_REDACT=1`). An opt-in Landlock sandbox (`WINX_SANDBOX=1`, Linux) adds a kernel-enforced second
   layer that confines writes to the workspace and hides the home directory.
 - Two transports: **stdio** for local clients, plus an optional token-gated **Streamable HTTP** server
-  (`winx serve --http`) for remote MCP clients like ChatGPT - see
+  (`winx-code-agent serve --http`) for remote MCP clients like ChatGPT - see
   [Remote access](#remote-access-chatgpt--other-remote-mcp-clients).
 
 ## MCP Tools
@@ -72,13 +74,13 @@ long-running TUIs without leaking output buffers into your token budget.
 | `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, drives TUIs. Supports `is_background`, `status_check`, `send_text`, `send_specials`, `send_ascii`, `allow_multi`, plus `screen` (a stable point-in-time frame of an interactive TUI with the cursor position; pass `diff:true` for only the lines that changed since your last look) and `wait_for_turn` (block until the TUI is ready for input, via per-app or configurable recognizers). A foreground `command` also supports MCP Tasks: task calls return immediately, remain pollable through `tasks/get`, can be cancelled, and retain the final `CallToolResult` for `tasks/result`. When a foreground command finishes, the status line reports its real `exit code` (parsed from the prompt marker), so failures surface without grepping stderr. |
 | `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range. When the token budget is hit it tells you the exact line + `file:N-M` syntax to resume from instead of silently dropping the tail.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks (with optional `@start-end` line anchors to pin a repeated block). Validates file read coverage and freshness before writing, reports any fuzzy tolerances it had to apply, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet. The success message includes a compact diff of what changed.                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `MultiFileEdit`   | Edits several files all-or-nothing: every file's edit is validated and computed in memory first, and only if all succeed is anything written - so a SEARCH that fails to match in the last file leaves the earlier ones untouched. For a single file use `FileWriteOrEdit`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `MultiFileEdit`   | Validates and computes every requested edit in memory before writing any file, so a validation failure leaves the whole batch untouched. Commits then use atomic per-file renames; if a rare I/O failure occurs during that phase, already-written files are reported and are not rolled back. For a single file use `FileWriteOrEdit`.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `UndoEdit`        | Reverts a file to its content before the last `FileWriteOrEdit`/`MultiFileEdit` this session (per-file, last ~10 edits kept in memory). Refused if the file changed on disk since your edit; a brand-new file's creation isn't undoable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `ReadImage`       | Returns a native MCP image content block (not base64 as text), so multimodal models actually see the image. Confined to the workspace (like `ReadFiles`) and size-capped.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `CodeMap`         | Tree-sitter code navigation, in one tool with two `operation`s. `outline`: a symbol map (functions, types, methods, ...) - a file returns its definitions, a directory (or empty) a relevance-ranked, token-budgeted repo symbol map, in 11 languages. `references`: where a `name` is defined and used (called) across the repo, counting only real identifier occurrences (never inside strings/comments, unlike grep), definitions first. For plain-text/regex search and file discovery, just use `rg`/`fd`/`grep` via `BashCommand`.                                                                                                                                                                                                                                                                              |
 
-Winx advertises MCP `2025-11-25`. `CodeMap` publishes an `outputSchema` for its existing
+Winx advertises MCP `2026-07-28`. `CodeMap` publishes an `outputSchema` for its existing
 `structuredContent`, while text content remains available for older clients. MCP Tasks are optional on
 `BashCommand` and apply only to a foreground `command`; include an explicit `thread_id` and do not combine
 the protocol-level `task` object with `is_background=true`. Task results are retained for the negotiated,
@@ -419,10 +421,17 @@ cd winx-code-agent
 cargo install --path .
 ```
 
-Or run it without installing:
+Or build and run the complete Unix daemon bundle without installing:
 
 ```bash
-cargo run --release
+cargo build --release --locked --bins
+./target/release/winx-code-agent
+```
+
+For a quick in-process development run that deliberately skips `winxd` and `winx-guardian`:
+
+```bash
+WINX_EMBEDDED=1 cargo run --release
 ```
 </details>
 
@@ -432,6 +441,36 @@ List MCP tools in your client. You should see nine entries: `Initialize`, `BashC
 `MultiFileEdit`, `UndoEdit`, `ContextSave`, `ReadImage`, `CodeMap`. Start with `Initialize` unless your local client exposes
 MCP Roots and Winx bootstraps from them; Winx tracks workspace + mode per thread.
 
+## Durable session lifecycle (Unix)
+
+The daemon runtime caps live guardians at 32 by default and automatically removes sessions that have been idle for 24
+hours. A session with a foreground command or a live background command is never removed by idle pruning. Operations
+addressed to a session refresh its activity timestamp; passive `list`/`prune` inspection does not. Metadata is kept
+beside the guardian socket with user-only permissions.
+
+```bash
+# Inspect and attach
+winx-code-agent list
+winx-code-agent attach <thread_id> --follow
+
+# Explicit cleanup
+winx-code-agent kill <thread_id>
+winx-code-agent kill --all
+
+# Remove sessions older than the configured TTL
+winx-code-agent prune
+
+# Remove every currently idle session, while preserving active commands
+winx-code-agent prune --idle-seconds 0
+
+# Reload winxd after changing lifecycle environment variables; guardians survive
+winx-code-agent restart-daemon
+```
+
+The quota and TTL are enforced by `winxd`, not just by one MCP adapter, so reconnecting clients and multiple adapters
+share the same resource boundary. A newly installed adapter also upgrades an older control plane automatically when it
+advertises safe planned restarts; the per-session guardians and their PTYs stay alive throughout.
+
 ## Remote access (ChatGPT & other remote MCP clients)
 
 By default Winx speaks MCP over **stdio** - the local transport every desktop client (Claude Desktop, Cursor, VS Code)
@@ -439,7 +478,7 @@ uses. For clients that live in the cloud and can't reach your machine over stdio
 connectors - Winx can also serve MCP over **Streamable HTTP**:
 
 ```bash
-winx serve --http --bind 127.0.0.1:8000 --token "$(openssl rand -hex 24)"
+winx-code-agent serve --http --bind 127.0.0.1:8000 --token "$(openssl rand -hex 24)"
 ```
 
 The MCP protocol is served at `/mcp`. Every request must carry the token in the `Authorization: Bearer <token>` header.
@@ -466,7 +505,7 @@ cloudflared tunnel --url http://localhost:8000
 #    -> https://<random>.trycloudflare.com
 
 # 2. start Winx, allowing that host
-winx serve --http --bind 127.0.0.1:8000 \
+winx-code-agent serve --http --bind 127.0.0.1:8000 \
      --token "$(openssl rand -hex 24)" \
      --allowed-host <random>.trycloudflare.com
 ```
@@ -490,7 +529,7 @@ When a client asks for connector metadata (ChatGPT's developer-mode form, an MCP
 > (interactive TUIs included), token-budgeted file reads, surgical search/replace edits, and tree-sitter code
 > navigation across 11 languages.
 
-The server also advertises its icon in the `initialize` handshake (`serverInfo.icons`, MCP 2025-11-25): a 96x96 PNG
+The server also advertises its icon in the `initialize` handshake (`serverInfo.icons`, MCP 2026-07-28): a 96x96 PNG
 embedded in the binary as a data URI, so it works over stdio and HTTP alike. Source art lives in
 [`.github/assets/icon.png`](.github/assets/icon.png).
 
@@ -517,6 +556,9 @@ All optional - Winx works out of the box without any of these.
 | `WINX_EMBEDDED` | Truthy value (`1`, `true`, `yes`, `on`) forcing the in-process runtime; useful as a fail-safe kill switch. |
 | `WINX_SOCKET` | Override the Unix socket used to reach `winxd`. |
 | `WINXD_BIN` / `WINX_GUARDIAN_BIN` | Override daemon/guardian executable discovery. Normally unnecessary when the three release binaries remain together. |
+| `WINX_MAX_GUARDIANS` | Maximum live daemon-owned sessions across all adapters. Defaults to `32`; accepted range is `1..=4096`. Read when `winxd` starts; use `restart-daemon` after changing it. |
+| `WINX_SESSION_IDLE_TTL_SECS` | Idle-session lifetime before automatic pruning. Defaults to `86400` (24 hours); `0` disables automatic TTL pruning. Active foreground/background commands are preserved. Read when `winxd` starts. |
+| `WINX_GUARDIAN_SWEEP_INTERVAL_SECS` | Interval between automatic guardian sweeps. Defaults to `60` seconds; accepted range is `1..=86400`. Read when `winxd` starts. |
 | `WINX_NO_COMPRESS` | Set to `1` to disable output compression and see raw, uncollapsed shell output (the `[winx: ×N]` collapsing is on by default). |
 | `WINX_NO_REDACT` | Set to `1` to disable secret redaction. By default winx scrubs high-confidence credentials (provider API keys, JWTs, PEM private keys, `user:pass@` URLs) from all tool output and saved memory, replacing each with `[REDACTED:<rule>]`. Turn this off only when you knowingly need a raw value. |
 | `WINX_SANDBOX` | Set to `1` to enable an opt-in Landlock filesystem sandbox (Linux 5.13+, EXPERIMENTAL). Confines winx and its shell to write only the workspace (the cwd at startup) plus `/tmp`, and makes the home directory unreadable, so a manipulated agent can't read `~/.ssh`/`~/.aws` or modify files outside the project. Coarse and best-effort: a command needing a path outside the allowlist fails. Degrades to a warning (unsandboxed) on older kernels. |
@@ -532,12 +574,13 @@ All optional - Winx works out of the box without any of these.
 ## Hacking on it
 
 ```bash
-cargo fmt --all
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo fmt --all -- --check
+cargo check --all-features --locked
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-features --locked
 ```
 
-CI runs the same three. If you touch `src/state/pty.rs` or anything in `src/tools/bash_command.rs`, the regression suite
+CI runs the same checks. If you touch `src/state/pty.rs` or anything in `src/tools/bash_command.rs`, the regression suite
 at `tests/bash_pty_regression_test.rs` is what protects against the usual TUI/PTY foot-guns - run it first.
 
 Robustness is also fuzzed and model-checked:

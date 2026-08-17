@@ -41,9 +41,9 @@ Commands run:
 
 ```bash
 cargo fmt --all -- --check
-cargo check --tests
-cargo clippy --all-targets --all-features
-cargo test --all-features
+cargo check --all-features --locked
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-features --locked
 ```
 
 ## Checklist

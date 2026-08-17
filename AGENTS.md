@@ -6,12 +6,12 @@ Winx is a Rust 2021 MCP server for shell and coding-agent workflows. The binary 
 
 ## Build, Test, and Development Commands
 
-- `cargo check --tests` performs a fast compile check for library and test code.
-- `cargo run --release` starts the MCP server locally without installing it.
-- `cargo build --release --locked` produces the optimized binary using the committed lockfile.
+- `cargo check --all-features --locked` performs a fast compile check with the committed lockfile.
+- `WINX_EMBEDDED=1 cargo run --release` starts an in-process development server without sibling daemons.
+- `cargo build --release --locked --bins` produces the complete optimized Unix bundle; run `./target/release/winx-code-agent` afterward.
 - `cargo fmt --all -- --check` verifies formatting; run `cargo fmt --all` to apply it.
-- `cargo clippy --all-targets --all-features` runs the configured lint suite.
-- `cargo test --all-features` runs the full normal test suite.
+- `cargo clippy --all-targets --all-features --locked -- -D warnings` runs the enforced lint suite.
+- `cargo test --all-features --locked` runs the full normal test suite.
 - `cargo test --features loom --lib loom_` runs the opt-in concurrency model checks.
 
 ## Coding Style & Naming Conventions

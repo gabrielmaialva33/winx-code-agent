@@ -51,6 +51,8 @@ This is powerful by design. Only connect Winx to MCP clients and agent workflows
 - Keep secrets out of project files that agents can read.
 - Avoid running Winx with elevated privileges.
 - Treat shell access as equivalent to local user access.
+- Keep the daemon guardian quota and idle TTL enabled on long-lived or network-reachable deployments.
+- Review durable sessions with `winx-code-agent list`; use `prune`, `kill <thread_id>`, or `kill --all` when cleanup is needed.
 
 ## Filesystem Safety
 
@@ -78,13 +80,13 @@ Use standard Rust tooling and GitHub dependency alerts when reviewing dependency
 
 ```bash
 cargo fmt --all -- --check
-cargo check --tests
-cargo clippy --all-targets --all-features
-cargo test --all-features
+cargo check --all-features --locked
+cargo clippy --all-targets --all-features --locked -- -D warnings
+cargo test --all-features --locked
 ```
 
 ## Disclosure
 
 We follow coordinated disclosure. Public details should be shared after a fix or mitigation is available, unless immediate disclosure is necessary to protect users.
 
-Last updated: May 2026
+Last updated: August 2026
