@@ -1,5 +1,6 @@
 [package]
 name = "winx-code-agent"
+default-run = "winx-code-agent"
 version = "0.2.332"
 edition = "2021"
 rust-version = "1.88"

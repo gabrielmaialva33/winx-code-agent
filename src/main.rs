@@ -13,11 +13,13 @@ use std::time::Duration;
 use clap::Parser;
 #[cfg(unix)]
 use winx_code_agent::daemon::{default_socket_path, DaemonClient};
+#[cfg(unix)]
+use winx_code_agent::runtime::{configured_daemon_binary, restart_control_daemon_at};
 use winx_code_agent::{start_winx_server, Result, WinxError};
 
 /// Winx - High Performance MCP Server
 #[derive(Parser)]
-#[command(name = "winx")]
+#[command(name = "winx-code-agent")]
 #[command(author = "Gabriel Maia")]
 #[command(version)]
 #[command(about = "High-performance MCP server for shell and file operations", long_about = None)]
@@ -91,10 +93,30 @@ enum Commands {
         socket: Option<PathBuf>,
     },
 
-    /// Stop and remove a daemon-owned shell session
+    /// Stop and remove one or every daemon-owned shell session
     #[cfg(unix)]
     Kill {
-        thread_id: String,
+        #[arg(required_unless_present = "all")]
+        thread_id: Option<String>,
+        #[arg(long, conflicts_with = "thread_id")]
+        all: bool,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+
+    /// Remove idle or unreachable daemon-owned shell sessions
+    #[cfg(unix)]
+    Prune {
+        /// Override the configured idle TTL for this run. Zero prunes every idle session.
+        #[arg(long)]
+        idle_seconds: Option<u64>,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
+
+    /// Restart winxd without terminating per-session guardians or PTYs
+    #[cfg(unix)]
+    RestartDaemon {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
@@ -151,7 +173,11 @@ async fn async_main(cli: Cli) -> Result<()> {
             run_attach(socket, thread_id, consumer, follow).await
         }
         #[cfg(unix)]
-        Some(Commands::Kill { thread_id, socket }) => run_kill(socket, thread_id).await,
+        Some(Commands::Kill { thread_id, all, socket }) => run_kill(socket, thread_id, all).await,
+        #[cfg(unix)]
+        Some(Commands::Prune { idle_seconds, socket }) => run_prune(socket, idle_seconds).await,
+        #[cfg(unix)]
+        Some(Commands::RestartDaemon { socket }) => run_restart_daemon(socket).await,
         // Default: stdio transport for local MCP clients.
         None | Some(Commands::Serve { .. }) => run_server().await,
     }
@@ -197,9 +223,47 @@ async fn run_attach(
 }
 
 #[cfg(unix)]
-async fn run_kill(socket: Option<PathBuf>, thread_id: String) -> Result<()> {
-    let killed = daemon_client(socket).kill_session(&thread_id).await?;
+async fn run_kill(socket: Option<PathBuf>, thread_id: Option<String>, all: bool) -> Result<()> {
+    let client = daemon_client(socket);
+    if all {
+        let sessions = client.list_sessions().await?;
+        let mut killed = 0usize;
+        for session in sessions {
+            if client.kill_session(&session.thread_id).await? {
+                killed += 1;
+            }
+        }
+        writeln!(std::io::stdout().lock(), "killed {killed} session(s)")?;
+        return Ok(());
+    }
+
+    let thread_id = thread_id
+        .ok_or_else(|| WinxError::InvalidInput("provide a thread_id or pass --all".to_string()))?;
+    let killed = client.kill_session(&thread_id).await?;
     writeln!(std::io::stdout().lock(), "{}", if killed { "killed" } else { "not found" })?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn run_prune(socket: Option<PathBuf>, idle_seconds: Option<u64>) -> Result<()> {
+    let result = daemon_client(socket).prune_sessions(idle_seconds).await?;
+    serde_json::to_writer_pretty(std::io::stdout().lock(), &result)
+        .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+    writeln!(std::io::stdout().lock())?;
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn run_restart_daemon(socket: Option<PathBuf>) -> Result<()> {
+    let socket = socket.unwrap_or_else(default_socket_path);
+    let binary = configured_daemon_binary()?;
+    let hello = restart_control_daemon_at(&socket, &binary).await?;
+    writeln!(
+        std::io::stdout().lock(),
+        "restarted winxd pid={} epoch={}",
+        hello.daemon_pid,
+        hello.daemon_epoch
+    )?;
     Ok(())
 }
 
