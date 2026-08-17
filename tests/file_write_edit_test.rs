@@ -314,7 +314,7 @@ Modified content here.
 
     // This should fail or return an error about needing to read first
     match result {
-        Ok(response) => {
+        Ok(_response) => {
             // In wcgw mode with full permissions, it might work
             // But there should be some indication about whitelist
 
@@ -577,15 +577,9 @@ if __name__ == "__main__":
         (final_content.contains("Cannot divide by zero"), "Divide error handling present"),
     ];
 
-    let mut all_passed = true;
     for (check, description) in &checks {
-        if *check {
-        } else {
-            all_passed = false;
-        }
+        assert!(*check, "{description}.\nFinal content:\n{final_content}");
     }
-
-    assert!(all_passed, "Not all edits were applied.\nFinal content:\n{final_content}");
 
     Ok(())
 }
