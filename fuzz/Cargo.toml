@@ -1,0 +1,50 @@
+[package]
+name = "winx-code-agent-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.winx-code-agent]
+path = ".."
+features = ["fuzzing"]
+
+[[bin]]
+name = "thread_id"
+path = "fuzz_targets/thread_id.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "terminal"
+path = "fuzz_targets/terminal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bash_parser"
+path = "fuzz_targets/bash_parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "bash_command_json"
+path = "fuzz_targets/bash_command_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "edit_blocks"
+path = "fuzz_targets/edit_blocks.rs"
+test = false
+doc = false
+bench = false
