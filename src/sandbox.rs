@@ -20,9 +20,12 @@
 //! read without the sandbox, so this isn't a regression - but don't rely on the
 //! sandbox to hide env-passed secrets from co-tenant processes.
 
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
-use tracing::{info, warn};
+#[cfg(target_os = "linux")]
+use tracing::info;
+use tracing::warn;
 
 #[cfg(target_os = "linux")]
 const DEFAULT_RO_PATHS: &[&str] =
