@@ -4,13 +4,16 @@
 # This script helps with setting up and launching the Winx Code Agent
 
 # Default settings
-WINX_HOME="$(pwd)"
+WINX_HOME="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WINX_BIN="$WINX_HOME/target/release/winx-code-agent"
-# shellcheck disable=SC2002
-WINX_VERSION=$(cat "$WINX_HOME/Cargo.toml" | grep "version" | head -1 | cut -d '"' -f 2)
+WINXD_BIN="$WINX_HOME/target/release/winxd"
+WINX_GUARDIAN_BIN="$WINX_HOME/target/release/winx-guardian"
+WINX_VERSION=$(awk -F '"' '/^version = / { print $2; exit }' "$WINX_HOME/Cargo.toml")
 CLAUDE_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
 LOG_LEVEL="info"
 DEBUG_MODE=false
+DO_BUILD=false
+DO_INSTALL=false
 
 # Colors for pretty output
 GREEN='\033[0;32m'
@@ -33,7 +36,9 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --debug-mode)
+      # Backward-compatible alias for the CLI's actual --debug flag.
       DEBUG_MODE=true
+      LOG_LEVEL="debug"
       shift
       ;;
     --verbose)
@@ -52,7 +57,7 @@ while [[ $# -gt 0 ]]; do
       echo "Usage: $0 [options]"
       echo "Options:"
       echo "  --debug       Enable debug logging"
-      echo "  --debug-mode  Enable enhanced error reporting"
+      echo "  --debug-mode  Alias for --debug"
       echo "  --verbose     Enable verbose logging"
       echo "  --build       Build the agent before launching"
       echo "  --install     Install/update the agent in Claude config"
@@ -76,16 +81,22 @@ fi
 # Build if requested
 if [ "$DO_BUILD" = true ]; then
   echo -e "${YELLOW}Building Winx agent...${NC}"
-  cd "$WINX_HOME"
-  cargo build --release
-  
-  if [ $? -ne 0 ]; then
+  cd "$WINX_HOME" || exit 1
+  if ! cargo build --release --locked --bins; then
     echo -e "${RED}Build failed!${NC}"
     exit 1
   fi
   
   echo -e "${GREEN}Build successful!${NC}"
 fi
+
+for binary in "$WINX_BIN" "$WINXD_BIN" "$WINX_GUARDIAN_BIN"; do
+  if [ ! -x "$binary" ]; then
+    echo -e "${RED}Required binary not found or not executable: $binary${NC}"
+    echo "Run $0 --build first."
+    exit 1
+  fi
+done
 
 # Install in Claude config if requested
 if [ "$DO_INSTALL" = true ]; then
@@ -134,16 +145,18 @@ fi
 
 # Print status
 echo -e "${GREEN}Winx agent is ready!${NC}"
-echo "Binary: $WINX_BIN"
+echo "Adapter: $WINX_BIN"
+echo "Control daemon: $WINXD_BIN"
+echo "Session guardian: $WINX_GUARDIAN_BIN"
 echo "Config: $CLAUDE_CONFIG"
 echo "Log level: $LOG_LEVEL"
 echo "Debug mode: $DEBUG_MODE"
 
-# Optionally start the agent
-if [ "$DEBUG_MODE" = true ]; then
+# Start the adapter. The daemon runtime discovers winxd/winx-guardian beside it.
+if [ "$DEBUG_MODE" = true ] || [ "$LOG_LEVEL" = "debug" ]; then
   echo -e "${YELLOW}Starting Winx in debug mode...${NC}"
-  "$WINX_BIN" --debug --debug-mode
+  "$WINX_BIN" --debug
 else
   echo -e "${YELLOW}Starting Winx...${NC}"
-  "$WINX_BIN" --$LOG_LEVEL
+  "$WINX_BIN" --verbose
 fi
