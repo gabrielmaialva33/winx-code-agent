@@ -42,7 +42,7 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Clippy
-        run: cargo clippy --all-features --locked -- -W clippy::all -A clippy::missing_docs_in_private_items -A clippy::pedantic
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       - name: Build
         run: cargo build --all-features --locked
