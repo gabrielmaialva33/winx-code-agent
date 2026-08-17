@@ -83,10 +83,7 @@ pub fn compress_output(output: &str) -> Option<String> {
 }
 
 fn disabled() -> bool {
-    std::env::var("WINX_NO_COMPRESS").is_ok_and(|value| {
-        let value = value.trim();
-        !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false")
-    })
+    crate::config::env_flag("WINX_NO_COMPRESS")
 }
 
 #[cfg(test)]

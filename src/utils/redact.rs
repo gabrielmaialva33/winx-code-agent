@@ -67,7 +67,7 @@ fn rules() -> &'static [(&'static str, Regex)] {
 
 /// Whether redaction is disabled via `WINX_NO_REDACT`.
 fn disabled() -> bool {
-    std::env::var("WINX_NO_REDACT").is_ok_and(|v| v != "0" && !v.is_empty())
+    crate::config::env_flag("WINX_NO_REDACT")
 }
 
 /// Scrub credential patterns from `text`. Returns `Cow::Borrowed` (no allocation)

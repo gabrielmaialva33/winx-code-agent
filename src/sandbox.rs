@@ -36,9 +36,7 @@ const DEFAULT_RW_PATHS: &[&str] = &["/tmp", "/dev", "/var/tmp"];
 /// is taken as the workspace and granted read-write. MUST be called before the
 /// async runtime is built so its worker threads inherit the Landlock domain.
 pub fn apply_if_requested() {
-    let enabled =
-        std::env::var("WINX_SANDBOX").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
-    if !enabled {
+    if !crate::config::env_flag("WINX_SANDBOX") {
         return;
     }
 
@@ -71,7 +69,7 @@ pub fn apply_if_requested() {
 
 #[cfg(target_os = "linux")]
 fn apply_linux(workspace_root: &Path) -> anyhow::Result<landlock::RulesetStatus> {
-    use landlock::{Access, AccessFs, Ruleset, RulesetAttr, RulesetCreatedAttr, ABI};
+    use landlock::{Access, AccessFs, Ruleset, RulesetAttr, ABI};
 
     // ABI V1 (kernel 5.13) is the baseline; read access includes Execute, so
     // binaries under the RO system paths still run.

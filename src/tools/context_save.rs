@@ -642,9 +642,7 @@ fn try_open_file(file_path: &str) -> Result<()> {
 }
 
 fn should_open_context_file(file_path: &str) -> bool {
-    std::env::var("WINX_OPEN_CONTEXT").is_ok_and(|value| value == "1" || value == "true")
-        && Path::new(file_path).is_file()
-        && !cfg!(test)
+    crate::config::env_flag("WINX_OPEN_CONTEXT") && Path::new(file_path).is_file() && !cfg!(test)
 }
 
 /// Save context data to a temporary file as a last resort
@@ -717,7 +715,8 @@ mod tests {
     fn read_text_for_context_caps_oversized_file() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("big.txt");
-        std::fs::write(&p, vec![b'a'; MAX_CONTEXT_READ_BYTES as usize + 4096]).unwrap();
+        let capped = usize::try_from(MAX_CONTEXT_READ_BYTES).unwrap_or(usize::MAX - 4096);
+        std::fs::write(&p, vec![b'a'; capped + 4096]).unwrap();
         // Reads only the capped head, not the whole oversized file.
         assert_eq!(read_text_for_context(&p).unwrap().len() as u64, MAX_CONTEXT_READ_BYTES);
     }
