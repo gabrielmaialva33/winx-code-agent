@@ -3,9 +3,7 @@
 //! Winx is a high-performance Rust implementation of the Model Context Protocol (MCP).
 //! It provides core tools for shell execution and file management with extreme efficiency.
 
-#[cfg(unix)]
 use std::io::Write;
-#[cfg(unix)]
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::Duration;
@@ -40,10 +38,6 @@ struct Cli {
 enum Commands {
     /// Start MCP server (default: stdio transport for local clients)
     Serve {
-        /// Enable debug mode with enhanced error reporting
-        #[arg(long)]
-        debug_mode: bool,
-
         /// Serve over Streamable HTTP instead of stdio, for remote MCP clients
         /// (e.g. `ChatGPT` developer-mode connectors). Requires --token.
         #[arg(long)]
@@ -54,11 +48,43 @@ enum Commands {
         #[arg(long, default_value = "127.0.0.1:8000")]
         bind: String,
 
-        /// Shared secret required on every HTTP request, sent as
-        /// `Authorization: Bearer <token>`. Falls back to the `WINX_HTTP_TOKEN`
-        /// env var.
-        #[arg(long)]
+        /// Shared secret required on every HTTP request. Prefer --token-file so
+        /// the secret is not visible in process arguments. Falls back to
+        /// `WINX_HTTP_TOKEN` when no other credential source is provided.
+        #[arg(long, conflicts_with_all = ["token_file", "principal_config"])]
         token: Option<String>,
+
+        /// Read the single-principal bearer token from a chmod-600 file.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["token", "principal_config"])]
+        token_file: Option<PathBuf>,
+
+        /// TOML file containing multiple [[principals]] entries, each backed by
+        /// `token_file` or `token_env`. Sessions and Tasks are isolated per principal.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["token", "token_file"])]
+        principal_config: Option<PathBuf>,
+
+        /// Permit a token shorter than 32 bytes. Intended only for local tests.
+        #[arg(long)]
+        allow_weak_token: bool,
+
+        /// Permit binding HTTP to a non-loopback address. Off by default because
+        /// this endpoint provides shell and filesystem access.
+        #[arg(long)]
+        allow_non_loopback: bool,
+
+        /// Maximum HTTP requests executing concurrently.
+        #[arg(
+            long,
+            default_value_t = winx_code_agent::http_server::DEFAULT_MAX_CONCURRENCY
+        )]
+        max_concurrency: usize,
+
+        /// Fixed-window request limit per source IP.
+        #[arg(
+            long,
+            default_value_t = winx_code_agent::http_server::DEFAULT_REQUESTS_PER_MINUTE
+        )]
+        requests_per_minute: u32,
 
         /// Extra Host authority to accept (your tunnel hostname, e.g.
         /// abc.trycloudflare.com). Repeatable. Loopback is always allowed.
@@ -120,6 +146,9 @@ enum Commands {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
+
+    /// Print a redacted runtime/configuration diagnostic report
+    Doctor,
 }
 
 /// Logging setup
@@ -164,8 +193,32 @@ fn main() -> Result<()> {
 async fn async_main(cli: Cli) -> Result<()> {
     match cli.command {
         Some(Commands::Serve {
-            http: true, bind, token, allowed_host, allow_query_token, ..
-        }) => run_http_server(bind, token, allowed_host, allow_query_token).await,
+            http: true,
+            bind,
+            token,
+            token_file,
+            principal_config,
+            allow_weak_token,
+            allow_non_loopback,
+            max_concurrency,
+            requests_per_minute,
+            allowed_host,
+            allow_query_token,
+        }) => {
+            run_http_server(
+                bind,
+                token,
+                token_file,
+                principal_config,
+                allow_weak_token,
+                allow_non_loopback,
+                max_concurrency,
+                requests_per_minute,
+                allowed_host,
+                allow_query_token,
+            )
+            .await
+        }
         #[cfg(unix)]
         Some(Commands::List { socket }) => run_list(socket).await,
         #[cfg(unix)]
@@ -178,6 +231,7 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Prune { idle_seconds, socket }) => run_prune(socket, idle_seconds).await,
         #[cfg(unix)]
         Some(Commands::RestartDaemon { socket }) => run_restart_daemon(socket).await,
+        Some(Commands::Doctor) => run_doctor().await,
         // Default: stdio transport for local MCP clients.
         None | Some(Commands::Serve { .. }) => run_server().await,
     }
@@ -267,19 +321,95 @@ async fn run_restart_daemon(socket: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
+async fn run_doctor() -> Result<()> {
+    let runtime = winx_code_agent::runtime::configured_runtime_mode().map_or_else(
+        |error| format!("invalid: {error}"),
+        |mode| format!("{mode:?}").to_ascii_lowercase(),
+    );
+    let mut report = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "platform": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH
+        },
+        "cwd": std::env::current_dir().ok().map(|path| path.display().to_string()),
+        "runtime": runtime,
+        "environment": {
+            "sandbox_requested": winx_code_agent::config::env_flag("WINX_SANDBOX"),
+            "redaction_disabled": winx_code_agent::config::env_flag("WINX_NO_REDACT"),
+            "compression_disabled": winx_code_agent::config::env_flag("WINX_NO_COMPRESS"),
+            "http_token_configured": winx_code_agent::config::env_text("WINX_HTTP_TOKEN").is_some()
+        }
+    });
+
+    #[cfg(unix)]
+    {
+        let socket = default_socket_path();
+        let daemon = match DaemonClient::new(&socket).hello().await {
+            Ok(hello) => serde_json::json!({
+                "reachable": true,
+                "socket": socket.display().to_string(),
+                "pid": hello.daemon_pid,
+                "epoch": hello.daemon_epoch,
+                "protocol": format!("{}.{}", hello.protocol_major, hello.protocol_minor),
+                "capabilities": hello.capabilities
+            }),
+            Err(error) => serde_json::json!({
+                "reachable": false,
+                "socket": socket.display().to_string(),
+                "error": error.to_string()
+            }),
+        };
+        report["daemon"] = daemon;
+        report["daemon_binary"] = match configured_daemon_binary() {
+            Ok(path) => serde_json::json!({"available": true, "path": path.display().to_string()}),
+            Err(error) => serde_json::json!({"available": false, "error": error.to_string()}),
+        };
+    }
+
+    serde_json::to_writer_pretty(std::io::stdout().lock(), &report)
+        .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+    writeln!(std::io::stdout().lock())?;
+    Ok(())
+}
+
 /// Executes the remote MCP server over Streamable HTTP.
+#[allow(clippy::too_many_arguments)]
 async fn run_http_server(
     bind: String,
     token: Option<String>,
+    token_file: Option<PathBuf>,
+    principal_config: Option<PathBuf>,
+    allow_weak_token: bool,
+    allow_non_loopback: bool,
+    max_concurrency: usize,
+    requests_per_minute: u32,
     allowed_hosts: Vec<String>,
     allow_query_token: bool,
 ) -> Result<()> {
-    let token = token.or_else(|| std::env::var("WINX_HTTP_TOKEN").ok()).unwrap_or_default();
+    if token.is_some() {
+        tracing::warn!("--token exposes the HTTP secret in process arguments; prefer --token-file");
+    }
+    let principals = winx_code_agent::config::load_http_principals(
+        principal_config.as_deref(),
+        token,
+        token_file.as_deref(),
+        allow_weak_token,
+    )?;
+    let options = winx_code_agent::http_server::HttpServerOptions {
+        bind: bind.clone(),
+        principals,
+        extra_hosts: allowed_hosts,
+        allow_query_token,
+        allow_non_loopback,
+        max_concurrency,
+        requests_per_minute,
+    };
     tracing::info!("Starting winx remote MCP (HTTP) v{} on {bind}", env!("CARGO_PKG_VERSION"));
 
-    winx_code_agent::http_server::start_http_server(&bind, token, allowed_hosts, allow_query_token)
-        .await
-        .map_err(|e| WinxError::ShellInitializationError(format!("HTTP server failed: {e}")))
+    winx_code_agent::http_server::start_http_server_with_options(options).await.map_err(|error| {
+        WinxError::ShellInitializationError(format!("HTTP server failed: {error}"))
+    })
 }
 
 /// Executes the MCP server

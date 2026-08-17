@@ -98,7 +98,7 @@ mod session_registry_tests {
         let (second, _) = service.session_for("thread_b").await;
         let (fallback, _) = service.session_for("").await;
         assert!(Arc::ptr_eq(&second, &fallback));
-        assert!(service.active_slot().await.is_some());
+        assert!(service.active_slot(None).await.is_some());
     }
 
     #[tokio::test]

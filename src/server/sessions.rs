@@ -123,6 +123,7 @@ impl WinxService {
     /// Marks the slot as most-recently-used and evicts the LRU idle session when
     /// adding a new key would exceed [`MAX_SESSIONS`].
     pub(super) async fn session_for(&self, thread_id: &str) -> (SharedBashState, SessionGuard) {
+        let thread_id = crate::types::normalize_thread_id(thread_id);
         let mut registry = self.sessions.lock().await;
         let key = if thread_id.is_empty() {
             match self.isolation {
@@ -132,7 +133,7 @@ impl WinxService {
                 SessionIsolation::Strict => "anonymous".to_string(),
             }
         } else {
-            thread_id.to_string()
+            thread_id.clone()
         };
 
         if !registry.slots.contains_key(&key) && registry.slots.len() >= MAX_SESSIONS {
@@ -177,9 +178,21 @@ impl WinxService {
         (slot, pin.acquire())
     }
 
-    /// The most recently active session slot, without creating one.
-    pub(super) async fn active_slot(&self) -> Option<SharedBashState> {
+    /// The most recently active session slot, optionally confined to one HTTP
+    /// principal's internal thread-id prefix.
+    pub(super) async fn active_slot(
+        &self,
+        session_prefix: Option<&str>,
+    ) -> Option<SharedBashState> {
         let registry = self.sessions.lock().await;
+        if let Some(prefix) = session_prefix {
+            return registry
+                .last_used
+                .iter()
+                .filter(|(key, _)| key.starts_with(prefix))
+                .max_by_key(|(_, last_used)| **last_used)
+                .and_then(|(key, _)| registry.slots.get(key).cloned());
+        }
         registry.last_active.as_ref().and_then(|key| registry.slots.get(key).cloned())
     }
 

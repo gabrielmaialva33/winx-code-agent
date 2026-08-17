@@ -24,6 +24,10 @@ pub(super) fn to_mcp_error(tool: &str, error: &WinxError) -> McpError {
     let message = format!("{tool} failed: {error}");
     match error {
         WinxError::BashStateNotInitialized
+        | WinxError::NoActiveCommand(_)
+        | WinxError::BackgroundSessionNotFound(_)
+        | WinxError::EmptyInteractiveInput { .. }
+        | WinxError::InteractiveTargetNotRunning(_)
         | WinxError::CommandNotAllowed(_)
         | WinxError::PathSecurityError { .. }
         | WinxError::ThreadIdMismatch(_)
@@ -111,12 +115,15 @@ impl WinxService {
         result
     }
 
-    pub(super) async fn knowledge_transfer_prompt_text(&self) -> String {
+    pub(super) async fn knowledge_transfer_prompt_text(
+        &self,
+        session_prefix: Option<&str>,
+    ) -> String {
         let mut text = String::from(
             "Prepare a concise handoff for another agent. Include active objective, current state, important files, changed files, blockers, validation already run, and exact next commands.\n",
         );
 
-        let state_snapshot = if let Some(slot) = self.active_slot().await {
+        let state_snapshot = if let Some(slot) = self.active_slot(session_prefix).await {
             let guard = slot.lock().await;
             guard.as_ref().map(|state| {
                 let whitelist = state
@@ -152,9 +159,11 @@ impl WinxService {
             return text;
         };
 
+        let display_thread_id =
+            session_prefix.and_then(|prefix| thread_id.strip_prefix(prefix)).unwrap_or(&thread_id);
         let _ = writeln!(
             text,
-            "\n# Current Winx state\nThread: {thread_id}\nWorkspace: {}\nCwd: {}\nMode: {mode}\nWhitelisted files: {whitelist_count}",
+            "\n# Current Winx state\nThread: {display_thread_id}\nWorkspace: {}\nCwd: {}\nMode: {mode}\nWhitelisted files: {whitelist_count}",
             workspace_root.display(),
             cwd.display()
         );

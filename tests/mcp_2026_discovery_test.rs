@@ -1,9 +1,14 @@
 use std::net::TcpListener as StdTcpListener;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+const TEST_TOKEN: &str = "modern-test-token-0123456789abcdef";
+const LEFT_TOKEN: &str = "left-principal-token-0123456789abcdef";
+const RIGHT_TOKEN: &str = "right-principal-token-0123456789abcdef";
 
 struct ServerProcess(Child);
 
@@ -12,6 +17,17 @@ impl Drop for ServerProcess {
         let _ = self.0.kill();
         let _ = self.0.wait();
     }
+}
+
+fn spawn_single_token_server(address: std::net::SocketAddr) -> anyhow::Result<ServerProcess> {
+    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+        .args(["serve", "--http", "--bind", &address.to_string(), "--token", TEST_TOKEN])
+        .env("WINX_EMBEDDED", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(ServerProcess(child))
 }
 
 async fn wait_until_listening(address: std::net::SocketAddr) -> anyhow::Result<()> {
@@ -31,7 +47,17 @@ async fn post_json(
     method: &str,
     body: &str,
 ) -> anyhow::Result<String> {
-    post_json_with_session(address, protocol_version, Some(method), None, body).await
+    post_json_as(address, protocol_version, method, body, TEST_TOKEN).await
+}
+
+async fn post_json_as(
+    address: std::net::SocketAddr,
+    protocol_version: &str,
+    method: &str,
+    body: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    post_json_with_session_as(address, protocol_version, Some(method), None, body, token).await
 }
 
 async fn post_json_with_session(
@@ -40,6 +66,17 @@ async fn post_json_with_session(
     method: Option<&str>,
     session_id: Option<&str>,
     body: &str,
+) -> anyhow::Result<String> {
+    post_json_with_session_as(address, protocol_version, method, session_id, body, TEST_TOKEN).await
+}
+
+async fn post_json_with_session_as(
+    address: std::net::SocketAddr,
+    protocol_version: &str,
+    method: Option<&str>,
+    session_id: Option<&str>,
+    body: &str,
+    token: &str,
 ) -> anyhow::Result<String> {
     let mut stream = TcpStream::connect(address).await?;
     let method_header =
@@ -57,7 +94,7 @@ async fn post_json_with_session(
     let session_header =
         session_id.map_or_else(String::new, |id| format!("Mcp-Session-Id: {id}\r\n"));
     let request = format!(
-        "POST /mcp HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer modern-test-token\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: {protocol_version}\r\n{method_header}{name_header}{session_header}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+        "POST /mcp HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: {protocol_version}\r\n{method_header}{name_header}{session_header}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(request.as_bytes()).await?;
@@ -92,18 +129,77 @@ fn response_json(response: &str) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::from_str(data)?)
 }
 
+fn modern_request_meta(client_name: &str, tasks: bool) -> serde_json::Value {
+    let capabilities = if tasks {
+        serde_json::json!({
+            "extensions": { "io.modelcontextprotocol/tasks": {} }
+        })
+    } else {
+        serde_json::json!({})
+    };
+    serde_json::json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": { "name": client_name, "version": "1" },
+        "io.modelcontextprotocol/clientCapabilities": capabilities
+    })
+}
+
+async fn initialize_modern_as(
+    address: std::net::SocketAddr,
+    token: &str,
+    workspace: &Path,
+    thread_id: &str,
+    client_name: &str,
+) -> anyhow::Result<String> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": format!("initialize-{client_name}"),
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta(client_name, false),
+            "name": "Initialize",
+            "arguments": {
+                "type": "first_call",
+                "any_workspace_path": workspace,
+                "mode_name": "wcgw",
+                "thread_id": thread_id
+            }
+        }
+    });
+    post_json_as(address, "2026-07-28", "tools/call", &request.to_string(), token).await
+}
+
+async fn pwd_as(
+    address: std::net::SocketAddr,
+    token: &str,
+    thread_id: &str,
+    client_name: &str,
+) -> anyhow::Result<String> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": format!("pwd-{client_name}"),
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta(client_name, false),
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": "pwd",
+                    "is_background": false
+                },
+                "thread_id": thread_id
+            }
+        }
+    });
+    post_json_as(address, "2026-07-28", "tools/call", &request.to_string(), token).await
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn modern_client_can_discover_server_before_initialization() -> anyhow::Result<()> {
     let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
-    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
-        .args(["serve", "--http", "--bind", &address.to_string(), "--token", "modern-test-token"])
-        .env("WINX_EMBEDDED", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let _server = ServerProcess(child);
+    let _server = spawn_single_token_server(address)?;
     wait_until_listening(address).await?;
 
     let response = post_json(
@@ -124,14 +220,7 @@ async fn modern_client_can_discover_server_before_initialization() -> anyhow::Re
 async fn modern_stateless_tools_list_exposes_bash_command() -> anyhow::Result<()> {
     let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
-    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
-        .args(["serve", "--http", "--bind", &address.to_string(), "--token", "modern-test-token"])
-        .env("WINX_EMBEDDED", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let _server = ServerProcess(child);
+    let _server = spawn_single_token_server(address)?;
     wait_until_listening(address).await?;
 
     let response = post_json(
@@ -151,14 +240,7 @@ async fn modern_stateless_tools_list_exposes_bash_command() -> anyhow::Result<()
 async fn legacy_initialize_session_still_exposes_bash_command() -> anyhow::Result<()> {
     let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
-    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
-        .args(["serve", "--http", "--bind", &address.to_string(), "--token", "modern-test-token"])
-        .env("WINX_EMBEDDED", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let _server = ServerProcess(child);
+    let _server = spawn_single_token_server(address)?;
     wait_until_listening(address).await?;
 
     let initialize = post_json_with_session(
@@ -201,24 +283,10 @@ async fn modern_bash_command_task_completes_through_tasks_get() -> anyhow::Resul
     let workspace = tempfile::tempdir()?;
     let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
-    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
-        .args(["serve", "--http", "--bind", &address.to_string(), "--token", "modern-test-token"])
-        .env("WINX_EMBEDDED", "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    let _server = ServerProcess(child);
+    let _server = spawn_single_token_server(address)?;
     wait_until_listening(address).await?;
 
-    let client_capabilities = serde_json::json!({
-        "extensions": { "io.modelcontextprotocol/tasks": {} }
-    });
-    let request_meta = serde_json::json!({
-        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
-        "io.modelcontextprotocol/clientInfo": { "name": "task-test", "version": "1" },
-        "io.modelcontextprotocol/clientCapabilities": client_capabilities
-    });
+    let request_meta = modern_request_meta("task-test", true);
     let initialize = serde_json::json!({
         "jsonrpc": "2.0",
         "id": "tool-init",
@@ -291,5 +359,74 @@ async fn modern_bash_command_task_completes_through_tasks_get() -> anyhow::Resul
             status => anyhow::bail!("task did not complete successfully ({status:?}): {response}"),
         }
     }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn http_principals_isolate_the_same_external_thread_id() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let left_workspace = tempfile::tempdir()?;
+    let right_workspace = tempfile::tempdir()?;
+    let credentials = tempfile::tempdir()?;
+    let left_token_file = credentials.path().join("left-token");
+    let right_token_file = credentials.path().join("right-token");
+    std::fs::write(&left_token_file, LEFT_TOKEN)?;
+    std::fs::write(&right_token_file, RIGHT_TOKEN)?;
+    std::fs::set_permissions(&left_token_file, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::set_permissions(&right_token_file, std::fs::Permissions::from_mode(0o600))?;
+
+    let principal_config = credentials.path().join("principals.toml");
+    std::fs::write(
+        &principal_config,
+        format!(
+            "[[principals]]\nname = \"left\"\ntoken_file = {left_token_file:?}\n\n[[principals]]\nname = \"right\"\ntoken_file = {right_token_file:?}\n"
+        ),
+    )?;
+
+    let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+        .args(["serve", "--http", "--bind", &address.to_string(), "--principal-config"])
+        .arg(&principal_config)
+        .env("WINX_EMBEDDED", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    let _server = ServerProcess(child);
+    wait_until_listening(address).await?;
+
+    let shared_thread = "shared_external_thread";
+    let left_initialize = initialize_modern_as(
+        address,
+        LEFT_TOKEN,
+        left_workspace.path(),
+        shared_thread,
+        "left-client",
+    )
+    .await?;
+    let right_initialize = initialize_modern_as(
+        address,
+        RIGHT_TOKEN,
+        right_workspace.path(),
+        shared_thread,
+        "right-client",
+    )
+    .await?;
+    assert!(left_initialize.starts_with("HTTP/1.1 200"), "{left_initialize}");
+    assert!(right_initialize.starts_with("HTTP/1.1 200"), "{right_initialize}");
+    assert!(left_initialize.contains(shared_thread), "{left_initialize}");
+    assert!(right_initialize.contains(shared_thread), "{right_initialize}");
+
+    let left_pwd = pwd_as(address, LEFT_TOKEN, shared_thread, "left-client").await?;
+    let right_pwd = pwd_as(address, RIGHT_TOKEN, shared_thread, "right-client").await?;
+    let left_path = left_workspace.path().display().to_string();
+    let right_path = right_workspace.path().display().to_string();
+    assert!(left_pwd.contains(&left_path), "left principal lost its workspace: {left_pwd}");
+    assert!(!left_pwd.contains(&right_path), "left principal reached right workspace: {left_pwd}");
+    assert!(right_pwd.contains(&right_path), "right principal lost its workspace: {right_pwd}");
+    assert!(!right_pwd.contains(&left_path), "right principal reached left workspace: {right_pwd}");
     Ok(())
 }

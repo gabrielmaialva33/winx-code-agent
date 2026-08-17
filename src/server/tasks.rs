@@ -8,6 +8,7 @@ use rmcp::ErrorData as McpError;
 use serde_json::Value;
 use tracing::warn;
 
+use super::principal::{new_task_id, RequestScope};
 use super::WinxService;
 use crate::state::task_state::{TaskEntry, DEFAULT_TASK_TTL_MS};
 use crate::types::{normalize_thread_id, BashCommand, BashCommandAction};
@@ -115,6 +116,7 @@ impl WinxService {
     pub(super) async fn enqueue_bash_task(
         &self,
         request: CallToolRequestParams,
+        scope: RequestScope,
     ) -> Result<CreateTaskResult, McpError> {
         let args = request
             .arguments
@@ -143,7 +145,7 @@ impl WinxService {
             ));
         }
 
-        let task_id = format!("task_{:032x}", rand::rng().random::<u128>());
+        let task_id = new_task_id(scope.principal(), rand::rng().random::<u128>());
         let now = rmcp::task_manager::current_timestamp();
         let task = Task::new(task_id.clone(), TaskStatus::Working, now.clone(), now)
             .with_status_message("Running BashCommand")
@@ -162,23 +164,29 @@ impl WinxService {
                 tokio::time::timeout(MAX_TASK_RUNTIME, service.run_bash_task(request)).await;
 
             let (status, message, result) = match outcome {
-                Ok(Ok(result)) => match serde_json::to_value(result) {
-                    Ok(result) => (
-                        TaskStatus::Completed,
-                        Some("BashCommand completed".to_string()),
-                        Some(result),
-                    ),
-                    Err(error) => (
+                Ok(Ok(mut result)) => {
+                    scope.unscope_result(&mut result);
+                    match serde_json::to_value(result) {
+                        Ok(result) => (
+                            TaskStatus::Completed,
+                            Some("BashCommand completed".to_string()),
+                            Some(result),
+                        ),
+                        Err(error) => (
+                            TaskStatus::Failed,
+                            Some(format!("Failed to serialize task result: {error}")),
+                            None,
+                        ),
+                    }
+                }
+                Ok(Err(mut error)) => {
+                    scope.unscope_error(&mut error);
+                    (
                         TaskStatus::Failed,
-                        Some(format!("Failed to serialize task result: {error}")),
+                        Some(crate::utils::redact::redact(&error.message).into_owned()),
                         None,
-                    ),
-                },
-                Ok(Err(error)) => (
-                    TaskStatus::Failed,
-                    Some(crate::utils::redact::redact(&error.message).into_owned()),
-                    None,
-                ),
+                    )
+                }
                 Err(_) => {
                     service.interrupt_task_thread(&thread_id).await;
                     (

@@ -5,6 +5,7 @@
 
 mod catalog;
 mod handler;
+mod principal;
 mod sessions;
 mod tasks;
 mod tool_dispatch;

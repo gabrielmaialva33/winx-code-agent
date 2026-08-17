@@ -12,6 +12,7 @@ use rmcp::{
 };
 
 use super::catalog::{server_icon_data_uri, winx_prompts, winx_tools};
+use super::principal::{principal_from_context, scope_tool_request, task_belongs_to_principal};
 use super::WinxService;
 
 impl ServerHandler for WinxService {
@@ -54,8 +55,15 @@ impl ServerHandler for WinxService {
     async fn get_task(
         &self,
         request: GetTaskParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<GetTaskResult, McpError> {
+        let principal = principal_from_context(&context);
+        if !task_belongs_to_principal(&request.task_id, principal.as_ref()) {
+            return Err(McpError::invalid_request(
+                format!("Unknown or expired task: {}", request.task_id),
+                None,
+            ));
+        }
         let mut tasks = self.tasks.lock().await;
         let entry = tasks.get(&request.task_id).ok_or_else(|| {
             McpError::invalid_request(format!("Unknown or expired task: {}", request.task_id), None)
@@ -66,8 +74,15 @@ impl ServerHandler for WinxService {
     async fn update_task(
         &self,
         request: UpdateTaskParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
+        let principal = principal_from_context(&context);
+        if !task_belongs_to_principal(&request.task_id, principal.as_ref()) {
+            return Err(McpError::invalid_request(
+                format!("Unknown or expired task: {}", request.task_id),
+                None,
+            ));
+        }
         let mut tasks = self.tasks.lock().await;
         tasks.get(&request.task_id).ok_or_else(|| {
             McpError::invalid_request(format!("Unknown or expired task: {}", request.task_id), None)
@@ -78,8 +93,15 @@ impl ServerHandler for WinxService {
     async fn cancel_task(
         &self,
         request: CancelTaskParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<(), McpError> {
+        let principal = principal_from_context(&context);
+        if !task_belongs_to_principal(&request.task_id, principal.as_ref()) {
+            return Err(McpError::invalid_request(
+                format!("Unknown or expired task: {}", request.task_id),
+                None,
+            ));
+        }
         let (abort_handle, thread_id) = {
             let mut tasks = self.tasks.lock().await;
             let entry = tasks.get_mut(&request.task_id).ok_or_else(|| {
@@ -137,7 +159,7 @@ impl ServerHandler for WinxService {
     async fn get_prompt(
         &self,
         request: GetPromptRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResponse, McpError> {
         if request.name != "KnowledgeTransfer" {
             return Err(McpError::invalid_request(
@@ -146,8 +168,12 @@ impl ServerHandler for WinxService {
             ));
         }
 
-        let text =
-            crate::utils::redact::redact(&self.knowledge_transfer_prompt_text().await).into_owned();
+        let principal = principal_from_context(&context);
+        let session_prefix = principal.as_ref().map(crate::config::HttpPrincipal::session_prefix);
+        let text = crate::utils::redact::redact(
+            &self.knowledge_transfer_prompt_text(session_prefix.as_deref()).await,
+        )
+        .into_owned();
         Ok(GetPromptResult::new(vec![PromptMessage::new_text(Role::User, text)])
             .with_description("Knowledge transfer handoff prompt")
             .into())
@@ -184,11 +210,25 @@ impl ServerHandler for WinxService {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        let principal = principal_from_context(&context);
+        let (request, scope) = scope_tool_request(request, principal).map_err(|error| {
+            McpError::invalid_request(format!("Cannot scope remote request: {error}"), None)
+        })?;
         if context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks())
             && Self::bash_task_is_eligible(&request)
         {
-            return Ok(CallToolResponse::Task(self.enqueue_bash_task(request).await?));
+            return Ok(CallToolResponse::Task(self.enqueue_bash_task(request, scope).await?));
         }
-        Ok(self.execute_tool_call(request).await?.into())
+
+        match self.execute_tool_call(request).await {
+            Ok(mut result) => {
+                scope.unscope_result(&mut result);
+                Ok(result.into())
+            }
+            Err(mut error) => {
+                scope.unscope_error(&mut error);
+                Err(error)
+            }
+        }
     }
 }
