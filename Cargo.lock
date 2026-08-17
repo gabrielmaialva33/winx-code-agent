@@ -2640,7 +2640,6 @@ dependencies = [
  "home",
  "ignore",
  "landlock",
- "lazy_static",
  "libc",
  "loom",
  "memmap2",

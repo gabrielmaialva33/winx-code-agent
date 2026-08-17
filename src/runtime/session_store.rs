@@ -1,7 +1,7 @@
 //! Embedded session index used by the shell runtime.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, Weak};
 
 use crate::errors::Result;
 use crate::state::pty::{PtyShell, SharedPtyShell};
@@ -71,10 +71,8 @@ impl SessionStore {
     }
 }
 
-lazy_static::lazy_static! {
-    static ref EMBEDDED_SESSION_STORE: StdMutex<SessionStore> =
-        StdMutex::new(SessionStore::new());
-}
+static EMBEDDED_SESSION_STORE: LazyLock<StdMutex<SessionStore>> =
+    LazyLock::new(|| StdMutex::new(SessionStore::new()));
 
 /// Lock the embedded session index, recovering from poisoning like the legacy
 /// background manager did.

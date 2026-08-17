@@ -1,6 +1,6 @@
 use regex::Regex;
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, LazyLock, RwLock};
 use std::time::Instant;
 
 /// Maximum number of lines to keep in the screen buffer
@@ -99,10 +99,9 @@ impl TerminalCache {
     }
 }
 
-// Initialize the global terminal cache
-lazy_static::lazy_static! {
-    static ref TERMINAL_CACHE: TerminalCache = TerminalCache::new(100, CACHE_TTL);
-}
+// Initialize the global terminal cache.
+static TERMINAL_CACHE: LazyLock<TerminalCache> =
+    LazyLock::new(|| TerminalCache::new(100, CACHE_TTL));
 
 /// Render terminal output with line wrapping
 pub fn render_terminal_output(text: &str) -> Vec<String> {
@@ -119,7 +118,7 @@ pub fn render_terminal_output(text: &str) -> Vec<String> {
     }
 
     // Periodically clean up expired cache entries.
-    if rand::random::<u32>() % 100 == 0 {
+    if rand::random::<u32>().is_multiple_of(100) {
         TERMINAL_CACHE.cleanup();
     }
 

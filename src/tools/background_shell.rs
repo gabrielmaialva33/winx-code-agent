@@ -3,7 +3,7 @@
 use rand::RngExt;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::info;
@@ -273,9 +273,8 @@ impl BackgroundShellManager {
 }
 
 // Global background shell manager (thread-safe) - matches WCGW Python's BashState.background_shells
-lazy_static::lazy_static! {
-    static ref BG_SHELL_MANAGER: StdMutex<BackgroundShellManager> = StdMutex::new(BackgroundShellManager::new());
-}
+static BG_SHELL_MANAGER: LazyLock<StdMutex<BackgroundShellManager>> =
+    LazyLock::new(|| StdMutex::new(BackgroundShellManager::new()));
 
 /// Lock the global background-shell manager, recovering from poisoning.
 ///
