@@ -12,7 +12,11 @@ fn session_store_resolves_main_shell_by_thread() {
 
     store.bind_main("thread-a", &shell);
 
-    let resolved = store.resolve("thread-a", &ShellTarget::Main).expect("main shell is indexed");
-    assert!(Arc::ptr_eq(&shell, &resolved));
+    assert!(
+        store
+            .resolve("thread-a", &ShellTarget::Main)
+            .is_some_and(|resolved| Arc::ptr_eq(&shell, &resolved)),
+        "main shell is indexed"
+    );
     assert!(store.resolve("thread-b", &ShellTarget::Main).is_none());
 }

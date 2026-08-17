@@ -303,8 +303,10 @@ async fn daemon_runtime_owns_initialization_and_reset() -> Result<()> {
 
     let local_has_pty = {
         let state = state.lock().await;
-        let has_pty = state.as_ref().expect("initialized state").pty_shell.lock().await.is_some();
-        has_pty
+        match state.as_ref() {
+            Some(state) => state.pty_shell.lock().await.is_some(),
+            None => false,
+        }
     };
     let before = DaemonClient::new(&socket).session_info("rpc-daemon-initialize").await?;
 

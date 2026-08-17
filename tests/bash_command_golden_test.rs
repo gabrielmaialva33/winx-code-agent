@@ -133,7 +133,9 @@ fn normalize_volatile(output: &str, workspace: &str, bg_command_ids: &[&str]) ->
             } else if line.len() >= 128 && line.bytes().all(|byte| byte == b'x') {
                 "<LONG_X_PAYLOAD>".to_string()
             } else if line.starts_with("<WORKSPACE>/.winx/scratch/bash-output-")
-                && line.ends_with(".txt")
+                && std::path::Path::new(line)
+                    .extension()
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("txt"))
             {
                 "<WORKSPACE>/.winx/scratch/<SCRATCH_FILE>".to_string()
             } else {
