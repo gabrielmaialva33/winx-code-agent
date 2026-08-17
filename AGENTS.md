@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Winx is a Rust 2021 MCP server for shell and coding-agent workflows. The binary entry point is `src/main.rs`; library exports live in `src/lib.rs`. MCP registration and transports are organized in `src/server.rs` and `src/http_server.rs`. Add tool implementations under `src/tools/`, terminal and persistence logic under `src/state/`, and reusable parsing, path, repository, and safety helpers under `src/utils/`. Integration and lifecycle coverage belongs in `tests/`. Tokenizer and path-ranking model data lives in `assets/`; CI and release automation lives in `.github/workflows/`.
+Winx is a Rust 2021 MCP server for shell and coding-agent workflows. The binary entry point is `src/main.rs`; library exports live in `src/lib.rs`. `src/server.rs` is the MCP-service facade, with catalog/schema, handler, session, task, and tool-dispatch responsibilities split under `src/server/`; HTTP transport remains in `src/http_server.rs`. Tool facades live under `src/tools/`; the `BashCommand` implementation is split by execution, interaction, output/status, and TUI behavior under `src/tools/bash_command/`. Terminal and persistence logic belongs under `src/state/`, and reusable parsing, path, repository, and safety helpers under `src/utils/`. Integration and lifecycle coverage belongs in `tests/`. Tokenizer and path-ranking model data lives in `assets/`; CI and release automation lives in `.github/workflows/`.
 
 ## Build, Test, and Development Commands
 

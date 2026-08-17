@@ -20,13 +20,13 @@ Setup:
 git clone https://github.com/YOUR_USERNAME/winx-code-agent.git
 cd winx-code-agent
 git remote add upstream https://github.com/gabrielmaialva33/winx-code-agent.git
-cargo check --tests
+cargo check --all-features --locked
 ```
 
 ## Project Structure
 
-- `src/server.rs`: MCP server wiring, tool registration, resource handlers.
-- `src/tools/`: MCP tool implementations.
+- `src/server.rs`: thin MCP-service facade; focused catalog, handler, session, task, dispatch, and test modules live in `src/server/`.
+- `src/tools/`: MCP tool facades and implementations; `BashCommand` internals are split under `src/tools/bash_command/`.
 - `src/types.rs`: tool schemas and input deserialization.
 - `src/state/`: shell, PTY, persistence, and terminal state.
 - `src/utils/`: shared file, path, mmap, repo, and command-safety helpers.
