@@ -8,7 +8,7 @@ use crate::state::persistence::BashStateSnapshot;
 use crate::types::BashCommand;
 
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 0;
+pub const PROTOCOL_MINOR: u16 = 1;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -107,6 +107,20 @@ pub struct SessionInfo {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SessionParams {
     pub thread_id: String,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub(crate) struct PruneParams {
+    #[serde(default)]
+    pub idle_seconds: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PruneResult {
+    pub removed_thread_ids: Vec<String>,
+    pub skipped_active_thread_ids: Vec<String>,
+    pub stale_socket_count: usize,
+    pub unreachable_guardian_count: usize,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

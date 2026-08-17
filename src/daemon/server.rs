@@ -163,6 +163,7 @@ async fn serve_connection(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn dispatch(
     request: RpcRequest,
     sessions: &Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
@@ -386,17 +387,14 @@ async fn run_action(
 
     {
         let mut guard = session.state.lock().await;
-        match guard.as_mut() {
-            Some(state) => {
-                let daemon_cwd = state.cwd.clone();
-                state.apply_snapshot(&params.snapshot);
-                state.cwd = daemon_cwd;
-            }
-            None => {
-                let mut state = BashState::new();
-                state.apply_snapshot(&params.snapshot);
-                *guard = Some(state);
-            }
+        if let Some(state) = guard.as_mut() {
+            let daemon_cwd = state.cwd.clone();
+            state.apply_snapshot(&params.snapshot);
+            state.cwd = daemon_cwd;
+        } else {
+            let mut state = BashState::new();
+            state.apply_snapshot(&params.snapshot);
+            *guard = Some(state);
         }
     }
 
@@ -544,9 +542,7 @@ async fn session_info(session: &Arc<DaemonSession>) -> Option<SessionInfo> {
         let guard = main.lock().await;
         guard.as_ref().map_or((None, false), |shell| (shell.process_id(), shell.command_running))
     };
-    let mut background_command_ids =
-        session.background_ids.lock().await.iter().cloned().collect::<Vec<_>>();
-    background_command_ids.sort();
+    let background_command_ids = active_background_command_ids(session, &thread_id).await;
     Some(SessionInfo {
         thread_id,
         cwd,
@@ -555,6 +551,37 @@ async fn session_info(session: &Arc<DaemonSession>) -> Option<SessionInfo> {
         running,
         background_command_ids,
     })
+}
+
+async fn active_background_command_ids(
+    session: &Arc<DaemonSession>,
+    thread_id: &str,
+) -> Vec<String> {
+    let candidates = session.background_ids.lock().await.clone();
+    let mut active = Vec::new();
+    for id in candidates {
+        let shell = {
+            let store = lock_session_store();
+            store.resolve(thread_id, &ShellTarget::Background(id.clone()))
+        };
+        let Some(shell) = shell else { continue };
+        // Capture the final queued bytes before deciding that a completed shell is
+        // no longer active. Otherwise pruning the id here could make the journal
+        // drainer stop one poll too early.
+        capture_shell_output(session, &id, &shell).await;
+        let running = {
+            let guard = shell.lock().await;
+            guard.as_ref().is_some_and(|shell| shell.command_running)
+        };
+        if running {
+            active.push(id);
+        }
+    }
+
+    let active_set = active.iter().cloned().collect::<HashSet<_>>();
+    session.background_ids.lock().await.retain(|id| active_set.contains(id));
+    active.sort();
+    active
 }
 
 async fn interrupt_session(session: &Arc<DaemonSession>) -> Result<()> {

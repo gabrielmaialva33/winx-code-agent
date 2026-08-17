@@ -576,10 +576,16 @@ impl WinxService {
                 .last_used
                 .iter()
                 .filter(|(k, _)| **k != key)
-                .filter(|(k, _)| reg.in_flight.get(k.as_str()).map_or(true, |p| !p.is_pinned()))
+                .filter(|(k, _)| reg.in_flight.get(k.as_str()).is_none_or(|p| !p.is_pinned()))
                 .min_by_key(|(_, t)| **t)
                 .map(|(k, _)| k.clone());
             if let Some(victim) = victim {
+                // The daemon runtime owns a process outside this registry. Release
+                // it while the registry lock still prevents the same thread_id from
+                // being recreated underneath the termination request.
+                if let Err(error) = self.shell_runtime.terminate_session(&victim).await {
+                    warn!(%error, "failed to terminate LRU shell session '{victim}'");
+                }
                 reg.slots.remove(&victim);
                 reg.last_used.remove(&victim);
                 reg.in_flight.remove(&victim);
@@ -707,8 +713,8 @@ impl WinxService {
     }
 
     /// Bootstrap a local single-client session from the client's first MCP Root.
-    /// Roots are part of stable 2025-11-25, although rmcp 1.8 marks the API as
-    /// deprecated in anticipation of the later SEP-2577 draft.
+    /// The negotiated MCP protocol still exposes Roots, although `rmcp` marks this
+    /// compatibility API as deprecated in anticipation of the later SEP-2577 draft.
     #[allow(deprecated)]
     async fn initialize_from_client_roots(&self, context: NotificationContext<RoleServer>) {
         if self.isolation != SessionIsolation::Lenient {
@@ -918,8 +924,8 @@ fn root_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
     path.is_absolute().then_some(path)
 }
 
-/// Server icon (96x96 PNG) as a self-contained data URI, per the 2025-11-25
-/// icons revision. A data URI works over stdio and HTTP alike — no extra
+/// Server icon (96x96 PNG) as a self-contained data URI, per MCP 2026-07-28.
+/// A data URI works over stdio and HTTP alike — no extra
 /// endpoint or auth exemption needed for clients to fetch it.
 fn server_icon_data_uri() -> &'static str {
     static URI: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -1609,6 +1615,55 @@ pub async fn start_winx_server_with_runtime(
 mod session_registry_tests {
     use super::*;
 
+    #[derive(Clone, Default)]
+    struct RecordingRuntime {
+        terminated: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl ShellRuntime for RecordingRuntime {
+        fn configure_session<'a>(
+            &'a self,
+            _bash_state: &'a mut BashState,
+            _transition: crate::runtime::ShellSessionTransition,
+        ) -> crate::runtime::ShellRuntimeConfigureFuture<'a> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn run_action<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+            _command: BashCommand,
+        ) -> crate::runtime::ShellRuntimeFuture<'a> {
+            Box::pin(async {
+                Err(WinxError::CommandExecutionError(
+                    "recording runtime does not execute commands".to_string(),
+                ))
+            })
+        }
+
+        fn interrupt<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+        ) -> crate::runtime::ShellRuntimeUnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn terminate_session<'a>(
+            &'a self,
+            thread_id: &'a str,
+        ) -> crate::runtime::ShellRuntimeUnitFuture<'a> {
+            let terminated = self.terminated.clone();
+            let thread_id = thread_id.to_string();
+            Box::pin(async move {
+                terminated
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(thread_id);
+                Ok(())
+            })
+        }
+    }
+
     #[tokio::test]
     async fn distinct_threads_get_distinct_sessions() {
         let svc = WinxService::new();
@@ -1656,6 +1711,25 @@ mod session_registry_tests {
         }
         let reg = svc.sessions.lock().await;
         assert!(reg.slots.len() <= MAX_SESSIONS, "session count {} over cap", reg.slots.len());
+    }
+
+    #[tokio::test]
+    async fn lru_eviction_releases_runtime_owned_session() {
+        let runtime = RecordingRuntime::default();
+        let terminated = runtime.terminated.clone();
+        let svc = WinxService::with_runtime(SessionIsolation::Lenient, Arc::new(runtime));
+
+        let (_, first_guard) = svc.session_for("evict_me").await;
+        drop(first_guard);
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        for i in 0..MAX_SESSIONS {
+            let (_, guard) = svc.session_for(&format!("replacement_{i}")).await;
+            drop(guard);
+        }
+
+        let terminated =
+            terminated.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        assert_eq!(terminated, vec!["evict_me"]);
     }
 
     #[tokio::test]
@@ -1712,14 +1786,14 @@ mod task_lifecycle_tests {
         worker.abort();
         service.interrupt_task_thread("task_cancel_regression").await;
         let interrupted = tokio::time::timeout(Duration::from_secs(5), worker).await;
-        match interrupted {
-            // A foreground BashCommand may have already returned its documented
-            // incremental "still running" result before abort wins the race.
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) if error.is_cancelled() => {}
-            Ok(Err(error)) => panic!("aborted task worker failed instead of cancelling: {error}"),
-            Err(_) => panic!("aborted task worker did not settle"),
-        }
+        // A foreground BashCommand may have already returned its documented
+        // incremental "still running" result before abort wins the race.
+        let settled = match interrupted {
+            Ok(Ok(_)) => true,
+            Ok(Err(error)) => error.is_cancelled(),
+            Err(_) => false,
+        };
+        assert!(settled, "aborted task worker did not settle as completed or cancelled");
 
         let recovery = service
             .handle_bash_command(Some(serde_json::json!({

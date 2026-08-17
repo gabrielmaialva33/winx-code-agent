@@ -14,7 +14,9 @@ use crate::state::bash_state::BashState;
 use crate::types::BashCommand;
 
 #[cfg(unix)]
-pub use selection::ensure_daemon_at;
+pub use selection::{
+    configured_daemon_binary, ensure_control_daemon_at, ensure_daemon_at, restart_control_daemon_at,
+};
 pub use selection::{
     configured_runtime_mode, configured_shell_runtime, select_runtime_mode, RuntimeMode,
 };
@@ -36,7 +38,7 @@ pub enum ShellSessionTransition {
     WorkspaceChange,
 }
 
-/// Narrow process-agnostic boundary for BashCommand execution.
+/// Narrow process-agnostic boundary for `BashCommand` execution.
 pub trait ShellRuntime: Send + Sync {
     fn configure_session<'a>(
         &'a self,
@@ -54,6 +56,9 @@ pub trait ShellRuntime: Send + Sync {
         &'a self,
         bash_state: &'a Arc<Mutex<Option<BashState>>>,
     ) -> ShellRuntimeUnitFuture<'a>;
+
+    /// Release the runtime-owned resources for one logical session.
+    fn terminate_session<'a>(&'a self, thread_id: &'a str) -> ShellRuntimeUnitFuture<'a>;
 }
 
 /// Current in-process runtime. It intentionally delegates to the existing
@@ -71,10 +76,9 @@ impl ShellRuntime for EmbeddedShellRuntime {
             if matches!(
                 transition,
                 ShellSessionTransition::FirstCall | ShellSessionTransition::Reset
-            ) {
-                if transition == ShellSessionTransition::Reset || bash_state.cwd.exists() {
-                    bash_state.init_pty_shell().await?;
-                }
+            ) && (transition == ShellSessionTransition::Reset || bash_state.cwd.exists())
+            {
+                bash_state.init_pty_shell().await?;
             }
             let attach_hint = {
                 let shell = bash_state.pty_shell.lock().await;
@@ -97,6 +101,10 @@ impl ShellRuntime for EmbeddedShellRuntime {
         bash_state: &'a Arc<Mutex<Option<BashState>>>,
     ) -> ShellRuntimeUnitFuture<'a> {
         Box::pin(interrupt_embedded(bash_state))
+    }
+
+    fn terminate_session<'a>(&'a self, _thread_id: &'a str) -> ShellRuntimeUnitFuture<'a> {
+        Box::pin(async { Ok(()) })
     }
 }
 

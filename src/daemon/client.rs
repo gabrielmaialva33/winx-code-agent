@@ -4,9 +4,9 @@ use tokio::net::UnixStream;
 
 use super::protocol::{
     read_json_frame, write_json_frame, ConfigureSessionParams, ConfigureSessionResult,
-    ConfigureSessionTransition, HelloResult, JournalRead, JournalReadParams, RpcRequest,
-    RpcResponse, RunActionParams, RunActionResult, SessionInfo, SessionParams, WireShellError,
-    PROTOCOL_MAJOR,
+    ConfigureSessionTransition, HelloResult, JournalRead, JournalReadParams, PruneParams,
+    PruneResult, RpcRequest, RpcResponse, RunActionParams, RunActionResult, SessionInfo,
+    SessionParams, WireShellError, PROTOCOL_MAJOR,
 };
 use crate::errors::{Result, WinxError};
 use crate::runtime::{
@@ -125,6 +125,18 @@ impl DaemonClient {
             rand::random::<u64>(),
             "session.kill",
             serde_json::to_value(SessionParams { thread_id: thread_id.to_string() })
+                .map_err(|error| WinxError::SerializationError(error.to_string()))?,
+        )
+        .await
+    }
+
+    pub async fn prune_sessions(&self, idle_seconds: Option<u64>) -> Result<PruneResult> {
+        let mut stream = self.connected().await?;
+        DaemonShellRuntime::request(
+            &mut stream,
+            rand::random::<u64>(),
+            "session.prune",
+            serde_json::to_value(PruneParams { idle_seconds })
                 .map_err(|error| WinxError::SerializationError(error.to_string()))?,
         )
         .await
@@ -282,6 +294,13 @@ impl ShellRuntime for DaemonShellRuntime {
             DaemonClient::new(&self.socket_path).interrupt_session(&thread_id).await
         })
     }
+
+    fn terminate_session<'a>(&'a self, thread_id: &'a str) -> ShellRuntimeUnitFuture<'a> {
+        Box::pin(async move {
+            let _ = DaemonClient::new(&self.socket_path).kill_session(thread_id).await?;
+            Ok(())
+        })
+    }
 }
 
 fn from_wire_error(error: WireShellError) -> WinxError {
@@ -290,9 +309,10 @@ fn from_wire_error(error: WireShellError) -> WinxError {
         WireShellError::ShellInitialization(message) => {
             WinxError::ShellInitializationError(message)
         }
-        WireShellError::CommandExecution(message) => WinxError::CommandExecutionError(message),
+        WireShellError::CommandExecution(message) | WireShellError::Other(message) => {
+            WinxError::CommandExecutionError(message)
+        }
         WireShellError::CommandNotAllowed(message) => WinxError::CommandNotAllowed(message),
         WireShellError::ThreadIdMismatch(message) => WinxError::ThreadIdMismatch(message),
-        WireShellError::Other(message) => WinxError::CommandExecutionError(message),
     }
 }

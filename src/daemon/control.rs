@@ -1,19 +1,17 @@
-use std::fmt::Write as FmtWrite;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
 use tokio::net::{UnixListener, UnixStream};
 
+use super::lifecycle::{GuardianLifecycle, GuardianLimits};
 use super::protocol::{
     read_json_frame, write_json_frame, ConfigureSessionParams, HelloResult, JournalReadParams,
-    RpcError, RpcRequest, RpcResponse, RunActionParams, SessionInfo, SessionParams,
+    PruneParams, RpcError, RpcRequest, RpcResponse, RunActionParams, SessionInfo, SessionParams,
     MAX_FRAME_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR,
 };
-use crate::daemon::DaemonClient;
 use crate::errors::{Result, WinxError};
-use crate::runtime::ensure_daemon_at;
 use crate::types::normalize_thread_id;
 
 /// Stable control plane. Each logical session is owned by a separate guardian
@@ -21,8 +19,7 @@ use crate::types::normalize_thread_id;
 pub struct ControlServer {
     listener: UnixListener,
     socket_path: PathBuf,
-    guardian_dir: PathBuf,
-    guardian_binary: PathBuf,
+    lifecycle: Arc<GuardianLifecycle>,
     epoch: String,
 }
 
@@ -49,30 +46,32 @@ impl ControlServer {
         }
         let listener = UnixListener::bind(&socket_path)?;
         tokio::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).await?;
+        let lifecycle = Arc::new(GuardianLifecycle::new(
+            guardian_dir,
+            guardian_binary()?,
+            GuardianLimits::from_env()?,
+        ));
 
         Ok(Self {
             listener,
             socket_path,
-            guardian_dir,
-            guardian_binary: guardian_binary()?,
+            lifecycle,
             epoch: format!("{:016x}", rand::random::<u64>()),
         })
     }
 
     pub async fn serve(self) -> Result<()> {
+        self.lifecycle.clone().spawn_sweeper();
         loop {
             let (stream, _) = self.listener.accept().await?;
             if !same_uid(&stream)? {
                 tracing::warn!("Rejected winxd control connection from a different uid");
                 continue;
             }
-            let guardian_dir = self.guardian_dir.clone();
-            let guardian_binary = self.guardian_binary.clone();
+            let lifecycle = self.lifecycle.clone();
             let epoch = self.epoch.clone();
             tokio::spawn(async move {
-                if let Err(error) =
-                    serve_connection(stream, guardian_dir, guardian_binary, epoch).await
-                {
+                if let Err(error) = serve_connection(stream, lifecycle, epoch).await {
                     tracing::debug!("winxd control client disconnected: {error}");
                 }
             });
@@ -88,8 +87,7 @@ impl Drop for ControlServer {
 
 async fn serve_connection(
     mut stream: UnixStream,
-    guardian_dir: PathBuf,
-    guardian_binary: PathBuf,
+    lifecycle: Arc<GuardianLifecycle>,
     epoch: String,
 ) -> Result<()> {
     loop {
@@ -98,17 +96,13 @@ async fn serve_connection(
             Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(()),
             Err(error) => return Err(error.into()),
         };
-        let response = dispatch(request, &guardian_dir, &guardian_binary, &epoch).await;
+        let response = dispatch(request, &lifecycle, &epoch).await;
         write_json_frame(&mut stream, &response).await?;
     }
 }
 
-async fn dispatch(
-    request: RpcRequest,
-    guardian_dir: &Path,
-    guardian_binary: &Path,
-    epoch: &str,
-) -> RpcResponse {
+#[allow(clippy::too_many_lines)]
+async fn dispatch(request: RpcRequest, lifecycle: &GuardianLifecycle, epoch: &str) -> RpcResponse {
     if request.jsonrpc != "2.0" {
         return rpc_error(request.id, -32600, "JSON-RPC version must be 2.0");
     }
@@ -121,11 +115,14 @@ async fn dispatch(
                 capabilities: vec![
                     "per_session_guardians".to_string(),
                     "planned_control_restart".to_string(),
+                    "guardian_quota".to_string(),
+                    "guardian_idle_ttl".to_string(),
                     "session.configure".to_string(),
                     "shell.run_action".to_string(),
                     "session.list".to_string(),
                     "session.read_output".to_string(),
                     "session.kill".to_string(),
+                    "session.prune".to_string(),
                     "multi_consumer_cursors".to_string(),
                     "idempotency".to_string(),
                 ],
@@ -137,9 +134,20 @@ async fn dispatch(
     }
 
     if request.method == "session.list" {
-        return match list_sessions(guardian_dir).await {
+        return match list_sessions(lifecycle.guardian_dir()).await {
             Ok(sessions) => rpc_result(request.id, &sessions),
             Err(error) => rpc_error(request.id, -32000, &error.to_string()),
+        };
+    }
+
+    if request.method == "session.prune" {
+        let params = match decode::<PruneParams>(request.params) {
+            Ok(params) => params,
+            Err(error) => return rpc_error(request.id, -32602, &error.to_string()),
+        };
+        return match lifecycle.prune(params.idle_seconds).await {
+            Ok(result) => rpc_result(request.id, &result),
+            Err(error) => rpc_error(request.id, -32003, &error.to_string()),
         };
     }
 
@@ -148,21 +156,37 @@ async fn dispatch(
         Ok(_) => return rpc_error(request.id, -32602, "explicit thread_id is required"),
         Err(error) => return rpc_error(request.id, -32602, &error.to_string()),
     };
-    let guardian_socket = guardian_socket(guardian_dir, &thread_id);
+    let guardian_socket = lifecycle.socket_for(&thread_id);
     if matches!(request.method.as_str(), "session.configure" | "shell.run_action") {
-        if let Err(error) = ensure_daemon_at(&guardian_socket, guardian_binary).await {
+        if let Err(error) = lifecycle.ensure_guardian(&thread_id, &guardian_socket).await {
             return rpc_error(request.id, -32001, &error.to_string());
+        }
+    }
+    if request.method == "session.kill" {
+        match tokio::fs::try_exists(&guardian_socket).await {
+            Ok(true) => {}
+            Ok(false) => return rpc_result(request.id, &false),
+            Err(error) => return rpc_error(request.id, -32002, &error.to_string()),
         }
     }
 
     let kill_after = request.method == "session.kill";
     let request_id = request.id;
-    let response = match relay(&guardian_socket, request).await {
-        Ok(response) => response,
+    let (response, hello) = match relay(&guardian_socket, request).await {
+        Ok(result) => result,
         Err(error) => return rpc_error(request_id, -32002, &error.to_string()),
     };
+
     if kill_after && response.error.is_none() {
-        terminate_guardian(&guardian_socket).await;
+        if let Err(error) = lifecycle.finish_kill(&guardian_socket, hello.daemon_pid).await {
+            return rpc_error(
+                request_id,
+                -32003,
+                &format!("session state was removed, but guardian cleanup failed: {error}"),
+            );
+        }
+    } else {
+        lifecycle.note_activity(&guardian_socket, &thread_id, hello.daemon_pid).await;
     }
     response
 }
@@ -187,7 +211,7 @@ fn request_thread_id(request: &RpcRequest) -> Result<String> {
     Ok(normalize_thread_id(&thread_id))
 }
 
-async fn relay(socket: &Path, request: RpcRequest) -> Result<RpcResponse> {
+async fn relay(socket: &Path, request: RpcRequest) -> Result<(RpcResponse, HelloResult)> {
     let mut stream = UnixStream::connect(socket).await.map_err(|error| {
         WinxError::ShellInitializationError(format!(
             "guardian at {} is unavailable: {error}",
@@ -205,8 +229,8 @@ async fn relay(socket: &Path, request: RpcRequest) -> Result<RpcResponse> {
         },
     )
     .await?;
-    let hello: RpcResponse = read_json_frame(&mut stream).await?;
-    let hello: HelloResult = decode(hello.result.ok_or_else(|| {
+    let hello_response: RpcResponse = read_json_frame(&mut stream).await?;
+    let hello: HelloResult = decode(hello_response.result.ok_or_else(|| {
         WinxError::ConfigurationError("guardian handshake omitted result".to_string())
     })?)?;
     if hello.protocol_major != PROTOCOL_MAJOR {
@@ -216,7 +240,8 @@ async fn relay(socket: &Path, request: RpcRequest) -> Result<RpcResponse> {
         )));
     }
     write_json_frame(&mut stream, &request).await?;
-    Ok(read_json_frame(&mut stream).await?)
+    let response = read_json_frame(&mut stream).await?;
+    Ok((response, hello))
 }
 
 async fn list_sessions(guardian_dir: &Path) -> Result<Vec<SessionInfo>> {
@@ -233,7 +258,7 @@ async fn list_sessions(guardian_dir: &Path) -> Result<Vec<SessionInfo>> {
             method: "session.list".to_string(),
             params: serde_json::json!({}),
         };
-        let Ok(response) = relay(&path, request).await else { continue };
+        let Ok((response, _)) = relay(&path, request).await else { continue };
         let Some(result) = response.result else { continue };
         if let Ok(mut guardian_sessions) = serde_json::from_value::<Vec<SessionInfo>>(result) {
             sessions.append(&mut guardian_sessions);
@@ -241,25 +266,6 @@ async fn list_sessions(guardian_dir: &Path) -> Result<Vec<SessionInfo>> {
     }
     sessions.sort_by(|left, right| left.thread_id.cmp(&right.thread_id));
     Ok(sessions)
-}
-
-async fn terminate_guardian(socket: &Path) {
-    let Ok(hello) = DaemonClient::new(socket).hello().await else { return };
-    let Ok(pid) = i32::try_from(hello.daemon_pid) else { return };
-    // The handshake came from this exact same-uid guardian socket, so the pid is
-    // resolved rather than guessed. SIGTERM affects only that guardian process.
-    unsafe {
-        libc::kill(pid, libc::SIGTERM);
-    }
-}
-
-fn guardian_socket(guardian_dir: &Path, thread_id: &str) -> PathBuf {
-    let digest = Sha256::digest(thread_id.as_bytes());
-    let mut name = String::with_capacity(24);
-    for byte in &digest[..12] {
-        let _ = write!(name, "{byte:02x}");
-    }
-    guardian_dir.join(format!("{name}.sock"))
 }
 
 fn decode<T: serde::de::DeserializeOwned>(value: serde_json::Value) -> Result<T> {

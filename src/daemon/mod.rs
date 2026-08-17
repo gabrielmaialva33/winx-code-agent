@@ -2,6 +2,7 @@
 
 mod client;
 mod control;
+mod lifecycle;
 mod protocol;
 mod server;
 
@@ -10,7 +11,8 @@ use std::path::PathBuf;
 pub use client::{DaemonClient, DaemonShellRuntime};
 pub use control::ControlServer;
 pub use protocol::{
-    HelloResult, JournalRead, SessionInfo, MAX_FRAME_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    HelloResult, JournalRead, PruneResult, SessionInfo, MAX_FRAME_BYTES, PROTOCOL_MAJOR,
+    PROTOCOL_MINOR,
 };
 pub use server::DaemonServer;
 
