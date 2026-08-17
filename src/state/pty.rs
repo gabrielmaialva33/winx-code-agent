@@ -51,10 +51,13 @@ const WCGW_PROMPT_PATTERN: &str = "◉";
 const WCGW_PROMPT_END: &str = "──➤";
 
 fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>, bool) {
-    let requested = std::env::var("WINX_ATTACH_TERMINAL")
-        .or_else(|_| std::env::var("WINX_USE_SCREEN"))
+    let requested = crate::config::env_text("WINX_ATTACH_TERMINAL")
+        .or_else(|| crate::config::env_text("WINX_USE_SCREEN"))
         .unwrap_or_default();
-    if !requested.is_empty() && requested != "0" && requested != "false" {
+    if requested == "tmux"
+        || requested == "screen"
+        || crate::config::parse_bool(&requested) == Some(true)
+    {
         let session = format!("winx-{}-{}", std::process::id(), timestamp_millis());
         if requested == "tmux" && command_available("tmux") {
             let mut cmd = CommandBuilder::new("tmux");
@@ -157,7 +160,14 @@ fn winx_creator_pid(name: &str) -> Option<u32> {
     name.strip_prefix("winx-")?.split('-').next()?.parse::<u32>().ok()
 }
 
-/// Whether a process with `pid` is currently alive (Linux `/proc` check).
+/// Whether a process with `pid` is currently alive. `kill(pid, 0)` is portable
+/// across supported Unix platforms and sends no signal.
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    crate::os::unix::process_exists(pid)
+}
+
+#[cfg(not(unix))]
 fn process_exists(pid: u32) -> bool {
     std::path::Path::new("/proc").join(pid.to_string()).exists()
 }
@@ -269,25 +279,14 @@ impl std::fmt::Debug for PtyShell {
 /// catastrophic from a teardown path.
 #[cfg(unix)]
 fn killable_group(pid: u32) -> Option<i32> {
-    let pid = i32::try_from(pid).ok()?;
-    if pid <= 1 {
-        return None;
-    }
-    // SAFETY: getpgid(2) reads the group of an existing pid; integer-only, no
-    // memory touched. Returns -1 for a dead/invalid pid, which fails the check.
-    let group = unsafe { libc::getpgid(pid) };
-    (group == pid).then_some(group)
+    crate::os::unix::owned_process_group(pid)
 }
 
 /// Send `signal` to the whole process group `pgid` (group-kill via negative
 /// pid). `pgid` must be one vetted by [`killable_group`].
 #[cfg(unix)]
 fn signal_group(pgid: i32, signal: i32) {
-    // SAFETY: kill(2) with a negative pid signals a process group; integer-only,
-    // no memory touched. `pgid` came from `killable_group`, so it is `> 1`.
-    unsafe {
-        libc::kill(-pgid, signal);
-    }
+    let _ = crate::os::unix::signal_group(pgid, signal);
 }
 
 impl Drop for PtyShell {
@@ -1118,6 +1117,21 @@ mod tests {
     }
 
     #[test]
+    fn screen_session_name_parser_is_strict() {
+        assert_eq!(super::winx_creator_pid("winx-123-456"), Some(123));
+        assert_eq!(super::winx_creator_pid("winx-nope-456"), None);
+        assert_eq!(super::winx_creator_pid("other-123-456"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_probe_recognizes_current_process_and_rejects_reserved_pids() {
+        assert!(super::process_exists(std::process::id()));
+        assert!(!super::process_exists(0));
+        assert!(!super::process_exists(1));
+    }
+
+    #[test]
     fn prompt_detection_is_suffix_anchored() {
         // Per-shell nonce + exit code after the arrow: `──➤<nonce>:<code>`.
         let end = "──➤deadbeefcafe0001";
@@ -1252,9 +1266,7 @@ mod tests {
     /// as a zombie under init until reaped, so callers poll.
     #[cfg(unix)]
     fn pid_alive(pid: i32) -> bool {
-        // SAFETY: kill(2) with signal 0 only checks permission/existence for an
-        // integer pid; it sends nothing and touches no memory.
-        unsafe { libc::kill(pid, 0) == 0 }
+        u32::try_from(pid).is_ok_and(crate::os::unix::process_exists)
     }
 
     #[cfg(unix)]

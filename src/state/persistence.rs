@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tracing::{debug, error, info, warn};
+use tracing::{error, warn};
 
 use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
@@ -182,6 +182,7 @@ pub fn delete_bash_state(thread_id: &str) -> Result<()> {
 }
 
 impl BashStateSnapshot {
+    #[allow(clippy::too_many_arguments)]
     pub fn from_state(
         cwd: &str,
         workspace_root: &str,

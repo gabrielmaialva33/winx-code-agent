@@ -2,7 +2,6 @@
 use anyhow::Result;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -10,8 +9,7 @@ use tokio::sync::Mutex;
 use tracing::info;
 
 use crate::state::persistence::{
-    delete_bash_state as delete_state_file, load_bash_state as load_state_file,
-    save_bash_state as save_state_file, BashStateSnapshot,
+    load_bash_state as load_state_file, save_bash_state as save_state_file, BashStateSnapshot,
 };
 use crate::state::pty::PtyShell;
 use crate::types::{
@@ -67,6 +65,7 @@ impl FileWhitelistData {
         self.get_percentage_read() >= 99.0
     }
 
+    #[allow(clippy::cast_precision_loss)]
     pub fn get_percentage_read(&self) -> f64 {
         if self.total_lines == 0 {
             return 100.0;

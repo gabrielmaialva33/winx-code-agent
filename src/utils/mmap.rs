@@ -1,3 +1,7 @@
+// File lengths are validated against explicit u64 ceilings before these casts;
+// mmap APIs then require platform-sized usize lengths.
+#![allow(unsafe_code, clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+
 use memmap2::{Mmap, MmapOptions};
 use rayon::prelude::*;
 use std::cmp::min;
