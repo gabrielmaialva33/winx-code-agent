@@ -7,7 +7,8 @@
 //! input we fall back to a cheap character/word estimate.
 
 use std::sync::OnceLock;
-use tokenizers::Tokenizer;
+
+use tokie::Tokenizer;
 
 /// Embedded `Xenova/claude-tokenizer` definition (Hugging Face `tokenizer.json`).
 static CLAUDE_TOKENIZER_JSON: &[u8] =
@@ -16,11 +17,22 @@ static CLAUDE_TOKENIZER_JSON: &[u8] =
 fn tokenizer() -> Option<&'static Tokenizer> {
     static TOKENIZER: OnceLock<Option<Tokenizer>> = OnceLock::new();
     TOKENIZER
-        .get_or_init(|| match Tokenizer::from_bytes(CLAUDE_TOKENIZER_JSON) {
-            Ok(tokenizer) => Some(tokenizer),
-            Err(error) => {
-                tracing::warn!("Failed to load embedded Claude tokenizer, using estimate: {error}");
-                None
+        .get_or_init(|| {
+            let json = match std::str::from_utf8(CLAUDE_TOKENIZER_JSON) {
+                Ok(json) => json,
+                Err(error) => {
+                    tracing::warn!("Embedded Claude tokenizer is not UTF-8: {error}");
+                    return None;
+                }
+            };
+            match tokie::hf::from_json_str(json) {
+                Ok(tokenizer) => Some(tokenizer),
+                Err(error) => {
+                    tracing::warn!(
+                        "Failed to load embedded Claude tokenizer, using estimate: {error}"
+                    );
+                    None
+                }
             }
         })
         .as_ref()
@@ -38,13 +50,13 @@ pub fn count_tokens(text: &str) -> usize {
 /// unavailable so callers can pick a byte-based fallback.
 pub fn encode_ids(text: &str) -> Option<Vec<u32>> {
     let tokenizer = tokenizer()?;
-    tokenizer.encode(text, false).ok().map(|encoding| encoding.get_ids().to_vec())
+    Some(tokenizer.encode_ids(text, false))
 }
 
 /// Decode Claude token ids back into text. Returns `None` on failure.
 pub fn decode_ids(ids: &[u32]) -> Option<String> {
     let tokenizer = tokenizer()?;
-    tokenizer.decode(ids, false).ok()
+    tokenizer.decode(ids)
 }
 
 /// Return `true` when byte length alone proves `text` fits the token budget.
@@ -116,6 +128,30 @@ mod tests {
                 "sample produced more tokens than UTF-8 bytes"
             );
         }
+    }
+
+    #[test]
+    fn embedded_claude_tokenizer_matches_golden_ids() -> anyhow::Result<()> {
+        let cases: &[(&str, &[u32])] = &[
+            ("", &[]),
+            ("hello world", &[9381, 2253]),
+            (
+                "fn main() { println!(\"hello\"); }",
+                &[3258, 1890, 370, 503, 637, 9706, 5, 496, 9381, 5018, 863],
+            ),
+            (
+                "áéíóú 日本語 🚀",
+                &[2273, 1222, 2843, 3024, 8286, 225, 12956, 12163, 23598, 257, 41270, 253, 227],
+            ),
+            ("line one\nline two\nline three", &[936, 813, 203, 936, 1231, 203, 936, 2119]),
+        ];
+        for (sample, expected) in cases {
+            let actual = encode_ids(sample)
+                .ok_or_else(|| anyhow::anyhow!("embedded tokenizer failed for {sample:?}"))?;
+            assert_eq!(&actual, expected, "token ids diverged for {sample:?}");
+            assert_eq!(decode_ids(&actual).as_deref(), Some(*sample));
+        }
+        Ok(())
     }
 
     #[test]

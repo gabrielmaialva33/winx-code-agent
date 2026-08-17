@@ -11,7 +11,9 @@
 
 use std::collections::HashMap;
 use std::sync::OnceLock;
-use tokenizers::Tokenizer;
+
+use serde::Deserialize;
+use tokie::Tokenizer;
 
 static PATHS_MODEL: &[u8] =
     include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/paths_tokens.model"));
@@ -20,18 +22,37 @@ static PATHS_VOCAB: &[u8] =
 
 struct PathAnalyzer {
     tokenizer: Tokenizer,
+    id_tokens: Vec<String>,
     vocab_probs: HashMap<String, f64>,
+}
+
+#[derive(Deserialize)]
+struct PathTokenizerFile {
+    model: PathTokenizerModel,
+}
+
+#[derive(Deserialize)]
+struct PathTokenizerModel {
+    vocab: Vec<(String, f64)>,
 }
 
 impl PathAnalyzer {
     fn load() -> Option<Self> {
-        let tokenizer = match Tokenizer::from_bytes(PATHS_MODEL) {
+        let model_json = std::str::from_utf8(PATHS_MODEL).ok()?;
+        let tokenizer = match tokie::hf::from_json_str(model_json) {
             Ok(tokenizer) => tokenizer,
             Err(error) => {
                 tracing::warn!("Failed to load embedded path-ranking model: {error}");
                 return None;
             }
         };
+        let id_tokens = serde_json::from_str::<PathTokenizerFile>(model_json)
+            .ok()?
+            .model
+            .vocab
+            .into_iter()
+            .map(|(token, _)| token)
+            .collect::<Vec<_>>();
 
         // Vocab lines are `<token>\t<log_prob>`; mirror wcgw's `split()` + len==2 check.
         let text = std::str::from_utf8(PATHS_VOCAB).ok()?;
@@ -45,11 +66,15 @@ impl PathAnalyzer {
             }
         }
 
-        Some(Self { tokenizer, vocab_probs })
+        Some(Self { tokenizer, id_tokens, vocab_probs })
     }
 
-    fn sum_log_prob(&self, tokens: &[String]) -> f64 {
-        tokens.iter().filter_map(|token| self.vocab_probs.get(token)).sum()
+    fn sum_log_prob(&self, token_ids: &[u32]) -> f64 {
+        token_ids
+            .iter()
+            .filter_map(|token_id| self.id_tokens.get(*token_id as usize))
+            .filter_map(|token| self.vocab_probs.get(token))
+            .sum()
     }
 }
 
@@ -66,11 +91,7 @@ pub fn score_paths<S: AsRef<str>>(paths: &[S]) -> Option<Vec<f64>> {
     let analyzer = analyzer()?;
     let scores = paths
         .iter()
-        .map(|path| match analyzer.tokenizer.encode(path.as_ref(), false) {
-            Ok(encoding) => analyzer.sum_log_prob(encoding.get_tokens()),
-            // Unencodable path sinks to the bottom rather than poisoning the batch.
-            Err(_) => f64::MIN,
-        })
+        .map(|path| analyzer.sum_log_prob(&analyzer.tokenizer.encode_ids(path.as_ref(), false)))
         .collect();
     Some(scores)
 }
@@ -78,6 +99,32 @@ pub fn score_paths<S: AsRef<str>>(paths: &[S]) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn embedded_path_tokenizer_matches_golden_ids() -> anyhow::Result<()> {
+        let analyzer =
+            analyzer().ok_or_else(|| anyhow::anyhow!("embedded path analyzer failed"))?;
+        let cases: &[(&str, &[u32])] = &[
+            ("src/main.rs", &[13, 3, 21, 4, 506]),
+            ("node_modules/react/index.js", &[14, 5, 7, 3, 75, 3, 63, 4, 9]),
+            (
+                "a/b/c/d/e/f/zzz_tmp_garbage_9f8a.bin",
+                &[
+                    3473, 3, 65, 3, 20, 3, 31, 3, 48, 3, 32, 3, 356, 1193, 5, 514, 5, 2101, 102,
+                    2662, 5, 147, 32, 105, 42, 4, 268,
+                ],
+            ),
+            (
+                "tests/integração/日本語.rs",
+                &[146, 3, 180, 5318, 18526, 18560, 137, 3, 18490, 18436, 18581, 4, 506],
+            ),
+        ];
+        for (path, expected) in cases {
+            let actual = analyzer.tokenizer.encode_ids(path, false);
+            assert_eq!(&actual, expected, "path token ids diverged for {path:?}");
+        }
+        Ok(())
+    }
 
     #[test]
     fn ranks_source_above_noise_when_model_present() {
