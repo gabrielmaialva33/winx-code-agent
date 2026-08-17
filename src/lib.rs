@@ -1,29 +1,21 @@
-// Library code - some functions are part of public API but may not be used internally
-#![allow(dead_code)]
-// Allow unused items - library code may export items not used internally
-#![allow(unused)]
-// Clippy lints for library flexibility
-#![allow(clippy::too_many_arguments)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_possible_wrap)]
-// Internal modules don't need full documentation
+// Documentation coverage for the broad pre-1.0 module API is tracked separately;
+// all correctness and unused-code lints remain enabled.
 #![allow(missing_docs)]
+#![deny(unsafe_code)]
 
 //! # Winx - High Performance MCP Server
 //!
 //! A high-performance Rust implementation of the Model Context Protocol (MCP).
 //! It provides core tools for shell execution and file management with extreme efficiency.
 
+pub mod config;
 #[cfg(unix)]
 pub mod daemon;
 pub mod errors;
+#[cfg(feature = "fuzzing")]
+pub mod fuzzing;
 pub mod http_server;
+mod os;
 pub mod runtime;
 pub mod sandbox;
 pub mod server;

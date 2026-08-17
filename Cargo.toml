@@ -24,6 +24,7 @@ axum = "0.8"
 # Tower middleware for the HTTP transport: request body-size cap + per-request
 # timeout on the network-reachable RCE endpoint.
 tower-http = { version = "0.7", features = ["limit", "timeout"] }
+tower = { version = "0.5", features = ["limit"] }
 
 # Schema generation for MCP tools
 schemars = "1.2"
@@ -69,9 +70,9 @@ libc = "0.2"
 vte = "0.15"
 strsim = "0.11"
 
-# Hugging Face tokenizers - Claude-compatible token counting + path-ranking model.
-# default-features=false drops onig/esaxx (C/C++) and falls back to pure-Rust fancy-regex.
-tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
+# Lightweight Hugging Face tokenizer.json runtime for the embedded Claude BPE and
+# path-ranking Unigram models. Optional conversion/HF features stay disabled.
+tokie = { version = "0.1.4", default-features = false }
 
 # gitignore-aware repo walking (ripgrep's engine) for repo context parity with pygit2
 ignore = "0.4"
@@ -111,6 +112,8 @@ landlock = "0.4"
 tempfile = "3.14"
 # Property-based fuzzing of the terminal/ANSI parsers and pure helpers.
 proptest = "1.5"
+# Statistical micro-benchmarks for the hot pure-processing paths.
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 
 [dependencies.loom]
 # Model-checks the lock-free pin counter (SessionPin) under every thread
@@ -125,6 +128,12 @@ optional = true
 default = []
 # Swap the SessionPin atomics to loom's instrumented versions for model-checking.
 loom = ["dep:loom"]
+# Narrow wrappers used only by cargo-fuzz targets; never enabled in release builds.
+fuzzing = []
+
+[[bench]]
+name = "performance"
+harness = false
 
 # Clippy lints for quality
 [lints.clippy]
@@ -144,11 +153,8 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [lints.rust]
-# Note: unsafe_code is allowed in specific modules (mmap.rs, bash_state.rs) for I/O operations
-# unsafe_code = "deny"  # Re-enable when refactoring complete
-# Allow unused code in library - some functions are for public API or future use
-dead_code = "allow"
-unused = "allow"
+# Unsafe is denied at the crate level after remaining OS/mmap call sites are
+# isolated behind narrowly-audited modules.
 
 [profile.release]
 lto = true
