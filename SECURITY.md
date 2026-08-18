@@ -4,10 +4,10 @@
 
 Security fixes are provided for the current `0.2.x` line.
 
-| Version | Supported |
-| --- | --- |
-| `0.2.x` | Yes |
-| `< 0.2.0` | No |
+| Version   | Supported |
+|-----------|-----------|
+| `0.2.x`   | Yes       |
+| `< 0.2.0` | No        |
 
 ## Reporting a Vulnerability
 
@@ -55,7 +55,9 @@ This is powerful by design. Only connect Winx to MCP clients and agent workflows
 - Keep HTTP on loopback; use `--allow-non-loopback` only as an explicit, reviewed exception.
 - Store HTTP tokens in regular chmod-600 files, use one principal per remote client, and rotate leaked credentials.
 - Prefer bearer headers. Query-string tokens are opt-in because they leak into URL logs and history.
-- Keep HTTP concurrency/rate limits and the daemon guardian quota/idle TTL enabled.
+- Keep HTTP concurrency/rate limits and the daemon guardian quota/tiered idle TTL enabled.
+- Keep the default `--session-affinity workspace` for stateless clients. Use `thread` only when the client can retain stable
+  IDs and operators accept responsibility for abandoned-session cleanup.
 - Review redacted configuration with `winx-code-agent doctor`.
 - Review durable sessions with `winx-code-agent list`; use `prune`, `kill <thread_id>`, or `kill --all` when cleanup is needed.
 - Follow the complete [Streamable HTTP deployment guide](docs/streamable-http.md) before exposing remote access.
@@ -86,10 +88,34 @@ HTTP bearer tokens must be at least 32 bytes unless the operator explicitly enab
 `--principal-config` assigns each client an independent identity: external thread IDs and MCP Task IDs are scoped before
 they reach the shared service registry, preventing accidental or deliberate cross-principal session reuse.
 
+Remote first calls default to one durable session per `(principal, canonical workspace)`. This prevents stateless clients
+and cosmetic model-generated ID changes from exhausting the guardian quota. It also means parallel conversations using
+the same principal in the same repository intentionally share one shell, cwd, foreground-command lock, and output stream.
+Use separate principals or `--session-affinity thread` when that sharing is unacceptable; thread affinity requires stable
+client-owned IDs and explicit cleanup.
+
 Authentication is not authorization inside a shell. A principal permitted to use Winx still receives the capabilities of
 the selected Winx mode. Use `architect`, a constrained `code_writer`, containers, and OS-level isolation where needed.
 Winx does not currently provide built-in TLS, OAuth/OIDC, mTLS, or per-principal tool policy; those controls belong at a
-reviewed network edge when required.
+reviewed network edge when required. OAuth/OIDC well-known probes are intentionally ordinary `404 Not Found` responses;
+only `/mcp` is protected by Winx bearer authentication.
+
+## Guardian Lifecycle Safety
+
+Protocol `1.3` guardians own their creation, activity, and last-command clocks. Files beside guardian sockets are a
+control-plane cache, not the authoritative clock, because runtime directories may be tmpfs and recreated after reboot.
+Compatibility logic for protocol `1.2` distinguishes passive metadata reconstruction from real adapter activity and uses
+socket age for never-used legacy guardians.
+
+The default retention policy is deliberately tiered:
+
+- never-used guardians: 30 minutes (`WINX_UNUSED_SESSION_IDLE_TTL_SECS`);
+- guardians that ran a command: 24 hours (`WINX_SESSION_IDLE_TTL_SECS`);
+- active foreground or background commands: never removed by idle pruning.
+
+Under hard quota pressure, Winx may reclaim only the oldest inactive guardian that has never run a command. Used or active
+shells are not sacrificed to admit a new session. `prune --idle-seconds 0` is the explicit operator override for removing
+all idle sessions while still preserving active commands.
 
 ## Dependency and Release Security
 

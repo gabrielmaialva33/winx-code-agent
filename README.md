@@ -34,8 +34,8 @@ before reaching the model.
 
 > [!IMPORTANT]
 > **Streamable HTTP is the main deployment path.** Winx binds it to loopback by default, requires a strong bearer token,
-> supports independent authenticated principals, and isolates their shell sessions and MCP Tasks even when clients reuse
-> the same external `thread_id`.
+> supports independent authenticated principals, and defaults to one durable session per principal/workspace. Repeated
+> stateless `Initialize` calls reattach instead of manufacturing a new guardian.
 
 ## Remote MCP in 60 seconds
 
@@ -71,7 +71,7 @@ an OpenAI-hosted MCP endpoint.
 - **Durable sessions:** HTTP is stateless from the client's point of view, but Unix PTYs live in per-session guardians and
   can be resumed with the same `thread_id`.
 - **Identity-aware isolation:** one token per principal; thread IDs and MCP Task IDs are scoped internally and translated
-  back before the response leaves the server.
+  back before the response leaves the server. Workspace affinity absorbs unstable model-generated thread IDs.
 - **Fail-closed network defaults:** loopback-only binding, 32-byte minimum tokens, chmod-600 token files, DNS-rebinding
   host checks, body/time/concurrency limits, per-IP rate limiting, and delayed invalid-auth responses.
 - **Agent-native terminal semantics:** foreground and background commands, status polling, interactive input, stable TUI
@@ -81,10 +81,10 @@ an OpenAI-hosted MCP endpoint.
 
 ## Choose your transport
 
-| Transport | Best for | Endpoint / launch | Authentication | Session model |
-|-----------|----------|-------------------|----------------|---------------|
-| **Streamable HTTP** | ChatGPT, hosted agents, remote automation, multiple MCP clients | `https://host/mcp` through a tunnel/proxy, with Winx on `127.0.0.1:8000` | Strong bearer token; optional multi-principal TOML | Stateless requests mapped to durable per-principal sessions on Unix |
-| **stdio** | Claude Code, Codex CLI, Cursor, VS Code, desktop and local IDE clients | client launches `winx-code-agent` | Local process boundary | One local client, using the same durable daemon runtime on Unix |
+| Transport           | Best for                                                               | Endpoint / launch                                                        | Authentication                                     | Session model                                                                |
+|---------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------|----------------------------------------------------|------------------------------------------------------------------------------|
+| **Streamable HTTP** | ChatGPT, hosted agents, remote automation, multiple MCP clients        | `https://host/mcp` through a tunnel/proxy, with Winx on `127.0.0.1:8000` | Strong bearer token; optional multi-principal TOML | Stateless requests mapped to durable principal/workspace sessions by default |
+| **stdio**           | Claude Code, Codex CLI, Cursor, VS Code, desktop and local IDE clients | client launches `winx-code-agent`                                        | Local process boundary                             | One local client, using the same durable daemon runtime on Unix              |
 
 ## Remote architecture
 
@@ -159,7 +159,7 @@ Secure MCP Tunnel / VPN / authenticated reverse proxy
 | `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, drives TUIs. Supports `is_background`, `status_check`, `send_text`, `send_specials`, `send_ascii`, `allow_multi`, plus `screen` (a stable point-in-time frame of an interactive TUI with the cursor position; pass `diff:true` for only the lines that changed since your last look) and `wait_for_turn` (block until the TUI is ready for input, via per-app or configurable recognizers). A foreground `command` also supports MCP Tasks: task calls return immediately, remain pollable through `tasks/get`, can be cancelled, and retain the final `CallToolResult` for `tasks/result`. When a foreground command finishes, the status line reports its real `exit code` (parsed from the prompt marker), so failures surface without grepping stderr. |
 | `ReadFiles`       | One or many files, with line numbers. Append `:10-40` to a path for a range. When the token budget is hit it tells you the exact line + `file:N-M` syntax to resume from instead of silently dropping the tail.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks (with optional `@start-end` line anchors to pin a repeated block). Validates file read coverage and freshness before writing, reports any fuzzy tolerances it had to apply, then runs a tree-sitter syntax check (18+ languages) and points at the offending line with a snippet. The success message includes a compact diff of what changed.                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `MultiFileEdit`   | Validates and computes every requested edit in memory before writing any file, so a validation failure leaves the whole batch untouched. Commits then use atomic per-file renames; if a rare I/O failure occurs during that phase, already-written files are reported and are not rolled back. For a single file use `FileWriteOrEdit`.                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `MultiFileEdit`   | Validates and computes every requested edit in memory before writing any file, so a validation failure leaves the whole batch untouched. Commits then use atomic per-file renames; if a rare I/O failure occurs during that phase, already-written files are reported and are not rolled back. For a single file use `FileWriteOrEdit`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `UndoEdit`        | Reverts a file to its content before the last `FileWriteOrEdit`/`MultiFileEdit` this session (per-file, last ~10 edits kept in memory). Refused if the file changed on disk since your edit; a brand-new file's creation isn't undoable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `ReadImage`       | Returns a native MCP image content block (not base64 as text), so multimodal models actually see the image. Confined to the workspace (like `ReadFiles`) and size-capped.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -531,10 +531,11 @@ MCP Roots and Winx bootstraps from them; Winx tracks workspace + mode per thread
 
 ## Durable session lifecycle (Unix)
 
-The daemon runtime caps live guardians at 32 by default and automatically removes sessions that have been idle for 24
-hours. A session with a foreground command or a live background command is never removed by idle pruning. Operations
-addressed to a session refresh its activity timestamp; passive `list`/`prune` inspection does not. Metadata is kept
-beside the guardian socket with user-only permissions.
+The daemon runtime caps live guardians at 32 by default and uses tiered idle retention: a shell that has never run a
+command expires after 30 minutes, while a used shell expires after 24 hours. A foreground command or live background
+command is never removed. New guardians report their own creation, activity, and command clocks; the control-plane JSON
+beside each socket is only a permission-protected cache. For protocol-1.2 guardians, Winx uses real request metadata and
+the socket birth time instead of treating a recreated tmpfs metadata file as fresh activity.
 
 ```bash
 # Inspect and attach
@@ -545,10 +546,10 @@ winx-code-agent attach <thread_id> --follow
 winx-code-agent kill <thread_id>
 winx-code-agent kill --all
 
-# Remove sessions older than the configured TTL
+# Apply the tiered defaults (30 min never-used / 24 h used)
 winx-code-agent prune
 
-# Remove every currently idle session, while preserving active commands
+# Override both tiers; zero removes every idle session but preserves active commands
 winx-code-agent prune --idle-seconds 0
 
 # Reload winxd after changing lifecycle environment variables; guardians survive
@@ -559,13 +560,23 @@ winx-code-agent doctor
 ```
 
 The quota and TTL are enforced by `winxd`, not just by one MCP adapter, so reconnecting clients and multiple adapters
-share the same resource boundary. A newly installed adapter also upgrades an older control plane automatically when it
-advertises safe planned restarts; the per-session guardians and their PTYs stay alive throughout.
+share the same resource boundary. Under quota pressure, Winx first reclaims the oldest inactive guardian that has never
+run a command; used or active shells are never sacrificed to admit a new session. If no disposable guardian exists, the
+error points to the effective force-prune command: `winx-code-agent prune --idle-seconds 0`.
+
+A newly installed adapter upgrades an older control plane automatically when it advertises safe planned restarts; the
+per-session guardians and their PTYs stay alive throughout. Protocol `1.3` guardians are attach-or-create: repeating a
+first call for the same key preserves the PTY, cwd, output journal, and running command.
 
 ## Streamable HTTP deployment
 
 Streamable HTTP is Winx's primary interface for ChatGPT, hosted agents, remote automation, and any MCP client that cannot
 launch a local stdio process. The endpoint is always `/mcp`; the default listener is `127.0.0.1:8000`.
+
+Remote first calls default to `--session-affinity workspace`: the internal key is `(principal, canonical workspace)`, so
+reconnections and harmless variations such as `release_02333` versus `release_0_2_333` resolve to one guardian. Parallel
+conversations from the same principal in the same repository therefore share one shell. Deployments that require separate
+shells may opt into `--session-affinity thread`, but then the client owns stable thread IDs and cleanup.
 
 > [!TIP]
 > The full guide covers request headers, multi-principal configuration, private tunnels, operational limits, status codes,
@@ -574,12 +585,12 @@ launch a local stdio process. The endpoint is always `/mcp`; the default listene
 
 ### Deployment profiles
 
-| Profile | Credential model | Recommended exposure |
-|---------|------------------|----------------------|
-| Personal remote agent | One chmod-600 `--token-file` | Loopback + private tunnel or VPN |
-| Several clients or automations | `--principal-config` with one token per client | Loopback + authenticated HTTPS edge |
-| ChatGPT / OpenAI products | One dedicated principal per app | [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) or a reviewed public HTTPS proxy |
-| Local IDE or CLI | No HTTP server; use stdio | Local process only |
+| Profile                        | Credential model                               | Recommended exposure                                                                                                   |
+|--------------------------------|------------------------------------------------|------------------------------------------------------------------------------------------------------------------------|
+| Personal remote agent          | One chmod-600 `--token-file`                   | Loopback + private tunnel or VPN                                                                                       |
+| Several clients or automations | `--principal-config` with one token per client | Loopback + authenticated HTTPS edge                                                                                    |
+| ChatGPT / OpenAI products      | One dedicated principal per app                | [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) or a reviewed public HTTPS proxy |
+| Local IDE or CLI               | No HTTP server; use stdio                      | Local process only                                                                                                     |
 
 ### Multi-principal configuration
 
@@ -615,17 +626,20 @@ requirements.
 
 ### HTTP defaults
 
-| Control | Default |
-|---------|---------|
-| Bind address | `127.0.0.1:8000`; non-loopback requires `--allow-non-loopback` |
-| Authentication | `Authorization: Bearer <token>` |
-| Minimum token length | 32 bytes, unless `--allow-weak-token` is explicitly set |
-| Request body | 64 MiB maximum |
-| Request timeout | 120 seconds |
-| Concurrent requests | 32 globally |
-| Rate limit | 120 requests/minute per source IP |
-| Invalid authentication delay | 100 ms |
-| Query token | Disabled; requires `--allow-query-token` |
+| Control                      | Default                                                        |
+|------------------------------|----------------------------------------------------------------|
+| Bind address                 | `127.0.0.1:8000`; non-loopback requires `--allow-non-loopback` |
+| Authentication               | `Authorization: Bearer <token>`                                |
+| Minimum token length         | 32 bytes, unless `--allow-weak-token` is explicitly set        |
+| Request body                 | 64 MiB maximum                                                 |
+| Request timeout              | 120 seconds                                                    |
+| Concurrent requests          | 32 globally                                                    |
+| Rate limit                   | 120 requests/minute per source IP                              |
+| Invalid authentication delay | 100 ms                                                         |
+| Query token                  | Disabled; requires `--allow-query-token`                       |
+| Session affinity             | `workspace`; `thread` is the explicit isolation opt-out        |
+| Never-used guardian TTL      | 1,800 seconds (30 minutes)                                     |
+| Used guardian TTL            | 86,400 seconds (24 hours)                                      |
 
 ### Connector metadata
 
@@ -651,28 +665,29 @@ The server advertises its icon in the `initialize` handshake (`serverInfo.icons`
 All optional - Winx works out of the box without any of these. Boolean variables accept the same case-insensitive values:
 `1/true/yes/on` and `0/false/no/off`.
 
-| Variable | Effect |
-|----------|--------|
-| `RUST_LOG` | Log verbosity, e.g. `winx_code_agent=info`. At `info` you get the per-call **audit trail** (tool name, arg summary, duration, ok/error). |
-| `WINX_HTTP_TOKEN` | Single-principal HTTP bearer token used when `--token`, `--token-file`, and `--principal-config` are absent. Prefer a token file for long-lived deployments; see the [Streamable HTTP guide](docs/streamable-http.md). |
-| `WINX_RUNTIME` | Runtime selection on Unix: `daemon` (default) or `embedded`. Native Windows is embedded-only. |
-| `WINX_EMBEDDED` | Truthy value (`1`, `true`, `yes`, `on`) forcing the in-process runtime; useful as a fail-safe kill switch. |
-| `WINX_SOCKET` | Override the Unix socket used to reach `winxd`. |
-| `WINXD_BIN` / `WINX_GUARDIAN_BIN` | Override daemon/guardian executable discovery. Normally unnecessary when the three release binaries remain together. |
-| `WINX_MAX_GUARDIANS` | Maximum live daemon-owned sessions across all adapters. Defaults to `32`; accepted range is `1..=4096`. Read when `winxd` starts; use `restart-daemon` after changing it. |
-| `WINX_SESSION_IDLE_TTL_SECS` | Idle-session lifetime before automatic pruning. Defaults to `86400` (24 hours); `0` disables automatic TTL pruning. Active foreground/background commands are preserved. Read when `winxd` starts. |
-| `WINX_GUARDIAN_SWEEP_INTERVAL_SECS` | Interval between automatic guardian sweeps. Defaults to `60` seconds; accepted range is `1..=86400`. Read when `winxd` starts. |
-| `WINX_NO_COMPRESS` | Set to `1` to disable output compression and see raw, uncollapsed shell output (the `[winx: ×N]` collapsing is on by default). |
-| `WINX_NO_REDACT` | Set to `1` to disable secret redaction. By default winx scrubs high-confidence credentials (provider API keys, JWTs, PEM private keys, `user:pass@` URLs) from all tool output and saved memory, replacing each with `[REDACTED:<rule>]`. Turn this off only when you knowingly need a raw value. |
-| `WINX_SANDBOX` | Set to `1` to enable an opt-in Landlock filesystem sandbox (Linux 5.13+, EXPERIMENTAL). Confines winx and its shell to write only the workspace (the cwd at startup) plus `/tmp`, and makes the home directory unreadable, so a manipulated agent can't read `~/.ssh`/`~/.aws` or modify files outside the project. Coarse and best-effort: a command needing a path outside the allowlist fails. Degrades to a warning (unsandboxed) on older kernels. |
-| `WINX_SANDBOX_RO_PATHS` / `WINX_SANDBOX_RW_PATHS` | `:`-separated absolute paths to additionally allow read-only / read-write under `WINX_SANDBOX` (e.g. `WINX_SANDBOX_RO_PATHS=$HOME/.cargo:$HOME/.rustup` so cargo still works). |
-| `WINX_TURN_RECOGNIZER_CONFIG` | JSON `{"busy":[…],"awaiting_input":[…],"awaiting_approval":[…]}` of marker strings/regexes. With `recognizer:"configurable"`, lets `wait_for_turn` drive an arbitrary TUI without bespoke code. |
-| `WINX_CODING_TOKEN_BUDGET` / `WINX_NONCODING_TOKEN_BUDGET` | Override the per-file token budget for `ReadFiles` (and saved memory) - raise it for large-context models. Defaults: `24000` / `8000`. |
-| `WINX_KEEP_TAIL_PIPE` | Set to `1` to keep a trailing `\| tail …` instead of stripping it. Winx truncates output server-side, so by default it drops a redundant trailing `tail` (wcgw parity). |
-| `WINX_USE_SCREEN` / `WINX_ATTACH_TERMINAL` | Run the shell inside `screen`/`tmux` so you can attach to the live session. Set to `screen`, `tmux`, or any truthy value; Winx prints an attach hint on `Initialize`. |
-| `WINX_OPEN_CONTEXT` | Set to `1` to open the saved context file in your default app after `ContextSave`. |
-| `WINX_SHELL` | Set to `zsh` to run the session under zsh instead of bash (opt-in; bash stays the default). Falls back to bash if zsh isn't on `PATH` or the mode is restricted. |
-| `WINX_SERVER_INSTRUCTIONS` | Extra operator instructions appended to every `Initialize` response (e.g. house rules for the agent). |
+| Variable                                                   | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+|------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `RUST_LOG`                                                 | Log verbosity, e.g. `winx_code_agent=info`. At `info` you get the per-call **audit trail** (tool name, arg summary, duration, ok/error).                                                                                                                                                                                                                                                                                                                |
+| `WINX_HTTP_TOKEN`                                          | Single-principal HTTP bearer token used when `--token`, `--token-file`, and `--principal-config` are absent. Prefer a token file for long-lived deployments; see the [Streamable HTTP guide](docs/streamable-http.md).                                                                                                                                                                                                                                  |
+| `WINX_RUNTIME`                                             | Runtime selection on Unix: `daemon` (default) or `embedded`. Native Windows is embedded-only.                                                                                                                                                                                                                                                                                                                                                           |
+| `WINX_EMBEDDED`                                            | Truthy value (`1`, `true`, `yes`, `on`) forcing the in-process runtime; useful as a fail-safe kill switch.                                                                                                                                                                                                                                                                                                                                              |
+| `WINX_SOCKET`                                              | Override the Unix socket used to reach `winxd`.                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `WINXD_BIN` / `WINX_GUARDIAN_BIN`                          | Override daemon/guardian executable discovery. Normally unnecessary when the three release binaries remain together.                                                                                                                                                                                                                                                                                                                                    |
+| `WINX_MAX_GUARDIANS`                                       | Maximum live daemon-owned sessions across all adapters. Defaults to `32`; accepted range is `1..=4096`. Read when `winxd` starts; use `restart-daemon` after changing it.                                                                                                                                                                                                                                                                               |
+| `WINX_SESSION_IDLE_TTL_SECS`                               | Idle lifetime for sessions that have run a command. Defaults to `86400` (24 hours); `0` disables this tier. Active foreground/background commands are preserved. Read when `winxd` starts.                                                                                                                                                                                                                                                              |
+| `WINX_UNUSED_SESSION_IDLE_TTL_SECS`                        | Idle lifetime for guardians that have never run a command. Defaults to `1800` (30 minutes); `0` disables this tier. Under hard quota pressure, the oldest inactive never-used guardian may still be reclaimed.                                                                                                                                                                                                                                          |
+| `WINX_GUARDIAN_SWEEP_INTERVAL_SECS`                        | Interval between automatic guardian sweeps. Defaults to `60` seconds; accepted range is `1..=86400`. Read when `winxd` starts.                                                                                                                                                                                                                                                                                                                          |
+| `WINX_NO_COMPRESS`                                         | Set to `1` to disable output compression and see raw, uncollapsed shell output (the `[winx: ×N]` collapsing is on by default).                                                                                                                                                                                                                                                                                                                          |
+| `WINX_NO_REDACT`                                           | Set to `1` to disable secret redaction. By default winx scrubs high-confidence credentials (provider API keys, JWTs, PEM private keys, `user:pass@` URLs) from all tool output and saved memory, replacing each with `[REDACTED:<rule>]`. Turn this off only when you knowingly need a raw value.                                                                                                                                                       |
+| `WINX_SANDBOX`                                             | Set to `1` to enable an opt-in Landlock filesystem sandbox (Linux 5.13+, EXPERIMENTAL). Confines winx and its shell to write only the workspace (the cwd at startup) plus `/tmp`, and makes the home directory unreadable, so a manipulated agent can't read `~/.ssh`/`~/.aws` or modify files outside the project. Coarse and best-effort: a command needing a path outside the allowlist fails. Degrades to a warning (unsandboxed) on older kernels. |
+| `WINX_SANDBOX_RO_PATHS` / `WINX_SANDBOX_RW_PATHS`          | `:`-separated absolute paths to additionally allow read-only / read-write under `WINX_SANDBOX` (e.g. `WINX_SANDBOX_RO_PATHS=$HOME/.cargo:$HOME/.rustup` so cargo still works).                                                                                                                                                                                                                                                                          |
+| `WINX_TURN_RECOGNIZER_CONFIG`                              | JSON `{"busy":[…],"awaiting_input":[…],"awaiting_approval":[…]}` of marker strings/regexes. With `recognizer:"configurable"`, lets `wait_for_turn` drive an arbitrary TUI without bespoke code.                                                                                                                                                                                                                                                         |
+| `WINX_CODING_TOKEN_BUDGET` / `WINX_NONCODING_TOKEN_BUDGET` | Override the per-file token budget for `ReadFiles` (and saved memory) - raise it for large-context models. Defaults: `24000` / `8000`.                                                                                                                                                                                                                                                                                                                  |
+| `WINX_KEEP_TAIL_PIPE`                                      | Set to `1` to keep a trailing `\| tail …` instead of stripping it. Winx truncates output server-side, so by default it drops a redundant trailing `tail` (wcgw parity).                                                                                                                                                                                                                                                                                 |
+| `WINX_USE_SCREEN` / `WINX_ATTACH_TERMINAL`                 | Run the shell inside `screen`/`tmux` so you can attach to the live session. Set to `screen`, `tmux`, or any truthy value; Winx prints an attach hint on `Initialize`.                                                                                                                                                                                                                                                                                   |
+| `WINX_OPEN_CONTEXT`                                        | Set to `1` to open the saved context file in your default app after `ContextSave`.                                                                                                                                                                                                                                                                                                                                                                      |
+| `WINX_SHELL`                                               | Set to `zsh` to run the session under zsh instead of bash (opt-in; bash stays the default). Falls back to bash if zsh isn't on `PATH` or the mode is restricted.                                                                                                                                                                                                                                                                                        |
+| `WINX_SERVER_INSTRUCTIONS`                                 | Extra operator instructions appended to every `Initialize` response (e.g. house rules for the agent).                                                                                                                                                                                                                                                                                                                                                   |
 
 ## Verifying releases
 
@@ -737,4 +752,4 @@ If you want a tighter leash:
 
 ## License
 
-MIT - Gabriel Maia ([@gabrielmaialva33](https://github.com/gabrielmaialva33))
+MIT – Gabriel Maia ([@gabrielmaialva33](https://github.com/gabrielmaialva33))

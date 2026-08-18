@@ -1,0 +1,558 @@
+# Streamable HTTP deployment
+
+Winx exposes its full MCP toolset through an authenticated **Streamable HTTP** endpoint for ChatGPT, hosted agents,
+remote automation, and clients that cannot launch a local stdio process. The endpoint is `/mcp`; the default listener is
+`127.0.0.1:8000`.
+
+The endpoint grants real shell and filesystem capabilities. Winx therefore fails closed: it requires a strong credential,
+refuses non-loopback binding unless explicitly acknowledged, bounds request cost, and isolates authenticated principals.
+
+## At a glance
+
+| Property                 | Default                         |
+|--------------------------|---------------------------------|
+| MCP endpoint             | `/mcp`                          |
+| MCP protocol             | `2026-07-28`                    |
+| Listener                 | `127.0.0.1:8000`                |
+| Authentication           | `Authorization: Bearer <token>` |
+| Minimum token length     | 32 bytes                        |
+| Remote session affinity  | `workspace`                     |
+| Request body limit       | 64 MiB                          |
+| Request timeout          | 120 seconds                     |
+| Global concurrency       | 32 requests                     |
+| Per-source-IP rate limit | 120 requests per minute         |
+| Invalid-auth delay       | 100 ms                          |
+| Never-used guardian TTL  | 1,800 seconds (30 minutes)      |
+| Used guardian TTL        | 86,400 seconds (24 hours)       |
+| Live guardian quota      | 32                              |
+
+Winx supports modern stateless MCP calls and the legacy HTTP initialization/session flow. The same tools, prompts,
+resources, structured content, and optional MCP Tasks are available over HTTP and stdio.
+
+## Architecture
+
+```text
+Remote MCP client
+       │ HTTPS + bearer token
+       ▼
+Private tunnel / VPN / authenticated HTTPS reverse proxy
+       │ loopback HTTP
+       ▼
+127.0.0.1:8000/mcp
+       │
+       ├─ Host and body validation
+       ├─ Timeout, rate, and concurrency limits
+       ├─ Principal authentication
+       ├─ Session-affinity resolution
+       └─ thread_id / MCP Task scoping
+              │
+              ▼
+        shared WinxService
+              │
+              ▼
+            winxd
+              │
+              └─ winx-guardian per logical session
+                         │
+                         └─ real PTY / bash or zsh / foreground and background work
+```
+
+On Linux, macOS, and WSL2, `winx-code-agent` is only the MCP adapter. `winxd` owns the control plane, while each
+`winx-guardian` owns one PTY. Dropping an HTTP connection or restarting the adapter does not terminate that PTY.
+
+Native Windows uses the embedded runtime, so sessions last only as long as the server process. WSL2 is recommended when
+durable remote sessions are required.
+
+## Quick start
+
+Install the three Unix binaries:
+
+```bash
+cargo install winx-code-agent
+```
+
+Create a strong token in a user-only file:
+
+```bash
+mkdir -p ~/.config
+install -m 600 /dev/null ~/.config/winx-http-token
+openssl rand -hex 32 > ~/.config/winx-http-token
+```
+
+Start Winx on loopback:
+
+```bash
+winx-code-agent serve --http \
+  --bind 127.0.0.1:8000 \
+  --token-file ~/.config/winx-http-token
+```
+
+Configure the client with:
+
+```text
+URL: http://127.0.0.1:8000/mcp
+Authorization: Bearer <contents of ~/.config/winx-http-token>
+```
+
+Cloud clients need a reachable HTTPS URL. Keep Winx on loopback and put a private tunnel, VPN, or authenticated HTTPS
+reverse proxy in front. Winx does not terminate TLS itself.
+
+`--token-file` is preferred over `--token`: command-line secrets may appear in process listings, shell history, and
+automation logs. `WINX_HTTP_TOKEN` remains available as a single-principal environment fallback.
+
+## Session affinity
+
+### Workspace affinity — default
+
+The default is:
+
+```bash
+--session-affinity workspace
+```
+
+For each remote `Initialize(first_call)`, Winx derives the logical session from:
+
+```text
+(authenticated principal, canonical workspace)
+```
+
+The client-provided first-call `thread_id` is not trusted as the durable key. Variants such as:
+
+```text
+release_02333
+release_0_2_333
+```
+
+resolve to the same internal guardian when they refer to the same principal and workspace. Winx returns a stable external
+ID such as `ws_project_<hash>` and expects later tool calls to use that returned value.
+
+Consequences:
+
+- stateless reconnects attach to the existing session instead of creating another guardian;
+- repeated first calls preserve the PTY, cwd, output journal, and running command;
+- two different principals still receive different namespaces;
+- parallel conversations from the **same principal in the same workspace share one shell** and its foreground-command
+  lock;
+- first calls without a workspace share one scratch-session key per principal;
+- task resumption without a workspace is keyed by the saved task ID.
+
+Workspace affinity is the recommended mode for ChatGPT and other clients whose generated IDs are not guaranteed to be
+stable.
+
+### Thread affinity — explicit opt-out
+
+Use:
+
+```bash
+--session-affinity thread
+```
+
+when parallel conversations in one repository must own separate shells. In this mode the normalized external `thread_id`
+is the durable key. The client is responsible for:
+
+- generating a stable ID;
+- reusing it after reconnects;
+- avoiding cosmetic variants;
+- pruning or killing abandoned sessions.
+
+An empty first-call ID is still generated, so thread affinity should not be used with a client that cannot retain the
+returned ID.
+
+## Attach-or-create
+
+Protocol `1.3` guardians implement attach-or-create for `FirstCall`:
+
+1. a missing logical session creates a new PTY;
+2. an existing logical session returns its authoritative snapshot;
+3. the adapter updates its local state from that snapshot;
+4. the guardian keeps its original PTY process, cwd, mode, journal, cursors, and running commands.
+
+A deliberate replacement still uses the explicit reset or workspace/mode-change transitions. Repeating `FirstCall` is no
+longer an implicit reset.
+
+The same adapter also refreshes an existing guardian through a non-destructive mode transition. This keeps local and
+embedded runtimes from resetting a session on duplicate first calls.
+
+## Multiple authenticated principals
+
+Use one credential per client or automation:
+
+```bash
+mkdir -p ~/.config
+install -m 600 /dev/null ~/.config/winx-chatgpt-token
+install -m 600 /dev/null ~/.config/winx-automation-token
+openssl rand -hex 32 > ~/.config/winx-chatgpt-token
+openssl rand -hex 32 > ~/.config/winx-automation-token
+```
+
+Create a TOML file:
+
+```toml
+# ~/.config/winx-principals.toml
+[[principals]]
+name = "chatgpt"
+token_file = "/home/alice/.config/winx-chatgpt-token"
+
+[[principals]]
+name = "automation"
+token_file = "/home/alice/.config/winx-automation-token"
+
+[[principals]]
+name = "ci"
+token_env = "WINX_CI_MCP_TOKEN"
+```
+
+Then start:
+
+```bash
+chmod 600 ~/.config/winx-principals.toml
+winx-code-agent serve --http \
+  --principal-config ~/.config/winx-principals.toml
+```
+
+Principal rules:
+
+- names may contain ASCII letters, digits, `_`, and `-`;
+- each entry sets exactly one of `token_file` or `token_env`;
+- names, derived IDs, and tokens must be unique;
+- token files must be regular non-symlink files;
+- Unix token-file permissions must exclude group and other access;
+- tokens must contain at least 32 bytes unless `--allow-weak-token` is explicitly enabled for local testing.
+
+Thread IDs and MCP Task IDs are scoped before they reach the shared service. Normal results, structured content, Task
+results, and errors are translated back before leaving the server. A principal cannot get, update, or cancel another
+principal's Task.
+
+## Guardian lifecycle
+
+`winxd` enforces lifecycle across every adapter connected to the same control socket.
+
+### Authoritative activity clock
+
+Protocol `1.3` guardians report:
+
+- guardian creation time;
+- last session activity;
+- last command time;
+- whether a command has ever been attempted.
+
+The control-plane JSON next to each guardian socket is a cache for ownership and migration; it is not the source of truth.
+This matters because runtime directories such as `/run/user/<uid>` are usually tmpfs and can lose metadata on reboot or
+control-plane recreation.
+
+For protocol-1.2 guardians without activity fields:
+
+- used sessions conservatively use real control-plane request observations;
+- never-used sessions prefer the guardian socket birth time;
+- passive metadata reconstruction is distinguished from a real adapter request;
+- recreating every metadata file at one instant does not make every old guardian appear newly active.
+
+### Tiered TTL
+
+Two independent defaults avoid treating disposable shells and valuable builds alike:
+
+```text
+WINX_UNUSED_SESSION_IDLE_TTL_SECS=1800   # never ran a command
+WINX_SESSION_IDLE_TTL_SECS=86400         # ran a command
+```
+
+Set either value to `0` to disable that automatic tier. A foreground command or live background command is never removed,
+even when its wall-clock TTL has elapsed. Output produced by a running command refreshes guardian activity, so retention
+starts from meaningful terminal activity rather than only command submission.
+
+### Quota pressure
+
+Before refusing a new guardian, `winxd`:
+
+1. removes stale sockets and expired sessions;
+2. counts all live guardians;
+3. if still full, reclaims the oldest inactive guardian that has never run a command;
+4. repeats until one slot is available or no disposable guardian remains.
+
+Used sessions and active foreground/background commands are never sacrificed to admit another session. If the quota is
+still full, the error points to the effective manual command:
+
+```bash
+winx-code-agent prune --idle-seconds 0
+```
+
+That command removes every **idle** session while preserving active commands.
+
+## Operational commands
+
+```bash
+# Inspect sessions; protocol 1.3 includes activity timestamps and ever_ran_command
+winx-code-agent list
+
+# Follow a guardian journal with an independent cursor
+winx-code-agent attach <thread_id> --follow
+
+# Apply the configured 30-minute / 24-hour tiers
+winx-code-agent prune
+
+# Override both tiers for one prune operation
+winx-code-agent prune --idle-seconds 3600
+
+# Remove every idle session; active commands remain
+winx-code-agent prune --idle-seconds 0
+
+# Explicit cleanup
+winx-code-agent kill <thread_id>
+winx-code-agent kill --all
+
+# Replace only the control plane; guardians and PTYs survive
+winx-code-agent restart-daemon
+
+# Redacted runtime report
+winx-code-agent doctor
+```
+
+Changing guardian limits or TTL environment variables requires `restart-daemon` because `winxd` reads them at startup.
+
+## Network exposure
+
+### Preferred
+
+Keep the default loopback listener and place one of these in front:
+
+- a private VPN such as WireGuard or Tailscale;
+- an outbound-only/private MCP tunnel;
+- an authenticated HTTPS reverse proxy;
+- a tunnel operating inside the same trust boundary.
+
+When a proxy forwards a public `Host`, add the exact authority:
+
+```bash
+winx-code-agent serve --http \
+  --token-file ~/.config/winx-http-token \
+  --allowed-host mcp.example.com
+```
+
+`--allowed-host` extends host validation; it does not create DNS, TLS, authentication, or a tunnel.
+
+### Direct non-loopback binding
+
+Winx refuses wildcard, LAN, and public listeners by default. A reviewed deployment can acknowledge the risk:
+
+```bash
+winx-code-agent serve --http \
+  --bind 192.168.1.20:8000 \
+  --allow-non-loopback \
+  --token-file ~/.config/winx-http-token
+```
+
+This flag only permits the listener. It is not a substitute for HTTPS or firewall policy.
+
+## Authentication modes
+
+Winx accepts exactly one credential configuration:
+
+1. `--principal-config` for named principals; or
+2. `--token-file` for one file-backed principal; or
+3. `--token` for one command-line principal; or
+4. `WINX_HTTP_TOKEN` when no CLI credential source is supplied.
+
+The preferred request header is:
+
+```http
+Authorization: Bearer <token>
+```
+
+Query tokens are disabled by default. Compatibility mode is explicit:
+
+```bash
+winx-code-agent serve --http \
+  --token-file ~/.config/winx-http-token \
+  --allow-query-token
+```
+
+Then a URL-only client can use `https://host/mcp?token=<token>`. Query strings often appear in browser, proxy, tunnel,
+trace, and monitoring logs; prefer the bearer header.
+
+Winx does not implement OAuth/OIDC discovery. Requests to `/.well-known/oauth-protected-resource`,
+`/.well-known/openid-configuration`, and unrelated routes return ordinary `404 Not Found` responses without being forced
+through bearer authentication. `/mcp` remains protected and returns `401` for a missing or invalid token.
+
+## Resource limits and responses
+
+| Condition                                       | Response                  | Notes                        |
+|-------------------------------------------------|---------------------------|------------------------------|
+| Missing or invalid token                        | `401 Unauthorized`        | Delayed by 100 ms            |
+| Source IP exceeds the window                    | `429 Too Many Requests`   | Includes `Retry-After: 1`    |
+| Global concurrency exhausted                    | `503 Service Unavailable` | Includes `Retry-After: 1`    |
+| Request exceeds 120 seconds                     | `408 Request Timeout`     | Request is terminated        |
+| Body exceeds 64 MiB                             | `413 Payload Too Large`   | Rejected before MCP dispatch |
+| Public bind without acknowledgement             | Startup failure           | Prefer a private edge        |
+| Missing, weak, duplicate, or unsafe credentials | Startup failure           | Fix the credential source    |
+
+The rate limiter uses the TCP peer address seen by Winx. Several users behind one reverse proxy may share one window.
+Winx intentionally does not trust forwarded-IP headers by default.
+
+## CLI reference
+
+| Option                        | Purpose                                            |
+|-------------------------------|----------------------------------------------------|
+| `serve --http`                | Select Streamable HTTP instead of stdio            |
+| `--bind <IP:PORT>`            | Listener, default `127.0.0.1:8000`                 |
+| `--token-file <PATH>`         | Preferred single-principal credential source       |
+| `--principal-config <PATH>`   | Multi-principal TOML configuration                 |
+| `--token <VALUE>`             | Compatibility source; visible in process arguments |
+| `--session-affinity workspace | thread`                                            | Select reattach-by-workspace or caller-owned IDs |
+| `--allow-weak-token`          | Permit a short token for local tests only          |
+| `--allow-non-loopback`        | Explicitly permit a non-loopback listener          |
+| `--allowed-host <HOST>`       | Extend accepted Host authorities; repeatable       |
+| `--allow-query-token`         | Accept `?token=...`; disabled by default           |
+| `--max-concurrency <N>`       | Global simultaneous-request cap, default `32`      |
+| `--requests-per-minute <N>`   | Per-source-IP limit, default `120`                 |
+
+## MCP request requirements
+
+Modern clients normally send:
+
+```http
+Content-Type: application/json
+Accept: application/json, text/event-stream
+MCP-Protocol-Version: 2026-07-28
+Authorization: Bearer <token>
+```
+
+Winx also supports the legacy MCP HTTP initialization/session flow and returns `Mcp-Session-Id` for that lifecycle.
+Remote Roots bootstrap is disabled on the shared HTTP service; the explicit `Initialize` tool selects the workspace.
+
+## Upgrade notes for 0.2.333
+
+- Streamable HTTP now defaults to workspace affinity.
+- Repeated first calls attach rather than reset protocol-1.3 guardians.
+- `winxd` automatically upgrades from a control plane that supports planned restart; existing guardians keep running.
+- Existing protocol-1.2 guardians remain readable through compatible `SessionInfo` defaults.
+- Old never-used guardians are aged from their socket/activity evidence instead of bulk-recreated metadata timestamps.
+- A protocol-1.2 guardian cannot return the new authoritative snapshot fields; workspace affinity normally creates a new
+  canonical session while old sessions remain available for explicit cleanup.
+- The no-argument `prune` command now applies the two TTL tiers rather than only the 24-hour used-session TTL.
+
+## Troubleshooting
+
+### Guardian quota reached
+
+Inspect the fleet:
+
+```bash
+winx-code-agent list | jq '.[] | {
+  thread_id,
+  running,
+  background_command_ids,
+  ever_ran_command,
+  created_at_unix_ms,
+  last_activity_unix_ms
+}'
+```
+
+Apply normal retention:
+
+```bash
+winx-code-agent prune
+```
+
+Force all idle sessions out while preserving active work:
+
+```bash
+winx-code-agent prune --idle-seconds 0
+```
+
+Raising `WINX_MAX_GUARDIANS` only changes capacity. It does not solve unstable session keys; use workspace affinity or a
+stable thread-ID policy.
+
+### Session unexpectedly shared
+
+Workspace affinity deliberately shares one shell across conversations from the same principal and canonical workspace.
+Use a distinct principal or start with:
+
+```bash
+--session-affinity thread
+```
+
+and provide stable unique IDs.
+
+### Session unexpectedly disappeared
+
+Run:
+
+```bash
+winx-code-agent doctor
+winx-code-agent list
+```
+
+Check the selected runtime, the unused/used TTLs, explicit prune/kill operations, guardian quota pressure, and whether the
+server is native Windows/embedded rather than Unix daemon mode.
+
+### Token file rejected
+
+On Unix, verify that it is a regular file, not a symlink, and has no group/other permissions:
+
+```bash
+chmod 600 ~/.config/winx-http-token
+ls -l ~/.config/winx-http-token
+```
+
+### `401 Unauthorized`
+
+Verify the exact bearer token, remove surrounding quotes, and ensure the credential belongs to the intended principal.
+OAuth discovery probes are intentionally 404; Winx uses static bearer credentials unless an external edge adds another
+identity system.
+
+### `429` or `503`
+
+Lower polling/parallelism first. Raise `--requests-per-minute` or `--max-concurrency` only after measuring machine and
+client behavior. Remember that a reverse proxy may collapse many users into one source IP.
+
+## Security boundary
+
+A valid principal receives the capabilities of the selected Winx mode as the operating-system user running the server.
+Authentication separates clients; it does not make arbitrary shell execution harmless.
+
+- `wcgw` is full access and `BashCommand` is not workspace-confined;
+- `architect` is intended for read-oriented exploration;
+- `code_writer` constrains commands and writable globs;
+- secret redaction is enabled by default;
+- `WINX_SANDBOX=1` adds an experimental Landlock filesystem boundary on Linux;
+- Winx should not run as root or another elevated account;
+- each external client should receive its own principal and token;
+- leaked tokens should be rotated immediately;
+- remote access should be stopped when no longer needed.
+
+Winx does not currently provide built-in TLS, OAuth/OIDC, mTLS, or per-principal tool policy. Those controls belong at a
+reviewed network edge when required. Read [SECURITY.md](../SECURITY.md) before exposing a shell-capable principal.
+
+## Verification coverage
+
+Automated coverage includes:
+
+- single-token and multi-principal HTTP startup;
+- bearer and opt-in query-token authentication;
+- public well-known probes returning 404 while `/mcp` remains authenticated;
+- rejection of non-loopback binding without acknowledgement;
+- rate limiting and duplicate-principal rejection;
+- modern stateless discovery and tool listing;
+- legacy HTTP session initialization;
+- MCP Task completion over HTTP;
+- two principals using the same external ID without crossing workspaces;
+- one principal/workspace reusing a canonical session despite unstable first-call IDs;
+- guardian quota reclaim for never-used sessions;
+- active guardian preservation under quota pressure;
+- tiered default pruning;
+- guardian-owned activity clocks;
+- attach-or-create preserving shell PID and cwd;
+- legacy metadata fallback that prefers socket age over passive tmpfs reseeding.
+
+The implementation lives primarily in:
+
+```text
+src/http_server.rs
+src/config.rs
+src/server/principal.rs
+src/server/handler.rs
+src/daemon/lifecycle.rs
+src/daemon/server.rs
+tests/mcp_2026_discovery_test.rs
+tests/daemon_lifecycle_test.rs
+```
