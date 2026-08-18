@@ -2,30 +2,114 @@
   <img src=".github/assets/fairy.png" alt="Winx fairy mascot" width="160" />
 </p>
 
-# ✨ Winx - MCP Server for Shell & Coding Agents ✨
+# ✨ Winx — Remote MCP Runtime for Coding Agents ✨
 
 <p align="center">
-  <strong>🦀 Native Rust implementation inspired by WCGW, built for local code-agent workflows</strong>
+  <strong>Streamable HTTP, durable PTYs, and guarded file operations — built in native Rust</strong>
 </p>
 
 <p align="center">
   <img src="https://img.shields.io/badge/language-Rust-orange?style=flat&logo=rust" alt="Language" />
   <img src="https://img.shields.io/badge/license-MIT-blue?style=flat" alt="License" />
-  <img src="https://img.shields.io/badge/MCP-compatible-purple?style=flat" alt="MCP" />
+  <img src="https://img.shields.io/badge/MCP-2026--07--28-purple?style=flat" alt="MCP 2026-07-28" />
+  <img src="https://img.shields.io/badge/transport-Streamable_HTTP-2563eb?style=flat" alt="Streamable HTTP" />
+  <img src="https://img.shields.io/badge/auth-multi--principal-7c3aed?style=flat" alt="Multi-principal authentication" />
   <img src="https://img.shields.io/badge/transport-stdio-2f855a?style=flat" alt="stdio transport" />
 </p>
 
 <p align="center">
-  <em>A local MCP server you can hand to a coding agent and stop worrying about the shell.</em>
+  <em>Give remote and local agents durable, authenticated hands on your development machine.</em>
 </p>
 
-Winx is the MCP server I wanted while running Claude, Codex, and friends against real repos: a small Rust MCP adapter
-for shell, file IO, and code navigation, backed on Unix by durable per-session guardian processes that keep PTYs alive
-across client and adapter restarts.
+Winx is a **remote-first MCP runtime** for agents that need a real shell, guarded file-editing primitives, repository-aware
+code navigation, and sessions that survive dropped connections. Its primary deployment path is a hardened
+**Streamable HTTP** endpoint for ChatGPT and other cloud or networked MCP clients; stdio remains fully supported for
+Claude Code, Codex CLI, Cursor, VS Code, and other local clients.
 
-It started as a Rust port of [WCGW](https://github.com/rusiaaman/wcgw) but isn't a Python wrapper. Everything runs on a
-real PTY (via `portable-pty`), `cd` actually sticks, `Ctrl+C` actually interrupts, and background shells survive
-long-running TUIs without leaking output buffers into your token budget.
+On Unix, Winx separates the MCP adapter from the processes that own each PTY. `winxd` manages the control plane and one
+`winx-guardian` per logical session keeps the shell alive across HTTP disconnects, client restarts, and adapter upgrades.
+It started as a Rust port of [WCGW](https://github.com/rusiaaman/wcgw), but it is not a Python wrapper: `cd` persists,
+`Ctrl+C` interrupts the real process, interactive TUIs work, and large terminal output is rendered and token-budgeted
+before reaching the model.
+
+> [!IMPORTANT]
+> **Streamable HTTP is the main deployment path.** Winx binds it to loopback by default, requires a strong bearer token,
+> supports independent authenticated principals, and isolates their shell sessions and MCP Tasks even when clients reuse
+> the same external `thread_id`.
+
+## Remote MCP in 60 seconds
+
+```bash
+cargo install winx-code-agent
+
+mkdir -p ~/.config
+install -m 600 /dev/null ~/.config/winx-http-token
+openssl rand -hex 32 > ~/.config/winx-http-token
+
+winx-code-agent serve --http \
+  --bind 127.0.0.1:8000 \
+  --token-file ~/.config/winx-http-token
+```
+
+Connect an MCP client to:
+
+```text
+http://127.0.0.1:8000/mcp
+Authorization: Bearer <contents of ~/.config/winx-http-token>
+```
+
+Cloud clients need a reachable HTTPS endpoint. Keep Winx on loopback and use a private MCP tunnel, VPN, or authenticated
+HTTPS reverse proxy in front. For OpenAI products, the
+[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) keeps Winx private while exposing
+an OpenAI-hosted MCP endpoint.
+
+**Next:** [complete Streamable HTTP deployment guide](docs/streamable-http.md) ·
+[security model](SECURITY.md) · [local stdio setup](#install)
+
+## Why Winx for remote agents
+
+- **Durable sessions:** HTTP is stateless from the client's point of view, but Unix PTYs live in per-session guardians and
+  can be resumed with the same `thread_id`.
+- **Identity-aware isolation:** one token per principal; thread IDs and MCP Task IDs are scoped internally and translated
+  back before the response leaves the server.
+- **Fail-closed network defaults:** loopback-only binding, 32-byte minimum tokens, chmod-600 token files, DNS-rebinding
+  host checks, body/time/concurrency limits, per-IP rate limiting, and delayed invalid-auth responses.
+- **Agent-native terminal semantics:** foreground and background commands, status polling, interactive input, stable TUI
+  snapshots, turn detection, real exit codes, and bounded output.
+- **Repository tools, not just a shell:** guarded SEARCH/REPLACE edits, multi-file planning, undo, token-budgeted reads,
+  image input, context handoff, and tree-sitter symbol navigation.
+
+## Choose your transport
+
+| Transport | Best for | Endpoint / launch | Authentication | Session model |
+|-----------|----------|-------------------|----------------|---------------|
+| **Streamable HTTP** | ChatGPT, hosted agents, remote automation, multiple MCP clients | `https://host/mcp` through a tunnel/proxy, with Winx on `127.0.0.1:8000` | Strong bearer token; optional multi-principal TOML | Stateless requests mapped to durable per-principal sessions on Unix |
+| **stdio** | Claude Code, Codex CLI, Cursor, VS Code, desktop and local IDE clients | client launches `winx-code-agent` | Local process boundary | One local client, using the same durable daemon runtime on Unix |
+
+## Remote architecture
+
+```text
+Remote MCP client
+       │  HTTPS + bearer token
+       ▼
+Secure MCP Tunnel / VPN / authenticated reverse proxy
+       │  loopback HTTP
+       ▼
+127.0.0.1:8000/mcp
+       │
+       ├─ Host / body / timeout checks
+       ├─ Per-IP rate limit + global concurrency cap
+       ├─ Principal authentication
+       └─ thread_id and MCP Task scoping
+              │
+              ▼
+        shared WinxService
+              │
+              ▼
+            winxd
+              │
+              └─ winx-guardian per session ── real PTY / shell / TUI
+```
 
 ## What you get
 
@@ -62,10 +146,10 @@ long-running TUIs without leaking output buffers into your token budget.
   are scrubbed from **all** tool output and saved memory before they reach the model (disable with
   `WINX_NO_REDACT=1`). An opt-in Landlock sandbox (`WINX_SANDBOX=1`, Linux) adds a kernel-enforced second
   layer that confines writes to the workspace and hides the home directory.
-- Two transports: **stdio** for local clients, plus an optional hardened **Streamable HTTP** server
-  (`winx-code-agent serve --http`) for remote MCP clients. HTTP binds to loopback by default, requires a strong bearer
-  token, limits request size/rate/concurrency, and can isolate sessions and MCP Tasks across multiple authenticated
-  principals - see [Remote access](#remote-access-chatgpt--other-remote-mcp-clients).
+- A hardened **Streamable HTTP** endpoint (`winx-code-agent serve --http`) for remote MCP clients, with stdio retained for
+  local tools. HTTP binds to loopback by default, requires a strong bearer token, limits request size/rate/concurrency,
+  and isolates sessions and MCP Tasks across authenticated principals - see the
+  [deployment guide](docs/streamable-http.md).
 
 ## MCP Tools
 
@@ -122,6 +206,9 @@ Things the matcher forgives so you don't have to babysit the model:
   marking the lines that diverged
 
 ## Install
+
+The remote-first quickstart is [at the top of this README](#remote-mcp-in-60-seconds). This section covers package
+installation and local stdio client recipes.
 
 ```bash
 cargo install winx-code-agent
@@ -475,38 +562,26 @@ The quota and TTL are enforced by `winxd`, not just by one MCP adapter, so recon
 share the same resource boundary. A newly installed adapter also upgrades an older control plane automatically when it
 advertises safe planned restarts; the per-session guardians and their PTYs stay alive throughout.
 
-## Remote access (ChatGPT & other remote MCP clients)
+## Streamable HTTP deployment
 
-By default Winx speaks MCP over **stdio**, the local transport used by desktop clients. Remote MCP clients can instead
-use the hardened **Streamable HTTP** endpoint at `/mcp`.
+Streamable HTTP is Winx's primary interface for ChatGPT, hosted agents, remote automation, and any MCP client that cannot
+launch a local stdio process. The endpoint is always `/mcp`; the default listener is `127.0.0.1:8000`.
 
-Create a 32-byte-or-longer token in a user-only file, then start Winx on loopback:
+> [!TIP]
+> The full guide covers request headers, multi-principal configuration, private tunnels, operational limits, status codes,
+> durable sessions, troubleshooting, and the exact security boundary:
+> **[docs/streamable-http.md](docs/streamable-http.md)**.
 
-```bash
-install -m 600 /dev/null ~/.config/winx-http-token
-openssl rand -hex 32 > ~/.config/winx-http-token
+### Deployment profiles
 
-winx-code-agent serve --http \
-  --bind 127.0.0.1:8000 \
-  --token-file ~/.config/winx-http-token
-```
+| Profile | Credential model | Recommended exposure |
+|---------|------------------|----------------------|
+| Personal remote agent | One chmod-600 `--token-file` | Loopback + private tunnel or VPN |
+| Several clients or automations | `--principal-config` with one token per client | Loopback + authenticated HTTPS edge |
+| ChatGPT / OpenAI products | One dedicated principal per app | [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) or a reviewed public HTTPS proxy |
+| Local IDE or CLI | No HTTP server; use stdio | Local process only |
 
-The preferred request credential is `Authorization: Bearer <token>`. Direct `--token` remains available for compatibility
-but exposes the secret in process arguments; `WINX_HTTP_TOKEN` is the environment fallback. Winx rejects tokens shorter
-than 32 bytes unless `--allow-weak-token` is explicitly supplied for local development.
-
-| Flag | Purpose |
-|------|---------|
-| `--http` | Serve over Streamable HTTP instead of stdio. |
-| `--bind` | Listen address, default `127.0.0.1:8000`. Non-loopback addresses are refused unless `--allow-non-loopback` is explicit. |
-| `--token-file` | Read the single bearer token from a regular, non-symlink file; Unix permissions must exclude group/others. |
-| `--principal-config` | Load multiple named principals from TOML. Sessions and MCP Tasks are scoped to the authenticating principal. |
-| `--max-concurrency` | Maximum concurrent HTTP requests, default `32`. |
-| `--requests-per-minute` | Fixed-window request limit per source IP, default `120`. |
-| `--allowed-host` | Extra `Host` authority accepted by the DNS-rebinding guard. Repeatable. |
-| `--allow-query-token` | Also accept `?token=...` for URL-only clients. Off by default because URLs leak into logs/history. |
-
-A multi-client deployment should use one credential per client:
+### Multi-principal configuration
 
 ```toml
 # ~/.config/winx-principals.toml
@@ -525,53 +600,51 @@ winx-code-agent serve --http \
   --principal-config ~/.config/winx-principals.toml
 ```
 
-Even if two principals send the same external `thread_id`, Winx maps them to different internal session and Task IDs.
-Responses are translated back before leaving the server, so clients never see the internal principal prefix.
+Each authenticated principal receives its own internal namespace. The same external `thread_id` can therefore be reused
+by different clients without sharing a workspace, shell, guardian, or MCP Task. Internal prefixes are translated back out
+of normal results and errors before the response reaches the client.
 
-Remote clients normally require HTTPS. Keep Winx on loopback, put an authenticated tunnel or reverse proxy in front, and
-allow its hostname through the DNS-rebinding guard:
+### ChatGPT and OpenAI products
 
-```bash
-cloudflared tunnel --url http://localhost:8000
+ChatGPT connects to remote MCP endpoints rather than directly launching a server on your machine. For private or local
+Winx deployments, OpenAI documents the
+[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) as an outbound-only path that avoids
+opening inbound firewall ports. Developer Mode availability and workspace controls evolve, so use OpenAI's
+[current Developer Mode guide](https://developers.openai.com/api/docs/guides/developer-mode) for the latest UI and plan
+requirements.
 
-winx-code-agent serve --http \
-  --token-file ~/.config/winx-http-token \
-  --allowed-host <random>.trycloudflare.com
-```
+### HTTP defaults
 
-A client with a bearer/API-key field should use it. For a URL-only client, opt in to `--allow-query-token` and use
-`https://<host>/mcp?token=<token>` only on an ephemeral/trusted tunnel.
+| Control | Default |
+|---------|---------|
+| Bind address | `127.0.0.1:8000`; non-loopback requires `--allow-non-loopback` |
+| Authentication | `Authorization: Bearer <token>` |
+| Minimum token length | 32 bytes, unless `--allow-weak-token` is explicitly set |
+| Request body | 64 MiB maximum |
+| Request timeout | 120 seconds |
+| Concurrent requests | 32 globally |
+| Rate limit | 120 requests/minute per source IP |
+| Invalid authentication delay | 100 ms |
+| Query token | Disabled; requires `--allow-query-token` |
 
-The endpoint additionally enforces a 64 MB request-body limit, a 120-second request timeout, per-IP rate limiting, and a
-global concurrency cap. Binding to `0.0.0.0`, a LAN address, or any other non-loopback address requires the explicit
-`--allow-non-loopback` acknowledgement.
+### Connector metadata
 
-### Connector name & description (copy & paste)
+- **Name:** `Winx`
+- **Title:** `Winx High-Performance MCP`
+- **Description:**
 
-When a client asks for connector metadata (ChatGPT's developer-mode form, an MCP registry entry, a directory listing):
+> Remote-first Rust MCP runtime that gives agents durable, authenticated access to a real PTY, guarded file editing,
+> token-budgeted reads, image input, and tree-sitter code navigation. Streamable HTTP supports multi-principal session and
+> Task isolation; stdio remains available for local clients.
 
-- **Name**: `Winx`
-- **Title**: `Winx High-Performance MCP`
-- **Description**:
-
-> High-performance Rust MCP server that gives your agent hands on your machine: a real PTY-backed bash shell
-> (interactive TUIs included), token-budgeted file reads, surgical search/replace edits, and tree-sitter code
-> navigation across 11 languages.
-
-The server also advertises its icon in the `initialize` handshake (`serverInfo.icons`, MCP 2026-07-28): a 96x96 PNG
-embedded in the binary as a data URI, so it works over stdio and HTTP alike. Source art lives in
+The server advertises its icon in the `initialize` handshake (`serverInfo.icons`, MCP `2026-07-28`). Source art lives in
 [`.github/assets/icon.png`](.github/assets/icon.png).
 
-Modern remote clients may send stateless MCP requests. On Unix, long-lived `winxd`/guardian processes own each PTY, so
-restarting the MCP adapter or dropping an HTTP connection does not kill the shell. Within one authenticated principal, a
-later request can reattach with the same thread ID. Native Windows uses the embedded runtime, where sessions live only as
-long as the MCP server process.
-
 > [!WARNING]
-> The HTTP transport puts arbitrary shell and file access on the network. Anyone holding a configured principal token
-> gets a shell as your local user - and `BashCommand` in `wcgw` mode is not workspace-confined. Keep the listener on
-> loopback, prefer an authenticated tunnel, use `architect`/`code_writer` or a container, rotate leaked tokens, and shut
-> the endpoint down when it is no longer needed.
+> A valid Winx principal is equivalent to shell and file access as the operating-system user. `wcgw` mode is intentionally
+> powerful and `BashCommand` is not workspace-confined. Keep HTTP on loopback, prefer private connectivity, use
+> `architect` or constrained `code_writer` sessions where possible, rotate leaked tokens, and stop the endpoint when it is
+> no longer needed.
 
 ## Environment variables
 
@@ -581,7 +654,7 @@ All optional - Winx works out of the box without any of these. Boolean variables
 | Variable | Effect |
 |----------|--------|
 | `RUST_LOG` | Log verbosity, e.g. `winx_code_agent=info`. At `info` you get the per-call **audit trail** (tool name, arg summary, duration, ok/error). |
-| `WINX_HTTP_TOKEN` | Shared secret for the HTTP transport, used if `--token` isn't passed (see [Remote access](#remote-access-chatgpt--other-remote-mcp-clients)). |
+| `WINX_HTTP_TOKEN` | Single-principal HTTP bearer token used when `--token`, `--token-file`, and `--principal-config` are absent. Prefer a token file for long-lived deployments; see the [Streamable HTTP guide](docs/streamable-http.md). |
 | `WINX_RUNTIME` | Runtime selection on Unix: `daemon` (default) or `embedded`. Native Windows is embedded-only. |
 | `WINX_EMBEDDED` | Truthy value (`1`, `true`, `yes`, `on`) forcing the in-process runtime; useful as a fail-safe kill switch. |
 | `WINX_SOCKET` | Override the Unix socket used to reach `winxd`. |
@@ -643,10 +716,10 @@ Robustness is also fuzzed and model-checked:
 
 ## A note on security
 
-By default this is a local (stdio) MCP server. Anything connected to it can read files, edit files, and run shell
-commands inside the workspace - same blast radius as letting the model into your terminal. The optional HTTP transport
-(`--http`) extends that reach to the network; see
-[Remote access](#remote-access-chatgpt--other-remote-mcp-clients) for the extra precautions it demands.
+Winx supports local stdio and remote Streamable HTTP. Anything connected to either transport can read files, edit files,
+and run shell commands with the capability granted by the selected mode - the same blast radius as giving the client a
+terminal. HTTP extends that reach beyond the local process boundary; read the
+[Streamable HTTP deployment guide](docs/streamable-http.md) and [SECURITY.md](SECURITY.md) before exposing it.
 
 Two things are on by default to reduce the blast radius: **secret redaction** scrubs high-confidence credentials
 from all tool output and saved memory (`WINX_NO_REDACT=1` to disable), and the PTY shell's whole process group is

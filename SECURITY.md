@@ -31,8 +31,8 @@ We aim to acknowledge reports within 48 hours and provide an assessment within 7
 
 ## Threat Model
 
-Winx is primarily a local MCP server and can optionally expose a network-reachable Streamable HTTP transport. An
-authenticated MCP client can ask it to:
+Winx supports local stdio and a primary network-reachable Streamable HTTP deployment. An authenticated MCP client can
+ask it to:
 
 - read files;
 - write or edit files;
@@ -58,6 +58,7 @@ This is powerful by design. Only connect Winx to MCP clients and agent workflows
 - Keep HTTP concurrency/rate limits and the daemon guardian quota/idle TTL enabled.
 - Review redacted configuration with `winx-code-agent doctor`.
 - Review durable sessions with `winx-code-agent list`; use `prune`, `kill <thread_id>`, or `kill --all` when cleanup is needed.
+- Follow the complete [Streamable HTTP deployment guide](docs/streamable-http.md) before exposing remote access.
 
 ## Filesystem Safety
 
@@ -87,6 +88,8 @@ they reach the shared service registry, preventing accidental or deliberate cros
 
 Authentication is not authorization inside a shell. A principal permitted to use Winx still receives the capabilities of
 the selected Winx mode. Use `architect`, a constrained `code_writer`, containers, and OS-level isolation where needed.
+Winx does not currently provide built-in TLS, OAuth/OIDC, mTLS, or per-principal tool policy; those controls belong at a
+reviewed network edge when required.
 
 ## Dependency and Release Security
 
