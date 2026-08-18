@@ -1,14 +1,14 @@
 [package]
 name = "winx-code-agent"
 default-run = "winx-code-agent"
-version = "0.2.332"
+version = "0.2.333"
 edition = "2021"
 rust-version = "1.88"
-description = "High-performance Rust implementation of WCGW for LLM code agents"
+description = "Remote-first Rust MCP runtime with Streamable HTTP, durable PTYs, and guarded agent tools"
 authors = ["Gabriel Maia <gabrielmaialva33@gmail.com>"]
 license = "MIT"
 repository = "https://github.com/gabrielmaialva33/winx-code-agent"
-keywords = ["mcp", "llm", "code-agent", "shell", "wcgw"]
+keywords = ["mcp", "llm", "code-agent", "streamable-http", "shell"]
 categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
@@ -19,7 +19,7 @@ rmcp = { version = "3.1.2", features = [
     "server",
 ] }
 
-# HTTP server for the optional remote MCP transport (ChatGPT custom connector etc.)
+# HTTP server for the primary remote MCP transport (ChatGPT custom apps, hosted agents, etc.)
 axum = "0.8"
 # Tower middleware for the HTTP transport: request body-size cap + per-request
 # timeout on the network-reachable RCE endpoint.
