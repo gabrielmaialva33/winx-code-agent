@@ -1,7 +1,7 @@
-//! # Winx - High Performance MCP Server
+//! # Winx - Remote-first MCP runtime
 //!
-//! Winx is a high-performance Rust implementation of the Model Context Protocol (MCP).
-//! It provides core tools for shell execution and file management with extreme efficiency.
+//! Winx exposes durable shell, file, and code-navigation tools over hardened
+//! Streamable HTTP, with stdio retained for local MCP clients.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -15,12 +15,15 @@ use winx_code_agent::daemon::{default_socket_path, DaemonClient};
 use winx_code_agent::runtime::{configured_daemon_binary, restart_control_daemon_at};
 use winx_code_agent::{start_winx_server, Result, WinxError};
 
-/// Winx - High Performance MCP Server
+/// Winx - Remote-first MCP runtime
 #[derive(Parser)]
 #[command(name = "winx-code-agent")]
 #[command(author = "Gabriel Maia")]
 #[command(version)]
-#[command(about = "High-performance MCP server for shell and file operations", long_about = None)]
+#[command(
+    about = "Remote-first MCP runtime with Streamable HTTP, durable PTYs, and guarded shell/file tools",
+    long_about = None
+)]
 struct Cli {
     /// Enable verbose logging
     #[arg(short, long)]
