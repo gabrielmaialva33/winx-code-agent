@@ -174,13 +174,24 @@ fn setup_logging(verbose: bool, debug: bool) {
         tracing::Level::WARN
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into()),
-        )
-        .with_writer(std::io::stderr)
-        .with_ansi(true)
-        .init();
+    let filter = tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into());
+    // Usage events (one per authenticated HTTP request / tool call) stay
+    // visible at the default WARN level so persistent usage logs never depend
+    // on the verbosity flags. The directive is static and cannot fail to parse.
+    let filter = match "winx::usage=info".parse() {
+        Ok(directive) => filter.add_directive(directive),
+        Err(_) => filter,
+    };
+
+    let builder = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr);
+    // WINX_LOG_FORMAT=json emits one JSON object per line, for journald + jq.
+    if winx_code_agent::config::env_text("WINX_LOG_FORMAT")
+        .is_some_and(|format| format.eq_ignore_ascii_case("json"))
+    {
+        builder.json().init();
+    } else {
+        builder.with_ansi(true).init();
+    }
 }
 
 fn main() -> Result<()> {
