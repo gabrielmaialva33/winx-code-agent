@@ -42,7 +42,7 @@ anyhow = "1.0"
 
 # Logging and observability
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # File and system operations
 home = "0.5"
