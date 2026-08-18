@@ -26,8 +26,15 @@ pub use session_store::{SessionStore, ShellTarget};
 /// Boxed future returned by [`ShellRuntime`] implementations.
 pub type ShellRuntimeFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
 pub type ShellRuntimeUnitFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ShellSessionConfiguration {
+    pub attach_hint: Option<String>,
+    pub attached_existing: bool,
+}
+
 pub type ShellRuntimeConfigureFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<Option<String>>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<ShellSessionConfiguration>> + Send + 'a>>;
 
 /// State transition requested by the Initialize tool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -84,7 +91,7 @@ impl ShellRuntime for EmbeddedShellRuntime {
                 let shell = bash_state.pty_shell.lock().await;
                 shell.as_ref().and_then(|shell| shell.attach_hint.clone())
             };
-            Ok(attach_hint)
+            Ok(ShellSessionConfiguration { attach_hint, attached_existing: false })
         })
     }
 

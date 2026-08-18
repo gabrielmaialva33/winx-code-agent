@@ -41,7 +41,7 @@ async fn daemon_default_can_auto_spawn_the_sibling_binary() -> anyhow::Result<()
 
     let hello = DaemonClient::new(&socket).hello().await?;
     let validation = if hello.protocol_major == 1
-        && hello.capabilities.iter().any(|capability| capability == "guardian_quota")
+        && hello.capabilities.iter().any(|capability| capability == "guardian_activity_clock")
         && hello.daemon_pid != std::process::id()
     {
         Ok(())
@@ -63,7 +63,7 @@ async fn planned_control_restart_changes_epoch() -> anyhow::Result<()> {
 
     let restarted = restart_control_daemon_at(&socket, binary).await?;
     let validation = if restarted.daemon_epoch != previous.daemon_epoch
-        && restarted.capabilities.iter().any(|capability| capability == "guardian_quota")
+        && restarted.capabilities.iter().any(|capability| capability == "guardian_activity_clock")
     {
         Ok(())
     } else {

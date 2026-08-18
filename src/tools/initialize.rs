@@ -19,12 +19,13 @@ use crate::utils::path::{ensure_directory_exists, expand_user, validate_path_in_
 
 /// Create a unique scratch workspace under the system temp dir, used when the
 /// caller initializes without a workspace path.
-fn create_playground_dir() -> Result<PathBuf> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let dir =
-        std::env::temp_dir().join(format!("winx-playground-{}-{:x}", std::process::id(), stamp));
+fn create_playground_dir(thread_id: &str) -> Result<PathBuf> {
+    #[cfg(unix)]
+    let owner = crate::os::unix::effective_uid().to_string();
+    #[cfg(not(unix))]
+    let owner = std::process::id().to_string();
+
+    let dir = std::env::temp_dir().join(format!("winx-playground-{owner}-{thread_id}"));
     ensure_directory_exists(&dir)?;
     Ok(dir)
 }
@@ -124,12 +125,16 @@ fn read_initial_files_simple(files: &[String], workspace: &std::path::Path) -> S
     output
 }
 
-fn prepare_workspace(initialize: &Initialize, response: &mut String) -> Result<PathBuf> {
+fn prepare_workspace(
+    initialize: &Initialize,
+    thread_id: &str,
+    response: &mut String,
+) -> Result<PathBuf> {
     let workspace_path_str = expand_user(&initialize.any_workspace_path);
     if workspace_path_str.is_empty() {
         // wcgw parity: no path given → spin up a scratch playground instead of
         // forcing the agent to always supply a workspace.
-        let playground = create_playground_dir()?;
+        let playground = create_playground_dir(thread_id)?;
         let _ = writeln!(
             response,
             "No workspace path provided; created a playground at {}",
@@ -231,8 +236,8 @@ pub async fn handle_tool_call_with_runtime(
     info!("Initialize called for workspace: {}", initialize.any_workspace_path);
 
     validate_thread_id(&initialize)?;
-    let folder_to_start = prepare_workspace(&initialize, &mut response)?;
     let thread_id = initialize_thread_id(&initialize);
+    let folder_to_start = prepare_workspace(&initialize, &thread_id, &mut response)?;
 
     let mut bash_state_guard = bash_state_arc.lock().await;
     let mode = Modes::from(&initialize.mode_name);
@@ -241,53 +246,77 @@ pub async fn handle_tool_call_with_runtime(
 
     match initialize.init_type {
         InitializeType::FirstCall => {
-            let mut new_bash_state = BashState::new();
-            new_bash_state.current_thread_id.clone_from(&thread_id);
-            new_bash_state.mode = mode;
-            new_bash_state.bash_command_mode = bash_command_mode;
-            new_bash_state.file_edit_mode = file_edit_mode;
-            new_bash_state.write_if_empty_mode = write_if_empty_mode;
-            new_bash_state.initialized = true;
-
-            let resumed_context = if initialize.task_id_to_resume.is_empty() {
-                None
+            let configured = if bash_state_guard
+                .as_ref()
+                .is_some_and(|state| state.initialized && state.current_thread_id == thread_id)
+            {
+                let Some(state) = bash_state_guard.as_mut() else {
+                    return Err(WinxError::BashStateNotInitialized);
+                };
+                // Refresh guardian activity without resetting the PTY. Reusing the
+                // current snapshot as a mode transition is also compatible with
+                // protocol-1.2 guardians that predate attach-or-create.
+                let mut configured =
+                    runtime.configure_session(state, ShellSessionTransition::ModeChange).await?;
+                configured.attached_existing = true;
+                configured
             } else {
-                crate::tools::context_save::load_saved_context(&initialize.task_id_to_resume)?
+                let mut new_bash_state = BashState::new();
+                new_bash_state.current_thread_id.clone_from(&thread_id);
+                new_bash_state.mode = mode;
+                new_bash_state.bash_command_mode = bash_command_mode;
+                new_bash_state.file_edit_mode = file_edit_mode;
+                new_bash_state.write_if_empty_mode = write_if_empty_mode;
+                new_bash_state.initialized = true;
+
+                let resumed_context = if initialize.task_id_to_resume.is_empty() {
+                    None
+                } else {
+                    crate::tools::context_save::load_saved_context(&initialize.task_id_to_resume)?
+                };
+
+                if let Some((memory_data, snapshot)) = &resumed_context {
+                    if let Some(snapshot) = snapshot {
+                        new_bash_state.apply_snapshot(snapshot);
+                        new_bash_state.current_thread_id.clone_from(&thread_id);
+                    }
+                    let _ = writeln!(
+                        response,
+                        "\n# Resumed task {}\nFollowing is the retrieved task context:\n{}",
+                        initialize.task_id_to_resume, memory_data
+                    );
+                }
+
+                // A bash snapshot already carries cwd/workspace. Without one, prefer
+                // the project root recorded in the resumed memory (so the agent lands
+                // back in the right repo), then fall back to the provided folder.
+                if resumed_context.as_ref().and_then(|(_, snapshot)| snapshot.as_ref()).is_none() {
+                    let resumed_root = resumed_context
+                        .as_ref()
+                        .and_then(|(memory, _)| {
+                            crate::tools::context_save::extract_project_root(memory)
+                        })
+                        .filter(|root| root.exists());
+                    let target = resumed_root.as_deref().unwrap_or(folder_to_start.as_path());
+                    if target.exists() {
+                        new_bash_state.update_cwd(target)?;
+                        new_bash_state.update_workspace_root(target)?;
+                    }
+                }
+                let configured = runtime
+                    .configure_session(&mut new_bash_state, ShellSessionTransition::FirstCall)
+                    .await?;
+                *bash_state_guard = Some(new_bash_state);
+                configured
             };
 
-            if let Some((memory_data, snapshot)) = &resumed_context {
-                if let Some(snapshot) = snapshot {
-                    new_bash_state.apply_snapshot(snapshot);
-                    new_bash_state.current_thread_id.clone_from(&thread_id);
-                }
-                let _ = writeln!(
-                    response,
-                    "\n# Resumed task {}\nFollowing is the retrieved task context:\n{}",
-                    initialize.task_id_to_resume, memory_data
+            if configured.attached_existing {
+                response.push_str(
+                    "\nAttached to the existing durable session for this principal/workspace; \
+                     the guardian-owned PTY and cwd were preserved. Use `reset_shell` or an explicit \
+                     workspace/mode change when replacement is intended.\n",
                 );
             }
-
-            // A bash snapshot already carries cwd/workspace. Without one, prefer
-            // the project root recorded in the resumed memory (so the agent lands
-            // back in the right repo), then fall back to the provided folder.
-            if resumed_context.as_ref().and_then(|(_, snapshot)| snapshot.as_ref()).is_none() {
-                let resumed_root = resumed_context
-                    .as_ref()
-                    .and_then(|(memory, _)| {
-                        crate::tools::context_save::extract_project_root(memory)
-                    })
-                    .filter(|root| root.exists());
-                let target = resumed_root.as_deref().unwrap_or(folder_to_start.as_path());
-                if target.exists() {
-                    new_bash_state.update_cwd(target)?;
-                    new_bash_state.update_workspace_root(target)?;
-                }
-            }
-            let attach_hint = runtime
-                .configure_session(&mut new_bash_state, ShellSessionTransition::FirstCall)
-                .await?;
-
-            *bash_state_guard = Some(new_bash_state);
 
             let _ = write!(
                 response,
@@ -309,7 +338,7 @@ pub async fn handle_tool_call_with_runtime(
             }
 
             let _ = writeln!(response, "\nUse thread_id={thread_id} for all winx tool calls.");
-            if let Some(attach_hint) = attach_hint {
+            if let Some(attach_hint) = configured.attach_hint {
                 let _ = writeln!(response, "\nAttach terminal: {attach_hint}");
             }
 
@@ -320,7 +349,7 @@ pub async fn handle_tool_call_with_runtime(
                 response,
                 "\n{}",
                 crate::utils::mode_prompts::mode_prompt(
-                    mode,
+                    bash_state_guard.as_ref().map_or(mode, |state| state.mode),
                     initialize.code_writer_config.as_ref()
                 )
             );

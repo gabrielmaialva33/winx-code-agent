@@ -8,7 +8,7 @@ use crate::state::persistence::BashStateSnapshot;
 use crate::types::BashCommand;
 
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 2;
+pub const PROTOCOL_MINOR: u16 = 3;
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,6 +72,12 @@ pub(crate) struct ConfigureSessionParams {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ConfigureSessionResult {
     pub attach_hint: Option<String>,
+    /// Existing guardians return their authoritative state so a restarted adapter
+    /// can attach without resetting the PTY. Absent for protocol-1.2 guardians.
+    #[serde(default)]
+    pub snapshot: Option<BashStateSnapshot>,
+    #[serde(default)]
+    pub attached_existing: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -102,6 +108,16 @@ pub struct SessionInfo {
     pub command_id: Option<String>,
     pub running: bool,
     pub background_command_ids: Vec<String>,
+    /// Guardian-owned lifecycle clock. Optional for compatibility with guardians
+    /// created by releases before protocol 1.3.
+    #[serde(default)]
+    pub created_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub last_activity_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub last_command_at_unix_ms: Option<u64>,
+    #[serde(default)]
+    pub ever_ran_command: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

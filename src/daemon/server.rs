@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
@@ -37,12 +37,17 @@ struct DaemonSession {
     background_ids: Mutex<HashSet<String>>,
     command_id: Mutex<Option<String>>,
     delivery_cursors: Mutex<HashMap<String, TimedEntry<Arc<Mutex<ShellDeliveryCursor>>>>>,
+    created_at_unix_ms: u64,
+    last_activity_unix_ms: AtomicU64,
+    last_command_at_unix_ms: AtomicU64,
+    ever_ran_command: AtomicBool,
     drainer_started: AtomicBool,
     activity: Notify,
 }
 
 impl DaemonSession {
     fn new() -> Self {
+        let now = unix_ms();
         Self {
             state: Arc::new(Mutex::new(None)),
             completed: Mutex::new(HashMap::new()),
@@ -51,9 +56,23 @@ impl DaemonSession {
             background_ids: Mutex::new(HashSet::new()),
             command_id: Mutex::new(None),
             delivery_cursors: Mutex::new(HashMap::new()),
+            created_at_unix_ms: now,
+            last_activity_unix_ms: AtomicU64::new(now),
+            last_command_at_unix_ms: AtomicU64::new(0),
+            ever_ran_command: AtomicBool::new(false),
             drainer_started: AtomicBool::new(false),
             activity: Notify::new(),
         }
+    }
+
+    fn note_activity(&self, command: bool) {
+        let now = unix_ms();
+        self.last_activity_unix_ms.store(now, Ordering::Release);
+        if command {
+            self.last_command_at_unix_ms.store(now, Ordering::Release);
+            self.ever_ran_command.store(true, Ordering::Release);
+        }
+        self.activity.notify_one();
     }
 }
 
@@ -252,6 +271,8 @@ async fn dispatch(
                     "session.kill".to_string(),
                     "multi_consumer_cursors".to_string(),
                     "idempotency".to_string(),
+                    "session_activity_timestamps".to_string(),
+                    "attach_or_create".to_string(),
                 ],
                 max_frame_bytes: MAX_FRAME_BYTES,
                 daemon_epoch: epoch.to_string(),
@@ -316,6 +337,7 @@ async fn dispatch(
             let session = sessions.lock().await.get(&thread_id).cloned();
             match session {
                 Some(session) => {
+                    session.note_activity(false);
                     capture_session_outputs(&session).await;
                     let read = session.journal.lock().await.read(&params.consumer_id);
                     rpc_result(request.id, &read)
@@ -374,28 +396,43 @@ async fn configure_session(
         ));
     }
 
-    let session = {
+    let (session, entry_created) = {
         let mut sessions = sessions.lock().await;
         match params.transition {
-            ConfigureSessionTransition::FirstCall => {
-                sessions.entry(thread_id).or_insert_with(|| Arc::new(DaemonSession::new())).clone()
-            }
-            _ => sessions.get(&thread_id).cloned().ok_or(WinxError::BashStateNotInitialized)?,
+            ConfigureSessionTransition::FirstCall => match sessions.entry(thread_id) {
+                std::collections::hash_map::Entry::Occupied(entry) => (entry.get().clone(), false),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    let session = Arc::new(DaemonSession::new());
+                    entry.insert(session.clone());
+                    (session, true)
+                }
+            },
+            _ => (
+                sessions.get(&thread_id).cloned().ok_or(WinxError::BashStateNotInitialized)?,
+                false,
+            ),
         }
     };
     ensure_drainer(&session);
-    session.activity.notify_one();
+    session.note_activity(false);
 
-    let attach_hint = {
+    let (attach_hint, snapshot, attached_existing) = {
         let mut guard = session.state.lock().await;
+        let mut attached_existing = false;
         match params.transition {
             ConfigureSessionTransition::FirstCall => {
-                let mut state = BashState::new();
-                state.apply_snapshot(&params.snapshot);
-                if state.cwd.exists() {
-                    state.init_pty_shell().await?;
+                if entry_created || guard.is_none() {
+                    let mut state = BashState::new();
+                    state.apply_snapshot(&params.snapshot);
+                    if state.cwd.exists() {
+                        state.init_pty_shell().await?;
+                    }
+                    *guard = Some(state);
+                } else {
+                    // Attach-or-create: preserve the guardian-owned PTY, cwd, mode,
+                    // output journal, and command state across adapter reconnects.
+                    attached_existing = true;
                 }
-                *guard = Some(state);
             }
             ConfigureSessionTransition::ModeChange => {
                 let state = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
@@ -416,14 +453,17 @@ async fn configure_session(
             }
         }
         let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-        let shell = state.pty_shell.lock().await;
-        shell.as_ref().and_then(|shell| shell.attach_hint.clone())
+        let attach_hint = {
+            let shell = state.pty_shell.lock().await;
+            shell.as_ref().and_then(|shell| shell.attach_hint.clone())
+        };
+        (attach_hint, state.snapshot(), attached_existing)
     };
 
-    if matches!(
-        params.transition,
-        ConfigureSessionTransition::FirstCall | ConfigureSessionTransition::Reset
-    ) {
+    if matches!(params.transition, ConfigureSessionTransition::Reset)
+        || (matches!(params.transition, ConfigureSessionTransition::FirstCall)
+            && !attached_existing)
+    {
         *session.command_id.lock().await = None;
         session.completed.lock().await.clear();
         session.delivery_cursors.lock().await.clear();
@@ -431,7 +471,7 @@ async fn configure_session(
     }
     capture_session_outputs(&session).await;
     session.activity.notify_one();
-    Ok(ConfigureSessionResult { attach_hint })
+    Ok(ConfigureSessionResult { attach_hint, snapshot: Some(snapshot), attached_existing })
 }
 
 async fn run_action(
@@ -447,12 +487,14 @@ async fn run_action(
         ));
     }
 
+    let is_command =
+        matches!(&params.command.action_json, crate::types::BashCommandAction::Command { .. });
     let session = {
         let mut sessions = sessions.lock().await;
         sessions.entry(thread_id.clone()).or_insert_with(|| Arc::new(DaemonSession::new())).clone()
     };
     ensure_drainer(&session);
-    session.activity.notify_one();
+    session.note_activity(is_command);
 
     let now = Instant::now();
     let cached = {
@@ -469,18 +511,23 @@ async fn run_action(
 
     {
         let mut guard = session.state.lock().await;
-        if let Some(state) = guard.as_mut() {
+        let state = if let Some(state) = guard.as_mut() {
             let daemon_cwd = state.cwd.clone();
             state.apply_snapshot(&params.snapshot);
             state.cwd = daemon_cwd;
+            state
         } else {
             let mut state = BashState::new();
             state.apply_snapshot(&params.snapshot);
-            *guard = Some(state);
+            guard.insert(state)
+        };
+        let needs_shell = state.pty_shell.lock().await.is_none();
+        if needs_shell && state.cwd.exists() {
+            state.init_pty_shell().await?;
         }
     }
 
-    if matches!(&params.command.action_json, crate::types::BashCommandAction::Command { .. }) {
+    if is_command {
         *session.command_id.lock().await = Some(params.request_key.clone());
     }
     let consumer_id = if params.consumer_id.is_empty() {
@@ -616,6 +663,7 @@ async fn capture_shell_output(
     };
     let changed = !delta.is_empty();
     if changed {
+        session.last_activity_unix_ms.store(unix_ms(), Ordering::Release);
         session.journal.lock().await.append(delta);
     }
     CaptureState { changed, active }
@@ -636,6 +684,7 @@ async fn session_info(session: &Arc<DaemonSession>) -> Option<SessionInfo> {
         guard.as_ref().map_or((None, false), |shell| (shell.process_id(), shell.command_running))
     };
     let background_command_ids = active_background_command_ids(session, &thread_id).await;
+    let last_command_at_unix_ms = session.last_command_at_unix_ms.load(Ordering::Acquire);
     Some(SessionInfo {
         thread_id,
         cwd,
@@ -643,6 +692,10 @@ async fn session_info(session: &Arc<DaemonSession>) -> Option<SessionInfo> {
         command_id: session.command_id.lock().await.clone(),
         running,
         background_command_ids,
+        created_at_unix_ms: Some(session.created_at_unix_ms),
+        last_activity_unix_ms: Some(session.last_activity_unix_ms.load(Ordering::Acquire)),
+        last_command_at_unix_ms: (last_command_at_unix_ms > 0).then_some(last_command_at_unix_ms),
+        ever_ran_command: session.ever_ran_command.load(Ordering::Acquire),
     })
 }
 
@@ -678,6 +731,7 @@ async fn active_background_command_ids(
 }
 
 async fn interrupt_session(session: &Arc<DaemonSession>) -> Result<()> {
+    session.note_activity(false);
     let shell = {
         let state = session.state.lock().await;
         state.as_ref().map(|state| state.pty_shell.clone())
@@ -709,6 +763,14 @@ async fn interrupt_session(session: &Arc<DaemonSession>) -> Result<()> {
     Err(WinxError::CommandExecutionError(
         "interrupted shell did not return to a prompt within 3 seconds".to_string(),
     ))
+}
+
+fn unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 fn to_wire_error(error: WinxError) -> WireShellError {

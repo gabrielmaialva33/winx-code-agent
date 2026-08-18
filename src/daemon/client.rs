@@ -11,7 +11,7 @@ use super::protocol::{
 use crate::errors::{Result, WinxError};
 use crate::runtime::{
     ShellRuntime, ShellRuntimeConfigureFuture, ShellRuntimeFuture, ShellRuntimeUnitFuture,
-    ShellSessionTransition,
+    ShellSessionConfiguration, ShellSessionTransition,
 };
 use crate::state::bash_state::BashState;
 use crate::types::BashCommand;
@@ -239,7 +239,7 @@ impl DaemonShellRuntime {
         &self,
         bash_state: &mut BashState,
         transition: ShellSessionTransition,
-    ) -> Result<Option<String>> {
+    ) -> Result<ShellSessionConfiguration> {
         let transition = match transition {
             ShellSessionTransition::FirstCall => ConfigureSessionTransition::FirstCall,
             ShellSessionTransition::ModeChange => ConfigureSessionTransition::ModeChange,
@@ -258,7 +258,13 @@ impl DaemonShellRuntime {
             .map_err(|error| WinxError::SerializationError(error.to_string()))?,
         )
         .await?;
-        Ok(result.attach_hint)
+        if let Some(snapshot) = result.snapshot {
+            bash_state.apply_snapshot(&snapshot);
+        }
+        Ok(ShellSessionConfiguration {
+            attach_hint: result.attach_hint,
+            attached_existing: result.attached_existing,
+        })
     }
 }
 

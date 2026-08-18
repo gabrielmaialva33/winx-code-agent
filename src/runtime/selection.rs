@@ -14,7 +14,7 @@ use crate::errors::{Result, WinxError};
 use super::{EmbeddedShellRuntime, ShellRuntime};
 
 #[cfg(unix)]
-const GUARDIAN_LIFECYCLE_CAPABILITY: &str = "guardian_quota";
+const GUARDIAN_LIFECYCLE_CAPABILITY: &str = "guardian_activity_clock";
 #[cfg(unix)]
 const PLANNED_CONTROL_RESTART_CAPABILITY: &str = "planned_control_restart";
 #[cfg(unix)]
@@ -123,7 +123,7 @@ pub async fn ensure_control_daemon_at(socket: &Path, daemon_binary: &Path) -> Re
     }
     if !has_capability(&hello, PLANNED_CONTROL_RESTART_CAPABILITY) {
         return Err(WinxError::ConfigurationError(format!(
-            "the running winxd (pid {}) lacks guardian lifecycle controls and cannot be safely \
+            "the running winxd (pid {}) lacks the current guardian lifecycle controls and cannot be safely \
              restarted automatically; stop it manually, then retry",
             hello.daemon_pid
         )));

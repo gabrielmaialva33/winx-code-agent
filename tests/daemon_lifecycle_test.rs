@@ -38,11 +38,13 @@ fn spawn_daemon_with_limits(
     socket: &Path,
     max_guardians: usize,
     idle_ttl_secs: u64,
+    unused_idle_ttl_secs: u64,
 ) -> anyhow::Result<std::process::Child> {
     Ok(daemon_command(socket)
         .env("WINX_MAX_GUARDIANS", max_guardians.to_string())
         .env("WINX_SESSION_IDLE_TTL_SECS", idle_ttl_secs.to_string())
-        .env("WINX_GUARDIAN_SWEEP_INTERVAL_SECS", "1")
+        .env("WINX_UNUSED_SESSION_IDLE_TTL_SECS", unused_idle_ttl_secs.to_string())
+        .env("WINX_GUARDIAN_SWEEP_INTERVAL_SECS", "60")
         .spawn()?)
 }
 
@@ -298,38 +300,26 @@ async fn planned_control_restart_preserves_guardian_shell() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn daemon_enforces_guardian_quota_and_releases_capacity() -> anyhow::Result<()> {
+async fn daemon_reclaims_unused_guardian_under_quota_pressure() -> anyhow::Result<()> {
     let workspace = TempDir::new()?;
     let runtime_dir = TempDir::new()?;
     let socket = runtime_dir.path().join("winxd.sock");
-    let mut daemon = spawn_daemon_with_limits(&socket, 1, 86_400)?;
+    let mut daemon = spawn_daemon_with_limits(&socket, 1, 86_400, 86_400)?;
     let client = DaemonClient::new(&socket);
     wait_for_daemon(&client).await?;
 
     let _first = initialize_daemon_session(&socket, workspace.path(), "quota_first").await?;
-    let second_state = Arc::new(Mutex::new(None::<BashState>));
-    let runtime = DaemonShellRuntime::new(&socket);
-    let second = Initialize {
-        init_type: InitializeType::FirstCall,
-        mode_name: ModeName::Wcgw,
-        any_workspace_path: workspace.path().to_string_lossy().into_owned(),
-        thread_id: "quota_second".to_string(),
-        code_writer_config: None,
-        initial_files_to_read: vec![],
-        task_id_to_resume: String::new(),
-    };
-    let Err(error) =
-        tools::initialize::handle_tool_call_with_runtime(&runtime, &second_state, second.clone())
-            .await
-    else {
-        anyhow::bail!("second guardian unexpectedly exceeded the configured quota");
-    };
-    assert!(error.to_string().contains("guardian limit reached"), "{error}");
+    let before = client.session_info("quota_first").await?;
+    assert!(!before.ever_ran_command, "{before:?}");
 
-    assert!(client.kill_session("quota_first").await?);
-    tools::initialize::handle_tool_call_with_runtime(&runtime, &second_state, second).await?;
+    let _second = initialize_daemon_session(&socket, workspace.path(), "quota_second").await?;
+    assert!(
+        client.session_info("quota_first").await.is_err(),
+        "the unused guardian should have been reclaimed"
+    );
+    let second = client.session_info("quota_second").await?;
+    assert!(!second.ever_ran_command, "{second:?}");
     assert!(client.kill_session("quota_second").await?);
-    assert!(!client.kill_session("quota_missing").await?);
 
     daemon.kill()?;
     let _ = daemon.wait()?;
@@ -337,33 +327,153 @@ async fn daemon_enforces_guardian_quota_and_releases_capacity() -> anyhow::Resul
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn default_prune_seeds_legacy_guardian_activity_before_expiring_it() -> anyhow::Result<()> {
+async fn daemon_never_reclaims_an_active_guardian_for_quota() -> anyhow::Result<()> {
     let workspace = TempDir::new()?;
     let runtime_dir = TempDir::new()?;
     let socket = runtime_dir.path().join("winxd.sock");
-    let mut daemon = spawn_daemon_with_limits(&socket, 4, 86_400)?;
+    let mut daemon = spawn_daemon_with_limits(&socket, 1, 86_400, 86_400)?;
     let client = DaemonClient::new(&socket);
     wait_for_daemon(&client).await?;
 
-    let thread_id = "legacy_metadata";
+    let active = initialize_daemon_session(&socket, workspace.path(), "quota_active").await?;
+    let runtime = DaemonShellRuntime::new(&socket);
+    tools::bash_command::handle_tool_call_with_runtime(
+        &runtime,
+        &active,
+        command("quota_active", "sleep 30".to_string(), 0.0),
+    )
+    .await?;
+
+    let second_state = Arc::new(Mutex::new(None::<BashState>));
+    let second = Initialize {
+        init_type: InitializeType::FirstCall,
+        mode_name: ModeName::Wcgw,
+        any_workspace_path: workspace.path().to_string_lossy().into_owned(),
+        thread_id: "quota_blocked".to_string(),
+        code_writer_config: None,
+        initial_files_to_read: vec![],
+        task_id_to_resume: String::new(),
+    };
+    let Err(error) =
+        tools::initialize::handle_tool_call_with_runtime(&runtime, &second_state, second).await
+    else {
+        anyhow::bail!("an active guardian unexpectedly lost the only quota slot");
+    };
+    assert!(error.to_string().contains("guardian limit reached"), "{error}");
+    assert!(error.to_string().contains("prune --idle-seconds 0"), "{error}");
+    assert!(client.session_info("quota_active").await?.running);
+
+    client.interrupt_session("quota_active").await?;
+    assert!(client.kill_session("quota_active").await?);
+    daemon.kill()?;
+    let _ = daemon.wait()?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn default_prune_uses_short_ttl_for_never_used_sessions() -> anyhow::Result<()> {
+    let workspace = TempDir::new()?;
+    let runtime_dir = TempDir::new()?;
+    let socket = runtime_dir.path().join("winxd.sock");
+    let mut daemon = spawn_daemon_with_limits(&socket, 4, 86_400, 1)?;
+    let client = DaemonClient::new(&socket);
+    wait_for_daemon(&client).await?;
+
+    let thread_id = "unused_ttl";
     let _state = initialize_daemon_session(&socket, workspace.path(), thread_id).await?;
-    let guardian_dir = runtime_dir.path().join("guardians");
-    let mut entries = std::fs::read_dir(&guardian_dir)?;
-    let metadata = entries
-        .find_map(|entry| {
-            let path = entry.ok()?.path();
-            (path.extension().and_then(|extension| extension.to_str()) == Some("json"))
-                .then_some(path)
-        })
-        .ok_or_else(|| anyhow::anyhow!("guardian metadata was not created"))?;
-    std::fs::remove_file(&metadata)?;
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let pruned = client.prune_sessions(None).await?;
+    assert_eq!(pruned.removed_thread_ids, vec![thread_id]);
+    assert!(client.list_sessions().await?.is_empty());
 
-    let default_prune = client.prune_sessions(None).await?;
-    assert!(default_prune.removed_thread_ids.is_empty(), "{default_prune:?}");
-    assert!(metadata.exists(), "legacy guardian metadata should be reseeded");
+    daemon.kill()?;
+    let _ = daemon.wait()?;
+    Ok(())
+}
 
-    let explicit_prune = client.prune_sessions(Some(0)).await?;
-    assert_eq!(explicit_prune.removed_thread_ids, vec![thread_id]);
+#[tokio::test(flavor = "multi_thread")]
+async fn guardian_activity_clock_advances_after_a_command() -> anyhow::Result<()> {
+    let workspace = TempDir::new()?;
+    let runtime_dir = TempDir::new()?;
+    let socket = runtime_dir.path().join("winxd.sock");
+    let mut daemon = spawn_daemon(&socket)?;
+    let client = DaemonClient::new(&socket);
+    wait_for_daemon(&client).await?;
+
+    let thread_id = "activity_clock";
+    let state = initialize_daemon_session(&socket, workspace.path(), thread_id).await?;
+    let before = client.session_info(thread_id).await?;
+    assert!(before.created_at_unix_ms.is_some(), "{before:?}");
+    assert!(before.last_activity_unix_ms.is_some(), "{before:?}");
+    assert!(before.last_command_at_unix_ms.is_none(), "{before:?}");
+    assert!(!before.ever_ran_command, "{before:?}");
+
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let runtime = DaemonShellRuntime::new(&socket);
+    tools::bash_command::handle_tool_call_with_runtime(
+        &runtime,
+        &state,
+        command(thread_id, "printf activity-clock".to_string(), 2.0),
+    )
+    .await?;
+    let after = client.session_info(thread_id).await?;
+    assert!(after.ever_ran_command, "{after:?}");
+    assert!(after.last_command_at_unix_ms.is_some(), "{after:?}");
+    assert!(after.last_activity_unix_ms >= before.last_activity_unix_ms, "{before:?} {after:?}");
+
+    assert!(client.kill_session(thread_id).await?);
+    daemon.kill()?;
+    let _ = daemon.wait()?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_first_call_attaches_without_resetting_the_guardian_pty() -> anyhow::Result<()> {
+    let workspace = TempDir::new()?;
+    let nested = workspace.path().join("nested");
+    std::fs::create_dir_all(&nested)?;
+    let runtime_dir = TempDir::new()?;
+    let socket = runtime_dir.path().join("winxd.sock");
+    let mut daemon = spawn_daemon(&socket)?;
+    let client = DaemonClient::new(&socket);
+    wait_for_daemon(&client).await?;
+
+    let thread_id = "attach_or_create";
+    let first = initialize_daemon_session(&socket, workspace.path(), thread_id).await?;
+    let runtime = DaemonShellRuntime::new(&socket);
+    tools::bash_command::handle_tool_call_with_runtime(
+        &runtime,
+        &first,
+        command(thread_id, format!("cd {}", nested.display()), 2.0),
+    )
+    .await?;
+    let before = client.session_info(thread_id).await?;
+
+    let second = Arc::new(Mutex::new(None::<BashState>));
+    let response = tools::initialize::handle_tool_call_with_runtime(
+        &runtime,
+        &second,
+        Initialize {
+            init_type: InitializeType::FirstCall,
+            mode_name: ModeName::Wcgw,
+            any_workspace_path: workspace.path().to_string_lossy().into_owned(),
+            thread_id: thread_id.to_string(),
+            code_writer_config: None,
+            initial_files_to_read: vec![],
+            task_id_to_resume: String::new(),
+        },
+    )
+    .await?;
+    let after = client.session_info(thread_id).await?;
+    assert!(response.contains("Attached to the existing durable session"), "{response}");
+    assert_eq!(before.shell_pid, after.shell_pid, "reattach replaced the PTY owner");
+    assert_eq!(Path::new(&after.cwd).canonicalize()?, nested.canonicalize()?);
+    assert_eq!(
+        second.lock().await.as_ref().map(|state| state.cwd.clone()),
+        Some(nested.canonicalize()?)
+    );
+
+    assert!(client.kill_session(thread_id).await?);
     daemon.kill()?;
     let _ = daemon.wait()?;
     Ok(())
@@ -374,7 +484,7 @@ async fn manual_prune_removes_idle_but_preserves_active_sessions() -> anyhow::Re
     let workspace = TempDir::new()?;
     let runtime_dir = TempDir::new()?;
     let socket = runtime_dir.path().join("winxd.sock");
-    let mut daemon = spawn_daemon_with_limits(&socket, 4, 86_400)?;
+    let mut daemon = spawn_daemon_with_limits(&socket, 4, 86_400, 86_400)?;
     let client = DaemonClient::new(&socket);
     wait_for_daemon(&client).await?;
 

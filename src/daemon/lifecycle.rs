@@ -7,13 +7,14 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use super::client::DaemonClient;
-use super::protocol::{HelloResult, PruneResult};
+use super::protocol::{HelloResult, PruneResult, SessionInfo};
 use crate::errors::{Result, WinxError};
 use crate::runtime::ensure_daemon_at;
 
 const DEFAULT_MAX_GUARDIANS: usize = 32;
 const MAX_CONFIGURED_GUARDIANS: usize = 4096;
 const DEFAULT_IDLE_TTL_SECS: u64 = 24 * 60 * 60;
+const DEFAULT_UNUSED_IDLE_TTL_SECS: u64 = 30 * 60;
 const DEFAULT_SWEEP_INTERVAL_SECS: u64 = 60;
 const MAX_SWEEP_INTERVAL_SECS: u64 = 24 * 60 * 60;
 const GUARDIAN_STARTUP_GRACE: Duration = Duration::from_secs(30);
@@ -24,6 +25,7 @@ const TERMINATE_POLL: Duration = Duration::from_millis(25);
 pub(crate) struct GuardianLimits {
     max_guardians: usize,
     idle_ttl: Option<Duration>,
+    unused_idle_ttl: Option<Duration>,
     sweep_interval: Duration,
 }
 
@@ -37,6 +39,12 @@ impl GuardianLimits {
         )?;
         let idle_ttl_secs =
             parse_u64_env("WINX_SESSION_IDLE_TTL_SECS", DEFAULT_IDLE_TTL_SECS, 0, u64::MAX)?;
+        let unused_idle_ttl_secs = parse_u64_env(
+            "WINX_UNUSED_SESSION_IDLE_TTL_SECS",
+            DEFAULT_UNUSED_IDLE_TTL_SECS,
+            0,
+            u64::MAX,
+        )?;
         let sweep_interval_secs = parse_u64_env(
             "WINX_GUARDIAN_SWEEP_INTERVAL_SECS",
             DEFAULT_SWEEP_INTERVAL_SECS,
@@ -46,13 +54,19 @@ impl GuardianLimits {
         Ok(Self {
             max_guardians,
             idle_ttl: (idle_ttl_secs > 0).then(|| Duration::from_secs(idle_ttl_secs)),
+            unused_idle_ttl: (unused_idle_ttl_secs > 0)
+                .then(|| Duration::from_secs(unused_idle_ttl_secs)),
             sweep_interval: Duration::from_secs(sweep_interval_secs),
         })
     }
 
     #[cfg(test)]
-    fn new(max_guardians: usize, idle_ttl: Option<Duration>) -> Self {
-        Self { max_guardians, idle_ttl, sweep_interval: Duration::from_secs(1) }
+    fn new(
+        max_guardians: usize,
+        idle_ttl: Option<Duration>,
+        unused_idle_ttl: Option<Duration>,
+    ) -> Self {
+        Self { max_guardians, idle_ttl, unused_idle_ttl, sweep_interval: Duration::from_secs(1) }
     }
 }
 
@@ -62,6 +76,23 @@ struct GuardianMetadata {
     guardian_pid: u32,
     created_at_unix_ms: u64,
     last_seen_unix_ms: u64,
+    /// Distinguishes a real adapter request from passive metadata reconstruction.
+    #[serde(default)]
+    activity_observed: bool,
+}
+
+#[derive(Debug)]
+struct GuardianObservation {
+    socket: PathBuf,
+    hello: HelloResult,
+    metadata: Option<GuardianMetadata>,
+    sessions: Vec<super::protocol::SessionInfo>,
+    thread_id: String,
+    active: bool,
+    ever_ran_command: bool,
+    created_at_unix_ms: u64,
+    last_activity_unix_ms: u64,
+    starting: bool,
 }
 
 #[derive(Debug)]
@@ -98,7 +129,7 @@ impl GuardianLifecycle {
     }
 
     pub(crate) fn spawn_sweeper(self: Arc<Self>) {
-        if self.limits.idle_ttl.is_none() {
+        if self.limits.idle_ttl.is_none() && self.limits.unused_idle_ttl.is_none() {
             return;
         }
         tokio::spawn(async move {
@@ -130,11 +161,17 @@ impl GuardianLifecycle {
         // session. This keeps the hard quota useful without requiring manual
         // intervention for ordinary churn.
         let _ = self.prune_inner(None).await?;
-        let live = self.live_guardian_count().await?;
+        let mut live = self.live_guardian_count().await?;
+        while live >= self.limits.max_guardians {
+            if !self.reclaim_oldest_unused_guardian().await? {
+                break;
+            }
+            live = self.live_guardian_count().await?;
+        }
         if live >= self.limits.max_guardians {
             return Err(WinxError::ConfigurationError(format!(
-                "Winx guardian limit reached ({live}/{}). Reuse or kill an existing session, run \
-                 `winx-code-agent prune`, or raise WINX_MAX_GUARDIANS.",
+                "Winx guardian limit reached ({live}/{}). Reuse or kill an existing session, \
+                 run `winx-code-agent prune --idle-seconds 0`, or raise WINX_MAX_GUARDIANS.",
                 self.limits.max_guardians
             )));
         }
@@ -174,102 +211,51 @@ impl GuardianLifecycle {
     }
 
     async fn prune_inner(&self, idle_seconds: Option<u64>) -> Result<PruneResult> {
-        let idle_ttl = idle_seconds.map(Duration::from_secs).or(self.limits.idle_ttl);
         let now = unix_ms();
         let mut result = PruneResult::default();
 
         for socket in guardian_sockets(&self.guardian_dir).await? {
-            let metadata = self.read_metadata(&socket).await;
-            let Some(hello) = hello_with_retry(&socket).await else {
-                if metadata.as_ref().is_some_and(|meta| process_exists(meta.guardian_pid)) {
-                    result.unreachable_guardian_count += 1;
-                    continue;
-                }
-                self.remove_artifacts(&socket).await;
-                result.stale_socket_count += 1;
+            let Some(observation) = self.inspect_guardian(&socket, now, &mut result).await? else {
                 continue;
             };
 
-            let sessions = match DaemonClient::new(&socket).list_sessions().await {
-                Ok(sessions) => sessions,
-                Err(error) => {
-                    tracing::warn!(socket = %socket.display(), %error, "cannot inspect guardian");
-                    result.unreachable_guardian_count += 1;
-                    continue;
-                }
-            };
-            let thread_id = sessions
-                .first()
-                .map(|session| session.thread_id.clone())
-                .or_else(|| metadata.as_ref().map(|meta| meta.thread_id.clone()))
-                .unwrap_or_else(|| socket.display().to_string());
-
-            // Guardians from releases before lifecycle metadata have no reliable
-            // last-activity timestamp. On automatic/default pruning, seed them at
-            // first observation instead of treating the socket creation time as
-            // idle time and unexpectedly removing a recently used legacy session.
-            // An explicit `--idle-seconds` override remains authoritative.
-            if metadata.is_none() && !sessions.is_empty() && idle_seconds.is_none() {
-                self.record_observed(&socket, &thread_id, hello.daemon_pid, None).await?;
+            if observation.starting {
+                self.record_observed(
+                    &observation.socket,
+                    &observation.thread_id,
+                    observation.hello.daemon_pid,
+                    observation.metadata.as_ref(),
+                    observation.created_at_unix_ms,
+                    observation.last_activity_unix_ms,
+                )
+                .await?;
                 continue;
             }
 
-            let active = sessions
-                .iter()
-                .any(|session| session.running || !session.background_command_ids.is_empty());
-            let socket_timestamp = socket_modified_unix_ms(&socket);
-            let created_at = metadata
-                .as_ref()
-                .map(|meta| meta.created_at_unix_ms)
-                .or(socket_timestamp)
-                .unwrap_or(now);
-            let last_seen = metadata
-                .as_ref()
-                .map(|meta| meta.last_seen_unix_ms)
-                .or(socket_timestamp)
-                .unwrap_or(now);
-            let expired =
-                idle_ttl.is_some_and(|ttl| now.saturating_sub(last_seen) >= duration_ms(ttl));
-            let starting = sessions.is_empty()
-                && now.saturating_sub(created_at) < duration_ms(GUARDIAN_STARTUP_GRACE);
+            let idle_ttl =
+                idle_seconds.map(Duration::from_secs).or(if observation.ever_ran_command {
+                    self.limits.idle_ttl
+                } else {
+                    self.limits.unused_idle_ttl
+                });
+            let expired = idle_ttl.is_some_and(|ttl| {
+                now.saturating_sub(observation.last_activity_unix_ms) >= duration_ms(ttl)
+            });
 
-            // The control plane spawns a guardian immediately before relaying its
-            // first configure call. A concurrent manual/automatic prune can observe
-            // that brief empty state, so preserve young guardians until the relay
-            // either initializes them or the startup grace expires.
-            if starting {
-                self.record_observed(&socket, &thread_id, hello.daemon_pid, metadata.as_ref())
-                    .await?;
-                continue;
-            }
-
-            if sessions.is_empty() || (!active && expired) {
-                let mut safe_to_terminate = true;
-                for session in &sessions {
-                    if let Err(error) =
-                        DaemonClient::new(&socket).kill_session(&session.thread_id).await
-                    {
-                        tracing::warn!(
-                            socket = %socket.display(),
-                            session = %session.thread_id,
-                            %error,
-                            "refusing to terminate guardian after session cleanup failed"
-                        );
-                        result.unreachable_guardian_count += 1;
-                        safe_to_terminate = false;
-                        break;
-                    }
-                }
-                if !safe_to_terminate {
-                    continue;
-                }
-                self.terminate_guardian_with_pid(&socket, hello.daemon_pid).await?;
-                result.removed_thread_ids.push(thread_id);
+            if observation.sessions.is_empty() || (!observation.active && expired) {
+                let _ = self.terminate_observation(&observation, &mut result).await?;
             } else {
-                self.record_observed(&socket, &thread_id, hello.daemon_pid, metadata.as_ref())
-                    .await?;
-                if active && expired {
-                    result.skipped_active_thread_ids.push(thread_id);
+                self.record_observed(
+                    &observation.socket,
+                    &observation.thread_id,
+                    observation.hello.daemon_pid,
+                    observation.metadata.as_ref(),
+                    observation.created_at_unix_ms,
+                    observation.last_activity_unix_ms,
+                )
+                .await?;
+                if observation.active && expired {
+                    result.skipped_active_thread_ids.push(observation.thread_id);
                 }
             }
         }
@@ -277,6 +263,110 @@ impl GuardianLifecycle {
         result.removed_thread_ids.sort();
         result.skipped_active_thread_ids.sort();
         Ok(result)
+    }
+
+    async fn inspect_guardian(
+        &self,
+        socket: &Path,
+        now: u64,
+        result: &mut PruneResult,
+    ) -> Result<Option<GuardianObservation>> {
+        let metadata = self.read_metadata(socket).await;
+        let Some(hello) = hello_with_retry(socket).await else {
+            if metadata.as_ref().is_some_and(|meta| process_exists(meta.guardian_pid)) {
+                result.unreachable_guardian_count += 1;
+                return Ok(None);
+            }
+            self.remove_artifacts(socket).await;
+            result.stale_socket_count += 1;
+            return Ok(None);
+        };
+
+        let sessions = match DaemonClient::new(socket).list_sessions().await {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                tracing::warn!(socket = %socket.display(), %error, "cannot inspect guardian");
+                result.unreachable_guardian_count += 1;
+                return Ok(None);
+            }
+        };
+        let thread_id = sessions
+            .first()
+            .map(|session| session.thread_id.clone())
+            .or_else(|| metadata.as_ref().map(|meta| meta.thread_id.clone()))
+            .unwrap_or_else(|| socket.display().to_string());
+        let active = sessions
+            .iter()
+            .any(|session| session.running || !session.background_command_ids.is_empty());
+        let socket_timestamp = socket_modified_unix_ms(socket);
+        let (ever_ran_command, created_at_unix_ms, last_activity_unix_ms) =
+            derive_activity_clock(&sessions, metadata.as_ref(), socket_timestamp, now);
+        let starting = sessions.is_empty()
+            && now.saturating_sub(created_at_unix_ms) < duration_ms(GUARDIAN_STARTUP_GRACE);
+
+        Ok(Some(GuardianObservation {
+            socket: socket.to_path_buf(),
+            hello,
+            metadata,
+            sessions,
+            thread_id,
+            active,
+            ever_ran_command,
+            created_at_unix_ms,
+            last_activity_unix_ms,
+            starting,
+        }))
+    }
+
+    async fn terminate_observation(
+        &self,
+        observation: &GuardianObservation,
+        result: &mut PruneResult,
+    ) -> Result<bool> {
+        for session in &observation.sessions {
+            if let Err(error) =
+                DaemonClient::new(&observation.socket).kill_session(&session.thread_id).await
+            {
+                tracing::warn!(
+                    socket = %observation.socket.display(),
+                    session = %session.thread_id,
+                    %error,
+                    "refusing to terminate guardian after session cleanup failed"
+                );
+                result.unreachable_guardian_count += 1;
+                return Ok(false);
+            }
+        }
+        self.terminate_guardian_with_pid(&observation.socket, observation.hello.daemon_pid).await?;
+        result.removed_thread_ids.push(observation.thread_id.clone());
+        Ok(true)
+    }
+
+    async fn reclaim_oldest_unused_guardian(&self) -> Result<bool> {
+        let now = unix_ms();
+        let mut scan = PruneResult::default();
+        let mut candidates = Vec::new();
+        for socket in guardian_sockets(&self.guardian_dir).await? {
+            let Some(observation) = self.inspect_guardian(&socket, now, &mut scan).await? else {
+                continue;
+            };
+            if !observation.active && !observation.ever_ran_command && !observation.starting {
+                candidates.push(observation);
+            }
+        }
+        candidates.sort_by_key(|observation| observation.last_activity_unix_ms);
+
+        for observation in candidates {
+            let mut reclaimed = PruneResult::default();
+            if self.terminate_observation(&observation, &mut reclaimed).await? {
+                tracing::warn!(
+                    session = %observation.thread_id,
+                    "reclaimed an unused guardian under quota pressure"
+                );
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn live_guardian_count(&self) -> Result<usize> {
@@ -326,6 +416,7 @@ impl GuardianLifecycle {
             guardian_pid,
             created_at_unix_ms: existing.as_ref().map_or(now, |meta| meta.created_at_unix_ms),
             last_seen_unix_ms: now,
+            activity_observed: true,
         };
         self.write_metadata(socket, &metadata).await
     }
@@ -336,18 +427,23 @@ impl GuardianLifecycle {
         thread_id: &str,
         guardian_pid: u32,
         existing: Option<&GuardianMetadata>,
+        created_at_unix_ms: u64,
+        last_seen_unix_ms: u64,
     ) -> Result<()> {
-        if existing
-            .is_some_and(|meta| meta.thread_id == thread_id && meta.guardian_pid == guardian_pid)
-        {
+        if existing.is_some_and(|meta| {
+            meta.thread_id == thread_id
+                && meta.guardian_pid == guardian_pid
+                && meta.created_at_unix_ms == created_at_unix_ms
+                && meta.last_seen_unix_ms == last_seen_unix_ms
+        }) {
             return Ok(());
         }
-        let now = unix_ms();
         let metadata = GuardianMetadata {
             thread_id: thread_id.to_string(),
             guardian_pid,
-            created_at_unix_ms: existing.map_or(now, |meta| meta.created_at_unix_ms),
-            last_seen_unix_ms: existing.map_or(now, |meta| meta.last_seen_unix_ms),
+            created_at_unix_ms,
+            last_seen_unix_ms,
+            activity_observed: existing.is_some_and(|meta| meta.activity_observed),
         };
         self.write_metadata(socket, &metadata).await
     }
@@ -442,6 +538,51 @@ fn metadata_path(socket: &Path) -> PathBuf {
     socket.with_extension("json")
 }
 
+fn derive_activity_clock(
+    sessions: &[SessionInfo],
+    metadata: Option<&GuardianMetadata>,
+    socket_timestamp: Option<u64>,
+    now: u64,
+) -> (bool, u64, u64) {
+    let ever_ran_command = sessions.iter().any(|session| {
+        session.ever_ran_command
+            || session.command_id.is_some()
+            || session.last_command_at_unix_ms.is_some()
+            || !session.background_command_ids.is_empty()
+    });
+    let guardian_created = sessions.iter().filter_map(|session| session.created_at_unix_ms).min();
+    let guardian_activity =
+        sessions.iter().filter_map(|session| session.last_activity_unix_ms).max();
+    let created_at_unix_ms = guardian_created
+        .or(socket_timestamp)
+        .or_else(|| metadata.map(|meta| meta.created_at_unix_ms))
+        .unwrap_or(now);
+    let last_activity_unix_ms = guardian_activity.unwrap_or_else(|| {
+        if ever_ran_command {
+            // Legacy guardians cannot report activity. Preserve a used shell
+            // unless the control plane has observed a real request since the
+            // metadata cache was created.
+            metadata.map_or(now, |meta| meta.last_seen_unix_ms)
+        } else {
+            // For a never-used legacy guardian the socket birth time is the
+            // best available source. Prefer it over tmpfs metadata that may
+            // have been recreated en masse when winxd restarted.
+            let observed_activity = metadata
+                .filter(|meta| {
+                    meta.activity_observed || meta.last_seen_unix_ms > meta.created_at_unix_ms
+                })
+                .map(|meta| meta.last_seen_unix_ms);
+            socket_timestamp
+                .into_iter()
+                .chain(observed_activity)
+                .max()
+                .or_else(|| metadata.map(|meta| meta.created_at_unix_ms))
+                .unwrap_or(created_at_unix_ms)
+        }
+    });
+    (ever_ran_command, created_at_unix_ms, last_activity_unix_ms)
+}
+
 fn socket_modified_unix_ms(socket: &Path) -> Option<u64> {
     std::fs::metadata(socket)
         .ok()?
@@ -496,9 +637,96 @@ fn parse_u64_env(name: &str, default: u64, min: u64, max: u64) -> Result<u64> {
 mod tests {
     use super::*;
 
+    fn session_info() -> SessionInfo {
+        SessionInfo {
+            thread_id: "legacy".to_string(),
+            cwd: "/tmp".to_string(),
+            shell_pid: Some(7),
+            command_id: None,
+            running: false,
+            background_command_ids: Vec::new(),
+            created_at_unix_ms: None,
+            last_activity_unix_ms: None,
+            last_command_at_unix_ms: None,
+            ever_ran_command: false,
+        }
+    }
+
+    #[test]
+    fn legacy_unused_session_prefers_socket_age_over_reseeded_metadata() {
+        let sessions = [session_info()];
+        let metadata = GuardianMetadata {
+            thread_id: "legacy".to_string(),
+            guardian_pid: 7,
+            created_at_unix_ms: 900_000,
+            last_seen_unix_ms: 900_000,
+            activity_observed: false,
+        };
+        let (ever_ran, created, last_activity) =
+            derive_activity_clock(&sessions, Some(&metadata), Some(100_000), 1_000_000);
+        assert!(!ever_ran);
+        assert_eq!(created, 100_000);
+        assert_eq!(last_activity, 100_000);
+    }
+
+    #[test]
+    fn legacy_unused_session_keeps_real_post_seed_activity() {
+        let sessions = [session_info()];
+        let metadata = GuardianMetadata {
+            thread_id: "legacy".to_string(),
+            guardian_pid: 7,
+            created_at_unix_ms: 100_000,
+            last_seen_unix_ms: 850_000,
+            activity_observed: true,
+        };
+        let (ever_ran, _, last_activity) =
+            derive_activity_clock(&sessions, Some(&metadata), Some(100_000), 1_000_000);
+        assert!(!ever_ran);
+        assert_eq!(last_activity, 850_000);
+    }
+
+    #[test]
+    fn legacy_used_session_uses_control_observation_as_safe_fallback() {
+        let mut session = session_info();
+        session.command_id = Some("command".to_string());
+        let metadata = GuardianMetadata {
+            thread_id: "legacy".to_string(),
+            guardian_pid: 7,
+            created_at_unix_ms: 100_000,
+            last_seen_unix_ms: 850_000,
+            activity_observed: true,
+        };
+        let (ever_ran, _, last_activity) =
+            derive_activity_clock(&[session], Some(&metadata), Some(100_000), 1_000_000);
+        assert!(ever_ran);
+        assert_eq!(last_activity, 850_000);
+    }
+
+    #[test]
+    fn guardian_activity_clock_overrides_tmpfs_metadata() {
+        let mut session = session_info();
+        session.created_at_unix_ms = Some(200_000);
+        session.last_activity_unix_ms = Some(700_000);
+        session.last_command_at_unix_ms = Some(650_000);
+        session.ever_ran_command = true;
+        let metadata = GuardianMetadata {
+            thread_id: "legacy".to_string(),
+            guardian_pid: 7,
+            created_at_unix_ms: 900_000,
+            last_seen_unix_ms: 900_000,
+            activity_observed: false,
+        };
+        let (ever_ran, created, last_activity) =
+            derive_activity_clock(&[session], Some(&metadata), Some(100_000), 1_000_000);
+        assert!(ever_ran);
+        assert_eq!(created, 200_000);
+        assert_eq!(last_activity, 700_000);
+    }
+
     #[test]
     fn guardian_socket_is_stable_and_workspace_local() {
-        let limits = GuardianLimits::new(2, Some(Duration::from_secs(60)));
+        let limits =
+            GuardianLimits::new(2, Some(Duration::from_secs(60)), Some(Duration::from_secs(10)));
         let lifecycle = GuardianLifecycle::new(
             PathBuf::from("/tmp/winx-test-guardians"),
             PathBuf::from("/bin/false"),

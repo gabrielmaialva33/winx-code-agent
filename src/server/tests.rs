@@ -43,7 +43,7 @@ mod session_registry_tests {
             _bash_state: &'a mut BashState,
             _transition: crate::runtime::ShellSessionTransition,
         ) -> crate::runtime::ShellRuntimeConfigureFuture<'a> {
-            Box::pin(async { Ok(None) })
+            Box::pin(async { Ok(crate::runtime::ShellSessionConfiguration::default()) })
         }
 
         fn run_action<'a>(
