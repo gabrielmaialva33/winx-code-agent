@@ -137,7 +137,11 @@ jobs:
           mkdir -p dist
           sbom="$(find . -maxdepth 2 -type f \( -name '*.cdx.json' -o -name 'bom.json' \) -print -quit)"
           test -n "$sbom"
-          cp "$sbom" dist/winx-code-agent.cdx.json
+          # actions/attest requires bomFormat + specVersion + serialNumber, but
+          # cargo-cyclonedx omits serialNumber. Inject a deterministic UUIDv5
+          # derived from repo+commit so the SBOM stays reproducible.
+          serial="urn:uuid:$(uuidgen --sha1 --namespace @url --name "https://github.com/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}")"
+          jq --arg serial "$serial" '.serialNumber = $serial' "$sbom" > dist/winx-code-agent.cdx.json
           (cd dist && sha256sum winx-code-agent.cdx.json > winx-code-agent.cdx.json.sha256)
 
       - name: Upload SBOM
