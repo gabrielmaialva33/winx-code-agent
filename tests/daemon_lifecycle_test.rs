@@ -468,10 +468,12 @@ async fn repeated_first_call_attaches_without_resetting_the_guardian_pty() -> an
     assert!(response.contains("Attached to the existing durable session"), "{response}");
     assert_eq!(before.shell_pid, after.shell_pid, "reattach replaced the PTY owner");
     assert_eq!(Path::new(&after.cwd).canonicalize()?, nested.canonicalize()?);
-    assert_eq!(
-        second.lock().await.as_ref().map(|state| state.cwd.clone()),
-        Some(nested.canonicalize()?)
-    );
+    // The guardian snapshot reports the shell's logical cwd; on macOS the
+    // tempdir sits behind the /var -> /private/var symlink, so compare
+    // canonical forms on both sides.
+    let attached_cwd =
+        second.lock().await.as_ref().map(|state| state.cwd.canonicalize()).transpose()?;
+    assert_eq!(attached_cwd, Some(nested.canonicalize()?));
 
     assert!(client.kill_session(thread_id).await?);
     daemon.kill()?;
