@@ -112,6 +112,15 @@ async fn post_json_with_session_as(
     Ok(String::from_utf8_lossy(&response).into_owned())
 }
 
+async fn get_path(address: std::net::SocketAddr, path: &str) -> anyhow::Result<String> {
+    let mut stream = TcpStream::connect(address).await?;
+    let request = format!("GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n");
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response)).await??;
+    Ok(String::from_utf8_lossy(&response).into_owned())
+}
+
 fn response_header(response: &str, name: &str) -> Option<String> {
     response
         .lines()
@@ -169,15 +178,16 @@ async fn initialize_modern_as(
     post_json_as(address, "2026-07-28", "tools/call", &request.to_string(), token).await
 }
 
-async fn pwd_as(
+async fn bash_as(
     address: std::net::SocketAddr,
     token: &str,
     thread_id: &str,
     client_name: &str,
+    command: &str,
 ) -> anyhow::Result<String> {
     let request = serde_json::json!({
         "jsonrpc": "2.0",
-        "id": format!("pwd-{client_name}"),
+        "id": format!("bash-{client_name}"),
         "method": "tools/call",
         "params": {
             "_meta": modern_request_meta(client_name, false),
@@ -185,7 +195,7 @@ async fn pwd_as(
             "arguments": {
                 "action_json": {
                     "type": "command",
-                    "command": "pwd",
+                    "command": command,
                     "is_background": false
                 },
                 "thread_id": thread_id
@@ -193,6 +203,46 @@ async fn pwd_as(
         }
     });
     post_json_as(address, "2026-07-28", "tools/call", &request.to_string(), token).await
+}
+
+async fn pwd_as(
+    address: std::net::SocketAddr,
+    token: &str,
+    thread_id: &str,
+    client_name: &str,
+) -> anyhow::Result<String> {
+    bash_as(address, token, thread_id, client_name, "pwd").await
+}
+
+fn initialized_thread_id(response: &str) -> anyhow::Result<String> {
+    let response = response_json(response)?;
+    let text = response["result"]["content"]
+        .as_array()
+        .and_then(|content| content.iter().find_map(|item| item["text"].as_str()))
+        .ok_or_else(|| anyhow::anyhow!("Initialize response has no text content: {response}"))?;
+    text.lines()
+        .find_map(|line| {
+            line.strip_prefix("Use thread_id=")
+                .and_then(|value| value.strip_suffix(" for all winx tool calls."))
+                .map(str::to_string)
+        })
+        .ok_or_else(|| anyhow::anyhow!("Initialize response has no thread_id instruction: {text}"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn oauth_well_known_probes_return_404_without_bearer_auth() -> anyhow::Result<()> {
+    let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    let _server = spawn_single_token_server(address)?;
+    wait_until_listening(address).await?;
+
+    for path in ["/.well-known/oauth-protected-resource", "/.well-known/openid-configuration"] {
+        let response = get_path(address, path).await?;
+        assert!(response.starts_with("HTTP/1.1 404"), "{path}: {response}");
+    }
+    let protected = get_path(address, "/mcp").await?;
+    assert!(protected.starts_with("HTTP/1.1 401"), "{protected}");
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -307,6 +357,7 @@ async fn modern_bash_command_task_completes_through_tasks_get() -> anyhow::Resul
             .await
             .map_err(|error| anyhow::anyhow!("Initialize tool call failed: {error}"))?;
     assert!(initialize_response.starts_with("HTTP/1.1 200"), "{initialize_response}");
+    let initialized_thread = initialized_thread_id(&initialize_response)?;
 
     let call = serde_json::json!({
         "jsonrpc": "2.0",
@@ -321,7 +372,7 @@ async fn modern_bash_command_task_completes_through_tasks_get() -> anyhow::Resul
                     "command": "printf modern-task-output",
                     "is_background": false
                 },
-                "thread_id": "modern_task_test"
+                "thread_id": initialized_thread
             }
         }
     });
@@ -362,6 +413,55 @@ async fn modern_bash_command_task_completes_through_tasks_get() -> anyhow::Resul
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn http_workspace_affinity_reuses_one_session_for_unstable_thread_ids() -> anyhow::Result<()>
+{
+    let workspace = tempfile::tempdir()?;
+    let nested = workspace.path().join("nested");
+    std::fs::create_dir_all(&nested)?;
+    let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    let _server = spawn_single_token_server(address)?;
+    wait_until_listening(address).await?;
+
+    let first = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "release_02333",
+        "workspace-affinity-first",
+    )
+    .await?;
+    let first_thread = initialized_thread_id(&first)?;
+    assert!(first_thread.starts_with("ws_"), "{first_thread}");
+
+    let changed = bash_as(
+        address,
+        TEST_TOKEN,
+        &first_thread,
+        "workspace-affinity-cd",
+        &format!("cd {}", nested.display()),
+    )
+    .await?;
+    assert!(changed.starts_with("HTTP/1.1 200"), "{changed}");
+
+    let second = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "release_0_2_333",
+        "workspace-affinity-second",
+    )
+    .await?;
+    let second_thread = initialized_thread_id(&second)?;
+    assert_eq!(first_thread, second_thread);
+    assert!(second.contains("Attached to the existing durable session"), "{second}");
+
+    let pwd = pwd_as(address, TEST_TOKEN, &second_thread, "workspace-affinity-pwd").await?;
+    assert!(pwd.contains(&nested.display().to_string()), "{pwd}");
+    Ok(())
+}
+
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn http_principals_isolate_the_same_external_thread_id() -> anyhow::Result<()> {
@@ -388,7 +488,15 @@ async fn http_principals_isolate_the_same_external_thread_id() -> anyhow::Result
     let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
     let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
     let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
-        .args(["serve", "--http", "--bind", &address.to_string(), "--principal-config"])
+        .args([
+            "serve",
+            "--http",
+            "--bind",
+            &address.to_string(),
+            "--session-affinity",
+            "thread",
+            "--principal-config",
+        ])
         .arg(&principal_config)
         .env("WINX_EMBEDDED", "1")
         .stdin(Stdio::null())

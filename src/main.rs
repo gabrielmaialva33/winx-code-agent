@@ -75,6 +75,16 @@ enum Commands {
         #[arg(long)]
         allow_non_loopback: bool,
 
+        /// Session key used by remote first-call initialization. `workspace`
+        /// reuses one durable shell per principal/project; `thread` trusts the
+        /// caller's `thread_id` and requires explicit lifecycle management.
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = winx_code_agent::config::HttpSessionAffinity::Workspace
+        )]
+        session_affinity: winx_code_agent::config::HttpSessionAffinity,
+
         /// Maximum HTTP requests executing concurrently.
         #[arg(
             long,
@@ -203,6 +213,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             principal_config,
             allow_weak_token,
             allow_non_loopback,
+            session_affinity,
             max_concurrency,
             requests_per_minute,
             allowed_host,
@@ -215,6 +226,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 principal_config,
                 allow_weak_token,
                 allow_non_loopback,
+                session_affinity,
                 max_concurrency,
                 requests_per_minute,
                 allowed_host,
@@ -385,6 +397,7 @@ async fn run_http_server(
     principal_config: Option<PathBuf>,
     allow_weak_token: bool,
     allow_non_loopback: bool,
+    session_affinity: winx_code_agent::config::HttpSessionAffinity,
     max_concurrency: usize,
     requests_per_minute: u32,
     allowed_hosts: Vec<String>,
@@ -405,6 +418,7 @@ async fn run_http_server(
         extra_hosts: allowed_hosts,
         allow_query_token,
         allow_non_loopback,
+        session_affinity,
         max_concurrency,
         requests_per_minute,
     };

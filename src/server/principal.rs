@@ -1,4 +1,5 @@
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 use axum::http::request::Parts;
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
@@ -7,7 +8,7 @@ use rmcp::ErrorData as McpError;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::config::HttpPrincipal;
+use crate::config::{HttpPrincipal, HttpSessionAffinity};
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::generate_thread_id;
 use crate::types::{normalize_thread_id, MAX_NORMALIZED_THREAD_ID_BYTES};
@@ -64,9 +65,21 @@ pub(super) fn principal_from_context(
         .cloned()
 }
 
+pub(super) fn session_affinity_from_context(
+    context: &RequestContext<RoleServer>,
+) -> HttpSessionAffinity {
+    context
+        .extensions
+        .get::<Parts>()
+        .and_then(|parts| parts.extensions.get::<HttpSessionAffinity>())
+        .copied()
+        .unwrap_or(HttpSessionAffinity::Thread)
+}
+
 pub(super) fn scope_tool_request(
     mut request: CallToolRequestParams,
     principal: Option<HttpPrincipal>,
+    session_affinity: HttpSessionAffinity,
 ) -> Result<(CallToolRequestParams, RequestScope)> {
     let Some(principal) = principal else {
         return Ok((request, RequestScope::default()));
@@ -80,7 +93,11 @@ pub(super) fn scope_tool_request(
     let arguments = request.arguments.get_or_insert_default();
     let supplied = arguments.get("thread_id").and_then(Value::as_str).unwrap_or_default();
     let normalized = normalize_thread_id(supplied);
-    let external = if request.name == "Initialize" && normalized.is_empty() {
+    let first_call = request.name == "Initialize"
+        && arguments.get("type").and_then(Value::as_str).is_none_or(|kind| kind == "first_call");
+    let external = if first_call && session_affinity == HttpSessionAffinity::Workspace {
+        workspace_affinity_thread_id(arguments)
+    } else if first_call && normalized.is_empty() {
         generate_thread_id()
     } else {
         normalized
@@ -101,6 +118,57 @@ pub(super) fn new_task_id(principal: Option<&HttpPrincipal>, random: u128) -> St
         Some(principal) => format!("{}{:032x}", principal.task_prefix(), random),
         None => format!("task_{random:032x}"),
     }
+}
+
+fn workspace_affinity_thread_id(arguments: &serde_json::Map<String, Value>) -> String {
+    let workspace =
+        arguments.get("any_workspace_path").and_then(Value::as_str).unwrap_or_default().trim();
+    let resume =
+        arguments.get("task_id_to_resume").and_then(Value::as_str).unwrap_or_default().trim();
+
+    let (label, identity) = if workspace.is_empty() {
+        if resume.is_empty() {
+            ("scratch".to_string(), "scratch".to_string())
+        } else {
+            ("resume".to_string(), format!("resume:{resume}"))
+        }
+    } else {
+        let path = canonical_workspace_identity(workspace);
+        let label = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(workspace_label)
+            .filter(|label| !label.is_empty())
+            .unwrap_or_else(|| "workspace".to_string());
+        (label, path.to_string_lossy().into_owned())
+    };
+
+    let digest = Sha256::digest(identity.as_bytes());
+    let mut suffix = String::with_capacity(16);
+    for byte in &digest[..8] {
+        let _ = write!(suffix, "{byte:02x}");
+    }
+    normalize_thread_id(&format!("ws_{label}_{suffix}"))
+}
+
+fn canonical_workspace_identity(workspace: &str) -> PathBuf {
+    let expanded = crate::utils::path::expand_user(workspace);
+    let mut path = PathBuf::from(expanded);
+    if !path.is_absolute() {
+        path = std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(path);
+    }
+    if path.is_file() {
+        path = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+    }
+    path.canonicalize().unwrap_or(path)
+}
+
+fn workspace_label(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .take(24)
+        .collect()
 }
 
 fn tool_uses_thread_id(name: &str) -> bool {
@@ -173,7 +241,7 @@ fn unscope_json(value: &mut Value, replacements: &[(String, String)]) {
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::{new_task_id, scope_tool_request, task_belongs_to_principal};
-    use crate::config::HttpPrincipal;
+    use crate::config::{HttpPrincipal, HttpSessionAffinity};
     use rmcp::model::CallToolRequestParams;
     use serde_json::json;
 
@@ -186,8 +254,15 @@ mod tests {
         let request = CallToolRequestParams::new("BashCommand").with_arguments(
             json!({"thread_id": "shared", "command": "pwd"}).as_object().cloned().unwrap(),
         );
-        let (left, _) = scope_tool_request(request.clone(), Some(principal("left"))).expect("left");
-        let (right, _) = scope_tool_request(request, Some(principal("right"))).expect("right");
+        let (left, _) = scope_tool_request(
+            request.clone(),
+            Some(principal("left")),
+            HttpSessionAffinity::Thread,
+        )
+        .expect("left");
+        let (right, _) =
+            scope_tool_request(request, Some(principal("right")), HttpSessionAffinity::Thread)
+                .expect("right");
         assert_ne!(left.arguments, right.arguments);
     }
 
@@ -195,7 +270,9 @@ mod tests {
     fn long_scoped_thread_stays_within_filename_limit() {
         let request = CallToolRequestParams::new("Initialize")
             .with_arguments(json!({"thread_id": "x".repeat(500)}).as_object().cloned().unwrap());
-        let (request, _) = scope_tool_request(request, Some(principal("client"))).expect("scope");
+        let (request, _) =
+            scope_tool_request(request, Some(principal("client")), HttpSessionAffinity::Thread)
+                .expect("scope");
         let id = request
             .arguments
             .and_then(|arguments| {
@@ -203,6 +280,36 @@ mod tests {
             })
             .expect("thread id");
         assert!(id.len() <= crate::types::MAX_NORMALIZED_THREAD_ID_BYTES);
+    }
+
+    #[test]
+    fn workspace_affinity_ignores_unstable_first_call_thread_ids() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let make = |thread_id: &str| {
+            CallToolRequestParams::new("Initialize").with_arguments(
+                json!({
+                    "type": "first_call",
+                    "any_workspace_path": workspace.path(),
+                    "thread_id": thread_id
+                })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            )
+        };
+        let (first, _) = scope_tool_request(
+            make("release_02333"),
+            Some(principal("client")),
+            HttpSessionAffinity::Workspace,
+        )
+        .expect("first");
+        let (second, _) = scope_tool_request(
+            make("release_0_2_333"),
+            Some(principal("client")),
+            HttpSessionAffinity::Workspace,
+        )
+        .expect("second");
+        assert_eq!(first.arguments, second.arguments);
     }
 
     #[test]

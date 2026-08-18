@@ -26,7 +26,7 @@ use tokio::sync::{Mutex, Semaphore};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
-use crate::config::HttpPrincipal;
+use crate::config::{HttpPrincipal, HttpSessionAffinity};
 use crate::runtime::{configured_shell_runtime, ShellRuntime};
 use crate::server::{SessionIsolation, WinxService};
 
@@ -47,6 +47,7 @@ pub struct HttpServerOptions {
     pub extra_hosts: Vec<String>,
     pub allow_query_token: bool,
     pub allow_non_loopback: bool,
+    pub session_affinity: HttpSessionAffinity,
     pub max_concurrency: usize,
     pub requests_per_minute: u32,
 }
@@ -66,6 +67,7 @@ impl HttpServerOptions {
             extra_hosts,
             allow_query_token,
             allow_non_loopback: false,
+            session_affinity: HttpSessionAffinity::Workspace,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             requests_per_minute: DEFAULT_REQUESTS_PER_MINUTE,
         })
@@ -110,14 +112,19 @@ pub async fn start_http_server_with_runtime(
     let security = Arc::new(RouteSecurity {
         principals: Arc::new(options.principals),
         allow_query: options.allow_query_token,
+        session_affinity: options.session_affinity,
         concurrency: shared_concurrency,
         rate_limiter: shared_rate_limiter,
     });
-    let app = Router::new()
+    let protected_mcp = Router::new()
         .nest_service("/mcp", mcp_service)
         .layer(middleware::from_fn_with_state(security, enforce_route_security))
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
+    // Keep OAuth discovery probes and every unrelated path outside bearer auth.
+    // Winx does not advertise OAuth metadata, so those routes should be ordinary
+    // 404s instead of 401s that encourage clients to start a nonexistent flow.
+    let app = Router::new().merge(protected_mcp);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::warn!(
@@ -168,6 +175,7 @@ fn validate_options(options: &HttpServerOptions) -> Result<SocketAddr, BoxError>
 struct RouteSecurity {
     principals: Arc<Vec<HttpPrincipal>>,
     allow_query: bool,
+    session_affinity: HttpSessionAffinity,
     concurrency: Arc<Semaphore>,
     rate_limiter: Arc<RateLimiter>,
 }
@@ -178,6 +186,10 @@ async fn enforce_route_security(
     request: Request,
     next: Next,
 ) -> Response {
+    let path = request.uri().path();
+    if path != "/mcp" && !path.starts_with("/mcp/") {
+        return next.run(request).await;
+    }
     if !security.rate_limiter.allow(peer.ip()).await {
         return retry_response(StatusCode::TOO_MANY_REQUESTS, "request rate limit exceeded\n");
     }
@@ -199,6 +211,7 @@ async fn enforce_route_security(
 
     let mut request = request;
     request.extensions_mut().insert(principal);
+    request.extensions_mut().insert(security.session_affinity);
     let response = next.run(request).await;
     drop(permit);
     response
@@ -308,6 +321,7 @@ mod tests {
             extra_hosts: Vec::new(),
             allow_query_token: false,
             allow_non_loopback: false,
+            session_affinity: crate::config::HttpSessionAffinity::Workspace,
             max_concurrency: super::DEFAULT_MAX_CONCURRENCY,
             requests_per_minute: super::DEFAULT_REQUESTS_PER_MINUTE,
         }

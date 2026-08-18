@@ -10,6 +10,20 @@ use crate::errors::{Result, WinxError};
 /// Minimum accepted HTTP bearer-token length in bytes.
 pub const MIN_HTTP_TOKEN_BYTES: usize = 32;
 
+/// How remote `Initialize(first_call)` requests select a durable shell session.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
+pub enum HttpSessionAffinity {
+    /// Reuse one session per authenticated principal and canonical workspace.
+    /// This is the safe default for stateless clients whose generated thread IDs
+    /// are not stable across reconnects or conversations.
+    #[default]
+    Workspace,
+    /// Trust the external `thread_id` as the session key. This preserves parallel
+    /// shells in one workspace, but callers must supply a stable ID and clean up
+    /// abandoned sessions themselves.
+    Thread,
+}
+
 /// Parse common human-friendly boolean spellings.
 pub fn parse_bool(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {

@@ -12,7 +12,10 @@ use rmcp::{
 };
 
 use super::catalog::{server_icon_data_uri, winx_prompts, winx_tools};
-use super::principal::{principal_from_context, scope_tool_request, task_belongs_to_principal};
+use super::principal::{
+    principal_from_context, scope_tool_request, session_affinity_from_context,
+    task_belongs_to_principal,
+};
 use super::WinxService;
 
 impl ServerHandler for WinxService {
@@ -211,9 +214,11 @@ impl ServerHandler for WinxService {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let principal = principal_from_context(&context);
-        let (request, scope) = scope_tool_request(request, principal).map_err(|error| {
-            McpError::invalid_request(format!("Cannot scope remote request: {error}"), None)
-        })?;
+        let affinity = session_affinity_from_context(&context);
+        let (request, scope) =
+            scope_tool_request(request, principal, affinity).map_err(|error| {
+                McpError::invalid_request(format!("Cannot scope remote request: {error}"), None)
+            })?;
         if context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks())
             && Self::bash_task_is_eligible(&request)
         {
