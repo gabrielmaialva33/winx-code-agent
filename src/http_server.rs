@@ -190,6 +190,7 @@ async fn enforce_route_security(
     if path != "/mcp" && !path.starts_with("/mcp/") {
         return next.run(request).await;
     }
+    let started = Instant::now();
     if !security.rate_limiter.allow(peer.ip()).await {
         return retry_response(StatusCode::TOO_MANY_REQUESTS, "request rate limit exceeded\n");
     }
@@ -209,11 +210,25 @@ async fn enforce_route_security(
         return (StatusCode::UNAUTHORIZED, "missing or invalid token\n").into_response();
     };
 
+    let principal_name = principal.name().to_string();
+    let method = request.method().clone();
     let mut request = request;
     request.extensions_mut().insert(principal);
     request.extensions_mut().insert(security.session_affinity);
     let response = next.run(request).await;
     drop(permit);
+    // One structured `winx::usage` event per authenticated request. Metadata
+    // only — the body (commands, file contents) is never logged.
+    tracing::info!(
+        target: "winx::usage",
+        event = "http_request",
+        principal = %principal_name,
+        peer = %peer,
+        method = %method,
+        status = response.status().as_u16(),
+        duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "http request"
+    );
     response
 }
 
