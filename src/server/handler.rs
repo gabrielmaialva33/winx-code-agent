@@ -14,9 +14,51 @@ use rmcp::{
 use super::catalog::{server_icon_data_uri, winx_prompts, winx_tools};
 use super::principal::{
     principal_from_context, scope_tool_request, session_affinity_from_context,
-    task_belongs_to_principal,
+    task_belongs_to_principal, RequestScope,
 };
 use super::WinxService;
+
+/// One structured `winx::usage` event per tool call. Only metadata is logged —
+/// never tool arguments, command text, or file contents (secrets/PII).
+struct UsageEvent {
+    tool: String,
+    principal: String,
+    thread_id: String,
+    started: std::time::Instant,
+}
+
+impl UsageEvent {
+    fn start(request: &CallToolRequestParams, scope: &RequestScope) -> Self {
+        let thread_id = request
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments.get("thread_id"))
+            .and_then(serde_json::Value::as_str)
+            .map(|thread_id| scope.unscope_text(thread_id))
+            .unwrap_or_default();
+        Self {
+            tool: request.name.to_string(),
+            principal: scope
+                .principal()
+                .map_or_else(|| "local".to_string(), |principal| principal.name().to_string()),
+            thread_id,
+            started: std::time::Instant::now(),
+        }
+    }
+
+    fn emit(&self, outcome: &str) {
+        tracing::info!(
+            target: "winx::usage",
+            event = "tool_call",
+            tool = %self.tool,
+            principal = %self.principal,
+            thread_id = %self.thread_id,
+            duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            outcome,
+            "tool call"
+        );
+    }
+}
 
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
@@ -219,19 +261,31 @@ impl ServerHandler for WinxService {
             scope_tool_request(request, principal, affinity).map_err(|error| {
                 McpError::invalid_request(format!("Cannot scope remote request: {error}"), None)
             })?;
+        let usage = UsageEvent::start(&request, &scope);
         if context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks())
             && Self::bash_task_is_eligible(&request)
         {
-            return Ok(CallToolResponse::Task(self.enqueue_bash_task(request, scope).await?));
+            return match self.enqueue_bash_task(request, scope).await {
+                Ok(task) => {
+                    usage.emit("task");
+                    Ok(CallToolResponse::Task(task))
+                }
+                Err(error) => {
+                    usage.emit("error");
+                    Err(error)
+                }
+            };
         }
 
         match self.execute_tool_call(request).await {
             Ok(mut result) => {
                 scope.unscope_result(&mut result);
+                usage.emit("ok");
                 Ok(result.into())
             }
             Err(mut error) => {
                 scope.unscope_error(&mut error);
+                usage.emit("error");
                 Err(error)
             }
         }
