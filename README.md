@@ -2,7 +2,7 @@
   <img src=".github/assets/fairy.png" alt="Winx fairy mascot" width="160" />
 </p>
 
-# ✨ Winx — Remote MCP Runtime for Coding Agents ✨
+# ✨ Winx — Remote MCP Runtime for Coding Agents
 
 <p align="center">
   <strong>Streamable HTTP, durable PTYs, and guarded file operations — built in native Rust</strong>
