@@ -1,5 +1,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use tracing::warn;
 
 /// Security error for path validation
 #[derive(Debug)]
@@ -18,7 +21,9 @@ impl std::fmt::Display for PathSecurityError {
             PathSecurityError::PathTraversal { path, workspace } => {
                 write!(
                     f,
-                    "Path traversal detected: '{}' escapes workspace '{}'",
+                    "Path traversal detected: '{}' escapes workspace '{}'. To allow paths outside \
+                     the workspace, set WINX_ALLOW_PATHS in the winx server config (read once at \
+                     startup — restart required; exporting it in a shell has no effect)",
                     path.display(),
                     workspace.display()
                 )
@@ -41,16 +46,92 @@ impl std::fmt::Display for PathSecurityError {
 
 impl std::error::Error for PathSecurityError {}
 
-/// Validates that a path is within the workspace root.
-/// Returns the canonicalized path if valid.
+/// Parse the `:`-separated `WINX_ALLOW_PATHS` value into canonical roots.
+///
+/// Entries must be absolute (relative to *what* would be ambiguous — the tools
+/// that use this run with a per-session cwd) and must exist, so that the roots
+/// are canonical and comparable with `starts_with`. Anything else is dropped
+/// with a warning: a typo'd root silently widening nothing is the safe failure.
+fn parse_allow_paths(raw: &str) -> Vec<PathBuf> {
+    raw.split(':')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .filter_map(|entry| {
+            let candidate = Path::new(entry);
+            if !candidate.is_absolute() {
+                warn!("WINX_ALLOW_PATHS: ignoring '{entry}' (must be an absolute path)");
+                return None;
+            }
+            match candidate.canonicalize() {
+                Ok(root) => Some(root),
+                Err(e) => {
+                    warn!("WINX_ALLOW_PATHS: ignoring '{entry}' ({e})");
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/// Extra roots the file tools may reach outside the workspace, from
+/// `WINX_ALLOW_PATHS` (`:`-separated absolute paths, same convention as
+/// `WINX_SANDBOX_RW_PATHS`).
+///
+/// Read from the environment ONCE, at first use. That is deliberate: the
+/// containment policy is set by whoever starts the server, out of band, and is
+/// not renegotiable at runtime — no tool argument and no shell command the model
+/// is talked into running can widen it mid-session.
+///
+/// `WINX_ALLOW_PATHS=/` degenerates to "unconfined" (every canonical path on
+/// unix starts with `/`), which is the intended way to turn containment off — an
+/// explicit, visible config value rather than a separate kill-switch flag.
+fn allowed_roots() -> &'static [PathBuf] {
+    static ROOTS: OnceLock<Vec<PathBuf>> = OnceLock::new();
+    ROOTS.get_or_init(|| {
+        let roots = crate::config::env_text("WINX_ALLOW_PATHS").map(|raw| parse_allow_paths(&raw));
+        let roots = roots.unwrap_or_default();
+        if !roots.is_empty() {
+            let list = roots.iter().map(|r| r.display().to_string()).collect::<Vec<_>>().join(", ");
+            warn!(
+                "WINX_ALLOW_PATHS active: the file tools may read and write outside the \
+                 workspace, under: {list}"
+            );
+        }
+        roots
+    })
+}
+
+/// Containment predicate: a resolved path is acceptable if it is inside the
+/// workspace or inside one of the operator-configured extra roots.
+fn is_contained(
+    canonical_path: &Path,
+    canonical_workspace: &Path,
+    extra_roots: &[PathBuf],
+) -> bool {
+    canonical_path.starts_with(canonical_workspace)
+        || extra_roots.iter().any(|root| canonical_path.starts_with(root))
+}
+
+/// Validates that a path is within the workspace root (or an extra root allowed
+/// via `WINX_ALLOW_PATHS`). Returns the canonicalized path if valid.
 ///
 /// # Security
 /// - Prevents path traversal attacks (../)
-/// - Detects symlinks pointing outside workspace
+/// - Detects symlinks pointing outside the allowed roots
 /// - Canonicalizes path before comparison
 pub fn validate_path_in_workspace(
     path: &Path,
     workspace_root: &Path,
+) -> Result<PathBuf, PathSecurityError> {
+    validate_path_with_roots(path, workspace_root, allowed_roots())
+}
+
+/// The real implementation, with the allowed roots injected so tests can drive
+/// every case without touching process-global environment state.
+fn validate_path_with_roots(
+    path: &Path,
+    workspace_root: &Path,
+    extra_roots: &[PathBuf],
 ) -> Result<PathBuf, PathSecurityError> {
     // Resolve the workspace boundary once, up front; everything is checked
     // against this. Fail closed if the workspace itself can't be canonicalized.
@@ -77,7 +158,7 @@ pub fn validate_path_in_workspace(
                     error: e,
                 }
             })?;
-            if !canonical_target.starts_with(&canonical_workspace) {
+            if !is_contained(&canonical_target, &canonical_workspace, extra_roots) {
                 return Err(PathSecurityError::SymlinkEscape {
                     path: path.to_path_buf(),
                     target: canonical_target,
@@ -92,7 +173,7 @@ pub fn validate_path_in_workspace(
     // lexical resolution of the not-yet-existing tail.
     match path.canonicalize() {
         Ok(canonical_path) => {
-            if canonical_path.starts_with(&canonical_workspace) {
+            if is_contained(&canonical_path, &canonical_workspace, extra_roots) {
                 Ok(canonical_path)
             } else {
                 Err(PathSecurityError::PathTraversal {
@@ -102,7 +183,7 @@ pub fn validate_path_in_workspace(
             }
         }
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            resolve_new_path(path, &canonical_workspace)
+            resolve_new_path(path, &canonical_workspace, extra_roots)
         }
         Err(e) => {
             Err(PathSecurityError::CanonicalizationFailed { path: path.to_path_buf(), error: e })
@@ -126,7 +207,11 @@ pub fn validate_path_in_workspace(
 ///   would follow out of the workspace.
 /// - The lexical pass resolves `..` before the containment check, so
 ///   `workspace/new/../../etc/passwd` is rejected.
-fn resolve_new_path(path: &Path, canonical_workspace: &Path) -> Result<PathBuf, PathSecurityError> {
+fn resolve_new_path(
+    path: &Path,
+    canonical_workspace: &Path,
+    extra_roots: &[PathBuf],
+) -> Result<PathBuf, PathSecurityError> {
     let traversal = || PathSecurityError::PathTraversal {
         path: path.to_path_buf(),
         workspace: canonical_workspace.to_path_buf(),
@@ -166,7 +251,7 @@ fn resolve_new_path(path: &Path, canonical_workspace: &Path) -> Result<PathBuf, 
         }
     }
 
-    if resolved.starts_with(canonical_workspace) {
+    if is_contained(&resolved, canonical_workspace, extra_roots) {
         Ok(resolved)
     } else {
         Err(traversal())
@@ -369,6 +454,90 @@ mod tests {
         symlink(outside.path().join("nonexistent"), &link).unwrap();
         let f = link.join("file.txt");
         assert!(validate_path_in_workspace(&f, ws.path()).is_err());
+    }
+
+    #[test]
+    fn parse_allow_paths_keeps_absolute_existing_roots_only() {
+        let existing = TempDir::new().unwrap();
+        let existing_str = existing.path().to_string_lossy().to_string();
+        let raw = format!("{existing_str}: :relative/dir:/definitely/not/here/xyz");
+        let roots = parse_allow_paths(&raw);
+        assert_eq!(roots, vec![existing.path().canonicalize().unwrap()]);
+    }
+
+    #[test]
+    fn allowed_root_permits_existing_path_outside_workspace() {
+        let ws = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let f = outside.path().join("note.md");
+        fs::write(&f, "x").unwrap();
+        let roots = vec![outside.path().canonicalize().unwrap()];
+
+        // Without the allowlist it is a traversal; with it, it resolves.
+        assert!(validate_path_with_roots(&f, ws.path(), &[]).is_err());
+        let v = validate_path_with_roots(&f, ws.path(), &roots).unwrap();
+        assert!(v.starts_with(outside.path().canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn allowed_root_permits_new_file_outside_workspace() {
+        // The `mkdir -p` path (resolve_new_path) must honour the extra roots too.
+        let ws = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let f = outside.path().join("new/deep/file.txt");
+        let roots = vec![outside.path().canonicalize().unwrap()];
+
+        assert!(validate_path_with_roots(&f, ws.path(), &[]).is_err());
+        let v = validate_path_with_roots(&f, ws.path(), &roots).unwrap();
+        assert!(v.ends_with("new/deep/file.txt"));
+    }
+
+    #[test]
+    fn allowed_root_does_not_widen_to_its_siblings() {
+        // Allowing one root must not allow everything above or beside it.
+        let ws = TempDir::new().unwrap();
+        let allowed = TempDir::new().unwrap();
+        let other = TempDir::new().unwrap();
+        let f = other.path().join("secret.txt");
+        fs::write(&f, "s").unwrap();
+        let roots = vec![allowed.path().canonicalize().unwrap()];
+        assert!(matches!(
+            validate_path_with_roots(&f, ws.path(), &roots),
+            Err(PathSecurityError::PathTraversal { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_slash_allow_path_disables_containment() {
+        // The documented way to turn containment off: every canonical unix path
+        // starts with `/`, so `WINX_ALLOW_PATHS=/` accepts anything that resolves.
+        let ws = TempDir::new().unwrap();
+        let roots = parse_allow_paths("/");
+        assert_eq!(roots, vec![PathBuf::from("/")]);
+        let v = validate_path_with_roots(Path::new("/etc/hostname"), ws.path(), &roots).unwrap();
+        assert_eq!(v, PathBuf::from("/etc/hostname"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_into_allowed_root_is_accepted() {
+        // A symlink out of the workspace is an escape only if the target is
+        // outside every allowed root.
+        use std::os::unix::fs::symlink;
+        let ws = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let target = outside.path().join("data.txt");
+        fs::write(&target, "d").unwrap();
+        let link = ws.path().join("link.txt");
+        symlink(&target, &link).unwrap();
+        let roots = vec![outside.path().canonicalize().unwrap()];
+
+        assert!(matches!(
+            validate_path_with_roots(&link, ws.path(), &[]),
+            Err(PathSecurityError::SymlinkEscape { .. })
+        ));
+        assert!(validate_path_with_roots(&link, ws.path(), &roots).is_ok());
     }
 
     #[cfg(unix)]
