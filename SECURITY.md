@@ -66,7 +66,9 @@ This is powerful by design. Only connect Winx to MCP clients and agent workflows
 
 Winx validates workspace paths and tracks read-before-edit state. Security-sensitive changes should preserve:
 
-- workspace path validation;
+- workspace path validation (default-on; widened only by the operator-set `WINX_ALLOW_PATHS`, read once at
+  startup so no tool argument or agent-run command can relax it at runtime - `WINX_ALLOW_PATHS=/` disables
+  containment for the file tools and should be treated as such);
 - symlink and path traversal protections;
 - read-before-edit enforcement;
 - hash/range based overwrite tracking;
