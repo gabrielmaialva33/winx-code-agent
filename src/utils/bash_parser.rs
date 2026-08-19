@@ -73,7 +73,11 @@ pub fn assert_single_statement(command: &str, allow_shell_probe: bool) -> Result
 
     if statement_count > 1 && !trimmed.contains('\n') {
         return Err(WinxError::CommandExecutionError(
-            "Command should contain a single top-level bash statement. For deliberate scripts, split statements across lines or set allow_multi=true.".to_string(),
+            "Command should contain a single top-level bash statement. Fix one of three ways: \
+             send one statement per call; put each statement on its own line (multiline is \
+             allowed); or resend as {\"type\": \"command\", \"command\": \"...\", \
+             \"allow_multi\": true} when the composite is intentional."
+                .to_string(),
         ));
     }
 

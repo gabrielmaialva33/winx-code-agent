@@ -48,7 +48,11 @@ pub(super) async fn execute_send_text(
 ) -> Result<String> {
     debug!(bytes = text.len(), submit, "Processing SendText action");
     if text.is_empty() {
-        return Err(WinxError::InvalidInput("send_text cannot be empty".to_string()));
+        return Err(WinxError::InvalidInput(
+            "send_text cannot be empty. To press Enter alone, use send_specials: [\"Enter\"]; \
+             to submit typed text, set submit: true."
+                .to_string(),
+        ));
     }
 
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));

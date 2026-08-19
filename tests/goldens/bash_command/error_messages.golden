@@ -7,7 +7,7 @@ Invalid input: No shell found running with command id missing-bg-id.
 No command running in background.
 
 === empty send_text ===
-Invalid input: send_text cannot be empty
+Invalid input: send_text cannot be empty. To press Enter alone, use send_specials: ["Enter"]; to submit typed text, set submit: true.
 === dead background input ===
 Invalid input: Background shell <BG_ID> already exited (last command: printf 'dead-final\n'; false).
 Final captured output:

@@ -653,6 +653,9 @@ pub enum BashCommandAction {
     /// return after the bytes so the target program receives the input as a
     /// completed line (matches what hitting Enter would do in a TUI).
     SendText {
+        /// Text to type into the running program. Must be non-empty: to press
+        /// Enter alone, use `send_specials: ["Enter"]` instead.
+        #[schemars(length(min = 1))]
         send_text: String,
         bg_command_id: Option<String>,
         #[serde(default)]

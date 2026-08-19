@@ -116,10 +116,14 @@ pub async fn start_http_server_with_runtime(
         concurrency: shared_concurrency,
         rate_limiter: shared_rate_limiter,
     });
+    // The timeout sits INSIDE the security middleware: when it fires, the
+    // middleware still receives the 408 response and records the usage event.
+    // With the previous order the timed-out future was dropped before logging,
+    // so 408s were invisible in the usage log.
     let protected_mcp = Router::new()
         .nest_service("/mcp", mcp_service)
-        .layer(middleware::from_fn_with_state(security, enforce_route_security))
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
+        .layer(middleware::from_fn_with_state(security, enforce_route_security))
         .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
     // Keep OAuth discovery probes and every unrelated path outside bearer auth.
     // Winx does not advertise OAuth metadata, so those routes should be ordinary
