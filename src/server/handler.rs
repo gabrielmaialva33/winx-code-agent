@@ -22,6 +22,8 @@ use super::WinxService;
 /// never tool arguments, command text, or file contents (secrets/PII).
 struct UsageEvent {
     tool: String,
+    action: String,
+    ws: String,
     principal: String,
     thread_id: String,
     started: std::time::Instant,
@@ -29,15 +31,27 @@ struct UsageEvent {
 
 impl UsageEvent {
     fn start(request: &CallToolRequestParams, scope: &RequestScope) -> Self {
-        let thread_id = request
-            .arguments
-            .as_ref()
+        let arguments = request.arguments.as_ref();
+        let thread_id = arguments
             .and_then(|arguments| arguments.get("thread_id"))
             .and_then(serde_json::Value::as_str)
             .map(|thread_id| scope.unscope_text(thread_id))
             .unwrap_or_default();
+        let action =
+            if request.name == "BashCommand" { bash_action(arguments) } else { String::new() };
+        let ws = if request.name == "Initialize" {
+            arguments
+                .and_then(|arguments| arguments.get("any_workspace_path"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        } else {
+            String::new()
+        };
         Self {
             tool: request.name.to_string(),
+            action,
+            ws,
             principal: scope
                 .principal()
                 .map_or_else(|| "local".to_string(), |principal| principal.name().to_string()),
@@ -51,6 +65,8 @@ impl UsageEvent {
             target: "winx::usage",
             event = "tool_call",
             tool = %self.tool,
+            action = %self.action,
+            ws = %self.ws,
             principal = %self.principal,
             thread_id = %self.thread_id,
             duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -58,6 +74,47 @@ impl UsageEvent {
             "tool call"
         );
     }
+}
+
+/// Classify a `BashCommand` call by action kind (`command`, `status_check`,
+/// `send_text`, ...) without touching the command text itself. Mirrors the
+/// lenient forms accepted by the `BashCommand` deserializer: a typed
+/// `action_json` object, a JSON-encoded string, a bare command string, or
+/// legacy shorthand keys at the top level.
+fn bash_action(arguments: Option<&rmcp::model::JsonObject>) -> String {
+    use serde_json::Value;
+    const KINDS: [&str; 7] = [
+        "command",
+        "status_check",
+        "send_text",
+        "send_specials",
+        "send_ascii",
+        "screen",
+        "wait_for_turn",
+    ];
+    let Some(arguments) = arguments else {
+        return String::new();
+    };
+    let parsed;
+    let action = match arguments.get("action_json") {
+        Some(Value::Object(object)) => object,
+        Some(Value::String(text)) => {
+            match serde_json::from_str::<Value>(&text.replace('\n', " ")) {
+                Ok(Value::Object(object)) => {
+                    parsed = object;
+                    &parsed
+                }
+                // A non-object string is treated as a bare command downstream.
+                _ => return "command".to_string(),
+            }
+        }
+        // Legacy shorthand: the argument object itself is the action.
+        _ => arguments,
+    };
+    if let Some(kind) = action.get("type").and_then(Value::as_str) {
+        return kind.to_string();
+    }
+    KINDS.iter().find(|kind| action.contains_key(**kind)).map_or("?", |kind| kind).to_string()
 }
 
 impl ServerHandler for WinxService {

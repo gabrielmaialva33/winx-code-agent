@@ -82,7 +82,12 @@ fn main_shell(bash_state: &BashState) -> SharedPtyShell {
         .unwrap_or_else(|| bash_state.pty_shell.clone())
 }
 
-const DEFAULT_TIMEOUT: f64 = 5.0;
+// Default block window when the client omits `wait_for_seconds`. Usage logs
+// showed remote clients omit it and then burn one full LLM round-trip per 5 s
+// re-check on long commands (runs of up to 18 consecutive polls); a larger
+// window resolves most commands in a single call while staying far below the
+// 120 s HTTP request timeout.
+const DEFAULT_TIMEOUT: f64 = 15.0;
 
 fn effective_wait_for_seconds(wait_for_seconds: Option<f32>) -> f64 {
     wait_for_seconds.map_or(DEFAULT_TIMEOUT, |seconds| f64::from(seconds).max(0.0))
@@ -367,5 +372,10 @@ mod tests {
     fn requested_wait_is_not_silently_capped() {
         assert!((effective_wait_for_seconds(Some(120.0)) - 120.0).abs() < f64::EPSILON);
         assert!((effective_wait_for_seconds(Some(150.0)) - 150.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn omitted_wait_uses_the_larger_default_window() {
+        assert!((effective_wait_for_seconds(None) - 15.0).abs() < f64::EPSILON);
     }
 }

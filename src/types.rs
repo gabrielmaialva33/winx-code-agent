@@ -736,7 +736,10 @@ pub struct BashCommand {
     /// The action to perform (command, status check, etc.)
     pub action_json: BashCommandAction,
 
-    /// Optional timeout in seconds to wait for command completion
+    /// Seconds to block waiting for command completion or new output before
+    /// returning (default 15). Prefer 30-60 for commands you expect to run
+    /// long (builds, tests, installs): one larger wait resolves in a single
+    /// call instead of several `status_check` round-trips.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_for_seconds: Option<f32>,
