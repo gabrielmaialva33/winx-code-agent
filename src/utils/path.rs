@@ -512,11 +512,20 @@ mod tests {
     fn root_slash_allow_path_disables_containment() {
         // The documented way to turn containment off: every canonical unix path
         // starts with `/`, so `WINX_ALLOW_PATHS=/` accepts anything that resolves.
+        // Asserted against a temp dir rather than a system path, and compared to
+        // the CANONICAL form: validation always returns a canonicalized path, and
+        // on macOS the system prefixes are symlinks (`/etc` -> `/private/etc`,
+        // `/var` -> `/private/var`), so a literal comparison would be wrong there.
         let ws = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let f = outside.path().join("anywhere.txt");
+        fs::write(&f, "x").unwrap();
         let roots = parse_allow_paths("/");
         assert_eq!(roots, vec![PathBuf::from("/")]);
-        let v = validate_path_with_roots(Path::new("/etc/hostname"), ws.path(), &roots).unwrap();
-        assert_eq!(v, PathBuf::from("/etc/hostname"));
+
+        assert!(validate_path_with_roots(&f, ws.path(), &[]).is_err());
+        let v = validate_path_with_roots(&f, ws.path(), &roots).unwrap();
+        assert_eq!(v, f.canonicalize().unwrap());
     }
 
     #[cfg(unix)]
