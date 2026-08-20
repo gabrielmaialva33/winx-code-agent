@@ -1,11 +1,11 @@
 use rmcp::{
     model::{
-        CallToolRequestParams, CallToolResponse, CancelTaskParams, GetPromptRequestParams,
-        GetPromptResponse, GetPromptResult, GetTaskParams, GetTaskResult, Icon, Implementation,
-        ListPromptsResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
-        PromptMessage, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
-        ReadResourceResult, Resource, ResourceContents, Role, ServerCapabilities, ServerInfo,
-        TaskStatus, Tool, UpdateTaskParams,
+        CacheScope, CallToolRequestParams, CallToolResponse, CancelTaskParams,
+        GetPromptRequestParams, GetPromptResponse, GetPromptResult, GetTaskParams, GetTaskResult,
+        Icon, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
+        PaginatedRequestParams, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
+        ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role,
+        ServerCapabilities, ServerInfo, TaskStatus, Tool, UpdateTaskParams,
     },
     service::{NotificationContext, RequestContext, RoleServer},
     ErrorData as McpError, ServerHandler,
@@ -73,6 +73,19 @@ impl UsageEvent {
             outcome,
             "tool call"
         );
+    }
+}
+
+/// Emit the cache fields required by MCP 2026-07-28 without changing the wire
+/// shape for clients that negotiated an older protocol revision.
+fn cache_hints_for_protocol(
+    protocol_version: Option<ProtocolVersion>,
+    cache_scope: CacheScope,
+) -> (Option<u64>, Option<CacheScope>) {
+    if protocol_version.is_some_and(|version| version >= ProtocolVersion::V_2026_07_28) {
+        (Some(0), Some(cache_scope))
+    } else {
+        (None, None)
     }
 }
 
@@ -235,27 +248,43 @@ impl ServerHandler for WinxService {
     async fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items(winx_tools()))
+        let (ttl_ms, cache_scope) =
+            cache_hints_for_protocol(ctx.protocol_version(), CacheScope::Public);
+        let mut result = ListToolsResult::with_all_items(winx_tools());
+        result.ttl_ms = ttl_ms;
+        result.cache_scope = cache_scope;
+        Ok(result)
     }
 
     async fn list_resources(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        Ok(ListResourcesResult::with_all_items(vec![Resource::new("file://readme", "README")
-            .with_description("Project README documentation")
-            .with_mime_type("text/markdown")]))
+        let (ttl_ms, cache_scope) =
+            cache_hints_for_protocol(ctx.protocol_version(), CacheScope::Public);
+        let mut result =
+            ListResourcesResult::with_all_items(vec![Resource::new("file://readme", "README")
+                .with_description("Project README documentation")
+                .with_mime_type("text/markdown")]);
+        result.ttl_ms = ttl_ms;
+        result.cache_scope = cache_scope;
+        Ok(result)
     }
 
     async fn list_prompts(
         &self,
         _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<ListPromptsResult, McpError> {
-        Ok(ListPromptsResult::with_all_items(winx_prompts()))
+        let (ttl_ms, cache_scope) =
+            cache_hints_for_protocol(ctx.protocol_version(), CacheScope::Public);
+        let mut result = ListPromptsResult::with_all_items(winx_prompts());
+        result.ttl_ms = ttl_ms;
+        result.cache_scope = cache_scope;
+        Ok(result)
     }
 
     async fn get_prompt(
@@ -284,7 +313,7 @@ impl ServerHandler for WinxService {
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: RequestContext<RoleServer>,
+        ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
         let content = match request.uri.as_ref() {
             "file://readme" => match tokio::fs::read_to_string("README.md").await {
@@ -304,7 +333,12 @@ impl ServerHandler for WinxService {
                 ));
             }
         };
-        Ok(ReadResourceResult::new(content).into())
+        let (ttl_ms, cache_scope) =
+            cache_hints_for_protocol(ctx.protocol_version(), CacheScope::Private);
+        let mut result = ReadResourceResult::new(content);
+        result.ttl_ms = ttl_ms;
+        result.cache_scope = cache_scope;
+        Ok(result.into())
     }
 
     async fn call_tool(
@@ -346,5 +380,27 @@ impl ServerHandler for WinxService {
                 Err(error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_hints_follow_negotiated_protocol_version() {
+        assert_eq!(
+            cache_hints_for_protocol(Some(ProtocolVersion::V_2026_07_28), CacheScope::Private,),
+            (Some(0), Some(CacheScope::Private))
+        );
+        assert_eq!(
+            cache_hints_for_protocol(Some(ProtocolVersion::V_2026_07_28), CacheScope::Public),
+            (Some(0), Some(CacheScope::Public))
+        );
+        assert_eq!(
+            cache_hints_for_protocol(Some(ProtocolVersion::V_2025_11_25), CacheScope::Private,),
+            (None, None)
+        );
+        assert_eq!(cache_hints_for_protocol(None, CacheScope::Private), (None, None));
     }
 }

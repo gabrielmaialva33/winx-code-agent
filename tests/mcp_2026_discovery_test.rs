@@ -131,11 +131,18 @@ fn response_header(response: &str, name: &str) -> Option<String> {
 }
 
 fn response_json(response: &str) -> anyhow::Result<serde_json::Value> {
-    let data = response
+    if let Some(data) = response
         .lines()
-        .find_map(|line| line.strip_prefix("data: "))
-        .ok_or_else(|| anyhow::anyhow!("response has no SSE data event: {response}"))?;
-    Ok(serde_json::from_str(data)?)
+        .filter_map(|line| line.strip_prefix("data: "))
+        .find(|data| !data.trim().is_empty())
+    {
+        return Ok(serde_json::from_str(data)?);
+    }
+
+    let (_, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| anyhow::anyhow!("response has no HTTP body: {response}"))?;
+    Ok(serde_json::from_str(body.trim())?)
 }
 
 fn modern_request_meta(client_name: &str, tasks: bool) -> serde_json::Value {
@@ -282,7 +289,71 @@ async fn modern_stateless_tools_list_exposes_bash_command() -> anyhow::Result<()
     .await?;
 
     assert!(response.starts_with("HTTP/1.1 200"), "{response}");
-    assert_eq!(response.matches(r#""name":"BashCommand""#).count(), 1, "{response}");
+    let response_json = response_json(&response)?;
+    assert_eq!(response_json["result"]["resultType"], "complete", "{response}");
+    assert_eq!(response_json["result"]["ttlMs"], 0, "{response}");
+    assert_eq!(response_json["result"]["cacheScope"], "public", "{response}");
+    let tools = response_json["result"]["tools"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("tools/list response has no tools array: {response}"))?;
+    assert_eq!(tools.iter().filter(|tool| tool["name"] == "BashCommand").count(), 1, "{response}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn modern_cacheable_resource_and_prompt_results_include_required_hints() -> anyhow::Result<()>
+{
+    let port = StdTcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+    let address: std::net::SocketAddr = format!("127.0.0.1:{port}").parse()?;
+    let _server = spawn_single_token_server(address)?;
+    wait_until_listening(address).await?;
+
+    let requests = [
+        (
+            "prompts/list",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "prompts-cache-test",
+                "method": "prompts/list",
+                "params": { "_meta": modern_request_meta("cache-test", false) }
+            }),
+            "public",
+        ),
+        (
+            "resources/list",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "resources-cache-test",
+                "method": "resources/list",
+                "params": { "_meta": modern_request_meta("cache-test", false) }
+            }),
+            "public",
+        ),
+        (
+            "resources/read",
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": "resource-read-cache-test",
+                "method": "resources/read",
+                "params": {
+                    "_meta": modern_request_meta("cache-test", false),
+                    "uri": "file://readme"
+                }
+            }),
+            "private",
+        ),
+    ];
+
+    for (method, request, expected_scope) in requests {
+        let body = request.to_string();
+        let response = post_json(address, "2026-07-28", method, &body).await?;
+        assert!(response.starts_with("HTTP/1.1 200"), "{method}: {response}");
+        let response_json = response_json(&response)?;
+        assert_eq!(response_json["result"]["resultType"], "complete", "{method}: {response}");
+        assert_eq!(response_json["result"]["ttlMs"], 0, "{method}: {response}");
+        assert_eq!(response_json["result"]["cacheScope"], expected_scope, "{method}: {response}");
+    }
+
     Ok(())
 }
 
@@ -324,6 +395,9 @@ async fn legacy_initialize_session_still_exposes_bash_command() -> anyhow::Resul
     )
     .await?;
     assert!(tools.starts_with("HTTP/1.1 200"), "{tools}");
+    let tools_json = response_json(&tools)?;
+    assert!(tools_json["result"].get("ttlMs").is_none(), "{tools}");
+    assert!(tools_json["result"].get("cacheScope").is_none(), "{tools}");
     assert_eq!(tools.matches(r#""name":"BashCommand""#).count(), 1, "{tools}");
     Ok(())
 }

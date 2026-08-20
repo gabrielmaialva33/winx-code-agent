@@ -324,6 +324,89 @@ mod discovery_protocol_tests {
     use serde_json::Value;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+    async fn stdio_tools_list(protocol_version: &str) -> Value {
+        let (client, server) = tokio::io::duplex(256 * 1024);
+        let (server_read, server_write) = tokio::io::split(server);
+        let transport = AsyncRwTransport::new_server(server_read, server_write);
+        let task = tokio::spawn(async move {
+            let running = WinxService::new()
+                .serve(transport)
+                .await
+                .expect("server should accept stdio initialization");
+            running.waiting().await.expect("server should shut down cleanly");
+        });
+
+        let (client_read, mut client_write) = tokio::io::split(client);
+        let mut client_read = BufReader::new(client_read);
+        let initialize = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": protocol_version,
+                "capabilities": {},
+                "clientInfo": { "name": "stdio-compat-test", "version": "1" }
+            }
+        });
+        client_write
+            .write_all(format!("{initialize}\n").as_bytes())
+            .await
+            .expect("write initialize request");
+
+        let mut line = String::new();
+        client_read.read_line(&mut line).await.expect("read initialize response");
+        let initialize_response: Value =
+            serde_json::from_str(&line).expect("valid initialize response");
+        assert_eq!(initialize_response["id"], 1);
+        assert_eq!(initialize_response["result"]["protocolVersion"], protocol_version);
+
+        client_write
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{}}\n",
+            )
+            .await
+            .expect("write initialized notification and tools/list request");
+
+        line.clear();
+        client_read.read_line(&mut line).await.expect("read tools/list response");
+        let response = serde_json::from_str(&line).expect("valid tools/list response");
+
+        drop(client_read);
+        drop(client_write);
+        task.await.expect("server task");
+        response
+    }
+
+    #[tokio::test]
+    async fn modern_stdio_tools_list_serializes_required_cache_hints() {
+        let response = stdio_tools_list("2026-07-28").await;
+
+        assert_eq!(response["id"], 2);
+        assert_eq!(response["result"]["resultType"], "complete");
+        assert_eq!(response["result"]["ttlMs"], 0);
+        assert_eq!(response["result"]["cacheScope"], "public");
+        assert!(response["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "BashCommand")));
+    }
+
+    #[tokio::test]
+    async fn legacy_stdio_tools_list_omits_modern_cache_hints() {
+        for protocol_version in ["2025-11-25", "2025-06-18", "2025-03-26"] {
+            let response = stdio_tools_list(protocol_version).await;
+
+            assert_eq!(response["id"], 2, "protocol {protocol_version}: {response}");
+            assert!(
+                response["result"].get("ttlMs").is_none(),
+                "protocol {protocol_version}: {response}"
+            );
+            assert!(
+                response["result"].get("cacheScope").is_none(),
+                "protocol {protocol_version}: {response}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn discover_probe_negotiates_modern_stateless_lifecycle() {
         let (client, server) = tokio::io::duplex(32 * 1024);
