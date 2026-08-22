@@ -18,6 +18,11 @@ pub enum HttpSessionAffinity {
     /// are not stable across reconnects or conversations.
     #[default]
     Workspace,
+    /// Reuse one session per principal, conversation identity, and canonical
+    /// workspace. `Mcp-Session-Id` is preferred; modern stateless clients fall
+    /// back to their supplied first-call `thread_id`, then to workspace affinity.
+    /// This separates parallel conversations without giving up workspace context.
+    Conversation,
     /// Trust the external `thread_id` as the session key. This preserves parallel
     /// shells in one workspace, but callers must supply a stable ID and clean up
     /// abandoned sessions themselves.

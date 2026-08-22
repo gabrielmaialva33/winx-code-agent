@@ -19,6 +19,7 @@ use axum::{
     response::{IntoResponse, Response},
     Router,
 };
+use rand::RngExt as _;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
@@ -39,6 +40,21 @@ const MAX_RATE_TRACKED_IPS: usize = 4_096;
 const INVALID_AUTH_DELAY: Duration = Duration::from_millis(100);
 pub const DEFAULT_MAX_CONCURRENCY: usize = 32;
 pub const DEFAULT_REQUESTS_PER_MINUTE: u32 = 120;
+
+/// Opaque per-request correlation shared by the HTTP middleware and MCP handler.
+/// It contains no client input and is safe to include in metadata-only usage logs.
+#[derive(Clone, Debug)]
+pub(crate) struct RequestCorrelation(String);
+
+impl RequestCorrelation {
+    fn new() -> Self {
+        Self(format!("r_{:032x}", rand::rng().random::<u128>()))
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct HttpServerOptions {
@@ -216,9 +232,11 @@ async fn enforce_route_security(
 
     let principal_name = principal.name().to_string();
     let method = request.method().clone();
+    let correlation = RequestCorrelation::new();
     let mut request = request;
     request.extensions_mut().insert(principal);
     request.extensions_mut().insert(security.session_affinity);
+    request.extensions_mut().insert(correlation.clone());
     let response = next.run(request).await;
     drop(permit);
     // One structured `winx::usage` event per authenticated request. Metadata
@@ -227,6 +245,7 @@ async fn enforce_route_security(
         target: "winx::usage",
         event = "http_request",
         principal = %principal_name,
+        request_id = %correlation.as_str(),
         peer = %peer,
         method = %method,
         status = response.status().as_u16(),

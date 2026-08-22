@@ -76,10 +76,28 @@ pub(super) fn session_affinity_from_context(
         .unwrap_or(HttpSessionAffinity::Thread)
 }
 
+/// Stable conversation identity supplied by the HTTP transport. Legacy MCP
+/// sessions use `Mcp-Session-Id`; reviewed gateways may provide the explicit
+/// fallback header for modern stateless clients. The value is only hashed into
+/// a durable session key and is never emitted in results or logs.
+pub(super) fn conversation_identity_from_context(
+    context: &RequestContext<RoleServer>,
+) -> Option<String> {
+    let parts = context.extensions.get::<Parts>()?;
+    ["mcp-session-id", "x-winx-conversation-id"]
+        .into_iter()
+        .find_map(|name| parts.headers.get(name))
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
 pub(super) fn scope_tool_request(
     mut request: CallToolRequestParams,
     principal: Option<HttpPrincipal>,
     session_affinity: HttpSessionAffinity,
+    conversation_identity: Option<&str>,
 ) -> Result<(CallToolRequestParams, RequestScope)> {
     let Some(principal) = principal else {
         return Ok((request, RequestScope::default()));
@@ -95,10 +113,18 @@ pub(super) fn scope_tool_request(
     let normalized = normalize_thread_id(supplied);
     let first_call = request.name == "Initialize"
         && arguments.get("type").and_then(Value::as_str).is_none_or(|kind| kind == "first_call");
-    let external = if first_call && session_affinity == HttpSessionAffinity::Workspace {
-        workspace_affinity_thread_id(arguments)
-    } else if first_call && normalized.is_empty() {
-        generate_thread_id()
+    let external = if first_call {
+        match session_affinity {
+            HttpSessionAffinity::Workspace => affinity_thread_id(arguments, None),
+            HttpSessionAffinity::Conversation => {
+                let identity = conversation_identity
+                    .filter(|identity| !identity.trim().is_empty())
+                    .or_else(|| (!normalized.is_empty()).then_some(normalized.as_str()));
+                affinity_thread_id(arguments, identity)
+            }
+            HttpSessionAffinity::Thread if normalized.is_empty() => generate_thread_id(),
+            HttpSessionAffinity::Thread => normalized,
+        }
     } else {
         normalized
     };
@@ -120,7 +146,10 @@ pub(super) fn new_task_id(principal: Option<&HttpPrincipal>, random: u128) -> St
     }
 }
 
-fn workspace_affinity_thread_id(arguments: &serde_json::Map<String, Value>) -> String {
+fn affinity_thread_id(
+    arguments: &serde_json::Map<String, Value>,
+    conversation_identity: Option<&str>,
+) -> String {
     let workspace =
         arguments.get("any_workspace_path").and_then(Value::as_str).unwrap_or_default().trim();
     let resume =
@@ -143,12 +172,16 @@ fn workspace_affinity_thread_id(arguments: &serde_json::Map<String, Value>) -> S
         (label, path.to_string_lossy().into_owned())
     };
 
+    let (prefix, identity) = match conversation_identity {
+        Some(conversation) => ("cv", format!("conversation:{conversation}:{identity}")),
+        None => ("ws", identity),
+    };
     let digest = Sha256::digest(identity.as_bytes());
     let mut suffix = String::with_capacity(16);
     for byte in &digest[..8] {
         let _ = write!(suffix, "{byte:02x}");
     }
-    normalize_thread_id(&format!("ws_{label}_{suffix}"))
+    normalize_thread_id(&format!("{prefix}_{label}_{suffix}"))
 }
 
 fn canonical_workspace_identity(workspace: &str) -> PathBuf {
@@ -243,7 +276,7 @@ mod tests {
     use super::{new_task_id, scope_tool_request, task_belongs_to_principal};
     use crate::config::{HttpPrincipal, HttpSessionAffinity};
     use rmcp::model::CallToolRequestParams;
-    use serde_json::json;
+    use serde_json::{json, Value};
 
     fn principal(name: &str) -> HttpPrincipal {
         HttpPrincipal::new(name, "0123456789abcdef0123456789abcdef", false).expect("test principal")
@@ -258,11 +291,16 @@ mod tests {
             request.clone(),
             Some(principal("left")),
             HttpSessionAffinity::Thread,
+            None,
         )
         .expect("left");
-        let (right, _) =
-            scope_tool_request(request, Some(principal("right")), HttpSessionAffinity::Thread)
-                .expect("right");
+        let (right, _) = scope_tool_request(
+            request,
+            Some(principal("right")),
+            HttpSessionAffinity::Thread,
+            None,
+        )
+        .expect("right");
         assert_ne!(left.arguments, right.arguments);
     }
 
@@ -270,9 +308,13 @@ mod tests {
     fn long_scoped_thread_stays_within_filename_limit() {
         let request = CallToolRequestParams::new("Initialize")
             .with_arguments(json!({"thread_id": "x".repeat(500)}).as_object().cloned().unwrap());
-        let (request, _) =
-            scope_tool_request(request, Some(principal("client")), HttpSessionAffinity::Thread)
-                .expect("scope");
+        let (request, _) = scope_tool_request(
+            request,
+            Some(principal("client")),
+            HttpSessionAffinity::Thread,
+            None,
+        )
+        .expect("scope");
         let id = request
             .arguments
             .and_then(|arguments| {
@@ -301,15 +343,88 @@ mod tests {
             make("release_02333"),
             Some(principal("client")),
             HttpSessionAffinity::Workspace,
+            None,
         )
         .expect("first");
         let (second, _) = scope_tool_request(
             make("release_0_2_333"),
             Some(principal("client")),
             HttpSessionAffinity::Workspace,
+            None,
         )
         .expect("second");
         assert_eq!(first.arguments, second.arguments);
+    }
+
+    #[test]
+    fn conversation_affinity_is_stable_within_and_distinct_across_conversations() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let make = |thread_id: &str| {
+            CallToolRequestParams::new("Initialize").with_arguments(
+                json!({
+                    "type": "first_call",
+                    "any_workspace_path": workspace.path(),
+                    "thread_id": thread_id
+                })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            )
+        };
+        let scope = |request, conversation| {
+            scope_tool_request(
+                request,
+                Some(principal("client")),
+                HttpSessionAffinity::Conversation,
+                Some(conversation),
+            )
+            .expect("conversation scope")
+            .0
+            .arguments
+            .and_then(|arguments| {
+                arguments.get("thread_id").and_then(Value::as_str).map(ToString::to_string)
+            })
+            .expect("thread id")
+        };
+
+        let first = scope(make("unstable_first"), "conversation-a");
+        let resumed = scope(make("unstable_second"), "conversation-a");
+        let parallel = scope(make("unstable_first"), "conversation-b");
+        assert_eq!(first, resumed);
+        assert_ne!(first, parallel);
+        assert!(first.contains("__cv_"), "{first}");
+    }
+
+    #[test]
+    fn conversation_affinity_falls_back_to_supplied_first_call_id() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let make = |thread_id: &str| {
+            CallToolRequestParams::new("Initialize").with_arguments(
+                json!({
+                    "type": "first_call",
+                    "any_workspace_path": workspace.path(),
+                    "thread_id": thread_id
+                })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            )
+        };
+        let (left, _) = scope_tool_request(
+            make("conversation_left"),
+            Some(principal("client")),
+            HttpSessionAffinity::Conversation,
+            None,
+        )
+        .expect("left");
+        let (right, _) = scope_tool_request(
+            make("conversation_right"),
+            Some(principal("client")),
+            HttpSessionAffinity::Conversation,
+            None,
+        )
+        .expect("right");
+        assert_ne!(left.arguments, right.arguments);
     }
 
     #[test]
