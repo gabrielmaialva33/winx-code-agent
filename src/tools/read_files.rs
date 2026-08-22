@@ -26,6 +26,16 @@ const NONCODING_MAX_TOKENS: usize = 8_000;
 type FileReadResult = (String, bool, usize, String, (usize, usize), String, usize);
 type ReadCoverage = (Vec<(usize, usize)>, String, usize);
 
+/// Complete result of one batched read. The MCP adapter uses the per-file
+/// errors to return an honest `isError: true` result while retaining any
+/// successfully read content in the same response.
+#[derive(Debug)]
+pub struct ReadFilesOutcome {
+    pub text: String,
+    pub successful_files: usize,
+    pub errors: Vec<WinxError>,
+}
+
 /// Maximum amount of data to read from a file
 const MAX_FILE_SIZE: u64 = 50_000_000;
 
@@ -256,6 +266,19 @@ pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     read_files: ReadFiles,
 ) -> Result<String> {
+    let outcome = handle_tool_call_detailed(bash_state_arc, read_files).await?;
+    if outcome.successful_files == 0 {
+        if let Some(error) = outcome.errors.into_iter().next() {
+            return Err(error);
+        }
+    }
+    Ok(outcome.text)
+}
+
+pub async fn handle_tool_call_detailed(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    read_files: ReadFiles,
+) -> Result<ReadFilesOutcome> {
     let (cwd, workspace_root) = {
         let bash_state_guard = bash_state_arc.lock().await;
         let bash_state = bash_state_guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
@@ -264,6 +287,8 @@ pub async fn handle_tool_call(
 
     let mut message = String::new();
     let mut file_ranges_dict: HashMap<String, ReadCoverage> = HashMap::new();
+    let mut successful_files = 0usize;
+    let mut errors = Vec::new();
 
     for (index, file_path) in read_files.file_paths.iter().enumerate() {
         let clean_path = read_files.get_clean_path(index);
@@ -282,6 +307,7 @@ pub async fn handle_tool_call(
         .await
         {
             Ok((content, truncated, _, canon_path, line_range, file_hash, total_lines)) => {
+                successful_files = successful_files.saturating_add(1);
                 let entry = file_ranges_dict
                     .entry(canon_path.clone())
                     .or_insert_with(|| (Vec::new(), file_hash.clone(), total_lines));
@@ -314,8 +340,9 @@ pub async fn handle_tool_call(
                     break;
                 }
             }
-            Err(e) => {
-                let _ = write!(message, "\nError reading {file_path}: {e}");
+            Err(error) => {
+                let _ = write!(message, "\nError reading {file_path}: {error}");
+                errors.push(error);
             }
         }
     }
@@ -339,5 +366,5 @@ pub async fn handle_tool_call(
         }
     }
 
-    Ok(message)
+    Ok(ReadFilesOutcome { text: message, successful_files, errors })
 }

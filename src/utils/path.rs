@@ -101,6 +101,12 @@ fn allowed_roots() -> &'static [PathBuf] {
     })
 }
 
+/// Effective operator-configured roots outside the workspace. Exposed for
+/// diagnostics so `doctor` reports the same once-read policy the file tools use.
+pub fn configured_allowed_roots() -> &'static [PathBuf] {
+    allowed_roots()
+}
+
 /// Containment predicate: a resolved path is acceptable if it is inside the
 /// workspace or inside one of the operator-configured extra roots.
 fn is_contained(
@@ -128,7 +134,7 @@ pub fn validate_path_in_workspace(
 
 /// The real implementation, with the allowed roots injected so tests can drive
 /// every case without touching process-global environment state.
-fn validate_path_with_roots(
+pub(crate) fn validate_path_with_roots(
     path: &Path,
     workspace_root: &Path,
     extra_roots: &[PathBuf],
@@ -293,8 +299,19 @@ pub fn resolve_in_workspace(
     cwd: &Path,
     workspace_root: &Path,
 ) -> Result<PathBuf, PathSecurityError> {
+    resolve_in_workspace_with_roots(path, cwd, workspace_root, allowed_roots())
+}
+
+/// Deterministic variant used by security tests and helpers that need to inject
+/// the exact containment policy instead of inheriting process-global overrides.
+pub(crate) fn resolve_in_workspace_with_roots(
+    path: &str,
+    cwd: &Path,
+    workspace_root: &Path,
+    extra_roots: &[PathBuf],
+) -> Result<PathBuf, PathSecurityError> {
     if path.trim().is_empty() {
-        return validate_path_in_workspace(workspace_root, workspace_root);
+        return validate_path_with_roots(workspace_root, workspace_root, extra_roots);
     }
     let expanded = expand_user(path);
     let candidate = if Path::new(&expanded).is_absolute() {
@@ -302,7 +319,7 @@ pub fn resolve_in_workspace(
     } else {
         cwd.join(expanded)
     };
-    validate_path_in_workspace(&candidate, workspace_root)
+    validate_path_with_roots(&candidate, workspace_root, extra_roots)
 }
 
 /// Match a glob against a workspace-relative path. `*`/`?` do NOT cross `/`
@@ -344,7 +361,7 @@ mod tests {
         ) {
             let ws = std::env::temp_dir().canonicalize().unwrap();
             let rel = segments.join("/");
-            if let Ok(resolved) = resolve_in_workspace(&rel, &ws, &ws) {
+            if let Ok(resolved) = resolve_in_workspace_with_roots(&rel, &ws, &ws, &[]) {
                 prop_assert!(
                     resolved.starts_with(&ws),
                     "resolve_in_workspace({rel:?}) escaped to {resolved:?}"
@@ -358,7 +375,7 @@ mod tests {
         #[test]
         fn validate_ok_implies_contained_any_input(s in ".*") {
             let ws = std::env::temp_dir().canonicalize().unwrap();
-            if let Ok(p) = validate_path_in_workspace(Path::new(&s), &ws) {
+            if let Ok(p) = validate_path_with_roots(Path::new(&s), &ws, &[]) {
                 prop_assert!(p.starts_with(&ws), "accepted escaping path {p:?} from input {s:?}");
             }
         }
@@ -387,7 +404,7 @@ mod tests {
         let ws = TempDir::new().unwrap();
         let f = ws.path().join("a.txt");
         fs::write(&f, "x").unwrap();
-        let v = validate_path_in_workspace(&f, ws.path()).unwrap();
+        let v = validate_path_with_roots(&f, ws.path(), &[]).unwrap();
         assert!(v.starts_with(ws.path().canonicalize().unwrap()));
     }
 
@@ -397,7 +414,7 @@ mod tests {
         // contained (validation happens before the dirs are created).
         let ws = TempDir::new().unwrap();
         let f = ws.path().join("new/deep/dir/file.txt");
-        let v = validate_path_in_workspace(&f, ws.path()).unwrap();
+        let v = validate_path_with_roots(&f, ws.path(), &[]).unwrap();
         assert!(v.starts_with(ws.path().canonicalize().unwrap()));
         assert!(v.ends_with("new/deep/dir/file.txt"));
     }
@@ -407,7 +424,7 @@ mod tests {
         let ws = TempDir::new().unwrap();
         let f = ws.path().join("nope/../../etc/passwd");
         assert!(matches!(
-            validate_path_in_workspace(&f, ws.path()),
+            validate_path_with_roots(&f, ws.path(), &[]),
             Err(PathSecurityError::PathTraversal { .. })
         ));
     }
@@ -419,7 +436,7 @@ mod tests {
         let f = outside.path().join("secret.txt");
         fs::write(&f, "s").unwrap();
         assert!(matches!(
-            validate_path_in_workspace(&f, ws.path()),
+            validate_path_with_roots(&f, ws.path(), &[]),
             Err(PathSecurityError::PathTraversal { .. })
         ));
     }
@@ -435,7 +452,7 @@ mod tests {
         let link = ws.path().join("link.txt");
         symlink(&secret, &link).unwrap();
         assert!(matches!(
-            validate_path_in_workspace(&link, ws.path()),
+            validate_path_with_roots(&link, ws.path(), &[]),
             Err(PathSecurityError::SymlinkEscape { .. })
         ));
     }
@@ -453,7 +470,7 @@ mod tests {
         let link = ws.path().join("evil");
         symlink(outside.path().join("nonexistent"), &link).unwrap();
         let f = link.join("file.txt");
-        assert!(validate_path_in_workspace(&f, ws.path()).is_err());
+        assert!(validate_path_with_roots(&f, ws.path(), &[]).is_err());
     }
 
     #[test]
@@ -561,7 +578,7 @@ mod tests {
         let link = ws.path().join("link");
         symlink(&real, &link).unwrap();
         let f = link.join("file.txt");
-        let v = validate_path_in_workspace(&f, ws.path()).unwrap();
+        let v = validate_path_with_roots(&f, ws.path(), &[]).unwrap();
         assert!(v.starts_with(ws.path().canonicalize().unwrap()));
     }
 }

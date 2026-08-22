@@ -14,6 +14,7 @@
 //! more state).
 
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -108,16 +109,7 @@ fn apply_batch(bash_state: &mut BashState, files: &[FileEditEntry]) -> Result<St
             entry.percentage_to_change,
             &entry.text_or_search_replace_blocks,
         )
-        .map_err(|e| {
-            // Plan failures (bad path, mode gate, stale/unread file, SEARCH miss)
-            // are all caused by the agent's input, so keep them client-classified
-            // (invalid_request) rather than wrapping in a server-error variant.
-            WinxError::ArgumentParseError(format!(
-                "MultiFileEdit aborted before writing anything - file {} ({}) failed validation: {e}",
-                index + 1,
-                entry.file_path
-            ))
-        })?;
+        .map_err(|error| contextualize_plan_error(bash_state, index, entry, error))?;
         planned.push(edit);
     }
 
@@ -156,4 +148,58 @@ fn apply_batch(bash_state: &mut BashState, files: &[FileEditEntry]) -> Result<St
     }
 
     Ok(format!("MultiFileEdit applied all {total} edits:\n\n{}", summaries.join("\n\n")))
+}
+
+/// Preserve the original failure class so the MCP orchestration layer can emit
+/// `needs_read`, stale-file recovery, or SEARCH conflict guidance. SEARCH errors
+/// do not carry a path themselves, so wrap them in path-aware
+/// `MultiFilePlanError` context without flattening the source into a string.
+fn contextualize_plan_error(
+    bash_state: &BashState,
+    index: usize,
+    entry: &FileEditEntry,
+    error: WinxError,
+) -> WinxError {
+    let context = format!(
+        "MultiFileEdit aborted before writing anything - file {} ({}) failed validation",
+        index + 1,
+        entry.file_path
+    );
+    match error {
+        WinxError::FileAccessError { path, message } => {
+            WinxError::FileAccessError { path, message: format!("{context}: {message}") }
+        }
+        source @ (WinxError::SearchBlockNotFound(_) | WinxError::SearchBlockAmbiguous { .. }) => {
+            WinxError::MultiFilePlanError {
+                index: index + 1,
+                path: resolved_entry_path(bash_state, &entry.file_path),
+                source: Box::new(source),
+            }
+        }
+        WinxError::SearchReplaceSyntaxError(message) => {
+            WinxError::SearchReplaceSyntaxError(format!("{context}: {message}"))
+        }
+        WinxError::SearchReplaceSyntaxErrorDetailed {
+            message,
+            line_number,
+            block_type,
+            suggestions,
+        } => WinxError::SearchReplaceSyntaxErrorDetailed {
+            message: format!("{context}: {message}"),
+            line_number,
+            block_type,
+            suggestions,
+        },
+        other => other,
+    }
+}
+
+fn resolved_entry_path(bash_state: &BashState, value: &str) -> PathBuf {
+    let expanded = crate::utils::path::expand_user(value);
+    let path = if Path::new(&expanded).is_absolute() {
+        PathBuf::from(expanded)
+    } else {
+        bash_state.cwd.join(expanded)
+    };
+    path.canonicalize().unwrap_or(path)
 }

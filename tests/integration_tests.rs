@@ -722,19 +722,11 @@ async fn test_read_files_nonexistent() -> Result<()> {
         end_line_nums: vec![None],
     };
 
-    let response =
-        winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await?;
-
-    // Should contain some indication of failure - could be error message or empty result
-    // Different error formats: "Error", "not found", "No such file", "does not exist", "failed"
-    let has_error_indication = response.to_lowercase().contains("error")
-        || response.to_lowercase().contains("not found")
-        || response.to_lowercase().contains("no such file")
-        || response.to_lowercase().contains("does not exist")
-        || response.to_lowercase().contains("failed")
-        || response.is_empty();
-
-    assert!(has_error_indication, "Expected error indication in response: {response}");
+    let result = winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await;
+    assert!(matches!(
+        result,
+        Err(WinxError::FileAccessError { message, .. }) if message.contains("does not exist")
+    ));
 
     Ok(())
 }

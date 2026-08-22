@@ -14,7 +14,7 @@ use tracing::{debug, error, info, instrument};
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
 use crate::types::ReadImage;
-use crate::utils::path::{expand_user, validate_path_in_workspace};
+use crate::utils::path::{expand_user, validate_path_in_workspace, validate_path_with_roots};
 
 /// Supported MIME types for images
 pub const SUPPORTED_MIME_TYPES: [&str; 4] = ["image/jpeg", "image/png", "image/gif", "image/webp"];
@@ -50,6 +50,25 @@ fn read_image_from_path(
     cwd: &Path,
     workspace_root: &Path,
 ) -> Result<(String, String)> {
+    read_image_from_path_impl(file_path, cwd, workspace_root, None)
+}
+
+#[cfg(test)]
+fn read_image_from_path_with_roots(
+    file_path: &str,
+    cwd: &Path,
+    workspace_root: &Path,
+    extra_roots: &[PathBuf],
+) -> Result<(String, String)> {
+    read_image_from_path_impl(file_path, cwd, workspace_root, Some(extra_roots))
+}
+
+fn read_image_from_path_impl(
+    file_path: &str,
+    cwd: &Path,
+    workspace_root: &Path,
+    extra_roots: Option<&[PathBuf]>,
+) -> Result<(String, String)> {
     debug!("Reading image: {}", file_path);
 
     // Expand the path
@@ -67,7 +86,11 @@ fn read_image_from_path(
     // the same guarantee ReadFiles/ContextSave give. Without this, ReadImage is
     // an arbitrary-file read primitive (`/etc/shadow`, `~/.ssh/*`), and over the
     // network-reachable HTTP transport that means remote exfiltration.
-    let path = validate_path_in_workspace(&path, workspace_root)
+    let validated = match extra_roots {
+        Some(extra_roots) => validate_path_with_roots(&path, workspace_root, extra_roots),
+        None => validate_path_in_workspace(&path, workspace_root),
+    };
+    let path = validated
         .map_err(|e| WinxError::PathSecurityError { path: path.clone(), message: e.to_string() })?;
 
     // Ensure it's a regular file (also rejects a path that doesn't exist).
@@ -181,7 +204,8 @@ mod tests {
         let img = ws.path().join("shot.png");
         fs::write(&img, b"\x89PNG\r\n\x1a\nfake").unwrap();
         let (mime, b64) =
-            read_image_from_path(img.to_str().unwrap(), ws.path(), ws.path()).unwrap();
+            read_image_from_path_with_roots(img.to_str().unwrap(), ws.path(), ws.path(), &[])
+                .unwrap();
         assert_eq!(mime, "image/png");
         assert!(!b64.is_empty());
     }
@@ -194,7 +218,8 @@ mod tests {
         let outside = TempDir::new().unwrap();
         let secret = outside.path().join("secret.png");
         fs::write(&secret, b"\x89PNG secret").unwrap();
-        let err = read_image_from_path(secret.to_str().unwrap(), ws.path(), ws.path());
+        let err =
+            read_image_from_path_with_roots(secret.to_str().unwrap(), ws.path(), ws.path(), &[]);
         assert!(matches!(err, Err(WinxError::PathSecurityError { .. })));
     }
 }

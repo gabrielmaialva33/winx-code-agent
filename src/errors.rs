@@ -80,6 +80,14 @@ pub enum WinxError {
     #[error("Search block matched multiple times")]
     SearchBlockAmbiguous { block_content: String, match_count: usize, suggestions: Vec<String> },
 
+    /// Path-aware context for a planning failure in an atomic multi-file edit.
+    /// The boxed source preserves the original recovery class instead of
+    /// flattening it into an argument/string error.
+    #[error(
+        "MultiFileEdit aborted before writing anything - file {index} ({path}) failed validation: {source}"
+    )]
+    MultiFilePlanError { index: usize, path: PathBuf, source: Box<WinxError> },
+
     /// Enhanced search/replace syntax error with detailed context
     #[error("Search/replace syntax error: {message}")]
     SearchReplaceSyntaxErrorDetailed {
@@ -215,6 +223,7 @@ impl ErrorRecovery {
 
 /// Enable cloning for `WinxError`
 impl Clone for WinxError {
+    #[allow(clippy::too_many_lines)] // exhaustive variant-preserving clone
     fn clone(&self) -> Self {
         match self {
             Self::ShellInitializationError(msg) => Self::ShellInitializationError(msg.clone()),
@@ -247,6 +256,11 @@ impl Clone for WinxError {
                     suggestions: suggestions.clone(),
                 }
             }
+            Self::MultiFilePlanError { index, path, source } => Self::MultiFilePlanError {
+                index: *index,
+                path: path.clone(),
+                source: Box::new((**source).clone()),
+            },
             Self::SearchReplaceSyntaxErrorDetailed {
                 message,
                 line_number,
