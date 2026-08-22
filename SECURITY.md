@@ -93,8 +93,18 @@ they reach the shared service registry, preventing accidental or deliberate cros
 Remote first calls default to one durable session per `(principal, canonical workspace)`. This prevents stateless clients
 and cosmetic model-generated ID changes from exhausting the guardian quota. It also means parallel conversations using
 the same principal in the same repository intentionally share one shell, cwd, foreground-command lock, and output stream.
-Use separate principals or `--session-affinity thread` when that sharing is unacceptable; thread affinity requires stable
-client-owned IDs and explicit cleanup.
+Use separate principals or `--session-affinity conversation` when that sharing is unacceptable. Conversation affinity
+prefers `Mcp-Session-Id`, accepts an edge-provided `X-Winx-Conversation-Id`, and falls back to the first-call `thread_id`;
+the identity is hashed and never returned or logged raw. A gateway must strip untrusted copies before injecting its header.
+`--session-affinity thread` remains the caller-owned option and requires stable IDs plus explicit cleanup.
+
+Optional `WINX_USAGE_LOG` telemetry is filtered to metadata-only `winx::usage` events. It includes hashed request/session
+correlation, tool/action, principal, scoped thread, client/protocol, outcome, duration, and response size. It must never
+include command text, file contents, tool output, bearer tokens, or raw conversation identities; regression tests enforce
+that boundary. On Unix each initial/rotated file is opened with `O_NOFOLLOW` and mode `0600`, existing broader modes are
+reduced to `0600`, and newly created log directories use `0700`. Landlock is applied before the non-blocking writer thread
+is created, so the logger cannot escape the sandbox domain; a sandboxed deployment must explicitly allow the chosen log
+path. Workspace paths and timing remain sensitive operational metadata despite these protections.
 
 Authentication is not authorization inside a shell. A principal permitted to use Winx still receives the capabilities of
 the selected Winx mode. Use `architect`, a constrained `code_writer`, containers, and OS-level isolation where needed.
@@ -104,10 +114,14 @@ only `/mcp` is protected by Winx bearer authentication.
 
 ## Guardian Lifecycle Safety
 
-Protocol `1.3` guardians own their creation, activity, and last-command clocks. Files beside guardian sockets are a
-control-plane cache, not the authoritative clock, because runtime directories may be tmpfs and recreated after reboot.
-Compatibility logic for protocol `1.2` distinguishes passive metadata reconstruction from real adapter activity and uses
-socket age for never-used legacy guardians.
+Protocol `1.3` guardians own their creation, activity, and last-command clocks. Protocol `1.4` additionally transports a
+runtime-owned `BashCommandState` independently of terminal output. MCP orchestration and Tasks consume only that typed
+state; child output and background-command summaries are never parsed for process status. Older guardians lacking
+`typed_action_result` fail closed for execution and must be removed and initialized again instead of enabling a
+text-parser fallback. Files beside guardian sockets
+are a control-plane cache, not the authoritative clock, because runtime directories may be tmpfs and recreated after
+reboot. Compatibility logic for protocol `1.2` distinguishes passive metadata reconstruction from real adapter activity
+and uses socket age for never-used legacy guardians.
 
 The default retention policy is deliberately tiered:
 

@@ -139,6 +139,35 @@ Consequences:
 Workspace affinity is the recommended mode for ChatGPT and other clients whose generated IDs are not guaranteed to be
 stable.
 
+### Conversation affinity — parallel web conversations
+
+Use:
+
+```bash
+--session-affinity conversation
+```
+
+when parallel conversations from one principal must work in the same repository without sharing a shell. Winx derives the
+key from:
+
+```text
+(authenticated principal, conversation identity, canonical workspace)
+```
+
+Identity preference is:
+
+1. `Mcp-Session-Id`, when the transport has a stable MCP session;
+2. `X-Winx-Conversation-Id`, when a reviewed gateway injects a stable opaque value;
+3. the supplied first-call `thread_id`, for modern stateless clients;
+4. workspace affinity, when no conversation identity exists.
+
+The identity is hashed into an external ID such as `cv_project_<hash>` and is never written raw to tool results or usage
+logs. Repeating `Initialize(first_call)` with the same conversation identity reattaches even if the supplied model-generated
+ID changes; another conversation identity gets a distinct guardian, cwd, command lock, and output journal.
+
+The gateway header is a trust input. Only inject it at an authenticated edge, strip untrusted client copies, and keep its
+value stable for the lifetime of the conversation.
+
 ### Thread affinity — explicit opt-out
 
 Use:
@@ -222,6 +251,50 @@ Principal rules:
 Thread IDs and MCP Task IDs are scoped before they reach the shared service. Normal results, structured content, Task
 results, and errors are translated back before leaving the server. A principal cannot get, update, or cancel another
 principal's Task.
+
+## LLM orchestration contract
+
+The MCP handshake leads with a deterministic sequencing contract: initialize once, preserve the returned `thread_id`, use
+`CodeMap` before broad reads, batch `ReadFiles`, read before editing, and never repeat a rejected call unchanged. Extra
+`WINX_SERVER_INSTRUCTIONS` are appended after those stable rules and are also included in the `Initialize` response for
+clients that do not expose handshake instructions to the model.
+
+Every tool advertises an `outputSchema` and returns a common `structuredContent` envelope. Existing text and image content
+remain unchanged for older clients. The main fields are:
+
+```json
+{
+  "status": "needs_read",
+  "tool": "FileWriteOrEdit",
+  "message": "FileWriteOrEdit failed: ...",
+  "errorCode": "read_required",
+  "retryable": true,
+  "retrySameCall": false,
+  "nextAction": {
+    "tool": "ReadFiles",
+    "instruction": "Perform every required read before retrying the edit.",
+    "arguments": {
+      "file_paths": ["/workspace/README.md:231-301"],
+      "thread_id": "ws_project_hash"
+    }
+  },
+  "requiredReads": [
+    { "path": "/workspace/README.md", "ranges": ["231-301"] }
+  ]
+}
+```
+
+Recoverable execution failures use HTTP/JSON-RPC success with MCP `isError: true`; malformed requests and failures that
+prevent a valid tool result from being serialized remain JSON-RPC errors. `BashCommand` reports `running` with
+`retryAfterMs` and a `status_check` next action, while interactive turns report `awaiting_input` or `awaiting_approval`.
+The shell runtime produces a separate `BashCommandState` containing process status, cwd, exit code, background ID, elapsed
+time, and optional interactive turn state. The MCP adapter and MCP Tasks consume only that typed value; rendered output,
+child output, and unescaped-looking command metadata are presentation data and cannot spoof orchestration.
+
+A `ReadFiles` batch containing one or more failed paths returns `isError: true`; content from successful paths remains in the
+same response, with `successful_files` and `failed_files` counts. `MultiFileEdit` preserves planning failure semantics:
+unread and stale files return `needs_read`, while missing or ambiguous SEARCH blocks return `conflict`, all without writing
+any file and with a concrete `ReadFiles` recovery action. MCP Task results retain the same envelope.
 
 ## Guardian lifecycle
 
@@ -308,6 +381,33 @@ winx-code-agent doctor
 ```
 
 Changing guardian limits or TTL environment variables requires `restart-daemon` because `winxd` reads them at startup.
+
+## Persistent usage telemetry
+
+Set a path to write only structured `winx::usage` events through a non-blocking JSONL writer:
+
+```bash
+WINX_USAGE_LOG="$HOME/.local/state/winx/usage.jsonl" \
+WINX_USAGE_LOG_ROTATION=daily \
+WINX_USAGE_LOG_KEEP_DAYS=7 \
+winx-code-agent serve --http --token-file ~/.config/winx-http-token
+```
+
+Rotation accepts `daily` (default), `hourly`, or `never`; retention applies to daily/hourly files, and `0` disables pruning.
+On Unix, every initial and rotated file is created/opened with `O_NOFOLLOW` and mode `0600`; an existing broader mode is
+reduced to `0600`, and newly created log directories use `0700`. Each tool event contains the tool/action, principal, scoped
+thread, hashed request and MCP-session correlation, client name and version, negotiated protocol, outcome, result status,
+duration, and response size. HTTP events contain peer, method, status, and duration. Command text, file contents, tool
+output, bearer tokens, and raw conversation identities are never written to this sink. Ordinary warnings and diagnostics
+continue to stderr according to `RUST_LOG` and `WINX_LOG_FORMAT`.
+
+Landlock is applied before the non-blocking logging worker is created, so the writer inherits the same domain as Tokio and
+PTY children. With `WINX_SANDBOX=1`, the usage-log path must therefore be under the startup workspace, `/tmp`, or an
+explicit `WINX_SANDBOX_RW_PATHS` root; startup fails rather than silently creating an unconstrained writer outside that
+policy.
+
+`winx-code-agent doctor` reports whether a usage log is configured and whether file tools are in `workspace`, `extended`,
+or `unconfined` containment mode.
 
 ## Network exposure
 
@@ -397,7 +497,7 @@ Winx intentionally does not trust forwarded-IP headers by default.
 | `--token-file <PATH>`         | Preferred single-principal credential source       |
 | `--principal-config <PATH>`   | Multi-principal TOML configuration                 |
 | `--token <VALUE>`             | Compatibility source; visible in process arguments |
-| `--session-affinity workspace | thread`                                            | Select reattach-by-workspace or caller-owned IDs |
+| `--session-affinity <MODE>`     | Select `workspace`, `conversation`, or caller-owned `thread` IDs |
 | `--allow-weak-token`          | Permit a short token for local tests only          |
 | `--allow-non-loopback`        | Explicitly permit a non-loopback listener          |
 | `--allowed-host <HOST>`       | Extend accepted Host authorities; repeatable       |
@@ -419,8 +519,12 @@ Authorization: Bearer <token>
 Winx also supports the legacy MCP HTTP initialization/session flow and returns `Mcp-Session-Id` for that lifecycle.
 Remote Roots bootstrap is disabled on the shared HTTP service; the explicit `Initialize` tool selects the workspace.
 
-## Upgrade notes for 0.2.333
+## Upgrade notes for 0.2.333 and later
 
+- Protocol `1.4` adds the `typed_action_result` capability and transports runtime-owned `BashCommandState` separately from
+  terminal text. The control plane upgrades automatically when possible. Existing older guardians remain listable and
+  attachable, but execution fails closed until the affected durable session is removed and initialized again; no
+  text-parser fallback is used.
 - Streamable HTTP now defaults to workspace affinity.
 - Repeated first calls attach rather than reset protocol-1.3 guardians.
 - `winxd` automatically upgrades from a control plane that supports planned restart; existing guardians keep running.
