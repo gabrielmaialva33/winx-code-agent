@@ -24,32 +24,54 @@
 use std::path::Path;
 
 #[cfg(target_os = "linux")]
-use tracing::info;
-use tracing::warn;
-
-#[cfg(target_os = "linux")]
 const DEFAULT_RO_PATHS: &[&str] =
     &["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc", "/proc", "/sys", "/run", "/opt"];
 
 #[cfg(target_os = "linux")]
 const DEFAULT_RW_PATHS: &[&str] = &["/tmp", "/dev", "/var/tmp"];
 
+#[derive(Debug)]
+enum SandboxMessage {
+    Info(String),
+    Warning(String),
+}
+
+/// Deferred diagnostics from sandbox setup. Landlock must be applied before
+/// logging creates its non-blocking writer thread; messages are therefore stored
+/// and emitted immediately after the subscriber is installed.
+#[derive(Debug, Default)]
+pub struct SandboxReport {
+    messages: Vec<SandboxMessage>,
+}
+
+impl SandboxReport {
+    pub fn emit(self) {
+        for message in self.messages {
+            match message {
+                SandboxMessage::Info(message) => tracing::info!("{message}"),
+                SandboxMessage::Warning(message) => tracing::warn!("{message}"),
+            }
+        }
+    }
+}
+
 /// Apply the Landlock sandbox if `WINX_SANDBOX` is set. Infallible: any problem
-/// is logged and the process continues (possibly unsandboxed). The cwd at startup
-/// is taken as the workspace and granted read-write. MUST be called before the
-/// async runtime is built so its worker threads inherit the Landlock domain.
-pub fn apply_if_requested() {
+/// is reported and the process continues (possibly unsandboxed). The cwd at
+/// startup is taken as the workspace and granted read-write. MUST be called
+/// before logging or the async runtime create threads so every child inherits the
+/// Landlock domain.
+pub fn apply_if_requested() -> SandboxReport {
+    let mut report = SandboxReport::default();
     if !crate::config::env_flag("WINX_SANDBOX") {
-        return;
+        return report;
     }
 
     let workspace_root = match std::env::current_dir() {
         Ok(dir) => dir,
-        Err(e) => {
-            warn!(
-                "WINX_SANDBOX: cannot determine the cwd ({e}); the workspace may not be writable \
-                 under the sandbox - start winx from your project directory."
-            );
+        Err(error) => {
+            report.messages.push(SandboxMessage::Warning(format!(
+                "WINX_SANDBOX: cannot determine the cwd ({error}); the workspace may not be writable under the sandbox - start winx from your project directory."
+            )));
             std::path::PathBuf::from(".")
         }
     };
@@ -57,17 +79,21 @@ pub fn apply_if_requested() {
     #[cfg(not(target_os = "linux"))]
     {
         let _ = &workspace_root;
-        warn!("WINX_SANDBOX is set but Landlock is Linux-only; continuing UNSANDBOXED.");
+        report.messages.push(SandboxMessage::Warning(
+            "WINX_SANDBOX is set but Landlock is Linux-only; continuing UNSANDBOXED.".to_string(),
+        ));
     }
 
     #[cfg(target_os = "linux")]
     match apply_linux(&workspace_root) {
-        Ok(status) => info!(
-            "WINX_SANDBOX active (Landlock {status:?}); writes confined to the workspace + /tmp, \
-             home not readable. Extend via WINX_SANDBOX_RO_PATHS / WINX_SANDBOX_RW_PATHS."
-        ),
-        Err(e) => warn!("WINX_SANDBOX: could not apply Landlock ({e}); continuing UNSANDBOXED."),
+        Ok(status) => report.messages.push(SandboxMessage::Info(format!(
+            "WINX_SANDBOX active (Landlock {status:?}); writes confined to the workspace + /tmp, home not readable. Extend via WINX_SANDBOX_RO_PATHS / WINX_SANDBOX_RW_PATHS."
+        ))),
+        Err(error) => report.messages.push(SandboxMessage::Warning(format!(
+            "WINX_SANDBOX: could not apply Landlock ({error}); continuing UNSANDBOXED."
+        ))),
     }
+    report
 }
 
 #[cfg(target_os = "linux")]

@@ -76,8 +76,9 @@ enum Commands {
         allow_non_loopback: bool,
 
         /// Session key used by remote first-call initialization. `workspace`
-        /// reuses one durable shell per principal/project; `thread` trusts the
-        /// caller's `thread_id` and requires explicit lifecycle management.
+        /// reuses one durable shell per principal/project; `conversation` also
+        /// separates client conversations when a stable identity is available;
+        /// `thread` trusts the caller's ID and requires explicit lifecycle care.
         #[arg(
             long,
             value_enum,
@@ -164,48 +165,15 @@ enum Commands {
     Doctor,
 }
 
-/// Logging setup
-fn setup_logging(verbose: bool, debug: bool) {
-    let level = if debug {
-        tracing::Level::DEBUG
-    } else if verbose {
-        tracing::Level::INFO
-    } else {
-        tracing::Level::WARN
-    };
-
-    let filter = tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into());
-    // Usage events (one per authenticated HTTP request / tool call) stay
-    // visible at the default WARN level so persistent usage logs never depend
-    // on the verbosity flags. The directive is static and cannot fail to parse.
-    let filter = match "winx::usage=info".parse() {
-        Ok(directive) => filter.add_directive(directive),
-        Err(_) => filter,
-    };
-
-    let builder = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr);
-    // WINX_LOG_FORMAT=json emits one JSON object per line, for journald + jq.
-    if winx_code_agent::config::env_text("WINX_LOG_FORMAT")
-        .is_some_and(|format| format.eq_ignore_ascii_case("json"))
-    {
-        builder.json().init();
-    } else {
-        builder.with_ansi(true).init();
-    }
-}
-
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    setup_logging(cli.verbose, cli.debug);
-
-    // Opt-in Landlock sandbox (WINX_SANDBOX=1), confining writes to the cwd (the
-    // workspace) + /tmp. Applied BEFORE the tokio runtime is built, so its worker
-    // threads - and the PTY shell forked from one of them - inherit the Landlock
-    // domain (restrict_self only covers the calling thread and its future
-    // children, and a #[tokio::main] runtime's workers already exist by the time
-    // the async body runs). No-op unless the env var is set.
-    winx_code_agent::sandbox::apply_if_requested();
+    // Apply Landlock before ANY worker thread exists. This includes the optional
+    // non-blocking usage-log writer as well as Tokio and PTY children; otherwise
+    // that writer would remain outside the Landlock domain for the process lifetime.
+    let sandbox_report = winx_code_agent::sandbox::apply_if_requested();
+    let _logging_guard = winx_code_agent::logging::initialize(cli.verbose, cli.debug)?;
+    sandbox_report.emit();
 
     tokio::runtime::Runtime::new()
         .map_err(|e| {
@@ -364,8 +332,26 @@ async fn run_doctor() -> Result<()> {
             "sandbox_requested": winx_code_agent::config::env_flag("WINX_SANDBOX"),
             "redaction_disabled": winx_code_agent::config::env_flag("WINX_NO_REDACT"),
             "compression_disabled": winx_code_agent::config::env_flag("WINX_NO_COMPRESS"),
-            "http_token_configured": winx_code_agent::config::env_text("WINX_HTTP_TOKEN").is_some()
+            "http_token_configured": winx_code_agent::config::env_text("WINX_HTTP_TOKEN").is_some(),
+            "usage_log_configured": winx_code_agent::config::env_text("WINX_USAGE_LOG").is_some()
         }
+    });
+    let allowed_roots = winx_code_agent::utils::path::configured_allowed_roots();
+    let unconfined =
+        cfg!(unix) && allowed_roots.iter().any(|root| root == std::path::Path::new("/"));
+    let containment_mode = if unconfined {
+        "unconfined"
+    } else if allowed_roots.is_empty() {
+        "workspace"
+    } else {
+        "extended"
+    };
+    report["file_tool_containment"] = serde_json::json!({
+        "mode": containment_mode,
+        "extra_roots": allowed_roots
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
     });
 
     #[cfg(unix)]
