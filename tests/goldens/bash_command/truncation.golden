@@ -2,14 +2,14 @@
 ◉ <WORKSPACE>──➤<PROMPT_NONCE>:0
 
 ---
+[Output was truncated to fit context. The earlier (dropped) output was saved to:
+<WORKSPACE>/.winx/scratch/<SCRATCH_FILE>
+Read it with ReadFiles or grep it via BashCommand.]
+---
+
+---
 
 bg_command_id = <BG_ID>
 status = process exited
 exit code = 0
 cwd = <WORKSPACE>
-
----
-[Output was truncated to fit context. The earlier (dropped) output was saved to:
-<WORKSPACE>/.winx/scratch/<SCRATCH_FILE>
-Read it with ReadFiles or grep it via BashCommand.]
----

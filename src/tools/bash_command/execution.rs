@@ -3,8 +3,10 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::{debug, error, warn};
 
-use super::output::{clear_to_run_async, get_status, wait_for_output};
-use super::{main_shell, send_utf8_in_byte_chunks, ShellDeliveryCursor, DEFAULT_TIMEOUT};
+use super::output::{clear_to_run_async, render_status, status_state, wait_for_output};
+use super::{
+    main_shell, send_utf8_in_byte_chunks, BashCommandResult, ShellDeliveryCursor, DEFAULT_TIMEOUT,
+};
 use crate::errors::{Result, WinxError};
 use crate::runtime::lock_session_store;
 use crate::state::bash_state::BashState;
@@ -75,7 +77,7 @@ pub(super) async fn execute_command(
     allow_multi: bool,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     let stripped_command = strip_tail_pipe(command);
     let command = stripped_command.as_str();
     debug!(bytes = command.len(), allow_multi, "Processing Command action");
@@ -161,7 +163,7 @@ async fn execute_in_background(
     command: &str,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     debug!(bytes = command.len(), "Executing command in background");
     let restricted_mode =
         matches!(bash_state.bash_command_mode.bash_mode, crate::types::BashMode::RestrictedMode);
@@ -211,7 +213,9 @@ async fn execute_in_background(
 
     let _ = (timeout_secs, delivery_cursor);
     let _ = shell;
-    Ok(get_status(bash_state, true, Some(&background_id), true, None, None, Some(&bash_state.cwd)))
+    let state = status_state(Some(&background_id), true, None, None, &bash_state.cwd, None);
+    let output = render_status(bash_state, &state);
+    Ok(BashCommandResult { output, state })
 }
 
 #[cfg(test)]

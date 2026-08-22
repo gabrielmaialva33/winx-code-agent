@@ -2,8 +2,10 @@ use std::time::Duration;
 
 use tracing::debug;
 
-use super::output::wait_for_output;
-use super::{main_shell, send_utf8_in_byte_chunks, SharedPtyShell, ShellDeliveryCursor};
+use super::output::{insert_note_before_status, wait_for_output};
+use super::{
+    main_shell, send_utf8_in_byte_chunks, BashCommandResult, SharedPtyShell, ShellDeliveryCursor,
+};
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
 use crate::state::pty::PtyShell;
@@ -45,7 +47,7 @@ pub(super) async fn execute_send_text(
     background_id: Option<&str>,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     debug!(bytes = text.len(), submit, "Processing SendText action");
     if text.is_empty() {
         return Err(WinxError::InvalidInput(
@@ -88,7 +90,7 @@ pub(super) async fn execute_send_specials(
     background_id: Option<&str>,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     debug!("Processing SendSpecials action: {keys:?} (submit={submit})");
     if keys.is_empty() {
         return Err(WinxError::InvalidInput("send_specials cannot be empty".to_string()));
@@ -147,7 +149,7 @@ pub(super) async fn execute_send_specials(
     if submit {
         submit_enter(&shell).await?;
     }
-    let mut output = wait_for_output(
+    let mut result = wait_for_output(
         bash_state,
         &shell,
         timeout_secs,
@@ -157,10 +159,11 @@ pub(super) async fn execute_send_specials(
         delivery_cursor,
     )
     .await?;
-    if is_interrupt && output.contains("status = still running") {
-        output.push_str("\n---\n----\nFailure interrupting.\nYou may want to try Ctrl-c again or program specific exit interactive commands.\n");
+    if is_interrupt && result.state.is_running() {
+        let note = "\n---\n----\nFailure interrupting.\nYou may want to try Ctrl-c again or program specific exit interactive commands.\n";
+        insert_note_before_status(bash_state, &mut result, note);
     }
-    Ok(output)
+    Ok(result)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -173,7 +176,7 @@ pub(super) async fn execute_send_ascii(
     background_id: Option<&str>,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     debug!(bytes = ascii_codes.len(), submit, "Processing SendAscii action");
     if ascii_codes.is_empty() {
         return Err(WinxError::InvalidInput("send_ascii cannot be empty".to_string()));
@@ -198,7 +201,7 @@ pub(super) async fn execute_send_ascii(
     if submit {
         submit_enter(&shell).await?;
     }
-    let mut output = wait_for_output(
+    let mut result = wait_for_output(
         bash_state,
         &shell,
         timeout_secs,
@@ -208,8 +211,9 @@ pub(super) async fn execute_send_ascii(
         delivery_cursor,
     )
     .await?;
-    if is_interrupt && output.contains("status = still running") {
-        output.push_str("\n---\n----\nFailure interrupting.\nYou may want to try Ctrl-c again or program specific exit interactive commands.\n");
+    if is_interrupt && result.state.is_running() {
+        let note = "\n---\n----\nFailure interrupting.\nYou may want to try Ctrl-c again or program specific exit interactive commands.\n";
+        insert_note_before_status(bash_state, &mut result, note);
     }
-    Ok(output)
+    Ok(result)
 }

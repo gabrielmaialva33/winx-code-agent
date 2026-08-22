@@ -6,7 +6,7 @@ use super::protocol::{
     read_json_frame, write_json_frame, ConfigureSessionParams, ConfigureSessionResult,
     ConfigureSessionTransition, HelloResult, JournalRead, JournalReadParams, PruneParams,
     PruneResult, RpcRequest, RpcResponse, RunActionParams, RunActionResult, SessionInfo,
-    SessionParams, WireShellError, PROTOCOL_MAJOR,
+    SessionParams, WireShellError, PROTOCOL_MAJOR, TYPED_ACTION_RESULT_CAPABILITY,
 };
 use crate::errors::{Result, WinxError};
 use crate::runtime::{
@@ -14,6 +14,7 @@ use crate::runtime::{
     ShellSessionConfiguration, ShellSessionTransition,
 };
 use crate::state::bash_state::BashState;
+use crate::tools::bash_command::BashCommandResult;
 use crate::types::BashCommand;
 
 /// Shell runtime backed by a `winxd` Unix-domain socket.
@@ -34,7 +35,7 @@ impl DaemonClient {
         Self { socket_path: socket_path.as_ref().to_path_buf() }
     }
 
-    async fn connected(&self) -> Result<UnixStream> {
+    async fn connected_with_hello(&self) -> Result<(UnixStream, HelloResult)> {
         let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|error| {
             WinxError::ShellInitializationError(format!(
                 "cannot connect to winxd at {}: {error}",
@@ -54,30 +55,15 @@ impl DaemonClient {
                 hello.protocol_major, PROTOCOL_MAJOR
             )));
         }
-        Ok(stream)
+        Ok((stream, hello))
+    }
+
+    async fn connected(&self) -> Result<UnixStream> {
+        self.connected_with_hello().await.map(|(stream, _)| stream)
     }
 
     pub async fn hello(&self) -> Result<HelloResult> {
-        let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|error| {
-            WinxError::ShellInitializationError(format!(
-                "cannot connect to winxd at {}: {error}",
-                self.socket_path.display()
-            ))
-        })?;
-        let hello: HelloResult = DaemonShellRuntime::request(
-            &mut stream,
-            rand::random::<u64>(),
-            "winx.hello",
-            serde_json::json!({ "protocol_major": PROTOCOL_MAJOR }),
-        )
-        .await?;
-        if hello.protocol_major != PROTOCOL_MAJOR {
-            return Err(WinxError::ConfigurationError(format!(
-                "winxd protocol major {} is incompatible with client {}",
-                hello.protocol_major, PROTOCOL_MAJOR
-            )));
-        }
-        Ok(hello)
+        self.connected_with_hello().await.map(|(_, hello)| hello)
     }
 
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
@@ -202,10 +188,17 @@ impl DaemonShellRuntime {
         &self,
         bash_state: &std::sync::Arc<tokio::sync::Mutex<Option<BashState>>>,
         command: BashCommand,
-    ) -> Result<String> {
+    ) -> Result<BashCommandResult> {
         let snapshot =
             bash_state.lock().await.as_ref().ok_or(WinxError::BashStateNotInitialized)?.snapshot();
-        let mut stream = DaemonClient::new(&self.socket_path).connected().await?;
+        let client = DaemonClient::new(&self.socket_path);
+        let (mut stream, hello) = client.connected_with_hello().await?;
+        if !hello.capabilities.iter().any(|capability| capability == TYPED_ACTION_RESULT_CAPABILITY)
+        {
+            return Err(WinxError::ConfigurationError(format!(
+                "the running winxd does not advertise {TYPED_ACTION_RESULT_CAPABILITY}; restart the control daemon with the current binaries before executing BashCommand"
+            )));
+        }
 
         let request_key = format!("{:016x}", rand::random::<u64>());
         let id = rand::random::<u64>();
@@ -226,11 +219,15 @@ impl DaemonShellRuntime {
         if let Some(state) = bash_state.lock().await.as_mut() {
             state.apply_snapshot(&result.snapshot);
         }
-        match (result.output, result.error) {
-            (Some(output), None) => Ok(output),
-            (_, Some(error)) => Err(from_wire_error(error)),
+        match (result.output, result.state, result.error) {
+            (Some(output), Some(state), None) => Ok(BashCommandResult { output, state }),
+            (_, _, Some(error)) => Err(from_wire_error(error)),
+            (Some(_), None, None) => Err(WinxError::ConfigurationError(
+                "the session guardian predates typed BashCommand results; terminate this durable session, then initialize it again so the current guardian binary is created. Winx will not reconstruct orchestration state from terminal text."
+                    .to_string(),
+            )),
             _ => Err(WinxError::ParseError(
-                "winxd action response had neither output nor error".to_string(),
+                "winxd action response had neither a typed result nor an error".to_string(),
             )),
         }
     }

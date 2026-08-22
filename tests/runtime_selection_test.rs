@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tempfile::TempDir;
 
-use winx_code_agent::daemon::DaemonClient;
+use winx_code_agent::daemon::{DaemonClient, TYPED_ACTION_RESULT_CAPABILITY};
 use winx_code_agent::runtime::{
     ensure_control_daemon_at, restart_control_daemon_at, select_runtime_mode, RuntimeMode,
 };
@@ -41,7 +41,9 @@ async fn daemon_default_can_auto_spawn_the_sibling_binary() -> anyhow::Result<()
 
     let hello = DaemonClient::new(&socket).hello().await?;
     let validation = if hello.protocol_major == 1
+        && hello.protocol_minor >= 4
         && hello.capabilities.iter().any(|capability| capability == "guardian_activity_clock")
+        && hello.capabilities.iter().any(|capability| capability == TYPED_ACTION_RESULT_CAPABILITY)
         && hello.daemon_pid != std::process::id()
     {
         Ok(())
@@ -63,7 +65,12 @@ async fn planned_control_restart_changes_epoch() -> anyhow::Result<()> {
 
     let restarted = restart_control_daemon_at(&socket, binary).await?;
     let validation = if restarted.daemon_epoch != previous.daemon_epoch
+        && restarted.protocol_minor >= 4
         && restarted.capabilities.iter().any(|capability| capability == "guardian_activity_clock")
+        && restarted
+            .capabilities
+            .iter()
+            .any(|capability| capability == TYPED_ACTION_RESULT_CAPABILITY)
     {
         Ok(())
     } else {

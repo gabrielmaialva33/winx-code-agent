@@ -8,8 +8,10 @@ mod interaction;
 mod output;
 mod tui;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tracing::{error, info};
 
@@ -27,6 +29,45 @@ use output::{execute_status_check, finalize_tombstone};
 use tui::{execute_screen, execute_wait_for_turn};
 
 type SharedPtyShell = Arc<Mutex<Option<PtyShell>>>;
+
+/// Authoritative process state produced by the shell runtime. It is transported
+/// separately from human-readable terminal output, so command text cannot spoof
+/// orchestration state by printing Winx-looking markers.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BashProcessStatus {
+    Running,
+    Exited,
+}
+
+/// Machine-readable state of one `BashCommand` action.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BashCommandState {
+    pub process_status: BashProcessStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub running_for_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    pub cwd: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_state: Option<crate::state::turn::TurnState>,
+}
+
+impl BashCommandState {
+    pub const fn is_running(&self) -> bool {
+        matches!(self.process_status, BashProcessStatus::Running)
+    }
+}
+
+/// Human-readable output plus runtime-owned state. Only `state` drives MCP
+/// orchestration; `output` is presentation and may contain arbitrary child text.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct BashCommandResult {
+    pub output: String,
+    pub state: BashCommandState,
+}
 
 /// Per-adapter delivery state used by daemon guardians. Embedded callers keep
 /// using the cursor stored directly on `PtyShell`, preserving legacy behavior.
@@ -120,19 +161,28 @@ pub async fn handle_tool_call(
     handle_tool_call_with_runtime(&EmbeddedShellRuntime, bash_state, command).await
 }
 
-/// Execute a `BashCommand` through the selected shell runtime.
+/// Backwards-compatible text-only API used by direct library callers.
 pub async fn handle_tool_call_with_runtime(
     runtime: &dyn ShellRuntime,
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
 ) -> Result<String> {
+    Ok(handle_tool_call_with_runtime_detailed(runtime, bash_state, command).await?.output)
+}
+
+/// Execute a `BashCommand` while preserving the runtime-owned typed state.
+pub async fn handle_tool_call_with_runtime_detailed(
+    runtime: &dyn ShellRuntime,
+    bash_state: &Arc<Mutex<Option<BashState>>>,
+    command: BashCommand,
+) -> Result<BashCommandResult> {
     runtime.run_action(bash_state, command).await
 }
 
 pub(crate) async fn handle_embedded_tool_call(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     handle_embedded_tool_call_inner(bash_state, command, None).await
 }
 
@@ -140,7 +190,7 @@ pub(crate) async fn handle_embedded_tool_call_with_cursor(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
     delivery_cursor: &Arc<Mutex<ShellDeliveryCursor>>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     let mut delivery_cursor = delivery_cursor.lock().await;
     handle_embedded_tool_call_inner(bash_state, command, Some(&mut delivery_cursor)).await
 }
@@ -150,7 +200,7 @@ async fn handle_embedded_tool_call_inner(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     let action_kind = match &command.action_json {
         BashCommandAction::Command { .. } => "command",
         BashCommandAction::StatusCheck { .. } => "status_check",
@@ -207,14 +257,14 @@ async fn handle_embedded_tool_call_inner(
     }
 
     match result {
-        Ok(mut output) => {
+        Ok(mut outcome) => {
             if let BashCommandAction::Command { ref command, .. } = command.action_json {
                 let command = command.trim();
-                if output.starts_with(command) {
-                    output = output[command.len()..].to_string();
+                if outcome.output.starts_with(command) {
+                    outcome.output = outcome.output[command.len()..].to_string();
                 }
             }
-            Ok(output)
+            Ok(outcome)
         }
         Err(error) => Err(error),
     }
@@ -226,7 +276,7 @@ async fn execute_bash_action(
     action: &BashCommandAction,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     let mut is_background = false;
     let mut background_id: Option<String> = None;
 
@@ -249,7 +299,7 @@ async fn execute_bash_action(
                     manager.peek_tombstone(&bash_state.current_thread_id, id)
                 {
                     drop(manager);
-                    return finalize_tombstone(id, tombstone, action);
+                    return finalize_tombstone(bash_state, id, tombstone, action);
                 } else {
                     let error = format!(
                         "No shell found running with command id {}.\n{}",

@@ -5,10 +5,12 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::state::persistence::BashStateSnapshot;
+use crate::tools::bash_command::BashCommandState;
 use crate::types::BashCommand;
 
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 3;
+pub const PROTOCOL_MINOR: u16 = 4;
+pub const TYPED_ACTION_RESULT_CAPABILITY: &str = "typed_action_result";
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -83,6 +85,11 @@ pub(crate) struct ConfigureSessionResult {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct RunActionResult {
     pub output: Option<String>,
+    /// Runtime-owned state added in protocol 1.4. Optional only so a new adapter
+    /// can reject an older guardian with an actionable upgrade error instead of
+    /// trying to reconstruct state from attacker-controlled output text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<BashCommandState>,
     pub snapshot: BashStateSnapshot,
     pub error: Option<WireShellError>,
 }

@@ -8,7 +8,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 #[cfg(unix)]
-use crate::daemon::{default_socket_path, DaemonClient, DaemonShellRuntime, HelloResult};
+use crate::daemon::{
+    default_socket_path, DaemonClient, DaemonShellRuntime, HelloResult,
+    TYPED_ACTION_RESULT_CAPABILITY,
+};
 use crate::errors::{Result, WinxError};
 
 use super::{EmbeddedShellRuntime, ShellRuntime};
@@ -118,7 +121,9 @@ pub async fn ensure_control_daemon_at(socket: &Path, daemon_binary: &Path) -> Re
     ensure_daemon_at(socket, daemon_binary).await?;
     let client = DaemonClient::new(socket);
     let hello = client.hello().await?;
-    if has_capability(&hello, GUARDIAN_LIFECYCLE_CAPABILITY) {
+    if has_capability(&hello, GUARDIAN_LIFECYCLE_CAPABILITY)
+        && has_capability(&hello, TYPED_ACTION_RESULT_CAPABILITY)
+    {
         return Ok(());
     }
     if !has_capability(&hello, PLANNED_CONTROL_RESTART_CAPABILITY) {
@@ -134,11 +139,13 @@ pub async fn ensure_control_daemon_at(socket: &Path, daemon_binary: &Path) -> Re
         "restarting older winxd control plane while preserving session guardians"
     );
     let restarted = restart_control_daemon_from_hello(socket, daemon_binary, hello).await?;
-    if !has_capability(&restarted, GUARDIAN_LIFECYCLE_CAPABILITY) {
-        return Err(WinxError::ConfigurationError(format!(
-            "restarted winxd at {} still lacks required capability {GUARDIAN_LIFECYCLE_CAPABILITY}",
-            socket.display()
-        )));
+    for capability in [GUARDIAN_LIFECYCLE_CAPABILITY, TYPED_ACTION_RESULT_CAPABILITY] {
+        if !has_capability(&restarted, capability) {
+            return Err(WinxError::ConfigurationError(format!(
+                "restarted winxd at {} still lacks required capability {capability}",
+                socket.display()
+            )));
+        }
     }
     Ok(())
 }

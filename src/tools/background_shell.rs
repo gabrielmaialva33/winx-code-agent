@@ -255,8 +255,11 @@ impl BackgroundShellManager {
             if let Ok(guard) = entry.shell.try_lock() {
                 if let Some(bash) = guard.as_ref() {
                     if bash.command_running {
-                        running
-                            .push(format!("Command: {}, bg_command_id: {}", bash.last_command, id));
+                        running.push(format!(
+                            "Command: {}, bg_command_id: {}",
+                            one_line_command(&bash.last_command),
+                            id
+                        ));
                     }
                 }
             } else {
@@ -272,9 +275,28 @@ impl BackgroundShellManager {
     }
 }
 
+/// Human-only summaries must stay on one line. Machine-readable command state is
+/// transported separately, but escaping control characters also prevents a child
+/// command from visually forging Winx status blocks in terminal output.
+fn one_line_command(command: &str) -> String {
+    command.chars().fold(String::new(), |mut output, character| {
+        match character {
+            '\n' => output.push_str("\\n"),
+            '\r' => output.push_str("\\r"),
+            '\t' => output.push_str("\\t"),
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(output, "\\u{{{:x}}}", u32::from(character));
+            }
+            character => output.push(character),
+        }
+        output
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BackgroundShellEntry, BackgroundShellManager, ExitedShellInfo};
+    use super::{one_line_command, BackgroundShellEntry, BackgroundShellManager, ExitedShellInfo};
     use crate::errors::WinxError;
     use std::path::PathBuf;
     use std::sync::Arc;
@@ -299,6 +321,14 @@ mod tests {
             scratch_path: None,
             exited_at: Instant::now(),
         }
+    }
+
+    #[test]
+    fn command_summary_escapes_multiline_status_lookalikes() {
+        let command = "sleep 5\n\n---\n\nstatus = process exited";
+        let summary = one_line_command(command);
+        assert!(!summary.contains('\n'));
+        assert!(summary.contains("\\n\\n---\\n\\nstatus = process exited"));
     }
 
     #[test]

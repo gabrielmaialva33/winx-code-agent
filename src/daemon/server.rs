@@ -13,7 +13,7 @@ use super::protocol::{
     read_json_frame, write_json_frame, ConfigureSessionParams, ConfigureSessionResult,
     ConfigureSessionTransition, HelloResult, JournalRead, JournalReadParams, RpcError, RpcRequest,
     RpcResponse, RunActionParams, RunActionResult, SessionInfo, SessionParams, WireShellError,
-    MAX_FRAME_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    MAX_FRAME_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR, TYPED_ACTION_RESULT_CAPABILITY,
 };
 use crate::errors::{Result, WinxError};
 use crate::runtime::{lock_session_store, ShellTarget};
@@ -266,6 +266,7 @@ async fn dispatch(
                 capabilities: vec![
                     "session.configure".to_string(),
                     "shell.run_action".to_string(),
+                    TYPED_ACTION_RESULT_CAPABILITY.to_string(),
                     "session.list".to_string(),
                     "session.read_output".to_string(),
                     "session.kill".to_string(),
@@ -474,6 +475,7 @@ async fn configure_session(
     Ok(ConfigureSessionResult { attach_hint, snapshot: Some(snapshot), attached_existing })
 }
 
+#[allow(clippy::too_many_lines)] // session setup, execution, capture, and idempotent caching
 async fn run_action(
     sessions: &Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     params: RunActionParams,
@@ -554,17 +556,27 @@ async fn run_action(
         &cursor,
     )
     .await;
-    if let Ok(output) = &outcome {
-        if let Some(id) = output.lines().find_map(|line| line.strip_prefix("bg_command_id = ")) {
-            session.background_ids.lock().await.insert(id.to_string());
+    if let Ok(result) = &outcome {
+        if let Some(id) = result.state.background_id.as_ref() {
+            session.background_ids.lock().await.insert(id.clone());
         }
     }
     capture_session_outputs(&session).await;
     let snapshot =
         session.state.lock().await.as_ref().ok_or(WinxError::BashStateNotInitialized)?.snapshot();
     let result = match outcome {
-        Ok(output) => RunActionResult { output: Some(output), snapshot, error: None },
-        Err(error) => RunActionResult { output: None, snapshot, error: Some(to_wire_error(error)) },
+        Ok(result) => RunActionResult {
+            output: Some(result.output),
+            state: Some(result.state),
+            snapshot,
+            error: None,
+        },
+        Err(error) => RunActionResult {
+            output: None,
+            state: None,
+            snapshot,
+            error: Some(to_wire_error(error)),
+        },
     };
 
     let mut completed = session.completed.lock().await;

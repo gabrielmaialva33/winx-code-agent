@@ -2,27 +2,30 @@
 
 initial-marker
 
+This is the main shell. No command running in background.
+
 ---
 
 status = still running
 running for = <SECONDS> seconds
 cwd = <WORKSPACE>
-This is the main shell. No command running in background.
 === incremental ===
 late-marker
 
+This is the main shell. No command running in background.
+
 ---
 
 status = still running
 running for = <SECONDS> seconds
 cwd = <WORKSPACE>
-This is the main shell. No command running in background.
 === deduplicated ===
 no new output since last check
 
+This is the main shell. No command running in background.
+
 ---
 
 status = still running
 running for = <SECONDS> seconds
 cwd = <WORKSPACE>
-This is the main shell. No command running in background.

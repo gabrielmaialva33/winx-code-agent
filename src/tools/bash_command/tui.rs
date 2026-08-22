@@ -1,8 +1,8 @@
 use std::fmt::Write as FmtWrite;
 use std::time::{Duration, Instant};
 
-use super::output::{get_status, truncate_to_token_budget, MAX_OUTPUT_TOKENS};
-use super::{main_shell, SharedPtyShell, ShellDeliveryCursor};
+use super::output::{render_status, status_state, truncate_to_token_budget, MAX_OUTPUT_TOKENS};
+use super::{main_shell, BashCommandResult, SharedPtyShell, ShellDeliveryCursor};
 use crate::errors::Result;
 use crate::state::bash_state::BashState;
 use crate::state::live_terminal::ScreenUpdate;
@@ -14,12 +14,12 @@ const SCREEN_DIFF_THRESHOLD: usize = 10;
 pub(super) async fn execute_screen(
     bash_state: &BashState,
     background_shell: Option<SharedPtyShell>,
-    is_background: bool,
+    _is_background: bool,
     background_id: Option<&str>,
     lines: Option<usize>,
     diff: bool,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
     let max_lines = lines.unwrap_or(0);
 
@@ -51,16 +51,15 @@ pub(super) async fn execute_screen(
         };
         let (cursor_row, cursor_column) = cursor;
         let alt = if in_alt { " [alt-screen]" } else { "" };
-        let running_for = running_for.map(|elapsed| format!("{} seconds", elapsed.as_secs()));
-        let status = get_status(
-            bash_state,
-            is_background,
+        let state = status_state(
             background_id,
             running,
-            running_for.as_deref(),
+            running_for,
             exit_code,
-            cwd.as_deref(),
+            cwd.as_deref().unwrap_or(&bash_state.cwd),
+            None,
         );
+        let status = render_status(bash_state, &state);
         let body = match update {
             ScreenUpdate::Unchanged => "(no change since last screen)".to_string(),
             ScreenUpdate::Diff(changed) => {
@@ -72,9 +71,12 @@ pub(super) async fn execute_screen(
             }
             ScreenUpdate::Full(snapshot) => render_snapshot(&snapshot),
         };
-        return Ok(format!(
-            "--- live screen{alt} [cursor row={cursor_row} col={cursor_column}] (diff) ---\n{body}{status}"
-        ));
+        return Ok(BashCommandResult {
+            output: format!(
+                "--- live screen{alt} [cursor row={cursor_row} col={cursor_column}] (diff) ---\n{body}{status}"
+            ),
+            state,
+        });
     }
 
     let (snapshot, running, in_alt, cursor, running_for, exit_code, cwd) = {
@@ -100,19 +102,21 @@ pub(super) async fn execute_screen(
     let body = render_snapshot(&snapshot);
     let alt = if in_alt { " [alt-screen]" } else { "" };
     let (cursor_row, cursor_column) = cursor;
-    let running_for = running_for.map(|elapsed| format!("{} seconds", elapsed.as_secs()));
-    let status = get_status(
-        bash_state,
-        is_background,
+    let state = status_state(
         background_id,
         running,
-        running_for.as_deref(),
+        running_for,
         exit_code,
-        cwd.as_deref(),
+        cwd.as_deref().unwrap_or(&bash_state.cwd),
+        None,
     );
-    Ok(format!(
-        "--- live screen{alt} [cursor row={cursor_row} col={cursor_column}] ---\n{body}{status}"
-    ))
+    let status = render_status(bash_state, &state);
+    Ok(BashCommandResult {
+        output: format!(
+            "--- live screen{alt} [cursor row={cursor_row} col={cursor_column}] ---\n{body}{status}"
+        ),
+        state,
+    })
 }
 
 fn render_snapshot(snapshot: &[String]) -> String {
@@ -164,14 +168,14 @@ fn wait_turn_outcome(
 pub(super) async fn execute_wait_for_turn(
     bash_state: &BashState,
     background_shell: Option<SharedPtyShell>,
-    is_background: bool,
+    _is_background: bool,
     background_id: Option<&str>,
     recognizer_hint: Option<&str>,
     quiet_ms: Option<u64>,
     timeout_seconds: Option<f32>,
     lines: Option<usize>,
     wait_through_busy: bool,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     use crate::state::turn::{recognizer_for, TurnState};
 
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
@@ -256,17 +260,19 @@ pub(super) async fn execute_wait_for_turn(
                 start.elapsed().as_secs_f64(),
                 alt
             );
-            let running_for = running_for.map(|elapsed| format!("{} seconds", elapsed.as_secs()));
-            let status = get_status(
-                bash_state,
-                is_background,
+            let result_state = status_state(
                 background_id,
                 running,
-                running_for.as_deref(),
+                running_for,
                 exit_code,
-                cwd.as_deref(),
+                cwd.as_deref().unwrap_or(&bash_state.cwd),
+                Some(state),
             );
-            return Ok(format!("{header}\n{body}{status}"));
+            let status = render_status(bash_state, &result_state);
+            return Ok(BashCommandResult {
+                output: format!("{header}\n{body}{status}"),
+                state: result_state,
+            });
         }
 
         tokio::time::sleep(poll).await;

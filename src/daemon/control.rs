@@ -9,7 +9,7 @@ use super::lifecycle::{GuardianLifecycle, GuardianLimits};
 use super::protocol::{
     read_json_frame, write_json_frame, ConfigureSessionParams, HelloResult, JournalReadParams,
     PruneParams, RpcError, RpcRequest, RpcResponse, RunActionParams, SessionInfo, SessionParams,
-    MAX_FRAME_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR,
+    MAX_FRAME_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR, TYPED_ACTION_RESULT_CAPABILITY,
 };
 use crate::errors::{Result, WinxError};
 use crate::types::normalize_thread_id;
@@ -122,6 +122,7 @@ async fn dispatch(request: RpcRequest, lifecycle: &GuardianLifecycle, epoch: &st
                     "quota_reclaims_unused".to_string(),
                     "session.configure".to_string(),
                     "shell.run_action".to_string(),
+                    TYPED_ACTION_RESULT_CAPABILITY.to_string(),
                     "session.list".to_string(),
                     "session.read_output".to_string(),
                     "session.kill".to_string(),
@@ -240,6 +241,14 @@ async fn relay(socket: &Path, request: RpcRequest) -> Result<(RpcResponse, Hello
         return Err(WinxError::ConfigurationError(format!(
             "guardian protocol major {} is incompatible with control {}",
             hello.protocol_major, PROTOCOL_MAJOR
+        )));
+    }
+    if request.method == "shell.run_action"
+        && !hello.capabilities.iter().any(|capability| capability == TYPED_ACTION_RESULT_CAPABILITY)
+    {
+        return Err(WinxError::ConfigurationError(format!(
+            "guardian pid {} does not advertise {TYPED_ACTION_RESULT_CAPABILITY}; terminate this durable session and initialize it again before running another BashCommand",
+            hello.daemon_pid
         )));
     }
     write_json_frame(&mut stream, &request).await?;

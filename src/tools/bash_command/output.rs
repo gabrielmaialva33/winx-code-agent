@@ -6,12 +6,16 @@ use regex::Regex;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
-use super::{main_shell, SharedPtyShell, ShellDeliveryCursor};
+use super::{
+    main_shell, BashCommandResult, BashCommandState, BashProcessStatus, SharedPtyShell,
+    ShellDeliveryCursor,
+};
 use crate::errors::{Result, WinxError};
 use crate::runtime::lock_session_store;
 use crate::state::bash_state::BashState;
 use crate::state::pty::PtyShell;
 use crate::state::terminal::{render_terminal_output, strip_ansi_codes};
+use crate::state::turn::TurnState;
 use crate::tools::background_shell::ExitedShellInfo;
 use crate::types::BashCommandAction;
 
@@ -54,42 +58,73 @@ pub(super) fn truncate_to_token_budget(text: &str, max_tokens: usize) -> std::bo
     std::borrow::Cow::Owned(format!("(...truncated)\n{decoded}"))
 }
 
-pub(super) fn get_status(
-    bash_state: &BashState,
-    is_background: bool,
+pub(super) fn status_state(
     background_id: Option<&str>,
     is_running: bool,
-    running_for: Option<&str>,
+    running_for: Option<Duration>,
     exit_code: Option<i32>,
-    reported_cwd: Option<&Path>,
-) -> String {
-    let mut status = "\n\n---\n\n".to_string();
-    if is_background {
-        if let Some(id) = background_id {
-            let _ = writeln!(status, "bg_command_id = {id}");
-        }
+    cwd: &Path,
+    turn_state: Option<TurnState>,
+) -> BashCommandState {
+    BashCommandState {
+        process_status: if is_running {
+            BashProcessStatus::Running
+        } else {
+            BashProcessStatus::Exited
+        },
+        background_id: background_id.map(ToString::to_string),
+        running_for_seconds: running_for.map(|duration| duration.as_secs()),
+        exit_code: (!is_running).then_some(exit_code).flatten(),
+        cwd: cwd.to_path_buf(),
+        turn_state,
     }
+}
 
-    if is_running {
+/// Render compatibility text from an already-authoritative state. Background
+/// command summaries are deliberately placed before the final status block, but
+/// they never participate in machine-readable orchestration.
+pub(super) fn render_status(bash_state: &BashState, state: &BashCommandState) -> String {
+    let mut status = String::new();
+    if state.background_id.is_none() {
+        let mut manager = lock_session_store();
+        status.push_str("\n\nThis is the main shell. ");
+        status.push_str(manager.get_running_info(&bash_state.current_thread_id).trim_end());
+    }
+    status.push_str("\n\n---\n\n");
+    if let Some(id) = state.background_id.as_deref() {
+        let _ = writeln!(status, "bg_command_id = {id}");
+    }
+    if state.is_running() {
         status.push_str("status = still running\n");
-        if let Some(duration) = running_for {
-            let _ = writeln!(status, "running for = {duration}");
+        if let Some(seconds) = state.running_for_seconds {
+            let _ = writeln!(status, "running for = {seconds} seconds");
         }
     } else {
         status.push_str("status = process exited\n");
-        if let Some(code) = exit_code {
+        if let Some(code) = state.exit_code {
             let _ = writeln!(status, "exit code = {code}");
         }
     }
-
-    let cwd = reported_cwd.unwrap_or(&bash_state.cwd);
-    let _ = writeln!(status, "cwd = {}", cwd.display());
-    if !is_background {
-        let mut manager = lock_session_store();
-        status.push_str("This is the main shell. ");
-        status.push_str(&manager.get_running_info(&bash_state.current_thread_id));
-    }
+    let _ = writeln!(status, "cwd = {}", state.cwd.display());
     status.trim_end().to_string()
+}
+
+/// Add a Winx-generated note before the compatibility status text without ever
+/// deriving state from that text. If the human summary changed concurrently, the
+/// note is appended instead; the authoritative `state` remains untouched.
+pub(super) fn insert_note_before_status(
+    bash_state: &BashState,
+    result: &mut BashCommandResult,
+    note: &str,
+) {
+    let status = render_status(bash_state, &result.state);
+    if result.output.ends_with(&status) {
+        result.output.truncate(result.output.len() - status.len());
+        result.output.push_str(note);
+        result.output.push_str(&status);
+    } else {
+        result.output.push_str(note);
+    }
 }
 
 fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> String {
@@ -216,7 +251,7 @@ pub(super) async fn wait_for_output(
     background_id: Option<&str>,
     is_status_check: bool,
     mut delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     let start = Instant::now();
     let (generation, legacy_delivered) = {
         let guard = shell.lock().await;
@@ -324,17 +359,10 @@ pub(super) async fn wait_for_output(
     };
     let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
     let (running_for, exit_code, shell_cwd, scratch) = read_status_extras(shell, complete).await;
-    let running_for = running_for.map(|elapsed| format!("{} seconds", elapsed.as_secs()));
-    let status = get_status(
-        bash_state,
-        is_background,
-        background_id,
-        !complete,
-        running_for.as_deref(),
-        exit_code,
-        shell_cwd.as_deref(),
-    );
-    Ok(format!("{rendered}{status}{scratch}"))
+    let cwd = shell_cwd.as_deref().unwrap_or(&bash_state.cwd);
+    let state = status_state(background_id, !complete, running_for, exit_code, cwd, None);
+    let status = render_status(bash_state, &state);
+    Ok(BashCommandResult { output: format!("{rendered}{scratch}{status}"), state })
 }
 
 async fn read_status_extras(
@@ -364,10 +392,11 @@ fn scratch_pointer(output_truncated: bool, scratch_path: Option<&Path>) -> Strin
 }
 
 pub(super) fn finalize_tombstone(
+    bash_state: &BashState,
     id: &str,
     tombstone: ExitedShellInfo,
     action: &BashCommandAction,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     let ExitedShellInfo {
         last_command,
         final_output,
@@ -383,15 +412,10 @@ pub(super) fn finalize_tombstone(
         | BashCommandAction::WaitForTurn { .. } => {
             let rendered = wcgw_incremental_text(final_output.as_ref(), "");
             let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
-            let mut status = "\n\n---\n\n".to_string();
-            let _ = writeln!(status, "bg_command_id = {id}");
-            status.push_str("status = process exited\n");
-            if let Some(code) = exit_code {
-                let _ = writeln!(status, "exit code = {code}");
-            }
-            let _ = writeln!(status, "cwd = {}", cwd.display());
+            let state = status_state(Some(id), false, None, exit_code, &cwd, None);
             let pointer = scratch_pointer(output_truncated, scratch_path.as_deref());
-            Ok(format!("{rendered}{}{pointer}", status.trim_end()))
+            let status = render_status(bash_state, &state);
+            Ok(BashCommandResult { output: format!("{rendered}{pointer}{status}"), state })
         }
         BashCommandAction::SendText { .. }
         | BashCommandAction::SendSpecials { .. }
@@ -414,7 +438,7 @@ pub(super) async fn execute_status_check(
     scrollback_lines: Option<usize>,
     verbose: bool,
     mut delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<String> {
+) -> Result<BashCommandResult> {
     debug!("Processing StatusCheck action (verbose={verbose}, scrollback={scrollback_lines:?})");
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
     let is_running = {
@@ -452,7 +476,7 @@ pub(super) async fn execute_status_check(
             };
             (
                 PtyShell::fingerprint(&shell.output_snapshot()),
-                shell.command_elapsed().map(|elapsed| format!("{} seconds", elapsed.as_secs())),
+                shell.command_elapsed(),
                 shell.command_running,
                 (!shell.command_running).then_some(shell.last_exit_code).flatten(),
                 shell.current_cwd().to_path_buf(),
@@ -465,16 +489,12 @@ pub(super) async fn execute_status_check(
             guard.as_mut().and_then(|shell| shell.last_returned_hash.replace(fingerprint))
         };
         if previous_hash == Some(fingerprint) {
-            let status = get_status(
-                bash_state,
-                is_background,
-                background_id,
-                running,
-                running_for.as_deref(),
-                exit_code,
-                Some(&cwd),
-            );
-            return Ok(format!("no new output since last check{status}"));
+            let state = status_state(background_id, running, running_for, exit_code, &cwd, None);
+            let status = render_status(bash_state, &state);
+            return Ok(BashCommandResult {
+                output: format!("no new output since last check{status}"),
+                state,
+            });
         }
     } else if !verbose {
         let fingerprint = {
@@ -501,9 +521,12 @@ pub(super) async fn execute_status_check(
             };
             if !scrollback.is_empty() {
                 let count = scrollback.lines().count();
-                return Ok(format!(
-                    "--- scrollback ({count} lines) ---\n{scrollback}\n--- latest ---\n{response}"
-                ));
+                let mut response = response;
+                response.output = format!(
+                    "--- scrollback ({count} lines) ---\n{scrollback}\n--- latest ---\n{}",
+                    response.output
+                );
+                return Ok(response);
             }
         }
     }

@@ -11,6 +11,7 @@ use tokio::sync::Mutex;
 
 use crate::errors::Result;
 use crate::state::bash_state::BashState;
+use crate::tools::bash_command::BashCommandResult;
 use crate::types::BashCommand;
 
 #[cfg(unix)]
@@ -24,7 +25,8 @@ pub(crate) use session_store::lock_session_store;
 pub use session_store::{SessionStore, ShellTarget};
 
 /// Boxed future returned by [`ShellRuntime`] implementations.
-pub type ShellRuntimeFuture<'a> = Pin<Box<dyn Future<Output = Result<String>> + Send + 'a>>;
+pub type ShellRuntimeFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BashCommandResult>> + Send + 'a>>;
 pub type ShellRuntimeUnitFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
