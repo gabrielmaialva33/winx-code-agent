@@ -32,6 +32,7 @@ const DEFAULT_RW_PATHS: &[&str] = &["/tmp", "/dev", "/var/tmp"];
 
 #[derive(Debug)]
 enum SandboxMessage {
+    #[cfg(target_os = "linux")]
     Info(String),
     Warning(String),
 }
@@ -48,6 +49,7 @@ impl SandboxReport {
     pub fn emit(self) {
         for message in self.messages {
             match message {
+                #[cfg(target_os = "linux")]
                 SandboxMessage::Info(message) => tracing::info!("{message}"),
                 SandboxMessage::Warning(message) => tracing::warn!("{message}"),
             }
