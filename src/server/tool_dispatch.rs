@@ -4,68 +4,15 @@ use std::process::Command;
 
 use rmcp::model::{CallToolRequestParams, CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
-use serde_json::Value;
+use serde_json::{json, Value};
 use tracing::{info, warn};
 
-use super::{SharedBashState, WinxService};
-use crate::errors::WinxError;
+use super::{outcomes, SharedBashState, WinxService};
 use crate::state::bash_state::generate_thread_id;
 use crate::types::{
     normalize_thread_id, BashCommand, CodeMap, ContextSave, FileWriteOrEdit, Initialize,
     MultiFileEdit, ReadFiles, ReadImage, UndoEdit,
 };
-
-/// Map a domain [`WinxError`] to the right JSON-RPC error kind.
-///
-/// Client-caused failures become `invalid_request`; genuine internal faults
-/// remain `internal_error`. The match is exhaustive so new variants must be
-/// classified deliberately.
-pub(super) fn to_mcp_error(tool: &str, error: &WinxError) -> McpError {
-    let message = format!("{tool} failed: {error}");
-    match error {
-        WinxError::BashStateNotInitialized
-        | WinxError::NoActiveCommand(_)
-        | WinxError::BackgroundSessionNotFound(_)
-        | WinxError::EmptyInteractiveInput { .. }
-        | WinxError::InteractiveTargetNotRunning(_)
-        | WinxError::CommandNotAllowed(_)
-        | WinxError::PathSecurityError { .. }
-        | WinxError::ThreadIdMismatch(_)
-        | WinxError::ParameterValidationError { .. }
-        | WinxError::MissingParameterError { .. }
-        | WinxError::NullValueError { .. }
-        | WinxError::ArgumentParseError(_)
-        | WinxError::JsonParseError(_)
-        | WinxError::DeserializationError(_)
-        | WinxError::WorkspacePathError(_)
-        | WinxError::InvalidInput(_)
-        | WinxError::ParseError(_)
-        | WinxError::FileAccessError { .. }
-        | WinxError::RecoverableSuggestionError { .. }
-        | WinxError::SearchReplaceSyntaxError(_)
-        | WinxError::SearchReplaceSyntaxErrorDetailed { .. }
-        | WinxError::SearchBlockNotFound(_)
-        | WinxError::SearchBlockAmbiguous { .. }
-        | WinxError::FileTooLarge { .. }
-        | WinxError::InteractiveCommandDetected { .. }
-        | WinxError::CommandAlreadyRunning { .. } => McpError::invalid_request(message, None),
-        WinxError::ShellInitializationError(_)
-        | WinxError::BashStateLockError(_)
-        | WinxError::CommandExecutionError(_)
-        | WinxError::SerializationError(_)
-        | WinxError::FileWriteError { .. }
-        | WinxError::DataLoadingError(_)
-        | WinxError::ContextSaveError(_)
-        | WinxError::CommandTimeout { .. }
-        | WinxError::ProcessCleanupError { .. }
-        | WinxError::BufferOverflow { .. }
-        | WinxError::SessionRecoveryError { .. }
-        | WinxError::ResourceAllocationError { .. }
-        | WinxError::IoError(_)
-        | WinxError::ConfigurationError(_)
-        | WinxError::FileError(_) => McpError::internal_error(message, None),
-    }
-}
 
 impl WinxService {
     pub(super) async fn execute_tool_call(
@@ -74,6 +21,7 @@ impl WinxService {
     ) -> Result<CallToolResult, McpError> {
         let tool = param.name.to_string();
         let args_value = param.arguments.map(Value::Object);
+        let orchestration_args = args_value.clone();
         let summary =
             crate::utils::redact::redact(&audit_summary(&tool, args_value.as_ref())).into_owned();
         let started = std::time::Instant::now();
@@ -93,6 +41,7 @@ impl WinxService {
 
         let result = match result {
             Ok(mut call) => {
+                outcomes::decorate_success(&tool, orchestration_args.as_ref(), &mut call);
                 redact_result(&mut call);
                 Ok(call)
             }
@@ -104,11 +53,24 @@ impl WinxService {
 
         let elapsed_ms = started.elapsed().as_millis();
         match &result {
-            Ok(_) => info!(tool = %tool, ms = elapsed_ms, "tool call ok — {summary}"),
+            Ok(call) if call.is_error == Some(true) => warn!(
+                tool = %tool,
+                ms = elapsed_ms,
+                status = outcomes::result_status(call),
+                response_bytes = outcomes::result_size_bytes(call),
+                "tool call failed — {summary}"
+            ),
+            Ok(call) => info!(
+                tool = %tool,
+                ms = elapsed_ms,
+                status = outcomes::result_status(call),
+                response_bytes = outcomes::result_size_bytes(call),
+                "tool call ok — {summary}"
+            ),
             Err(error) => warn!(
                 tool = %tool,
                 ms = elapsed_ms,
-                "tool call error — {summary}: {}",
+                "tool call protocol error — {summary}: {}",
                 error.message
             ),
         }
@@ -262,6 +224,7 @@ impl WinxService {
         args: Option<Value>,
     ) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
         let mut initialize: Initialize = Self::lenient_from_value(args).map_err(|error| {
             McpError::invalid_request(format!("Invalid Initialize parameters: {error}"), None)
         })?;
@@ -284,7 +247,7 @@ impl WinxService {
                 self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
-            Err(error) => Err(to_mcp_error("Initialize", &error)),
+            Err(error) => outcomes::tool_failure("Initialize", &error, Some(&recovery_args)),
         }
     }
 
@@ -293,6 +256,7 @@ impl WinxService {
         args: Option<Value>,
     ) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
         let mut bash_command: BashCommand = serde_json::from_value(args).map_err(|error| {
             McpError::invalid_request(
                 format!(
@@ -311,35 +275,55 @@ impl WinxService {
                 bash_command.thread_id = thread_id;
             }
         }
-        match crate::tools::bash_command::handle_tool_call_with_runtime(
+        match crate::tools::bash_command::handle_tool_call_with_runtime_detailed(
             self.shell_runtime.as_ref(),
             &slot,
             bash_command,
         )
         .await
         {
-            Ok(output) => {
+            Ok(outcome) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![ContentBlock::text(output)]))
+                outcomes::bash_success_result(Some(&recovery_args), outcome)
             }
-            Err(error) => Err(to_mcp_error("BashCommand", &error)),
+            Err(error) => outcomes::tool_failure("BashCommand", &error, Some(&recovery_args)),
         }
     }
 
     async fn handle_read_files(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
         let read_files: ReadFiles = Self::lenient_from_value(args).map_err(|error| {
             McpError::invalid_request(format!("Invalid ReadFiles parameters: {error}"), None)
         })?;
 
         let (slot, _session_guard) =
             self.session_for(&normalize_thread_id(&read_files.thread_id)).await;
-        match crate::tools::read_files::handle_tool_call(&slot, read_files).await {
-            Ok(result) => {
+        match crate::tools::read_files::handle_tool_call_detailed(&slot, read_files).await {
+            Ok(outcome) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
+                if let Some(error) = outcome.errors.first() {
+                    let mut result =
+                        outcomes::tool_failure("ReadFiles", error, Some(&recovery_args))?;
+                    result.content = vec![ContentBlock::text(outcome.text)];
+                    if let Some(Value::Object(structured)) = result.structured_content.as_mut() {
+                        let data = structured
+                            .entry("data")
+                            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+                        if let Value::Object(data) = data {
+                            data.insert(
+                                "successful_files".to_string(),
+                                json!(outcome.successful_files),
+                            );
+                            data.insert("failed_files".to_string(), json!(outcome.errors.len()));
+                        }
+                    }
+                    Ok(result)
+                } else {
+                    Ok(CallToolResult::success(vec![ContentBlock::text(outcome.text)]))
+                }
             }
-            Err(error) => Err(to_mcp_error("ReadFiles", &error)),
+            Err(error) => outcomes::tool_failure("ReadFiles", &error, Some(&recovery_args)),
         }
     }
 
@@ -348,6 +332,7 @@ impl WinxService {
         args: Option<Value>,
     ) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
         let edit: FileWriteOrEdit = Self::lenient_from_value(args).map_err(|error| {
             McpError::invalid_request(format!("Invalid FileWriteOrEdit parameters: {error}"), None)
         })?;
@@ -358,7 +343,7 @@ impl WinxService {
                 self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
-            Err(error) => Err(to_mcp_error("FileWriteOrEdit", &error)),
+            Err(error) => outcomes::tool_failure("FileWriteOrEdit", &error, Some(&recovery_args)),
         }
     }
 
@@ -367,6 +352,7 @@ impl WinxService {
         args: Option<Value>,
     ) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
         let multi: MultiFileEdit = Self::lenient_from_value(args).map_err(|error| {
             McpError::invalid_request(format!("Invalid MultiFileEdit parameters: {error}"), None)
         })?;
@@ -377,12 +363,13 @@ impl WinxService {
                 self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
-            Err(error) => Err(to_mcp_error("MultiFileEdit", &error)),
+            Err(error) => outcomes::tool_failure("MultiFileEdit", &error, Some(&recovery_args)),
         }
     }
 
     async fn handle_undo_edit(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
         let undo: UndoEdit = Self::lenient_from_value(args).map_err(|error| {
             McpError::invalid_request(format!("Invalid UndoEdit parameters: {error}"), None)
         })?;
@@ -393,12 +380,13 @@ impl WinxService {
                 self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
-            Err(error) => Err(to_mcp_error("UndoEdit", &error)),
+            Err(error) => outcomes::tool_failure("UndoEdit", &error, Some(&recovery_args)),
         }
     }
 
     async fn handle_context_save(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
         let context_save: ContextSave = Self::lenient_from_value(args).map_err(|error| {
             McpError::invalid_request(format!("Invalid ContextSave parameters: {error}"), None)
         })?;
@@ -410,12 +398,13 @@ impl WinxService {
                 self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
             }
-            Err(error) => Err(to_mcp_error("ContextSave", &error)),
+            Err(error) => outcomes::tool_failure("ContextSave", &error, Some(&recovery_args)),
         }
     }
 
     async fn handle_read_image(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
         let read_image: ReadImage = Self::lenient_from_value(args).map_err(|error| {
             McpError::invalid_request(format!("Invalid ReadImage parameters: {error}"), None)
         })?;
@@ -427,12 +416,13 @@ impl WinxService {
                 self.persist_state(&slot).await;
                 Ok(CallToolResult::success(vec![ContentBlock::image(base64_data, mime_type)]))
             }
-            Err(error) => Err(to_mcp_error("ReadImage", &error)),
+            Err(error) => outcomes::tool_failure("ReadImage", &error, Some(&recovery_args)),
         }
     }
 
     async fn handle_code_map(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
         let code_map: CodeMap = Self::lenient_from_value(args).map_err(|error| {
             McpError::invalid_request(format!("Invalid CodeMap parameters: {error}"), None)
         })?;
@@ -445,7 +435,7 @@ impl WinxService {
                 result.structured_content = Some(structured);
                 Ok(result)
             }
-            Err(error) => Err(to_mcp_error("CodeMap", &error)),
+            Err(error) => outcomes::tool_failure("CodeMap", &error, Some(&recovery_args)),
         }
     }
 }

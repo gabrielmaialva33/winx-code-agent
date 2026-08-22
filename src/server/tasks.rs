@@ -62,6 +62,9 @@ impl WinxService {
         let mut output = String::new();
         loop {
             let result = self.execute_tool_call(request).await?;
+            if result.is_error == Some(true) {
+                return Ok(result);
+            }
             let chunk = result
                 .content
                 .iter()
@@ -69,8 +72,11 @@ impl WinxService {
                 .collect::<Vec<_>>()
                 .join("\n");
             append_task_output(&mut output, &chunk);
-            if !chunk.contains("status = still running") {
-                return Ok(CallToolResult::success(vec![ContentBlock::text(output)]));
+            let running = super::outcomes::result_status(&result) == "running";
+            if !running {
+                let mut final_result = result;
+                final_result.content = vec![ContentBlock::text(output)];
+                return Ok(final_result);
             }
 
             let status = BashCommand {
@@ -165,11 +171,16 @@ impl WinxService {
 
             let (status, message, result) = match outcome {
                 Ok(Ok(mut result)) => {
+                    let failed = result.is_error == Some(true);
                     scope.unscope_result(&mut result);
                     match serde_json::to_value(result) {
                         Ok(result) => (
-                            TaskStatus::Completed,
-                            Some("BashCommand completed".to_string()),
+                            if failed { TaskStatus::Failed } else { TaskStatus::Completed },
+                            Some(if failed {
+                                "BashCommand returned a tool-level error".to_string()
+                            } else {
+                                "BashCommand completed".to_string()
+                            }),
                             Some(result),
                         ),
                         Err(error) => (

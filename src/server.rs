@@ -5,6 +5,7 @@
 
 mod catalog;
 mod handler;
+mod outcomes;
 mod principal;
 mod sessions;
 mod tasks;

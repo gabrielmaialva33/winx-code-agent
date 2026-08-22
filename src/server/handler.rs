@@ -1,3 +1,6 @@
+use std::fmt::Write as _;
+
+use axum::http::request::Parts;
 use rmcp::{
     model::{
         CacheScope, CallToolRequestParams, CallToolResponse, CancelTaskParams,
@@ -10,11 +13,13 @@ use rmcp::{
     service::{NotificationContext, RequestContext, RoleServer},
     ErrorData as McpError, ServerHandler,
 };
+use sha2::{Digest, Sha256};
 
 use super::catalog::{server_icon_data_uri, winx_prompts, winx_tools};
+use super::outcomes;
 use super::principal::{
-    principal_from_context, scope_tool_request, session_affinity_from_context,
-    task_belongs_to_principal, RequestScope,
+    conversation_identity_from_context, principal_from_context, scope_tool_request,
+    session_affinity_from_context, task_belongs_to_principal, RequestScope,
 };
 use super::WinxService;
 
@@ -26,11 +31,20 @@ struct UsageEvent {
     ws: String,
     principal: String,
     thread_id: String,
+    request_id: String,
+    client_name: String,
+    client_version: String,
+    protocol: String,
+    client_session: String,
     started: std::time::Instant,
 }
 
 impl UsageEvent {
-    fn start(request: &CallToolRequestParams, scope: &RequestScope) -> Self {
+    fn start(
+        request: &CallToolRequestParams,
+        scope: &RequestScope,
+        context: &RequestContext<RoleServer>,
+    ) -> Self {
         let arguments = request.arguments.as_ref();
         let thread_id = arguments
             .and_then(|arguments| arguments.get("thread_id"))
@@ -48,6 +62,31 @@ impl UsageEvent {
         } else {
             String::new()
         };
+        let client = context.client_info();
+        let client_name =
+            client.as_ref().map_or("unknown", |client| client.name.as_str()).to_string();
+        let client_version =
+            client.as_ref().map_or("unknown", |client| client.version.as_str()).to_string();
+        let protocol = context
+            .protocol_version()
+            .map_or_else(|| "unknown".to_string(), |version| version.to_string());
+        let request_id = context
+            .extensions
+            .get::<Parts>()
+            .and_then(|parts| parts.extensions.get::<crate::http_server::RequestCorrelation>())
+            .map_or_else(
+                || {
+                    serde_json::to_string(&context.id)
+                        .map_or_else(|_| "unknown".to_string(), |id| short_fingerprint("r", &id))
+                },
+                |correlation| correlation.as_str().to_string(),
+            );
+        let client_session = context
+            .extensions
+            .get::<Parts>()
+            .and_then(|parts| parts.headers.get("mcp-session-id"))
+            .and_then(|value| value.to_str().ok())
+            .map_or_else(|| "stateless".to_string(), |id| short_fingerprint("s", id));
         Self {
             tool: request.name.to_string(),
             action,
@@ -56,11 +95,16 @@ impl UsageEvent {
                 .principal()
                 .map_or_else(|| "local".to_string(), |principal| principal.name().to_string()),
             thread_id,
+            request_id,
+            client_name,
+            client_version,
+            protocol,
+            client_session,
             started: std::time::Instant::now(),
         }
     }
 
-    fn emit(&self, outcome: &str) {
+    fn emit(&self, outcome: &str, result_status: &str, response_bytes: usize) {
         tracing::info!(
             target: "winx::usage",
             event = "tool_call",
@@ -69,11 +113,27 @@ impl UsageEvent {
             ws = %self.ws,
             principal = %self.principal,
             thread_id = %self.thread_id,
+            request_id = %self.request_id,
+            client_name = %self.client_name,
+            client_version = %self.client_version,
+            protocol = %self.protocol,
+            client_session = %self.client_session,
+            result_status,
+            response_bytes,
             duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
             outcome,
             "tool call"
         );
     }
+}
+
+fn short_fingerprint(prefix: &str, value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    let mut output = format!("{prefix}_");
+    for byte in &digest[..8] {
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
 }
 
 /// Emit the cache fields required by MCP 2026-07-28 without changing the wire
@@ -130,6 +190,7 @@ fn bash_action(arguments: Option<&rmcp::model::JsonObject>) -> String {
     KINDS.iter().find(|kind| action.contains_key(**kind)).map_or("?", |kind| kind).to_string()
 }
 
+#[allow(clippy::unused_async_trait_impl)] // rmcp's trait requires these async signatures
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(
@@ -148,9 +209,7 @@ impl ServerHandler for WinxService {
                     .with_sizes(vec!["96x96".to_string()])]),
         )
         .with_protocol_version(ProtocolVersion::V_2026_07_28)
-        .with_instructions(
-            "Winx is a high-performance Rust implementation of MCP tools for shell and file management.",
-        )
+        .with_instructions(crate::utils::orchestration::server_instructions())
     }
 
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
@@ -348,21 +407,23 @@ impl ServerHandler for WinxService {
     ) -> Result<CallToolResponse, McpError> {
         let principal = principal_from_context(&context);
         let affinity = session_affinity_from_context(&context);
+        let conversation_identity = conversation_identity_from_context(&context);
         let (request, scope) =
-            scope_tool_request(request, principal, affinity).map_err(|error| {
-                McpError::invalid_request(format!("Cannot scope remote request: {error}"), None)
-            })?;
-        let usage = UsageEvent::start(&request, &scope);
+            scope_tool_request(request, principal, affinity, conversation_identity.as_deref())
+                .map_err(|error| {
+                    McpError::invalid_request(format!("Cannot scope remote request: {error}"), None)
+                })?;
+        let usage = UsageEvent::start(&request, &scope, &context);
         if context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks())
             && Self::bash_task_is_eligible(&request)
         {
             return match self.enqueue_bash_task(request, scope).await {
                 Ok(task) => {
-                    usage.emit("task");
+                    usage.emit("task", "working", 0);
                     Ok(CallToolResponse::Task(task))
                 }
                 Err(error) => {
-                    usage.emit("error");
+                    usage.emit("protocol_error", "failed", 0);
                     Err(error)
                 }
             };
@@ -371,12 +432,14 @@ impl ServerHandler for WinxService {
         match self.execute_tool_call(request).await {
             Ok(mut result) => {
                 scope.unscope_result(&mut result);
-                usage.emit("ok");
+                let status = outcomes::result_status(&result);
+                let outcome = if result.is_error == Some(true) { "tool_error" } else { "ok" };
+                usage.emit(outcome, &status, outcomes::result_size_bytes(&result));
                 Ok(result.into())
             }
             Err(mut error) => {
                 scope.unscope_error(&mut error);
-                usage.emit("error");
+                usage.emit("protocol_error", "failed", 0);
                 Err(error)
             }
         }

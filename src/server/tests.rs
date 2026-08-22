@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::catalog::{schema_to_input_schema, strip_schema_titles, winx_tools};
 use super::sessions::{root_uri_to_path, MAX_SESSIONS};
-use super::tool_dispatch::{audit_summary, to_mcp_error};
+use super::tool_dispatch::audit_summary;
 use super::*;
 use crate::errors::WinxError;
 use crate::runtime::ShellRuntime;
@@ -288,17 +288,43 @@ mod schema_tests {
     }
 
     #[test]
-    fn bash_command_and_code_map_output_schema_are_advertised() {
+    fn every_tool_advertises_orchestration_output_schema() {
         let tools = winx_tools();
-        assert!(tools.iter().any(|tool| tool.name == "BashCommand"));
+        assert_eq!(tools.len(), 9);
+        for tool in &tools {
+            let output = tool.output_schema.as_ref().expect("tool outputSchema");
+            let properties = output
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("outputSchema properties");
+            assert!(properties.contains_key("status"), "{} has no status: {output:?}", tool.name);
+            assert!(
+                properties.contains_key("retrySameCall"),
+                "{} has no retrySameCall: {output:?}",
+                tool.name
+            );
+            let blob = serde_json::to_string(output).unwrap_or_default();
+            assert!(!blob.contains("\"format\":\"uint\""), "unsupported uint format: {blob}");
+        }
 
         let code_map = tools.iter().find(|tool| tool.name == "CodeMap").expect("CodeMap");
-        let output = code_map.output_schema.as_ref().expect("CodeMap outputSchema");
-        assert!(output.get("properties").is_some_and(|properties| {
-            properties.as_object().is_some_and(|properties| properties.contains_key("truncated"))
-        }));
-        let blob = serde_json::to_string(output).unwrap_or_default();
-        assert!(!blob.contains("\"format\":\"uint\""), "unsupported uint format: {blob}");
+        let properties = code_map
+            .output_schema
+            .as_ref()
+            .and_then(|output| output.get("properties"))
+            .and_then(serde_json::Value::as_object)
+            .expect("CodeMap outputSchema properties");
+        assert!(properties.contains_key("truncated"));
+    }
+
+    #[test]
+    fn handshake_instructions_lead_with_recovery_contract() {
+        let info = ServerHandler::get_info(&super::WinxService::new());
+        let instructions = info.instructions.expect("server instructions");
+        let prefix = instructions.chars().take(512).collect::<String>();
+        assert!(prefix.contains("structuredContent.status"));
+        assert!(prefix.contains("Never repeat a failed tool call unchanged"));
+        assert!(prefix.contains("required_read"));
     }
 
     #[test]
@@ -443,46 +469,37 @@ mod discovery_protocol_tests {
 }
 
 mod error_mapping_tests {
+    #![allow(clippy::expect_used)]
     use super::*;
     use rmcp::model::ErrorCode;
+    use serde_json::json;
     use std::path::PathBuf;
 
-    fn code_of(error: &WinxError) -> ErrorCode {
-        to_mcp_error("Tool", error).code
+    #[test]
+    fn recoverable_execution_failures_are_visible_tool_results() {
+        let error = WinxError::FileAccessError {
+            path: PathBuf::from("/workspace/file.rs"),
+            message: "This file exists but hasn't been read in this session.".into(),
+        };
+        let result = super::outcomes::tool_failure(
+            "FileWriteOrEdit",
+            &error,
+            Some(&json!({"thread_id":"thread","file_path":"/workspace/file.rs"})),
+        )
+        .expect("tool-level result");
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured recovery");
+        assert_eq!(structured["status"], "needs_read");
+        assert_eq!(structured["nextAction"]["tool"], "ReadFiles");
+        assert_eq!(structured["retrySameCall"], false);
     }
 
     #[test]
-    fn client_caused_errors_map_to_invalid_request() {
-        assert_eq!(
-            code_of(&WinxError::RecoverableSuggestionError {
-                message: "bad arg".into(),
-                suggestion: "try x".into(),
-            }),
-            ErrorCode::INVALID_REQUEST,
-        );
-        assert_eq!(
-            code_of(&WinxError::ParseError("unexpected token".into())),
-            ErrorCode::INVALID_REQUEST,
-        );
-        assert_eq!(
-            code_of(&WinxError::FileAccessError {
-                path: PathBuf::from("/nope"),
-                message: "no such file".into(),
-            }),
-            ErrorCode::INVALID_REQUEST,
-        );
-    }
-
-    #[test]
-    fn server_caused_errors_stay_internal_error() {
-        assert_eq!(
-            code_of(&WinxError::IoError(std::io::Error::other("disk gone"))),
-            ErrorCode::INTERNAL_ERROR,
-        );
-        assert_eq!(
-            code_of(&WinxError::BashStateLockError("poisoned".into())),
-            ErrorCode::INTERNAL_ERROR,
-        );
+    fn serialization_failures_remain_protocol_internal_errors() {
+        let failure = WinxError::SerializationError("cannot encode result".into());
+        let error = super::outcomes::tool_failure("Tool", &failure, None)
+            .expect_err("serialization must remain a protocol error");
+        assert_eq!(error.code, ErrorCode::INTERNAL_ERROR);
     }
 }
 

@@ -4,9 +4,10 @@ use rmcp::model::{Prompt, Tool, ToolAnnotations};
 use schemars::schema_for;
 use serde_json::Value;
 
+use super::outcomes::{CodeMapToolResultEnvelope, ToolResultEnvelope};
 use crate::types::{
-    BashCommand, CodeMap, CodeMapStructuredOutput, ContextSave, FileWriteOrEdit, Initialize,
-    MultiFileEdit, ReadFiles, ReadImage, UndoEdit,
+    BashCommand, CodeMap, ContextSave, FileWriteOrEdit, Initialize, MultiFileEdit, ReadFiles,
+    ReadImage, UndoEdit,
 };
 
 /// Convert a schemars schema into the MCP tool input-schema representation.
@@ -31,7 +32,15 @@ pub(super) fn schema_to_input_schema<T: schemars::JsonSchema>(
 fn strip_unsupported_schema_formats(value: &mut Value) {
     match value {
         Value::Object(map) => {
-            if map.get("format").and_then(Value::as_str) == Some("uint") {
+            let unsupported_integer_format =
+                map.get("format").and_then(Value::as_str).is_some_and(|format| {
+                    format.starts_with("uint")
+                        || matches!(
+                            format,
+                            "int8" | "int16" | "int32" | "int64" | "isize" | "usize"
+                        )
+                });
+            if unsupported_integer_format {
                 map.remove("format");
             }
             for child in map.values_mut() {
@@ -110,23 +119,7 @@ const INITIALIZE_DESCRIPTION: &str =
      - Use type=\"user_asked_change_workspace\" if in a conversation user asked to change workspace";
 
 const BASH_COMMAND_DESCRIPTION: &str =
-    "- Execute a bash command. This is stateful (beware with subsequent calls). \
-     - Accepted payloads include action_json with an explicit type, action_json shorthand such as {\"command\":\"pwd\"}, or top-level shorthand such as {\"command\":\"pwd\"}. \
-     - Status of the command and the current working directory will always be returned at the end. \
-     - The first or the last line might be `(...truncated)` if the output is too long. \
-     - Always run `pwd` if you get any file or directory not found error to make sure you're not lost. \
-     - Do not run bg commands using \"&\", instead use this tool. \
-     - You must not use echo/cat to read/write files, use ReadFiles/FileWriteOrEdit \
-     - In order to check status of previous command, use `status_check` with empty command argument. \
-     - Only command is allowed to run at a time. You need to wait for any previous command to finish before running a new one. \
-     - Programs don't hang easily, so most likely explanation for no output is usually that the program is still running, and you need to check status again. \
-     - Do not send Ctrl-c before checking for status till 10 minutes or whatever is appropriate for the program to finish. \
-     - Only run long running commands in background. Each background command is run in a new non-reusable shell. \
-     - On running a bg command you'll get a bg command id that you should use to get status or interact. \
-     - MCP Tasks are supported for a single foreground `command` when the client declares the `io.modelcontextprotocol/tasks` extension. Use an explicit `thread_id`; poll with tasks/get, whose completed state contains the final CallToolResult. Do not combine an MCP Task with `is_background=true`. \
-     - Piloting an interactive full-screen TUI (the `claude` CLI, vim, htop, fzf, a REPL)? Run it in the background, then drive it with these two actions: \
-     - `screen` ({\"screen\":true,\"bg_command_id\":\"...\",\"lines\":N,\"diff\":true}) returns a STABLE snapshot of the live terminal screen (cursor moves, redraws, alternate-screen and synchronized-output already applied; ANSI stripped), with the cursor position in the header. Use this to read the current frame — unlike `status_check`, it never stacks redraw generations and never waits. Pass \"diff\":true to get back ONLY the lines that changed since your last `screen` look (large token savings when polling a TUI frame-by-frame; first look or a big change still returns the full frame). \
-     - `wait_for_turn` ({\"wait_for_turn\":true,\"bg_command_id\":\"...\",\"recognizer\":\"auto|claude|codex|antigravity|generic\",\"quiet_ms\":600,\"timeout_seconds\":30}) waits for the TUI's turn and returns the stable snapshot plus the detected state (busy / awaiting_input / awaiting_approval). By default it returns as soon as it confirms the app is actively working (state=busy) so a long-running child never pins you for the whole timeout — poll again to keep watching; pass \"wait_through_busy\":true to instead block through busy until it is ready for input (or the timeout fires). Typical REPL loop: run the app in bg -> wait_for_turn until awaiting_input -> send_text(submit:true) -> wait_for_turn -> screen, repeat.";
+    "Use this for stateful shell and process work after Initialize. Prefer a single foreground command with wait_for_seconds=30-60 when a build/test may take time. Treat structuredContent.status as authoritative: when it is `running`, wait retry_after_ms and execute next_action (`status_check`); never submit the original command again. Only use status_check for a command that Winx reported as running. Run long-lived or interactive programs with is_background=true, then use wait_for_turn/screen and send_text/send_specials. Never use shell redirection, echo, or cat for file edits/reads; use the file tools. MCP Tasks are supported for foreground commands when the client advertises them; do not combine Tasks with is_background=true.";
 
 const READ_FILES_DESCRIPTION: &str =
     "- Read full file content of one or more files. \
@@ -137,77 +130,7 @@ const READ_FILES_DESCRIPTION: &str =
      - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10`";
 
 const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
-    "- Writes or edits a file based on the percentage of changes. \
-     - Prefer this over writing/editing files with BashCommand (echo/sed/redirects/heredocs). \
-     - For an edit, the file must have been read first with ReadFiles, otherwise the edit is rejected. \
-     - Use absolute path only (~ allowed). \
-     - First write down percentage of lines that need to be replaced in the file (between 0-100) in percentage_to_change \
-     - percentage_to_change should be low if mostly new code is to be added. It should be high if a lot of things are to be replaced. \
-     - If percentage_to_change > 50, provide full file content in text_or_search_replace_blocks \
-     - If percentage_to_change <= 50, text_or_search_replace_blocks should be search/replace blocks. \
-     \
-     Instructions for editing files. \
-     # Example \
-     ## Input file \
-     ``` \
-     import numpy as np \
-     from impls import impl1, impl2 \
-     \
-     def hello(): \
-         \"print a greeting\" \
-         print(\"hello\") \
-     \
-     def call_hello(): \
-         \"call hello\" \
-         hello() \
-         print(\"Called\") \
-         impl1() \
-         hello() \
-         impl2() \
-     ``` \
-     ## Edit format on the input file \
-     ``` \
-     <<<<<<< SEARCH \
-     from impls import impl1, impl2 \
-     ======= \
-     from impls import impl1, impl2 \
-     from hello import hello as hello_renamed \
-     >>>>>>> REPLACE \
-     <<<<<<< SEARCH \
-     def hello(): \
-         \"print a greeting\" \
-         print(\"hello\") \
-     ======= \
-     >>>>>>> REPLACE \
-     <<<<<<< SEARCH \
-     def call_hello(): \
-         \"call hello\" \
-         hello() \
-     ======= \
-     def call_hello_renamed(): \
-         \"call hello renamed\" \
-         hello_renamed() \
-     >>>>>>> REPLACE \
-     <<<<<<< SEARCH \
-     impl1() \
-     hello() \
-     impl2() \
-     ======= \
-     impl1() \
-     hello_renamed() \
-     impl2() \
-     >>>>>>> REPLACE \
-     ``` \
-     # *SEARCH/REPLACE block* Rules: \
-     Every \"<<<<<<< SEARCH\" section must *EXACTLY MATCH* the existing file content, character for character, including all comments, docstrings, whitespaces, etc. \
-     Including multiple unique *SEARCH/REPLACE* blocks if needed. \
-     Include enough and only enough lines in each SEARCH section to uniquely match each set of lines that need to change. \
-     Keep *SEARCH/REPLACE* blocks concise. \
-     Break large *SEARCH/REPLACE* blocks into a series of smaller blocks that each change a small portion of the file. \
-     Include just the changing lines, and a few surrounding lines (0-3 lines) if needed for uniqueness. \
-     Other than for uniqueness, avoid including those lines which do not change in search (and replace) blocks. Target 0-3 non trivial extra lines per block. \
-     Preserve leading spaces and indentations in both SEARCH and REPLACE blocks. \
-     If a short block would match multiple places, anchor it to a line number from ReadFiles instead of padding with context: write the marker as \"<<<<<<< SEARCH @42\" (or a range \"@42-50\") to target that 1-based location. A stale anchor falls back to the normal search, so it never makes a valid edit fail.";
+    "Use this to edit one file; use MultiFileEdit when a change spans files. Read the target with ReadFiles first. If structuredContent.status is `needs_read`, perform every required_read or the supplied next_action before retrying; never repeat a failed edit unchanged. For percentage_to_change <= 50, provide concise exact SEARCH/REPLACE blocks with only enough context for uniqueness. For percentage_to_change > 50, provide the complete file and ensure the whole file was read. Preserve whitespace exactly. Use `<<<<<<< SEARCH @42` or `@42-50` to disambiguate repeated snippets. A stale file, missing block, or ambiguous block requires a fresh read before a corrected retry.";
 
 const MULTI_FILE_EDIT_DESCRIPTION: &str =
     "- Edits SEVERAL files together, all-or-nothing. Use this over multiple FileWriteOrEdit calls when a change spans files and a partial apply would be bad (e.g. rename a symbol across files). \
@@ -245,47 +168,47 @@ pub(super) fn winx_tools() -> Vec<Tool> {
 
 fn build_winx_tools() -> Vec<Tool> {
     vec![
-        mcp_tool::<Initialize>(
+        with_output_schema::<ToolResultEnvelope>(mcp_tool::<Initialize>(
             "Initialize",
             INITIALIZE_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
-        ),
-        mcp_tool::<BashCommand>(
+        )),
+        with_output_schema::<ToolResultEnvelope>(mcp_tool::<BashCommand>(
             "BashCommand",
             BASH_COMMAND_DESCRIPTION,
             ToolAnnotations::new().destructive(true).open_world(true),
-        ),
-        mcp_tool::<ReadFiles>(
+        )),
+        with_output_schema::<ToolResultEnvelope>(mcp_tool::<ReadFiles>(
             "ReadFiles",
             READ_FILES_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
-        ),
-        mcp_tool::<FileWriteOrEdit>(
+        )),
+        with_output_schema::<ToolResultEnvelope>(mcp_tool::<FileWriteOrEdit>(
             "FileWriteOrEdit",
             FILE_WRITE_OR_EDIT_DESCRIPTION,
             ToolAnnotations::new().destructive(true).open_world(false),
-        ),
-        mcp_tool::<MultiFileEdit>(
+        )),
+        with_output_schema::<ToolResultEnvelope>(mcp_tool::<MultiFileEdit>(
             "MultiFileEdit",
             MULTI_FILE_EDIT_DESCRIPTION,
             ToolAnnotations::new().destructive(true).open_world(false),
-        ),
-        mcp_tool::<UndoEdit>(
+        )),
+        with_output_schema::<ToolResultEnvelope>(mcp_tool::<UndoEdit>(
             "UndoEdit",
             UNDO_EDIT_DESCRIPTION,
             ToolAnnotations::new().destructive(true).open_world(false),
-        ),
-        mcp_tool::<ContextSave>(
+        )),
+        with_output_schema::<ToolResultEnvelope>(mcp_tool::<ContextSave>(
             "ContextSave",
             CONTEXT_SAVE_DESCRIPTION,
             ToolAnnotations::new().destructive(false).open_world(false),
-        ),
-        mcp_tool::<ReadImage>(
+        )),
+        with_output_schema::<ToolResultEnvelope>(mcp_tool::<ReadImage>(
             "ReadImage",
-            "Read an image from the shell.",
+            "Read an image from the workspace. The structured result reports the resolved tool state while the image remains in MCP content.",
             ToolAnnotations::new().read_only(true).open_world(false),
-        ),
-        with_output_schema::<CodeMapStructuredOutput>(mcp_tool::<CodeMap>(
+        )),
+        with_output_schema::<CodeMapToolResultEnvelope>(mcp_tool::<CodeMap>(
             "CodeMap",
             CODE_MAP_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),

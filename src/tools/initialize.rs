@@ -450,22 +450,7 @@ pub async fn handle_tool_call_with_runtime(
         }
     }
 
-    append_server_instructions(&mut response);
+    crate::utils::orchestration::append_initialize_instructions(&mut response);
 
     Ok(response)
-}
-
-/// Append the standard "disallow" note plus any operator-provided instructions
-/// from `WINX_SERVER_INSTRUCTIONS`, mirroring wcgw's Initialize output.
-fn append_server_instructions(response: &mut String) {
-    response.push_str(
-        "\nAs soon as you encounter \"The user has chosen to disallow the tool call.\", \
-         immediately stop doing everything and ask the user for the reason.\n",
-    );
-    if let Ok(extra) = std::env::var("WINX_SERVER_INSTRUCTIONS") {
-        let extra = extra.trim();
-        if !extra.is_empty() {
-            let _ = write!(response, "\n# Additional instructions\n{extra}\n");
-        }
-    }
 }

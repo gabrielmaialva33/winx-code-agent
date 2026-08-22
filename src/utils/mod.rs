@@ -8,6 +8,7 @@ pub mod display_tree;
 pub mod encoder;
 pub mod mmap;
 pub mod mode_prompts;
+pub mod orchestration;
 pub mod output_compress;
 pub mod path;
 pub mod path_prob;

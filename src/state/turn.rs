@@ -14,9 +14,11 @@
 //! never deal with escape codes — only with the visible text a human sees.
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 /// What an interactive program is doing right now, inferred from the screen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TurnState {
     /// Actively producing output (spinner / "esc to interrupt" / streaming).
     Busy,
