@@ -688,10 +688,18 @@ pub(super) fn audit_summary(tool: &str, args: Option<&Value>) -> String {
             }
         }
         "FileWriteOrEdit" | "ReadImage" | "UndoEdit" => {
-            format!("path={}", string("file_path"))
+            format!(
+                "path={} verify={}",
+                string("file_path"),
+                args.get("verify_command").is_some_and(|value| !value.is_null())
+            )
         }
         "MultiFileEdit" => {
-            format!("files={}", args.get("files").and_then(Value::as_array).map_or(0, Vec::len))
+            format!(
+                "files={} verify={}",
+                args.get("files").and_then(Value::as_array).map_or(0, Vec::len),
+                args.get("verify_command").is_some_and(|value| !value.is_null())
+            )
         }
         "ReadFiles" => format!(
             "files={}",
