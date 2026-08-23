@@ -1520,9 +1520,8 @@ mod tests {
             "cancelled-action-request",
         );
         params.options.cancellation_key = Some("cancel-before-action".to_string());
-        let result = run_action(&sessions, params, "guardian-a")
-            .await
-            .expect("cancelled action result");
+        let result =
+            run_action(&sessions, params, "guardian-a").await.expect("cancelled action result");
         assert!(matches!(
             result.error,
             Some(WireShellError::CommandExecution(ref message))
@@ -1536,8 +1535,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn automatic_pty_reset_advances_guardian_incarnation() {
+    async fn automatic_pty_reset_rotates_before_stale_operations_reach_the_new_pty() {
         let temp = tempfile::tempdir().expect("temporary directory");
+        let marker = temp.path().join("new-incarnation-running.marker");
         let mut state = BashState::new();
         state.cwd = temp.path().to_path_buf();
         state.workspace_root = temp.path().to_path_buf();
@@ -1552,13 +1552,31 @@ mod tests {
         .await
         .expect("first action");
         let prior_token = first.execution_token.expect("first execution token");
+        let session =
+            sessions.lock().await.get("automatic_pty_reset").expect("daemon session").clone();
 
-        let mut forced = action_params(&state, "printf reset-incarnation", "forced-auto-reset");
+        let mut forced = action_params(
+            &state,
+            &format!("sh -c 'touch {}; sleep 0.4; printf reset-incarnation'", marker.display()),
+            "forced-auto-reset",
+        );
         forced.options.force_clear_to_run_failure = true;
-        let reset = run_action(&sessions, forced, "guardian-a").await.expect("reset action");
-        let current = reset.execution_token.expect("reset execution token");
-        assert_eq!(prior_token.generation, current.generation);
-        assert_ne!(prior_token.session_epoch, current.session_epoch);
+        let reset_sessions = Arc::clone(&sessions);
+        let reset =
+            tokio::spawn(async move { run_action(&reset_sessions, forced, "guardian-a").await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("replacement PTY command never started");
+        assert_ne!(
+            *session.session_epoch.lock().await,
+            prior_token.session_epoch,
+            "epoch was not rotated before the replacement command launched"
+        );
+        assert!(!reset.is_finished(), "reset action returned before the interleaving probe");
 
         let mut stale_status = action_params(&state, "printf unused", "stale-after-auto-reset");
         stale_status.command = serde_json::from_value(serde_json::json!({
@@ -1568,8 +1586,30 @@ mod tests {
         }))
         .expect("status command");
         stale_status.options.expected_generation = Some(prior_token.generation);
-        stale_status.options.expected_execution = Some(prior_token);
+        stale_status.options.expected_execution = Some(prior_token.clone());
         assert!(run_action(&sessions, stale_status, "guardian-a").await.is_err());
+
+        assert!(!interrupt_session(
+            &session,
+            &SessionParams {
+                thread_id: "automatic_pty_reset".to_string(),
+                expected_generation: Some(prior_token.generation),
+                expected_execution: Some(prior_token.clone()),
+                expected_guardian_epoch: Some("guardian-a".to_string()),
+            },
+            "guardian-a",
+        )
+        .await
+        .expect("stale interrupt result"));
+
+        let reset = reset.await.expect("reset action join").expect("reset action result");
+        let current = reset.execution_token.clone().expect("reset execution token");
+        assert_eq!(prior_token.generation, current.generation);
+        assert_ne!(prior_token.session_epoch, current.session_epoch);
+        assert!(
+            reset.output.as_deref().unwrap_or_default().contains("reset-incarnation"),
+            "a stale operation disturbed the replacement command: {reset:?}"
+        );
     }
 
     #[tokio::test]
