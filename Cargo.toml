@@ -117,6 +117,13 @@ proptest = "1.5"
 # Statistical micro-benchmarks for the hot pure-processing paths.
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
 
+# nix 0.28.0's published build dependency expands a macro that current nightly
+# reports as future-incompatible. This upstream commit keeps nix at 0.28.0 and
+# changes only cfg_aliases 0.1 -> 0.2, removing the warning without changing the
+# portable-pty API. Remove after portable-pty publishes against a newer nix.
+[patch.crates-io]
+nix = { git = "https://github.com/nix-rust/nix", rev = "1def0c05c3d7ac460c3428bb2227cccd01008ccb" }
+
 [dependencies.loom]
 # Model-checks the lock-free pin counter (SessionPin) under every thread
 # interleaving. Gated behind the `loom` feature (NOT a global `--cfg loom`):

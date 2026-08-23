@@ -14,6 +14,11 @@ libfuzzer-sys = "0.4"
 path = ".."
 features = ["fuzzing"]
 
+# Keep the standalone fuzz workspace on the same pinned upstream nix fix as
+# the parent package. Patches in dependency manifests do not propagate.
+[patch.crates-io]
+nix = { git = "https://github.com/nix-rust/nix", rev = "1def0c05c3d7ac460c3428bb2227cccd01008ccb" }
+
 [[bin]]
 name = "thread_id"
 path = "fuzz_targets/thread_id.rs"
