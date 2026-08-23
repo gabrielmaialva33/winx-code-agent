@@ -1741,14 +1741,9 @@ async fn http_principals_isolate_the_same_external_thread_id() -> anyhow::Result
             }
         }
     });
-    let forbidden = post_json_as(
-        address,
-        "2026-07-28",
-        "tools/call",
-        &forbidden.to_string(),
-        LEFT_TOKEN,
-    )
-    .await?;
+    let forbidden =
+        post_json_as(address, "2026-07-28", "tools/call", &forbidden.to_string(), LEFT_TOKEN)
+            .await?;
     let forbidden = response_json(&forbidden)?;
     assert_eq!(forbidden["error"]["code"], -32600, "{forbidden}");
     assert!(
