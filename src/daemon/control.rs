@@ -42,6 +42,10 @@ struct CachedGuardian {
 struct SocketIdentity {
     device: u64,
     inode: u64,
+    ctime_seconds: i64,
+    ctime_nanoseconds: i64,
+    mtime_seconds: i64,
+    mtime_nanoseconds: i64,
 }
 
 struct GuardianNegotiationGate {
@@ -485,10 +489,14 @@ async fn cache_guardian(
 }
 
 async fn socket_identity(socket: &Path) -> Option<SocketIdentity> {
-    tokio::fs::metadata(socket)
-        .await
-        .ok()
-        .map(|metadata| SocketIdentity { device: metadata.dev(), inode: metadata.ino() })
+    tokio::fs::metadata(socket).await.ok().map(|metadata| SocketIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        ctime_seconds: metadata.ctime(),
+        ctime_nanoseconds: metadata.ctime_nsec(),
+        mtime_seconds: metadata.mtime(),
+        mtime_nanoseconds: metadata.mtime_nsec(),
+    })
 }
 
 fn normalize_guardian_request(request: &mut RpcRequest, hello: &HelloResult) -> Result<()> {

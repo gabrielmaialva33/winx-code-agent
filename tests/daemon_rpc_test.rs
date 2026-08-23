@@ -751,16 +751,30 @@ async fn daemon_multi_adapter_cancelled_queued_launch_never_creates_marker() -> 
         )
         .await?;
 
+    let blocker_started = workspace.path().join("blocker-started.marker");
+    let blocker_release = workspace.path().join("blocker-release.marker");
+    let blocker_command = format!(
+        "sh -c 'touch {}; while [ ! -e {} ]; do sleep 0.01; done'",
+        blocker_started.display(),
+        blocker_release.display()
+    );
     let first_state = Arc::clone(&state);
     let first = tokio::spawn(async move {
         first_runtime
             .run_action_detailed(
                 &first_state,
-                foreground(thread_id, "sh -c 'sleep 0.4'", 0.6),
+                foreground(thread_id, &blocker_command, 2.0),
                 ShellActionOptions::default(),
             )
             .await
     });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !blocker_started.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .map_err(|_| WinxError::CommandExecutionError("foreground blocker never started".into()))?;
 
     let cancellation_key = "queued-task-cancellation";
     let marker = workspace.path().join("queued-task.marker");
@@ -789,6 +803,7 @@ async fn daemon_multi_adapter_cancelled_queued_launch_never_creates_marker() -> 
         cancel_runtime.cancel_pending_action(&state, cancellation_key).await?,
         "guardian did not record the pending launch cancellation"
     );
+    std::fs::write(&blocker_release, b"release")?;
 
     first.await.map_err(|error| WinxError::CommandExecutionError(error.to_string()))??;
     let queued =
