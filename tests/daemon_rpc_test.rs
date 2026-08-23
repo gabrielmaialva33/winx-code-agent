@@ -504,6 +504,68 @@ async fn embedded_reset_prevents_numeric_generation_collision() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn embedded_reset_waits_for_atomic_action_before_changing_incarnation() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let thread_id = "embedded_atomic_reset";
+    let marker = workspace.path().join("action-entered.marker");
+    let state = initialized_state(&workspace, thread_id).await?;
+    let action_state = Arc::clone(&state);
+    let command = foreground(
+        thread_id,
+        &format!("sh -c 'touch {}; sleep 0.25; printf old-incarnation'", marker.display()),
+        0.6,
+    );
+    let action = tokio::spawn(async move {
+        EmbeddedShellRuntime
+            .run_action_detailed(&action_state, command, ShellActionOptions::default())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .map_err(|_| WinxError::CommandExecutionError("action never reached PTY".into()))?;
+
+    let reset_state = Arc::clone(&state);
+    let mut reset = tokio::spawn(async move {
+        let mut state = reset_state.lock().await;
+        EmbeddedShellRuntime
+            .configure_session(
+                state.as_mut().ok_or(WinxError::BashStateNotInitialized)?,
+                ShellSessionTransition::Reset,
+            )
+            .await
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut reset).await.is_err(),
+        "embedded reset crossed an in-flight action barrier"
+    );
+    let old = action
+        .await
+        .map_err(|error| WinxError::CommandExecutionError(error.to_string()))??
+        .execution_token
+        .ok_or_else(|| WinxError::CommandExecutionError("missing old token".into()))?;
+    reset
+        .await
+        .map_err(|error| WinxError::CommandExecutionError(error.to_string()))??;
+
+    let current = EmbeddedShellRuntime
+        .run_action_detailed(
+            &state,
+            foreground(thread_id, "printf new-incarnation", 0.5),
+            ShellActionOptions::default(),
+        )
+        .await?
+        .execution_token
+        .ok_or_else(|| WinxError::CommandExecutionError("missing current token".into()))?;
+    assert_eq!(old.generation, current.generation);
+    assert_ne!(old.session_epoch, current.session_epoch);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn daemon_reset_prevents_numeric_generation_collision() -> Result<()> {
     let workspace = TempDir::new()?;
     let socket_dir = TempDir::new()?;
