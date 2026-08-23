@@ -79,6 +79,8 @@ struct UsageEvent {
     client_version: String,
     protocol: String,
     client_session: String,
+    batch_items: usize,
+    worker_limit: usize,
     started: std::time::Instant,
 }
 
@@ -130,6 +132,22 @@ impl UsageEvent {
             .and_then(|parts| parts.headers.get("mcp-session-id"))
             .and_then(|value| value.to_str().ok())
             .map_or_else(|| "stateless".to_string(), |id| short_fingerprint("s", id));
+        let batch_items = match request.name.as_ref() {
+            "ReadFiles" => arguments
+                .and_then(|arguments| arguments.get("file_paths"))
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len),
+            "MultiFileEdit" => arguments
+                .and_then(|arguments| arguments.get("files"))
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len),
+            _ => 0,
+        };
+        let worker_limit = if request.name == "ReadFiles" {
+            crate::tools::read_files::configured_parallelism()
+        } else {
+            0
+        };
         Self {
             tool: request.name.to_string(),
             action,
@@ -143,6 +161,8 @@ impl UsageEvent {
             client_version,
             protocol,
             client_session,
+            batch_items,
+            worker_limit,
             started: std::time::Instant::now(),
         }
     }
@@ -161,6 +181,8 @@ impl UsageEvent {
             client_version = %self.client_version,
             protocol = %self.protocol,
             client_session = %self.client_session,
+            batch_items = self.batch_items,
+            worker_limit = self.worker_limit,
             result_status,
             response_bytes,
             duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
