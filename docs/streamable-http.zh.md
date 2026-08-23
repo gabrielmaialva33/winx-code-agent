@@ -96,6 +96,20 @@ Authorization: Bearer <~/.config/winx-http-token 的内容>
 
 强烈推荐使用 `--token-file` 代替 `--token`，避免敏感凭证出现在进程列表（`ps`）、Shell 历史及日志中。`WINX_HTTP_TOKEN` 环境变量可作为单主体部署的环境变量备选项。
 
+## 工作区会话一致性
+
+远程 `Initialize` 返回两个共同构成会话绑定的值：
+
+```text
+thread_id + workspace_root
+```
+
+后续每次有状态的 Winx 调用都必须原样携带这两个值。在选择 PTY 或执行任何工具操作前，Winx 会验证线程亲和性、提交的规范化根目录与已初始化会话是否一致。绑定缺失或混用时，服务器返回结构化的 `needs_initialize`/`conflict` 工具结果，且不会触达 Shell 或文件系统。
+
+此检查**不会**把工具目标限制在 `workspace_root` 内。该根目录只标识拥有终端、cwd、读取历史和编辑状态的项目上下文；路径权限由独立策略控制。例如设置 `WINX_ALLOW_PATHS=/` 后，只要当前模式允许，一致的会话仍可读取或编辑项目外的辅助路径。这样既支持真实的单体仓库和跨目录工作，也防止一个对话静默继承其他项目的终端。
+
+切换到其他项目时，请使用新路径调用 `Initialize(type="first_call")`，之后改用新返回的绑定。远程 `user_asked_change_workspace` 会安全失败，避免把持久会话键原地重定向到其他项目。
+
 ## 会话亲和性 (Session Affinity)
 
 ### 工作区亲和性 (默认)
@@ -159,6 +173,8 @@ Authorization: Bearer <~/.config/winx-http-token 的内容>
 2. 逻辑会话存在时返回其权威状态快照；
 3. 适配层根据快照同步本地状态；
 4. Guardian 保留原 PTY 进程、工作目录、安全模式、输出历史及运行中的命令。
+
+需要替换 Shell 时仍应显式使用重置；模式切换也必须显式请求。远程切换项目时应创建新的 `FirstCall` 绑定，而不是修改原工作区身份。重复调用 `FirstCall` 不会隐式重置会话。
 
 ## 多主体认证配置
 
