@@ -1493,7 +1493,7 @@ async fn adaptive_reserves_task_capacity_before_starting_the_command() -> anyhow
                 "arguments": {
                     "action_json": {
                         "type": "command",
-                        "command": "sleep 0.5",
+                        "command": "sleep 30",
                         "is_background": false
                     },
                     "wait_policy": "until_complete",
