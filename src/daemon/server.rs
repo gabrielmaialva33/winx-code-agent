@@ -21,7 +21,7 @@ use crate::errors::{Result, WinxError};
 use crate::runtime::{lock_session_store, ShellExecutionToken, ShellTarget};
 use crate::state::bash_state::BashState;
 use crate::state::pty::SharedPtyShell;
-use crate::tools::bash_command::{ShellDeliveryCursor, ShellResetTransition};
+use crate::tools::bash_command::{guardian_foreground_shell_needs_reset, ShellDeliveryCursor};
 use crate::types::normalize_thread_id;
 
 type SharedState = Arc<Mutex<Option<BashState>>>;
@@ -37,6 +37,13 @@ type CachedActionResult = std::result::Result<RunActionResult, String>;
 enum ActionCompletion {
     InFlight(Arc<watch::Sender<Option<CachedActionResult>>>),
     Complete(Box<CachedActionResult>),
+}
+
+enum ActionReservation {
+    Owner(Arc<watch::Sender<Option<CachedActionResult>>>),
+    Waiter(Arc<watch::Sender<Option<CachedActionResult>>>),
+    Cached(CachedActionResult),
+    Rejected { error: WinxError, preserve_cancellation: bool },
 }
 
 struct ActionOwnerGuard {
@@ -66,6 +73,7 @@ impl Drop for ActionOwnerGuard {
 
 struct ActionEntry {
     fingerprint: Vec<u8>,
+    cancellation_key: Option<String>,
     completion: ActionCompletion,
     last_seen: Instant,
 }
@@ -232,6 +240,33 @@ async fn consume_launch_cancellation_flag(
 ) {
     let mut reservations = session.launch_reservations.lock().await;
     if reservations.get(cancellation_key).is_some_and(|entry| Arc::ptr_eq(&entry.value, expected)) {
+        reservations.remove(cancellation_key);
+    }
+}
+
+async fn consume_unowned_launch_cancellation_flag(
+    session: &DaemonSession,
+    cancellation_key: Option<&str>,
+) {
+    let Some(cancellation_key) = cancellation_key else {
+        return;
+    };
+
+    // Owners publish their ActionEntry before acquiring the flag. Keep that
+    // registry locked through the cleanup decision so a rejected/replayed
+    // attempt cannot erase a cancellation reserved for an in-flight owner.
+    let completed = session.completed.lock().await;
+    let owned = completed.values().any(|entry| {
+        entry.cancellation_key.as_deref() == Some(cancellation_key)
+            && matches!(entry.completion, ActionCompletion::InFlight(_))
+            && !action_entry_is_terminal(entry)
+    });
+    if owned {
+        return;
+    }
+    let mut reservations = session.launch_reservations.lock().await;
+    if reservations.get(cancellation_key).is_some_and(|entry| Arc::strong_count(&entry.value) == 1)
+    {
         reservations.remove(cancellation_key);
     }
 }
@@ -638,80 +673,125 @@ async fn run_action(
         let mut sessions = sessions.lock().await;
         sessions.entry(thread_id.clone()).or_insert_with(|| Arc::new(DaemonSession::new())).clone()
     };
-    if let Some(key) = params.options.cancellation_key.as_deref() {
-        params.options.launch_cancelled = Some(launch_cancellation_flag(&session, key).await?);
-    }
-    let launch_reservation =
-        params.options.cancellation_key.clone().zip(params.options.launch_cancelled.clone());
+    let cancellation_key = params.options.cancellation_key.clone();
     let fingerprint = canonical_action_fingerprint(&params)?;
 
     let request_key = params.request_key.clone();
-    let (completion, owner) = {
+    let reservation = {
         let mut completed = session.completed.lock().await;
         let now = Instant::now();
         prune_action_entries(&mut completed, now);
         if let Some(entry) = completed.get_mut(&request_key) {
             if entry.fingerprint != fingerprint {
-                return Err(WinxError::InvalidInput(
-                    "request_key was reused with different shell action parameters".to_string(),
-                ));
-            }
-            entry.last_seen = now;
-            match &entry.completion {
-                ActionCompletion::Complete(result) => {
-                    return cached_action_result((**result).clone())
+                let preserve_cancellation = entry.cancellation_key == cancellation_key
+                    && matches!(entry.completion, ActionCompletion::InFlight(_))
+                    && !action_entry_is_terminal(entry);
+                ActionReservation::Rejected {
+                    error: WinxError::InvalidInput(
+                        "request_key was reused with different shell action parameters".to_string(),
+                    ),
+                    preserve_cancellation,
                 }
-                ActionCompletion::InFlight(sender) => (Arc::clone(sender), false),
+            } else {
+                entry.last_seen = now;
+                match &entry.completion {
+                    ActionCompletion::Complete(result) => {
+                        ActionReservation::Cached((**result).clone())
+                    }
+                    ActionCompletion::InFlight(sender) => {
+                        ActionReservation::Waiter(Arc::clone(sender))
+                    }
+                }
             }
         } else {
             if !evict_oldest_action_if_full(&mut completed) {
-                return Err(WinxError::ResourceAllocationError {
-                    message: format!(
-                        "all {MAX_SESSION_CACHE_ENTRIES} shell action reservations are in flight; retry after one completes"
-                    ),
-                });
+                ActionReservation::Rejected {
+                    error: WinxError::ResourceAllocationError {
+                        message: format!(
+                            "all {MAX_SESSION_CACHE_ENTRIES} shell action reservations are in flight; retry after one completes"
+                        ),
+                    },
+                    preserve_cancellation: false,
+                }
+            } else {
+                let completion = Arc::new(watch::channel(None).0);
+                completed.insert(
+                    request_key.clone(),
+                    ActionEntry {
+                        fingerprint,
+                        cancellation_key: cancellation_key.clone(),
+                        completion: ActionCompletion::InFlight(Arc::clone(&completion)),
+                        last_seen: now,
+                    },
+                );
+                ActionReservation::Owner(completion)
             }
-            let completion = Arc::new(watch::channel(None).0);
-            completed.insert(
-                request_key.clone(),
-                ActionEntry {
-                    fingerprint,
-                    completion: ActionCompletion::InFlight(Arc::clone(&completion)),
-                    last_seen: now,
-                },
-            );
-            (completion, true)
         }
     };
 
-    if owner {
-        let owner_session = Arc::clone(&session);
-        let owner_epoch = guardian_epoch.to_string();
-        let owner_completion = Arc::clone(&completion);
-        tokio::spawn(async move {
-            let mut owner_guard = ActionOwnerGuard::new(Arc::clone(&owner_completion));
-            let outcome = match tokio::time::timeout(
-                ACTION_OWNER_TIMEOUT,
-                execute_action(&owner_session, params, &owner_epoch),
-            )
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(_) => Err(WinxError::CommandTimeout {
-                    command: "guardian shell action".to_string(),
-                    timeout_seconds: ACTION_OWNER_TIMEOUT.as_secs(),
-                }),
-            };
-            if let Some((key, flag)) = launch_reservation {
-                consume_launch_cancellation_flag(&owner_session, &key, &flag).await;
+    match reservation {
+        ActionReservation::Cached(result) => {
+            consume_unowned_launch_cancellation_flag(&session, cancellation_key.as_deref()).await;
+            cached_action_result(result)
+        }
+        ActionReservation::Rejected { error, preserve_cancellation } => {
+            if !preserve_cancellation {
+                consume_unowned_launch_cancellation_flag(&session, cancellation_key.as_deref())
+                    .await;
             }
-            let cached = outcome.map_err(|error| error.to_string());
-            complete_action(&owner_session, &request_key, cached, &owner_completion).await;
-            owner_guard.disarm();
-        });
+            Err(error)
+        }
+        ActionReservation::Waiter(completion) => {
+            wait_for_action_completion(completion.subscribe()).await
+        }
+        ActionReservation::Owner(completion) => {
+            let launch_reservation = if let Some(key) = cancellation_key {
+                match launch_cancellation_flag(&session, &key).await {
+                    Ok(flag) => {
+                        params.options.launch_cancelled = Some(Arc::clone(&flag));
+                        Some((key, flag))
+                    }
+                    Err(error) => {
+                        complete_action(
+                            &session,
+                            &request_key,
+                            Err(error.to_string()),
+                            &completion,
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                }
+            } else {
+                None
+            };
+            let owner_session = Arc::clone(&session);
+            let owner_epoch = guardian_epoch.to_string();
+            let owner_completion = Arc::clone(&completion);
+            tokio::spawn(async move {
+                let mut owner_guard = ActionOwnerGuard::new(Arc::clone(&owner_completion));
+                let outcome = match tokio::time::timeout(
+                    ACTION_OWNER_TIMEOUT,
+                    execute_action(&owner_session, params, &owner_epoch),
+                )
+                .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(_) => Err(WinxError::CommandTimeout {
+                        command: "guardian shell action".to_string(),
+                        timeout_seconds: ACTION_OWNER_TIMEOUT.as_secs(),
+                    }),
+                };
+                if let Some((key, flag)) = launch_reservation {
+                    consume_launch_cancellation_flag(&owner_session, &key, &flag).await;
+                }
+                let cached = outcome.map_err(|error| error.to_string());
+                complete_action(&owner_session, &request_key, cached, &owner_completion).await;
+                owner_guard.disarm();
+            });
+            wait_for_action_completion(completion.subscribe()).await
+        }
     }
-
-    wait_for_action_completion(completion.subscribe()).await
 }
 
 fn cached_action_result(cached: CachedActionResult) -> Result<RunActionResult> {
@@ -783,7 +863,18 @@ async fn execute_action(
     params: RunActionParams,
     guardian_epoch: &str,
 ) -> Result<RunActionResult> {
-    let operation = Arc::clone(&session.operation_barrier).read_owned().await;
+    let foreground_command = matches!(
+        &params.command.action_json,
+        crate::types::BashCommandAction::Command { is_background: false, .. }
+    );
+    // Foreground preflight takes the writer before state, cursor, or command
+    // gates. Other actions take a reader. This global order avoids upgrading a
+    // reader while another reader is blocked on a lock held by this action.
+    let (write_operation, read_operation) = if foreground_command {
+        (Some(Arc::clone(&session.operation_barrier).write_owned().await), None)
+    } else {
+        (None, Some(Arc::clone(&session.operation_barrier).read_owned().await))
+    };
     if params
         .options
         .expected_guardian_epoch
@@ -816,7 +907,7 @@ async fn execute_action(
     ensure_drainer(session);
     session.note_activity(is_command);
 
-    {
+    let preflight_reset = {
         let mut guard = session.state.lock().await;
         let state = if let Some(state) = guard.as_mut() {
             let daemon_cwd = state.cwd.clone();
@@ -832,19 +923,24 @@ async fn execute_action(
         if needs_shell && state.cwd.exists() {
             state.init_pty_shell().await?;
         }
+        if foreground_command && !params.options.is_launch_cancelled() {
+            guardian_foreground_shell_needs_reset(state, &params.options).await?
+        } else {
+            false
+        }
+    };
+    if preflight_reset {
+        let mut guard = session.state.lock().await;
+        let state = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
+        *session.session_epoch.lock().await = new_epoch();
+        if let Err(error) = state.init_pty_shell().await {
+            tracing::warn!(%error, "failed to reset guardian PTY during exclusive preflight");
+        }
     }
-    let (reset_transition, _operation) = if is_command {
-        (
-            Some(ShellResetTransition::new(
-                Arc::clone(&session.operation_barrier),
-                operation,
-                Arc::clone(&session.session_epoch),
-                new_epoch(),
-            )),
-            None,
-        )
+    let _operation = if let Some(operation) = write_operation {
+        Some(operation.downgrade())
     } else {
-        (None, Some(operation))
+        read_operation
     };
 
     if is_command {
@@ -873,7 +969,7 @@ async fn execute_action(
         params.command,
         &cursor,
         params.options,
-        reset_transition,
+        foreground_command,
     )
     .await;
     let session_epoch = session.session_epoch.lock().await.clone();
@@ -1408,6 +1504,7 @@ mod tests {
                     format!("working-{index}"),
                     ActionEntry {
                         fingerprint: vec![u8::try_from(index % 255).unwrap_or_default()],
+                        cancellation_key: None,
                         completion: ActionCompletion::InFlight(Arc::new(watch::channel(None).0)),
                         last_seen: Instant::now(),
                     },
