@@ -142,13 +142,22 @@ fn canonical_binding_root(workspace: &str) -> Result<PathBuf> {
             message: "must be the non-empty canonical root returned by Initialize".to_string(),
         });
     }
-    let path = canonical_workspace_identity(workspace);
-    if !path.is_absolute() {
+    let expanded = crate::utils::path::expand_user(workspace);
+    let supplied = PathBuf::from(&expanded);
+    if !supplied.is_absolute() {
         return Err(WinxError::ParameterValidationError {
             field: "workspace_root".to_string(),
-            message: "must be an absolute path returned by Initialize".to_string(),
+            message: "must be the absolute canonical path returned by Initialize".to_string(),
         });
     }
+    if supplied.is_file() {
+        return Err(WinxError::ParameterValidationError {
+            field: "workspace_root".to_string(),
+            message: "must be the workspace directory returned by Initialize, not a file path"
+                .to_string(),
+        });
+    }
+    let path = canonical_workspace_identity(workspace);
     Ok(path)
 }
 
@@ -163,13 +172,15 @@ fn string_argument(arguments: Option<&rmcp::model::JsonObject>, key: &str) -> Op
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
     use std::path::Path;
 
     use crate::state::BashState;
     use serde_json::Value;
 
-    fn request(name: &str, value: Value) -> CallToolRequestParams {
+    fn request(name: &str, value: &Value) -> CallToolRequestParams {
         CallToolRequestParams::new(name.to_string())
             .with_arguments(value.as_object().expect("request object").clone())
     }
@@ -193,7 +204,7 @@ mod tests {
         bind(&service, "thread", workspace.path()).await;
         let request = request(
             "ReadFiles",
-            serde_json::json!({
+            &serde_json::json!({
                 "file_paths": [external.path().join("outside.txt")],
                 "thread_id": "thread",
                 "workspace_root": workspace.path()
@@ -219,7 +230,7 @@ mod tests {
         bind(&service, "wrong_thread", wrong.path()).await;
         let request = request(
             "BashCommand",
-            serde_json::json!({
+            &serde_json::json!({
                 "action_json": {"type": "command", "command": "pwd"},
                 "thread_id": "wrong_thread",
                 "workspace_root": intended.path()
@@ -245,7 +256,7 @@ mod tests {
         bind(&service, "thread", workspace.path()).await;
         let request = request(
             "ReadFiles",
-            serde_json::json!({"file_paths": [workspace.path()], "thread_id": "thread"}),
+            &serde_json::json!({"file_paths": [workspace.path()], "thread_id": "thread"}),
         );
 
         let error = service
