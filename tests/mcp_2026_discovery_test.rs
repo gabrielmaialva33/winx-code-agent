@@ -13,7 +13,7 @@ const LEFT_TOKEN: &str = "left-principal-token-0123456789abcdef";
 const RIGHT_TOKEN: &str = "right-principal-token-0123456789abcdef";
 const USAGE_READ_MARKER: &str = "winx-file-content-must-not-be-logged";
 
-type TestBindings = HashMap<(String, String), String>;
+type TestBindings = HashMap<(std::net::SocketAddr, String, String), String>;
 static TEST_BINDINGS: OnceLock<Mutex<TestBindings>> = OnceLock::new();
 
 fn test_bindings() -> &'static Mutex<TestBindings> {
@@ -167,7 +167,7 @@ async fn post_json_with_session_as(
     body: &str,
     token: &str,
 ) -> anyhow::Result<String> {
-    let body = add_known_workspace_binding(body, token);
+    let body = add_known_workspace_binding(address, body, token);
     let mut stream = TcpStream::connect(address).await?;
     let method_header =
         method.map_or_else(String::new, |method| format!("MCP-Method: {method}\r\n"));
@@ -200,11 +200,11 @@ async fn post_json_with_session_as(
         ),
     }
     let response = String::from_utf8_lossy(&response).into_owned();
-    remember_initialize_binding(&body, &response, token);
+    remember_initialize_binding(address, &body, &response, token);
     Ok(response)
 }
 
-fn add_known_workspace_binding(body: &str, token: &str) -> String {
+fn add_known_workspace_binding(address: std::net::SocketAddr, body: &str, token: &str) -> String {
     let Ok(mut request) = serde_json::from_str::<serde_json::Value>(body) else {
         return body.to_string();
     };
@@ -228,7 +228,7 @@ fn add_known_workspace_binding(body: &str, token: &str) -> String {
     else {
         return request.to_string();
     };
-    let key = (token.to_string(), thread_id.to_string());
+    let key = (address, token.to_string(), thread_id.to_string());
     let workspace_root = test_bindings()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -240,7 +240,12 @@ fn add_known_workspace_binding(body: &str, token: &str) -> String {
     request.to_string()
 }
 
-fn remember_initialize_binding(body: &str, response: &str, token: &str) {
+fn remember_initialize_binding(
+    address: std::net::SocketAddr,
+    body: &str,
+    response: &str,
+    token: &str,
+) {
     let is_initialize = serde_json::from_str::<serde_json::Value>(body)
         .ok()
         .and_then(|request| request.get("params")?.get("name")?.as_str().map(str::to_string))
@@ -263,7 +268,7 @@ fn remember_initialize_binding(body: &str, response: &str, token: &str) {
     test_bindings()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert((token.to_string(), thread_id.to_string()), workspace_root.to_string());
+        .insert((address, token.to_string(), thread_id.to_string()), workspace_root.to_string());
 }
 
 async fn get_path(address: std::net::SocketAddr, path: &str) -> anyhow::Result<String> {
