@@ -539,15 +539,20 @@ impl ServerHandler for WinxService {
         let principal = principal_from_context(&context);
         if principal
             .as_ref()
-            .is_some_and(|principal| {
-                let policy = principal.tool_policy();
-                !policy.allows(request.name.as_ref())
-                    || (request_requires_bash_capability(&request)
-                        && !policy.allows("BashCommand"))
-            })
+            .is_some_and(|principal| !principal.tool_policy().allows(request.name.as_ref()))
         {
             return Err(McpError::invalid_request(
                 format!("Tool is not available for this principal: {}", request.name),
+                None,
+            ));
+        }
+        if request_requires_bash_capability(&request)
+            && principal
+                .as_ref()
+                .is_some_and(|principal| !principal.tool_policy().allows("BashCommand"))
+        {
+            return Err(McpError::invalid_request(
+                "verify_command requires BashCommand in this principal's tool policy",
                 None,
             ));
         }
