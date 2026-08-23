@@ -155,7 +155,7 @@ pub(crate) fn commit_edit(bash_state: &mut BashState, planned: PlannedEdit) -> R
     );
     refresh_whitelist_and_stats(
         bash_state,
-        file_path_str,
+        &file_path_str,
         &path,
         &new_content,
         uses_search_replace,
@@ -217,7 +217,7 @@ fn format_unread_ranges(whitelist: &FileWhitelistData) -> String {
 
 fn refresh_whitelist_and_stats(
     bash_state: &mut BashState,
-    file_path_str: String,
+    file_path_str: &str,
     path: &Path,
     new_content: &str,
     uses_search_replace: bool,
@@ -225,7 +225,7 @@ fn refresh_whitelist_and_stats(
     let hash = hash_content(new_content);
     let total_lines = new_content.lines().count();
     bash_state.set_whitelist_entry(
-        &file_path_str,
+        file_path_str,
         FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines),
     );
 
