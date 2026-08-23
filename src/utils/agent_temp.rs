@@ -92,9 +92,15 @@ pub fn validate_edit_target(
     let info = session_info(workspace_root, thread_id);
     let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
     let requested_relative = requested_path.strip_prefix(&workspace).ok();
+    let resolved_relative = resolved_path.strip_prefix(&workspace).ok();
 
-    if let Some(relative) = requested_relative {
+    if let Some(relative) = resolved_relative {
         reject_legacy_root_artifact(relative, previous_bytes.is_none(), requested_path, &info)?;
+    }
+    if requested_relative != resolved_relative {
+        if let Some(relative) = requested_relative {
+            reject_legacy_root_artifact(relative, previous_bytes.is_none(), requested_path, &info)?;
+        }
     }
 
     let requested_temp = requested_relative.is_some_and(is_temp_relative);
@@ -427,6 +433,17 @@ mod tests {
         let error = validate_edit_target(workspace.path(), "active", &encoded, &encoded, None, 10)
             .expect_err("long component must fail");
         assert!(error.to_string().contains("filesystem names"), "{error}");
+    }
+
+    #[test]
+    fn resolved_path_cannot_hide_a_root_artifact_behind_parent_components() {
+        let workspace = TempDir::new().unwrap();
+        let requested = workspace.path().join("nested/../.winx-review-carrier.py");
+        let resolved = workspace.path().join(".winx-review-carrier.py");
+        let error =
+            validate_edit_target(workspace.path(), "active", &requested, &resolved, None, 10)
+                .expect_err("resolved top-level artifact must fail");
+        assert!(error.to_string().contains("workspace root"), "{error}");
     }
 
     #[test]
