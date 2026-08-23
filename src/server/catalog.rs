@@ -221,6 +221,7 @@ const INITIALIZE_DESCRIPTION: &str =
     "- Call this at the start of the conversation before using shell tools, unless a local MCP client supplied Roots and Winx initialized that workspace automatically. \
      - Do not call Initialize again while this conversation already has a valid Winx thread_id. A repeated first_call only reattaches the durable session and returns compact unchanged-context metadata; use ReadFiles, CodeMap, BashCommand, or edit tools directly. \
      - The result returns an inseparable thread_id/workspace_root pair. Copy both exactly into every later Winx call; never borrow a pair from another chat or project. workspace_root identifies the session and does not limit target paths. \
+     - The result also returns temporary_artifact_dir, a bounded session-local area for genuinely useful derived helpers. It is created on demand; keep names short, preserve source provenance, and treat its contents as non-canonical. \
      - Use `any_workspace_path` to initialize the shell in the appropriate project directory. \
      - If the user has mentioned a workspace or project root or any other file or folder use it to set `any_workspace_path`. \
      - If user has mentioned any files use `initial_files_to_read` to read, use absolute paths only (~ allowed) \
@@ -237,14 +238,14 @@ const BASH_COMMAND_DESCRIPTION: &str =
 const READ_FILES_DESCRIPTION: &str =
     "- Read full file content of one or more files. \
      - Prefer this over reading files with BashCommand (cat/head/tail): the output is token-budgeted and the read is recorded so FileWriteOrEdit can edit the file afterward. \
-     - Use this for exact source text and languages CodeMap does not support. Never manufacture a parseable carrier by encoding source into generated identifiers, filenames, or directory names. \
+     - Use this for exact canonical source text and languages CodeMap does not support. \
      - Do NOT use this for binary files or images — use ReadImage for images. \
      - Provide absolute paths only (~ allowed) \
      - Only if the task requires line numbers understanding: \
      - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10`";
 
 const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
-    "Use this to edit one file; use MultiFileEdit when a change spans files. Read the target with ReadFiles first. If structuredContent.status is `needs_read`, perform every required_read or the supplied next_action before retrying; never repeat a failed edit unchanged. For percentage_to_change <= 50, provide concise exact SEARCH/REPLACE blocks with only enough context for uniqueness. For percentage_to_change > 50, provide the complete file and ensure the whole file was read. Preserve whitespace exactly. Use `<<<<<<< SEARCH @42` or `@42-50` to disambiguate repeated snippets. A stale file, missing block, or ambiguous block requires a fresh read before a corrected retry. For a quick finite check, set verify_command so editing and verification share one MCP round trip; compose related fail-fast checks with &&. The edit remains applied when verification fails.";
+    "Use this to edit one file; use MultiFileEdit when a change spans files. Read the target with ReadFiles first. If structuredContent.status is `needs_read`, perform every required_read or the supplied next_action before retrying; never repeat a failed edit unchanged. For percentage_to_change <= 50, provide concise exact SEARCH/REPLACE blocks with only enough context for uniqueness. For percentage_to_change > 50, provide the complete file and ensure the whole file was read. Preserve whitespace exactly. Use `<<<<<<< SEARCH @42` or `@42-50` to disambiguate repeated snippets. A stale file, missing block, or ambiguous block requires a fresh read before a corrected retry. For a temporary helper, use the exact temporary_artifact_dir returned by Initialize; the file tools reject legacy root artifacts, cross-session temp paths, payload-sized names, excessive depth, and quota overflow. For a quick finite check, set verify_command so editing and verification share one MCP round trip; compose related fail-fast checks with &&. The edit remains applied when verification fails.";
 
 const MULTI_FILE_EDIT_DESCRIPTION: &str =
     "- Edits SEVERAL files together, all-or-nothing. Use this over multiple FileWriteOrEdit calls when a change spans files and a partial apply would be bad (e.g. rename a symbol across files). \
@@ -271,9 +272,9 @@ const CODE_MAP_DESCRIPTION: &str =
      - operation=\"outline\": map symbols (functions, types, methods, classes, ...). `path` to a FILE returns that file's definitions; `path` to a DIRECTORY (or empty = the whole workspace) returns a relevance-ranked, token-budgeted symbol map across files. Use it instead of reading whole files just to learn their shape. \
      - operation=\"references\": find where a symbol is defined and referenced (called/used), by name. `name` is required (exact identifier). Counts only real symbol occurrences, never matches inside strings or comments. Output lists definitions first, then references, as `def|ref  file:line  kind  name`. \
      - Scope either operation with `path` (file or directory; empty = the whole workspace); cap with `max_results`. gitignore-aware, workspace-confined, works in every mode. \
-     - 11 languages (rust, js/ts, go, c, c++, java, ruby, c#, php, lua); other files return no symbols. Note: C/C++ grammars tag definitions only, so references reads 0 for `.c`/`.h`/`.cpp`. \
-     - CodeMap returns symbols, not source text. For unsupported languages or exact code, use ReadFiles directly. Never translate or encode source into a supported language, identifiers, filenames, directory names, carrier files, or other metadata to make CodeMap expose it. \
-     - If a real task needs an ephemeral workspace-local helper, keep it under `<workspace_root>/.winx/tmp/` with short paths and remove it when done; never create `.winx-*` or `.winx_tmp` artifacts at the project root. \
+     - 13 languages (rust, javascript, typescript, python, elixir, go, c, c++, java, ruby, c#, php, lua); other files return no symbols. Note: C/C++ grammars tag definitions only, so references reads 0 for `.c`/`.h`/`.cpp`. \
+     - CodeMap returns symbols, not source text. For unsupported languages or exact code, use the structured fallback to ReadFiles; never transform source solely to make CodeMap parse it. \
+     - A derived representation or adapter is allowed only when independently useful: put it in the temporary_artifact_dir returned by Initialize, use short descriptive names, preserve original source_path/line provenance, and treat it as non-canonical. Never encode payload in filesystem names or create `.winx-*`/`.winx_tmp` artifacts at the project root. Automatic repo maps ignore `.winx`, while an explicit helper file path remains inspectable. \
      - For plain-text/regex search or file discovery, use rg / grep / fd / find via BashCommand.";
 
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
