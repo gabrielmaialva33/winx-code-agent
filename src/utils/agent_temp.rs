@@ -91,29 +91,38 @@ pub fn validate_edit_target(
 ) -> Result<()> {
     let info = session_info(workspace_root, thread_id);
     let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
-    let requested_relative = requested_path.strip_prefix(&workspace).ok();
-    let resolved_relative = resolved_path.strip_prefix(&workspace).ok();
+    // On macOS, tempfile and callers may spell the same workspace as `/var/...`
+    // while canonicalization produces `/private/var/...`. Accept either spelling
+    // at this boundary, then rebase policy checks onto the canonical workspace.
+    // The resolved path from the file-safety layer is normally canonical already;
+    // keeping the lexical fallback makes this helper safe and independently
+    // testable without allowing an alias to bypass temporary-artifact policy.
+    let requested_relative = workspace_relative(requested_path, workspace_root, &workspace);
+    let resolved_relative = workspace_relative(resolved_path, workspace_root, &workspace);
 
-    if let Some(relative) = resolved_relative {
+    if let Some(relative) = resolved_relative.as_deref() {
         reject_legacy_root_artifact(relative, previous_bytes.is_none(), requested_path, &info)?;
     }
     if requested_relative != resolved_relative {
-        if let Some(relative) = requested_relative {
+        if let Some(relative) = requested_relative.as_deref() {
             reject_legacy_root_artifact(relative, previous_bytes.is_none(), requested_path, &info)?;
         }
     }
 
-    let requested_temp = requested_relative.is_some_and(is_temp_relative);
-    let resolved_temp = resolved_path.starts_with(workspace.join(TEMP_ROOT));
+    let requested_temp = requested_relative.as_deref().is_some_and(is_temp_relative);
+    let resolved_temp = resolved_relative.as_deref().is_some_and(is_temp_relative);
     if !requested_temp && !resolved_temp {
         return Ok(());
     }
 
     reject_symlinked_temp_root(&workspace, requested_path, &info)?;
-    validate_session_relative_path(resolved_path, &info)?;
+    let policy_path = resolved_relative
+        .as_deref()
+        .map_or_else(|| resolved_path.to_path_buf(), |relative| workspace.join(relative));
+    validate_session_relative_path(&policy_path, &info)?;
     if new_bytes > MAX_FILE_BYTES {
         return Err(policy_error(
-            resolved_path,
+            &policy_path,
             &info,
             format!(
                 "helper content is {new_bytes} bytes; one temporary file is limited to \
@@ -123,6 +132,17 @@ pub fn validate_edit_target(
     }
 
     Ok(())
+}
+
+fn workspace_relative(
+    path: &Path,
+    workspace_root: &Path,
+    canonical_workspace: &Path,
+) -> Option<PathBuf> {
+    path.strip_prefix(canonical_workspace)
+        .or_else(|_| path.strip_prefix(workspace_root))
+        .ok()
+        .map(Path::to_path_buf)
 }
 
 /// Validate the aggregate size of a `MultiFileEdit` after every target has been
@@ -444,6 +464,37 @@ mod tests {
             validate_edit_target(workspace.path(), "active", &requested, &resolved, None, 10)
                 .expect_err("resolved top-level artifact must fail");
         assert!(error.to_string().contains("workspace root"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lexical_workspace_alias_cannot_bypass_temp_policy() {
+        use std::os::unix::fs::symlink;
+
+        let parent = TempDir::new().unwrap();
+        let real_workspace = parent.path().join("real-workspace");
+        let alias_workspace = parent.path().join("workspace-alias");
+        fs::create_dir(&real_workspace).unwrap();
+        symlink(&real_workspace, &alias_workspace).unwrap();
+
+        let legacy = alias_workspace.join(".winx_tmp/payload.txt");
+        let error = validate_edit_target(&alias_workspace, "active", &legacy, &legacy, None, 10)
+            .expect_err("a lexical workspace alias must not bypass root-artifact policy");
+        assert!(error.to_string().contains("workspace root"), "{error}");
+
+        let canonical_workspace = alias_workspace.canonicalize().unwrap();
+        let canonical_session = session_info(&alias_workspace, "active").directory;
+        let relative_session = canonical_session.strip_prefix(&canonical_workspace).unwrap();
+        let aliased_helper = alias_workspace.join(relative_session).join("adapter.py");
+        validate_edit_target(
+            &alias_workspace,
+            "active",
+            &aliased_helper,
+            &aliased_helper,
+            None,
+            10,
+        )
+        .expect("the active managed directory must work through the lexical alias");
     }
 
     #[test]
