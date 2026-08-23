@@ -1240,6 +1240,7 @@ fn same_uid(stream: &UnixStream) -> Result<bool> {
 mod tests {
     #![allow(clippy::expect_used)]
     use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
