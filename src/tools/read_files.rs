@@ -21,10 +21,21 @@ use crate::utils::path::{expand_user, validate_path_in_workspace};
 /// Default token limits for file reading
 const CODING_MAX_TOKENS: usize = 24_000;
 const NONCODING_MAX_TOKENS: usize = 8_000;
+const DEFAULT_READ_PARALLELISM: usize = 4;
+const MAX_READ_PARALLELISM: usize = 32;
 
 /// Type alias for file reading result
 type FileReadResult = (String, bool, usize, String, (usize, usize), String, usize);
 type ReadCoverage = (Vec<(usize, usize)>, String, usize);
+
+#[derive(Clone)]
+struct FileReadRequest {
+    index: usize,
+    requested_path: String,
+    clean_path: String,
+    start_line_num: Option<usize>,
+    end_line_num: Option<usize>,
+}
 
 /// Complete result of one batched read. The MCP adapter uses the per-file
 /// errors to return an honest `isError: true` result while retaining any
@@ -51,7 +62,7 @@ fn range_format(start_line_num: Option<usize>, end_line_num: Option<usize>) -> S
 }
 
 #[instrument(level = "debug", skip(file_path))]
-async fn read_file(
+fn read_file(
     file_path: &str,
     max_tokens: Option<usize>,
     cwd: &Path,
@@ -228,6 +239,18 @@ fn select_max_tokens(file_path: &str) -> usize {
     }
 }
 
+fn read_parallelism() -> usize {
+    parse_read_parallelism(crate::config::env_text("WINX_READ_PARALLELISM").as_deref())
+}
+
+fn parse_read_parallelism(value: Option<&str>) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|parallelism| *parallelism > 0)
+        .unwrap_or(DEFAULT_READ_PARALLELISM)
+        .min(MAX_READ_PARALLELISM)
+}
+
 fn is_source_code_file(file_path: &str) -> bool {
     let path = Path::new(file_path);
     let file_name = path.file_name().and_then(|name| name.to_str()).unwrap_or_default();
@@ -302,25 +325,58 @@ pub async fn handle_tool_call_detailed(
 
     let mut message = String::new();
     let mut file_ranges_dict: HashMap<String, ReadCoverage> = HashMap::new();
+    let mut stats_paths = Vec::new();
     let mut successful_files = 0usize;
     let mut errors = Vec::new();
 
-    for (index, file_path) in read_files.file_paths.iter().enumerate() {
-        let clean_path = read_files.get_clean_path(index);
-        let start_line_num = read_files.start_line_nums.get(index).copied().flatten();
-        let end_line_num = read_files.end_line_nums.get(index).copied().flatten();
+    let requests = read_files
+        .file_paths
+        .iter()
+        .enumerate()
+        .map(|(index, file_path)| FileReadRequest {
+            index,
+            requested_path: file_path.clone(),
+            clean_path: read_files.get_clean_path(index),
+            start_line_num: read_files.start_line_nums.get(index).copied().flatten(),
+            end_line_num: read_files.end_line_nums.get(index).copied().flatten(),
+        })
+        .collect::<Vec<_>>();
+    let show_line_numbers = read_files.show_line_numbers();
 
-        match read_file(
-            &clean_path,
-            Some(select_max_tokens(&clean_path)),
-            &cwd,
-            &workspace_root,
-            read_files.show_line_numbers(),
-            start_line_num,
-            end_line_num,
-        )
-        .await
-        {
+    // Files are independent, so perform blocking filesystem/tokenizer work in a
+    // bounded pool. Results are still consumed in request order, preserving the
+    // stable response and the rule that a truncated file stops the visible batch.
+    'batches: for batch in requests.chunks(read_parallelism()) {
+        let mut tasks = Vec::with_capacity(batch.len());
+        for request in batch.iter().cloned() {
+            let worker_path = request.clean_path.clone();
+            let worker_cwd = cwd.clone();
+            let worker_root = workspace_root.clone();
+            let start_line_num = request.start_line_num;
+            let end_line_num = request.end_line_num;
+            let task = tokio::task::spawn_blocking(move || {
+                read_file(
+                    &worker_path,
+                    Some(select_max_tokens(&worker_path)),
+                    &worker_cwd,
+                    &worker_root,
+                    show_line_numbers,
+                    start_line_num,
+                    end_line_num,
+                )
+            });
+            tasks.push((request, task));
+        }
+
+        let mut tasks = tasks.into_iter();
+        while let Some((request, task)) = tasks.next() {
+            let result = task.await.unwrap_or_else(|error| {
+                Err(WinxError::CommandExecutionError(format!(
+                    "ReadFiles worker failed for {}: {error}",
+                    request.clean_path
+                )))
+            });
+            match result {
             Ok((content, truncated, _, canon_path, line_range, file_hash, total_lines)) => {
                 successful_files = successful_files.saturating_add(1);
                 let entry = file_ranges_dict
@@ -333,18 +389,15 @@ pub async fn handle_tool_call_detailed(
                     message,
                     "\n{}{}\n```\n{content}\n```",
                     clean_path,
-                    range_format(start_line_num, end_line_num)
+                    range_format(request.start_line_num, request.end_line_num)
                 );
-
-                if let Err(e) = crate::utils::workspace_stats::record_read(
-                    &workspace_root,
-                    Path::new(&canon_path),
-                ) {
-                    debug!("failed to record read stats: {e}");
-                }
+                stats_paths.push(PathBuf::from(&canon_path));
 
                 if truncated {
-                    let remaining = read_files.file_paths.len().saturating_sub(index + 1);
+                    let remaining = read_files
+                        .file_paths
+                        .len()
+                        .saturating_sub(request.index + 1);
                     if remaining > 0 {
                         let _ = write!(
                             message,
@@ -352,32 +405,40 @@ pub async fn handle_tool_call_detailed(
                              limit. Call ReadFiles again for them.)"
                         );
                     }
-                    break;
+                    // `spawn_blocking` jobs already running cannot be cancelled,
+                    // but abort prevents queued work from starting. No result is
+                    // recorded or whitelisted unless it was returned to the caller.
+                    for (_, pending) in tasks {
+                        pending.abort();
+                    }
+                    break 'batches;
                 }
             }
             Err(error) => {
-                let _ = write!(message, "\nError reading {file_path}: {error}");
+                let _ = write!(message, "\nError reading {}: {error}", request.requested_path);
                 errors.push(error);
             }
+        }
+        }
+    }
+
+    if !stats_paths.is_empty() {
+        let stats_root = workspace_root.clone();
+        let stats_result = tokio::task::spawn_blocking(move || {
+            crate::utils::workspace_stats::record_reads(&stats_root, &stats_paths)
+        })
+        .await;
+        match stats_result {
+            Ok(Err(error)) => debug!("failed to record read stats: {error}"),
+            Err(error) => debug!("read stats worker failed: {error}"),
+            Ok(Ok(())) => {}
         }
     }
 
     let mut bash_state_guard = bash_state_arc.lock().await;
     if let Some(bash_state) = bash_state_guard.as_mut() {
         for (path, (ranges, file_hash, total_lines)) in file_ranges_dict {
-            bash_state
-                .whitelist_for_overwrite
-                .entry(path)
-                .and_modify(|existing| {
-                    existing.file_hash.clone_from(&file_hash);
-                    existing.total_lines = total_lines;
-                    // Merge (not extend): re-reading a file must not append duplicate
-                    // ranges forever. Keeps line_ranges_read bounded + disjoint.
-                    existing.merge_ranges(ranges.iter().copied());
-                })
-                .or_insert_with(|| {
-                    crate::state::bash_state::FileWhitelistData::new(file_hash, ranges, total_lines)
-                });
+            bash_state.record_read_coverage(path, ranges, file_hash, total_lines);
         }
     }
 
@@ -388,7 +449,7 @@ pub async fn handle_tool_call_detailed(
 mod tests {
     use std::fmt::Write as _;
 
-    use super::{read_file, trim_to_last_line_boundary};
+    use super::{parse_read_parallelism, read_file, trim_to_last_line_boundary};
     use crate::state::bash_state::FileWhitelistData;
 
     #[test]
@@ -404,8 +465,8 @@ mod tests {
         assert!(first_line_only.is_empty());
     }
 
-    #[tokio::test]
-    async fn token_truncation_whitelists_only_complete_visible_lines() -> anyhow::Result<()> {
+    #[test]
+    fn token_truncation_whitelists_only_complete_visible_lines() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("large.txt");
         let mut source = String::new();
@@ -416,7 +477,7 @@ mod tests {
         let path = path.to_str().ok_or_else(|| anyhow::anyhow!("fixture path is not UTF-8"))?;
 
         let (content, truncated, _, _, range, hash, total_lines) =
-            read_file(path, Some(50), temp.path(), temp.path(), false, None, None).await?;
+            read_file(path, Some(50), temp.path(), temp.path(), false, None, None)?;
 
         assert!(truncated);
         let visible = content
@@ -431,15 +492,15 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn oversized_first_line_records_no_read_coverage() -> anyhow::Result<()> {
+    #[test]
+    fn oversized_first_line_records_no_read_coverage() -> anyhow::Result<()> {
         let temp = tempfile::tempdir()?;
         let path = temp.path().join("single-line.txt");
         std::fs::write(&path, "x".repeat(10_000))?;
         let path = path.to_str().ok_or_else(|| anyhow::anyhow!("fixture path is not UTF-8"))?;
 
         let (content, truncated, _, _, range, hash, total_lines) =
-            read_file(path, Some(10), temp.path(), temp.path(), false, None, None).await?;
+            read_file(path, Some(10), temp.path(), temp.path(), false, None, None)?;
 
         assert!(truncated);
         assert!(content.starts_with("\n(...truncated) Showing up to line 0"));
@@ -448,5 +509,15 @@ mod tests {
         assert!(coverage.line_ranges_read.is_empty());
         assert_eq!(coverage.get_unread_ranges(), vec![(1, 1)]);
         Ok(())
+    }
+
+    #[test]
+    fn parallelism_uses_safe_defaults_and_bounds() {
+        assert_eq!(parse_read_parallelism(None), 4);
+        assert_eq!(parse_read_parallelism(Some("invalid")), 4);
+        assert_eq!(parse_read_parallelism(Some("0")), 4);
+        assert_eq!(parse_read_parallelism(Some("1")), 1);
+        assert_eq!(parse_read_parallelism(Some("8")), 8);
+        assert_eq!(parse_read_parallelism(Some("999")), 32);
     }
 }
