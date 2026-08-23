@@ -21,7 +21,7 @@ use crate::errors::{Result, WinxError};
 use crate::runtime::{lock_session_store, ShellExecutionToken, ShellTarget};
 use crate::state::bash_state::BashState;
 use crate::state::pty::SharedPtyShell;
-use crate::tools::bash_command::ShellDeliveryCursor;
+use crate::tools::bash_command::{ShellDeliveryCursor, ShellResetTransition};
 use crate::types::normalize_thread_id;
 
 type SharedState = Arc<Mutex<Option<BashState>>>;
@@ -75,7 +75,7 @@ struct DaemonSession {
     /// Reset/configure takes the writer; actions, snapshots, cursors, and
     /// interrupts take readers. This binds execution-token validation to the
     /// exact shell incarnation on which the operation is performed.
-    operation_barrier: RwLock<()>,
+    operation_barrier: Arc<RwLock<()>>,
     completed: Mutex<HashMap<String, ActionEntry>>,
     journal: Mutex<OutputJournal>,
     observed: Mutex<HashMap<String, (u64, String)>>,
@@ -89,7 +89,7 @@ struct DaemonSession {
     ever_ran_command: AtomicBool,
     drainer_started: AtomicBool,
     activity: Notify,
-    session_epoch: Mutex<String>,
+    session_epoch: Arc<Mutex<String>>,
 }
 
 impl DaemonSession {
@@ -97,7 +97,7 @@ impl DaemonSession {
         let now = unix_ms();
         Self {
             state: Arc::new(Mutex::new(None)),
-            operation_barrier: RwLock::new(()),
+            operation_barrier: Arc::new(RwLock::new(())),
             completed: Mutex::new(HashMap::new()),
             journal: Mutex::new(OutputJournal::default()),
             observed: Mutex::new(HashMap::new()),
@@ -111,7 +111,7 @@ impl DaemonSession {
             ever_ran_command: AtomicBool::new(false),
             drainer_started: AtomicBool::new(false),
             activity: Notify::new(),
-            session_epoch: Mutex::new(new_epoch()),
+            session_epoch: Arc::new(Mutex::new(new_epoch())),
         }
     }
 
@@ -200,7 +200,9 @@ async fn launch_cancellation_flag(
     {
         let oldest = reservations
             .iter()
-            .filter(|(_, entry)| Arc::strong_count(&entry.value) == 1)
+            .filter(|(_, entry)| {
+                Arc::strong_count(&entry.value) == 1 && !entry.value.load(Ordering::Acquire)
+            })
             .min_by_key(|(_, entry)| entry.last_seen)
             .map(|(key, _)| key.clone());
         if let Some(oldest) = oldest {
@@ -221,6 +223,17 @@ async fn launch_cancellation_flag(
         .or_insert_with(|| TimedEntry { value: Arc::new(AtomicBool::new(false)), last_seen: now });
     entry.last_seen = now;
     Ok(Arc::clone(&entry.value))
+}
+
+async fn consume_launch_cancellation_flag(
+    session: &DaemonSession,
+    cancellation_key: &str,
+    expected: &Arc<AtomicBool>,
+) {
+    let mut reservations = session.launch_reservations.lock().await;
+    if reservations.get(cancellation_key).is_some_and(|entry| Arc::ptr_eq(&entry.value, expected)) {
+        reservations.remove(cancellation_key);
+    }
 }
 
 fn validate_identifier(label: &str, value: &str) -> Result<()> {
@@ -628,6 +641,8 @@ async fn run_action(
     if let Some(key) = params.options.cancellation_key.as_deref() {
         params.options.launch_cancelled = Some(launch_cancellation_flag(&session, key).await?);
     }
+    let launch_reservation =
+        params.options.cancellation_key.clone().zip(params.options.launch_cancelled.clone());
     let fingerprint = canonical_action_fingerprint(&params)?;
 
     let request_key = params.request_key.clone();
@@ -687,6 +702,9 @@ async fn run_action(
                     timeout_seconds: ACTION_OWNER_TIMEOUT.as_secs(),
                 }),
             };
+            if let Some((key, flag)) = launch_reservation {
+                consume_launch_cancellation_flag(&owner_session, &key, &flag).await;
+            }
             let cached = outcome.map_err(|error| error.to_string());
             complete_action(&owner_session, &request_key, cached, &owner_completion).await;
             owner_guard.disarm();
@@ -765,7 +783,7 @@ async fn execute_action(
     params: RunActionParams,
     guardian_epoch: &str,
 ) -> Result<RunActionResult> {
-    let _operation = session.operation_barrier.read().await;
+    let operation = Arc::clone(&session.operation_barrier).read_owned().await;
     if params
         .options
         .expected_guardian_epoch
@@ -815,12 +833,18 @@ async fn execute_action(
             state.init_pty_shell().await?;
         }
     }
-    let pty_incarnation_before = {
-        let guard = session.state.lock().await;
-        let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-        let incarnation =
-            state.pty_shell.lock().await.as_ref().map(crate::state::pty::PtyShell::incarnation);
-        incarnation
+    let (reset_transition, _operation) = if is_command {
+        (
+            Some(ShellResetTransition::new(
+                Arc::clone(&session.operation_barrier),
+                operation,
+                Arc::clone(&session.session_epoch),
+                new_epoch(),
+            )),
+            None,
+        )
+    } else {
+        (None, Some(operation))
     };
 
     if is_command {
@@ -849,22 +873,10 @@ async fn execute_action(
         params.command,
         &cursor,
         params.options,
+        reset_transition,
     )
     .await;
-    let pty_incarnation_after = {
-        let guard = session.state.lock().await;
-        let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-        let incarnation =
-            state.pty_shell.lock().await.as_ref().map(crate::state::pty::PtyShell::incarnation);
-        incarnation
-    };
-    let session_epoch = if pty_incarnation_before == pty_incarnation_after {
-        session_epoch
-    } else {
-        let next = new_epoch();
-        *session.session_epoch.lock().await = next.clone();
-        next
-    };
+    let session_epoch = session.session_epoch.lock().await.clone();
     if let Ok(result) = &outcome {
         if let Some(id) = result.result.state.background_id.as_ref() {
             session.background_ids.lock().await.insert(id.clone());

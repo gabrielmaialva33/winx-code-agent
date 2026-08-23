@@ -53,7 +53,7 @@ impl ShellResetTransition {
         Self { barrier, operation: Some(operation), session_epoch, next_epoch }
     }
 
-    async fn reset_shell(&mut self, state: &mut BashState) -> Result<()> {
+    async fn reset_shell(&mut self, state: &mut BashState) -> anyhow::Result<()> {
         drop(self.operation.take());
         let operation = Arc::clone(&self.barrier).write_owned().await;
         *self.session_epoch.lock().await = self.next_epoch.clone();
@@ -287,7 +287,7 @@ async fn capture_embedded_state(
     Ok((state.clone(), operation_guard))
 }
 
-#[tracing::instrument(level = "info", skip(bash_state, command, delivery_cursor))]
+#[tracing::instrument(level = "info", skip(bash_state, command, delivery_cursor, reset_transition))]
 async fn handle_embedded_tool_call_inner(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
