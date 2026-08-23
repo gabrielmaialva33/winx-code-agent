@@ -168,7 +168,7 @@ mod task_lifecycle_tests {
 
     #[derive(Clone, Default)]
     struct PromotionContractRuntime {
-        interrupted: Arc<std::sync::Mutex<Vec<u64>>>,
+        interrupted: Arc<std::sync::Mutex<Vec<crate::runtime::ShellExecutionToken>>>,
         terminated: Arc<std::sync::Mutex<Vec<String>>>,
     }
 
@@ -200,18 +200,18 @@ mod task_lifecycle_tests {
             Box::pin(async { Ok(()) })
         }
 
-        fn interrupt_generation<'a>(
+        fn interrupt_execution<'a>(
             &'a self,
             _bash_state: &'a SharedBashState,
-            expected_generation: Option<u64>,
+            expected: Option<crate::runtime::ShellExecutionToken>,
         ) -> crate::runtime::ShellRuntimeBoolFuture<'a> {
             let interrupted = self.interrupted.clone();
             Box::pin(async move {
-                if let Some(generation) = expected_generation {
+                if let Some(execution) = expected {
                     interrupted
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .push(generation);
+                        .push(execution);
                     Ok(true)
                 } else {
                     Ok(false)
@@ -236,7 +236,7 @@ mod task_lifecycle_tests {
     }
 
     #[tokio::test]
-    async fn failed_promotion_interrupts_started_generation_and_releases_reservation() {
+    async fn failed_promotion_interrupts_full_execution_token_and_releases_reservation() {
         let runtime = PromotionContractRuntime::default();
         let interrupted = runtime.interrupted.clone();
         let service = WinxService::with_runtime(SessionIsolation::Lenient, Arc::new(runtime));
@@ -287,14 +287,15 @@ mod task_lifecycle_tests {
             .expect_err("promotion must reject a changed runtime capability");
         assert!(error.message.contains("safely promote"), "{error:?}");
         assert!(service.tasks.lock().await.get(&task_id).is_none());
-        assert_eq!(
-            *interrupted.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![41]
-        );
+        let interrupted = interrupted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].guardian_epoch, "embedded");
+        assert_eq!(interrupted[0].session_epoch, "test-session");
+        assert_eq!(interrupted[0].generation, 41);
     }
 
     #[tokio::test]
-    async fn immediate_task_launch_error_terminates_session_and_releases_reservation() {
+    async fn immediate_task_launch_error_remains_failed_until_ttl_without_terminating_session() {
         let runtime = PromotionContractRuntime::default();
         let terminated = runtime.terminated.clone();
         let service = WinxService::with_runtime(SessionIsolation::Lenient, Arc::new(runtime));
@@ -331,15 +332,22 @@ mod task_lifecycle_tests {
             .expect("Task response is created before worker launch");
 
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while service.tasks.lock().await.get(&task_id).is_some()
+        while service
+            .tasks
+            .lock()
+            .await
+            .get(&task_id)
+            .is_some_and(|entry| entry.task.status == rmcp::model::TaskStatus::Working)
             && std::time::Instant::now() < deadline
         {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        assert!(service.tasks.lock().await.get(&task_id).is_none());
+        assert_eq!(
+            service.tasks.lock().await.get(&task_id).map(|entry| entry.task.status),
+            Some(rmcp::model::TaskStatus::Failed)
+        );
         let terminated = terminated.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(terminated.len(), 1);
-        assert!(terminated[0].starts_with("immediatelauncherror_"), "{terminated:?}");
+        assert!(terminated.is_empty(), "invalid/tool errors must not terminate the session");
     }
 
     #[tokio::test]
@@ -416,15 +424,19 @@ mod task_lifecycle_tests {
             })
         };
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let generation = {
+        let execution = {
             let slot = service.sessions.lock().await.slots.get("task_cancel_regression").cloned();
             let slot = slot.expect("initialized session");
             let state = slot.lock().await;
             let shell = state.as_ref().expect("initialized state").pty_shell.lock().await;
-            shell.as_ref().map(crate::state::pty::PtyShell::command_generation)
+            shell.as_ref().map(|shell| crate::runtime::ShellExecutionToken {
+                guardian_epoch: "embedded".to_string(),
+                session_epoch: format!("{:016x}", shell.incarnation()),
+                generation: shell.command_generation(),
+            })
         };
         worker.abort();
-        service.interrupt_task_generation("task_cancel_regression", generation).await;
+        service.interrupt_task_execution("task_cancel_regression", execution).await;
         let interrupted = tokio::time::timeout(Duration::from_secs(5), worker).await;
         let settled = match interrupted {
             Ok(Ok(_)) => true,

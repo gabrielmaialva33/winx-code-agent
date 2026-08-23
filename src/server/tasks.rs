@@ -104,32 +104,13 @@ impl WinxService {
                             compact_bash_output,
                             expected_execution.clone(),
                             Arc::clone(&launch_cancelled),
+                            task_id,
                         ),
                     )
                     .await;
                 match launched {
                     Ok(execution) => execution,
-                    Err(error) => {
-                        if expected_execution.is_none() {
-                            if let Err(terminate_error) =
-                                self.shell_runtime.terminate_session(&thread_id).await
-                            {
-                                warn!(
-                                    %thread_id,
-                                    %terminate_error,
-                                    "failed to terminate session after immediate Task launch error"
-                                );
-                            }
-                            let mut tasks = self.tasks.lock().await;
-                            if tasks
-                                .get(task_id)
-                                .is_some_and(|entry| entry.task.status == TaskStatus::Working)
-                            {
-                                tasks.remove(task_id);
-                            }
-                        }
-                        return Err(error);
-                    }
+                    Err(error) => return Err(error),
                 }
             };
             let result = execution.result;
@@ -155,7 +136,6 @@ impl WinxService {
                         warn!(%thread_id, %error, "failed to terminate unsafe unbound Task launch");
                         error
                     });
-                    self.tasks.lock().await.remove(task_id);
                     return Err(McpError::internal_error(
                         "runtime did not bind a running BashCommand to its generation",
                         None,
@@ -235,26 +215,6 @@ impl WinxService {
         }
     }
 
-    pub(super) async fn interrupt_task_generation(
-        &self,
-        thread_id: &str,
-        expected_generation: Option<u64>,
-    ) -> bool {
-        let Some(expected_generation) = expected_generation else { return false };
-        let slot = {
-            let registry = self.sessions.lock().await;
-            registry.slots.get(thread_id).cloned()
-        };
-        let Some(slot) = slot else { return false };
-        match self.shell_runtime.interrupt_generation(&slot, Some(expected_generation)).await {
-            Ok(interrupted) => interrupted,
-            Err(error) => {
-                warn!(thread_id, ?expected_generation, %error, "failed to interrupt MCP task generation");
-                false
-            }
-        }
-    }
-
     pub(super) async fn interrupt_task_execution(
         &self,
         thread_id: &str,
@@ -270,6 +230,25 @@ impl WinxService {
             Ok(interrupted) => interrupted,
             Err(error) => {
                 warn!(thread_id, ?expected, %error, "failed to interrupt MCP task execution");
+                false
+            }
+        }
+    }
+
+    pub(super) async fn cancel_pending_task_action(
+        &self,
+        thread_id: &str,
+        cancellation_key: &str,
+    ) -> bool {
+        let slot = {
+            let registry = self.sessions.lock().await;
+            registry.slots.get(thread_id).cloned()
+        };
+        let Some(slot) = slot else { return false };
+        match self.shell_runtime.cancel_pending_action(&slot, cancellation_key).await {
+            Ok(cancelled) => cancelled,
+            Err(error) => {
+                warn!(thread_id, cancellation_key, %error, "failed to cancel pending MCP task action");
                 false
             }
         }
@@ -361,11 +340,11 @@ impl WinxService {
     async fn fail_bash_task_promotion(
         &self,
         reservation: &BashTaskReservation,
-        started_generation: Option<u64>,
+        started_execution: Option<ShellExecutionToken>,
         message: &str,
     ) -> McpError {
-        let safely_stopped = if let Some(generation) = started_generation {
-            self.interrupt_task_generation(&reservation.thread_id, Some(generation)).await
+        let safely_stopped = if let Some(execution) = started_execution.clone() {
+            self.interrupt_task_execution(&reservation.thread_id, Some(execution)).await
         } else {
             // A runtime that returned `running` without a generation breached
             // the promotion contract. Terminating this one durable session is
@@ -386,7 +365,7 @@ impl WinxService {
         warn!(
             task_id = reservation.task_id,
             thread_id = reservation.thread_id,
-            ?started_generation,
+            ?started_execution,
             safely_stopped,
             %message,
             "rolled back BashCommand task reservation after promotion failure"
@@ -418,7 +397,7 @@ impl WinxService {
                     return Err(self
                         .fail_bash_task_promotion(
                             &reservation,
-                            Some(token.generation),
+                            Some(token.clone()),
                             "runtime cannot safely promote this BashCommand",
                         )
                         .await);
@@ -427,7 +406,7 @@ impl WinxService {
                     return Err(self
                         .fail_bash_task_promotion(
                             &reservation,
-                            Some(token.generation),
+                            Some(token),
                             "BashCommand task reservation disappeared before promotion",
                         )
                         .await);
@@ -453,32 +432,6 @@ impl WinxService {
             )
             .await;
             service.finish_task_launch(&worker_task_id).await;
-
-            let launch_failed = {
-                let mut tasks = service.tasks.lock().await;
-                let outcome_failed = match &outcome {
-                    Ok(Err(_)) => true,
-                    Ok(Ok(result)) => result.is_error == Some(true),
-                    Err(_) => false,
-                };
-                tasks.get(&worker_task_id).is_some_and(|entry| {
-                    entry.task.status == TaskStatus::Working
-                        && entry.execution_token().is_none()
-                        && outcome_failed
-                })
-            };
-            if launch_failed {
-                if let Err(error) = service.shell_runtime.terminate_session(&thread_id).await {
-                    warn!(%thread_id, %error, "failed to terminate session after Task launch failure");
-                }
-                service.tasks.lock().await.remove(&worker_task_id);
-                warn!(
-                    task_id = worker_task_id,
-                    %thread_id,
-                    "released BashCommand Task reservation after immediate launch failure"
-                );
-                return;
-            }
 
             let (status, message, result) = match outcome {
                 Ok(Ok(mut result)) => {
@@ -568,6 +521,7 @@ fn task_action_options(
     compact_output: bool,
     expected_execution: Option<ShellExecutionToken>,
     launch_cancelled: Arc<std::sync::atomic::AtomicBool>,
+    cancellation_key: &str,
 ) -> ShellActionOptions {
     ShellActionOptions {
         compact_output,
@@ -575,6 +529,7 @@ fn task_action_options(
         expected_execution,
         expected_guardian_epoch: None,
         require_generation_binding: true,
+        cancellation_key: Some(cancellation_key.to_string()),
         launch_cancelled: Some(launch_cancelled),
     }
 }

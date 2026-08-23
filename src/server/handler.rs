@@ -388,6 +388,7 @@ impl ServerHandler for WinxService {
             abort_handle.abort();
         }
         if execution_token.is_none() {
+            self.cancel_pending_task_action(&thread_id, &request.task_id).await;
             execution_token = tokio::time::timeout(
                 std::time::Duration::from_millis(500),
                 execution_control.wait_for_execution(),
