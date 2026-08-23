@@ -381,6 +381,7 @@ async fn dispatch(
             let session = sessions.lock().await.remove(&normalize_thread_id(&params.thread_id));
             match session {
                 Some(session) => {
+                    let _operation = session.operation_barrier.write().await;
                     let background_ids = session.background_ids.lock().await.clone();
                     {
                         let mut store = lock_session_store();
@@ -855,6 +856,7 @@ async fn capture_shell_output(
 }
 
 async fn session_info(session: &Arc<DaemonSession>) -> Option<SessionInfo> {
+    let _operation = session.operation_barrier.read().await;
     let (thread_id, cwd, main) = {
         let state = session.state.lock().await;
         let state = state.as_ref()?;
@@ -917,9 +919,29 @@ async fn active_background_command_ids(
 
 async fn interrupt_session(
     session: &Arc<DaemonSession>,
-    expected_generation: Option<u64>,
+    params: &SessionParams,
+    guardian_epoch: &str,
 ) -> Result<bool> {
     session.note_activity(false);
+    let _operation = session.operation_barrier.read().await;
+    if params.expected_guardian_epoch.as_deref().is_some_and(|expected| expected != guardian_epoch)
+        || params
+            .expected_execution
+            .as_ref()
+            .is_some_and(|expected| expected.guardian_epoch != guardian_epoch)
+    {
+        return Ok(false);
+    }
+    let session_epoch = session.session_epoch.lock().await;
+    if params.expected_execution.as_ref().is_some_and(|expected| {
+        expected.session_epoch != *session_epoch
+            || params
+                .expected_generation
+                .is_some_and(|generation| generation != expected.generation)
+    }) {
+        return Ok(false);
+    }
+    drop(session_epoch);
     let shell = {
         let state = session.state.lock().await;
         state.as_ref().map(|state| state.pty_shell.clone())
@@ -928,7 +950,7 @@ async fn interrupt_session(
     {
         let mut guard = shell.lock().await;
         if let Some(shell) = guard.as_mut() {
-            if expected_generation.is_some_and(|expected| {
+            if params.expected_generation.is_some_and(|expected| {
                 shell.command_generation() != expected || !shell.command_running
             }) {
                 return Ok(false);
@@ -948,7 +970,7 @@ async fn interrupt_session(
             }
         };
         if recovered {
-            capture_session_outputs(session).await;
+            capture_session_outputs_locked(session).await;
             return Ok(true);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
