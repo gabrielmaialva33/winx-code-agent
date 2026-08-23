@@ -9,6 +9,7 @@ use tokio::net::TcpStream;
 const TEST_TOKEN: &str = "modern-test-token-0123456789abcdef";
 const LEFT_TOKEN: &str = "left-principal-token-0123456789abcdef";
 const RIGHT_TOKEN: &str = "right-principal-token-0123456789abcdef";
+const USAGE_READ_MARKER: &str = "winx-file-content-must-not-be-logged";
 
 struct ServerProcess(Child);
 
@@ -1203,10 +1204,37 @@ async fn multi_file_edit_preserves_search_conflict_recovery() -> anyhow::Result<
     Ok(())
 }
 
+async fn exercise_usage_read(
+    address: std::net::SocketAddr,
+    workspace: &Path,
+    thread_id: &str,
+) -> anyhow::Result<()> {
+    let first = workspace.join("telemetry-first.txt");
+    let second = workspace.join("telemetry-second.txt");
+    std::fs::write(&first, format!("{USAGE_READ_MARKER} first\n"))?;
+    std::fs::write(&second, format!("{USAGE_READ_MARKER} second\n"))?;
+    let read_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "usage-read",
+        "method": "tools/call",
+        "params": {
+            "name": "ReadFiles",
+            "arguments": {
+                "file_paths": [first, second],
+                "thread_id": thread_id
+            }
+        }
+    });
+    let response = post_json(address, "2026-07-28", "tools/call", &read_call.to_string()).await?;
+    if !response.contains(USAGE_READ_MARKER) {
+        anyhow::bail!("ReadFiles response omitted fixture content: {response}");
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> {
     const COMMAND_MARKER: &str = "winx-command-content-must-not-be-logged";
-    const READ_MARKER: &str = "winx-file-content-must-not-be-logged";
 
     let workspace = tempfile::tempdir()?;
     let logs = tempfile::tempdir()?;
@@ -1247,25 +1275,7 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
     .await?;
     assert!(command.contains(COMMAND_MARKER), "{command}");
 
-    let first = workspace.path().join("telemetry-first.txt");
-    let second = workspace.path().join("telemetry-second.txt");
-    std::fs::write(&first, format!("{READ_MARKER} first\n"))?;
-    std::fs::write(&second, format!("{READ_MARKER} second\n"))?;
-    let read_call = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": "usage-read",
-        "method": "tools/call",
-        "params": {
-            "name": "ReadFiles",
-            "arguments": {
-                "file_paths": [first, second],
-                "thread_id": thread_id
-            }
-        }
-    });
-    let read_response =
-        post_json(address, "2026-07-28", "tools/call", &read_call.to_string()).await?;
-    assert!(read_response.contains(READ_MARKER), "{read_response}");
+    exercise_usage_read(address, workspace.path(), &thread_id).await?;
 
     let deadline = Instant::now() + Duration::from_secs(3);
     let contents = loop {
@@ -1282,7 +1292,10 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
     assert!(!contents.contains(COMMAND_MARKER), "command leaked into usage log: {contents}");
-    assert!(!contents.contains(READ_MARKER), "file content leaked into usage log: {contents}");
+    assert!(
+        !contents.contains(USAGE_READ_MARKER),
+        "file content leaked into usage log: {contents}"
+    );
     assert!(!contents.contains(TEST_TOKEN), "HTTP token leaked into usage log: {contents}");
     #[cfg(unix)]
     {
