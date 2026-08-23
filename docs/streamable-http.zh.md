@@ -238,7 +238,7 @@ winx-code-agent serve --http --token-file ~/.config/winx-http-token \
 
 ## LLM 编排规范 (Orchestration Contract)
 
-MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、绝不原样重复已被拒绝的调用。
+MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、用 `&&` 合并相关的快速失败检查，并且绝不原样重复已被拒绝的调用。两个编辑工具都可通过 `verify_command` 在同一次调用中执行有限的编辑后检查，从而节省一次网络和模型往返。
 
 每个工具均声明了 `outputSchema` 并返回统一的 `structuredContent` 封装：
 
@@ -265,6 +265,10 @@ MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、�
 ```
 
 可恢复的执行失败在 HTTP/JSON-RPC 层面返回成功，而在 MCP 层面设置 `isError: true`，并附带明确的下一步修复动作（`nextAction`）。
+
+`FileWriteOrEdit` 和 `MultiFileEdit` 接受可选的 `verify_command` 与 `verify_wait_for_seconds`（默认 `15`，最大
+`60`）。验证仅在提交成功后运行，并以前台命令形式遵循与 `BashCommand` 相同的模式白名单。退出码为零时组合结果成功；非零退出码返回 `isError: true`、`errorCode: verification_failed` 和
+`data.edit_applied: true`，Winx 不会错误地声称已回滚编辑。若检查在有限等待时间后仍在运行，结果会提供标准的 `BashCommand` `status_check` 下一步动作。主体必须同时允许编辑工具和 `BashCommand` 才能使用此选项。
 
 ## Guardian 生命周期管理
 
