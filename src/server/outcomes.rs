@@ -112,6 +112,12 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
     if result.is_error == Some(true) || tool == "BashCommand" {
         return;
     }
+    if result.structured_content.as_ref().is_some_and(|structured| {
+        structured.get("tool").and_then(Value::as_str) == Some(tool)
+            && structured.get("status").and_then(Value::as_str).is_some()
+    }) {
+        return;
+    }
 
     let existing = result.structured_content.take();
     let text = result_text(result);
@@ -145,6 +151,93 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
         }
     }
     result.structured_content = Some(value);
+}
+
+/// Combine an already-applied edit with its optional foreground verification.
+/// The command remains a nested Bash result, while the outer status makes it
+/// explicit that a failed verification does not roll the edit back.
+pub(super) fn edit_verification_result(
+    tool: &str,
+    arguments: Option<&Value>,
+    edit_text: String,
+    verification: CallToolResult,
+) -> CallToolResult {
+    let verification_text = result_text(&verification);
+    let combined_text = if verification_text.trim().is_empty() {
+        format!("{edit_text}\n\nVerification completed without output.")
+    } else {
+        format!("{edit_text}\n\nVerification:\n{verification_text}")
+    };
+    let nested = verification.structured_content.unwrap_or_else(|| {
+        json!({
+            "status": if verification.is_error == Some(true) { "failed" } else { "completed" },
+            "tool": "BashCommand",
+            "message": "Verification returned no structured result."
+        })
+    });
+    let nested_status = nested.get("status").and_then(Value::as_str).unwrap_or("failed");
+    let exit_code = nested
+        .get("data")
+        .and_then(|data| data.get("exit_code"))
+        .and_then(Value::as_i64);
+    let nonzero_exit = exit_code.is_some_and(|code| code != 0);
+    let verification_error = verification.is_error == Some(true) || nonzero_exit;
+    let active = matches!(nested_status, "running" | "awaiting_input" | "awaiting_approval");
+    let outer_status = if nonzero_exit {
+        "failed"
+    } else if active || verification_error {
+        nested_status
+    } else {
+        "completed"
+    };
+    let message = if verification_error {
+        format!("{tool} applied the edit, but verification failed; the edit was not rolled back.")
+    } else if active {
+        format!("{tool} applied the edit; verification is still {outer_status}.")
+    } else {
+        format!("{tool} applied the edit and verification completed.")
+    };
+
+    let mut data = safe_success_data(tool, arguments, &combined_text, false);
+    data.insert("edit_applied".to_string(), Value::Bool(true));
+    data.insert("verification".to_string(), nested.clone());
+    if let Some(exit_code) = exit_code {
+        data.insert("verification_exit_code".to_string(), json!(exit_code));
+    }
+
+    let mut envelope = json!({
+        "status": outer_status,
+        "tool": tool,
+        "message": message,
+        "retryable": nested.get("retryable").and_then(Value::as_bool).unwrap_or(false),
+        "retrySameCall": false,
+        "requiredReads": [],
+        "data": data,
+    });
+    if verification_error {
+        let nested_code = nested
+            .get("errorCode")
+            .and_then(Value::as_str)
+            .unwrap_or("execution_failed");
+        envelope["errorCode"] = Value::String(if nonzero_exit {
+            "verification_failed".to_string()
+        } else {
+            format!("verification_{nested_code}")
+        });
+    }
+    for key in ["retryAfterMs", "nextAction"] {
+        if let Some(value) = nested.get(key) {
+            envelope[key] = value.clone();
+        }
+    }
+
+    let mut result = if verification_error {
+        CallToolResult::error(vec![ContentBlock::text(combined_text)])
+    } else {
+        CallToolResult::success(vec![ContentBlock::text(combined_text)])
+    };
+    result.structured_content = Some(envelope);
+    result
 }
 
 /// Build a `BashCommand` `CallToolResult` exclusively from runtime-owned state.
