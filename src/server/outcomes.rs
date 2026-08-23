@@ -177,10 +177,8 @@ pub(super) fn edit_verification_result(
         })
     });
     let nested_status = nested.get("status").and_then(Value::as_str).unwrap_or("failed");
-    let exit_code = nested
-        .get("data")
-        .and_then(|data| data.get("exit_code"))
-        .and_then(Value::as_i64);
+    let exit_code =
+        nested.get("data").and_then(|data| data.get("exit_code")).and_then(Value::as_i64);
     let nonzero_exit = exit_code.is_some_and(|code| code != 0);
     let verification_error = verification_is_error || nonzero_exit;
     let active = matches!(nested_status, "running" | "awaiting_input" | "awaiting_approval");
@@ -216,10 +214,8 @@ pub(super) fn edit_verification_result(
         "data": data,
     });
     if verification_error {
-        let nested_code = nested
-            .get("errorCode")
-            .and_then(Value::as_str)
-            .unwrap_or("execution_failed");
+        let nested_code =
+            nested.get("errorCode").and_then(Value::as_str).unwrap_or("execution_failed");
         envelope["errorCode"] = Value::String(if nonzero_exit {
             "verification_failed".to_string()
         } else {
