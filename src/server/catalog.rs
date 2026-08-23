@@ -103,7 +103,7 @@ fn mcp_tool<T: schemars::JsonSchema>(
 }
 
 const WORKSPACE_ROOT_DESCRIPTION: &str =
-    "Exact canonical workspace_root returned by the same Initialize call as thread_id. Copy this pair unchanged on every later call. It identifies the project session and is not a filesystem sandbox: target paths may be outside it when WINX_ALLOW_PATHS and the active mode permit. Never infer it from a target file path.";
+    "Exact canonical workspace_root returned by Initialize. Before every call, confirm it matches the project in the user's current task; if uncertain, Initialize that project. Use it only with the thread_id returned by the same Initialize call. It identifies the project session and is not a filesystem sandbox: target paths may be outside it when WINX_ALLOW_PATHS and the active mode permit. Never infer it from a target file path.";
 
 fn with_workspace_binding(
     schema: Arc<serde_json::Map<String, Value>>,
@@ -125,7 +125,7 @@ fn with_workspace_binding(
             thread_id.insert(
                 "description".to_string(),
                 Value::String(
-                    "Exact thread_id returned by the same Initialize call as workspace_root. Never borrow a thread_id from another chat or project."
+                    "Exact thread_id returned by the same Initialize call as workspace_root. Select it only after confirming workspace_root matches the user's current project. Never borrow it from another chat or project."
                         .to_string(),
                 ),
             );

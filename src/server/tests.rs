@@ -764,6 +764,13 @@ mod schema_tests {
                 "{} does not distinguish identity from path authority: {workspace}",
                 tool.name
             );
+            assert!(
+                workspace["description"]
+                    .as_str()
+                    .is_some_and(|description| description.contains("user's current task")),
+                "{} does not require a current-project check: {workspace}",
+                tool.name
+            );
             let required = tool
                 .input_schema
                 .get("required")

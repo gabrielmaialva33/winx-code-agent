@@ -596,7 +596,7 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
     if let Some(state) = bash_state_guard.as_ref() {
         let _ = writeln!(
             response,
-            "\nUse thread_id={thread_id} for all winx tool calls.\nUse workspace_root={} for all winx tool calls.\nKeep this exact pair together. workspace_root identifies this project session; it does not restrict target paths allowed by policy.",
+            "\nUse thread_id={thread_id} for all winx tool calls.\nUse workspace_root={} for all winx tool calls.\nBefore every reuse, confirm workspace_root still matches the user's current project. Keep this exact pair together. workspace_root identifies this project session; it does not restrict target paths allowed by policy.",
             state.workspace_root.display()
         );
     }
