@@ -79,6 +79,10 @@ struct UsageEvent {
     client_version: String,
     protocol: String,
     client_session: String,
+    conversation_source: String,
+    conversation_id: String,
+    workspace_id: String,
+    workspace_coherence: String,
     batch_items: usize,
     worker_limit: usize,
     started: std::time::Instant,
@@ -107,6 +111,18 @@ impl UsageEvent {
         } else {
             String::new()
         };
+        let workspace = if request.name == "Initialize" {
+            arguments
+                .and_then(|arguments| arguments.get("any_workspace_path"))
+                .and_then(serde_json::Value::as_str)
+        } else {
+            arguments
+                .and_then(|arguments| arguments.get("workspace_root"))
+                .and_then(serde_json::Value::as_str)
+        }
+        .unwrap_or_default();
+        let workspace_id =
+            if workspace.is_empty() { String::new() } else { short_fingerprint("w", workspace) };
         let client = context.client_info();
         let client_name =
             client.as_ref().map_or("unknown", |client| client.name.as_str()).to_string();
@@ -132,6 +148,7 @@ impl UsageEvent {
             .and_then(|parts| parts.headers.get("mcp-session-id"))
             .and_then(|value| value.to_str().ok())
             .map_or_else(|| "stateless".to_string(), |id| short_fingerprint("s", id));
+        let (conversation_source, conversation_id) = conversation_telemetry(context);
         let batch_items = match request.name.as_ref() {
             "ReadFiles" => arguments
                 .and_then(|arguments| arguments.get("file_paths"))
@@ -161,10 +178,18 @@ impl UsageEvent {
             client_version,
             protocol,
             client_session,
+            conversation_source,
+            conversation_id,
+            workspace_id,
+            workspace_coherence: "unchecked".to_string(),
             batch_items,
             worker_limit,
             started: std::time::Instant::now(),
         }
+    }
+
+    fn set_workspace_coherence(&mut self, value: &str) {
+        self.workspace_coherence = value.to_string();
     }
 
     fn emit(
@@ -223,6 +248,10 @@ impl UsageEvent {
                 client_version = %self.client_version,
                 protocol = %self.protocol,
                 client_session = %self.client_session,
+                conversation_source = %self.conversation_source,
+                conversation_id = %self.conversation_id,
+                workspace_id = %self.workspace_id,
+                workspace_coherence = %self.workspace_coherence,
                 batch_items = self.batch_items,
                 worker_limit = self.worker_limit,
                 initialize_transition,
@@ -256,6 +285,10 @@ impl UsageEvent {
             client_version = %self.client_version,
             protocol = %self.protocol,
             client_session = %self.client_session,
+            conversation_source = %self.conversation_source,
+            conversation_id = %self.conversation_id,
+            workspace_id = %self.workspace_id,
+            workspace_coherence = %self.workspace_coherence,
             batch_items = self.batch_items,
             worker_limit = self.worker_limit,
             result_status,
@@ -274,6 +307,26 @@ fn short_fingerprint(prefix: &str, value: &str) -> String {
         let _ = write!(output, "{byte:02x}");
     }
     output
+}
+
+fn conversation_telemetry(context: &RequestContext<RoleServer>) -> (String, String) {
+    let Some(parts) = context.extensions.get::<Parts>() else {
+        return ("none".to_string(), String::new());
+    };
+    for (header, source) in
+        [("mcp-session-id", "mcp_session"), ("x-winx-conversation-id", "gateway_header")]
+    {
+        if let Some(value) = parts
+            .headers
+            .get(header)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return (source.to_string(), short_fingerprint("c", value));
+        }
+    }
+    ("none".to_string(), String::new())
 }
 
 /// Emit the cache fields required by MCP 2026-07-28 without changing the wire
@@ -660,7 +713,33 @@ impl ServerHandler for WinxService {
                 .map_err(|error| {
                     McpError::invalid_request(format!("Cannot scope remote request: {error}"), None)
                 })?;
-        let usage = UsageEvent::start(&request, &scope, &context);
+        let mut usage = UsageEvent::start(&request, &scope, &context);
+        match self
+            .validate_workspace_coherence(
+                &request,
+                &scope,
+                affinity,
+                conversation_identity.as_deref(),
+            )
+            .await
+        {
+            Ok(coherence) => usage.set_workspace_coherence(coherence.as_str()),
+            Err(error) => {
+                usage.set_workspace_coherence("rejected");
+                let arguments = request.arguments.clone().map(serde_json::Value::Object);
+                let mut result =
+                    outcomes::tool_failure(request.name.as_ref(), &error, arguments.as_ref())?;
+                scope.unscope_result(&mut result);
+                let status = outcomes::result_status(&result);
+                usage.emit(
+                    "tool_error",
+                    &status,
+                    outcomes::result_size_bytes(&result),
+                    Some(&result),
+                );
+                return Ok(result.into());
+            }
+        }
         let compact_bash_output = supports_compact_bash_output(&context);
         let supports_tasks =
             context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks());
