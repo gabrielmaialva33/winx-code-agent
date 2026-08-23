@@ -181,12 +181,25 @@ fn response_json(response: &str) -> anyhow::Result<serde_json::Value> {
 }
 
 fn modern_request_meta(client_name: &str, tasks: bool) -> serde_json::Value {
-    let capabilities = if tasks {
-        serde_json::json!({
-            "extensions": { "io.modelcontextprotocol/tasks": {} }
-        })
-    } else {
+    modern_request_meta_with_compact(client_name, tasks, false)
+}
+
+fn modern_request_meta_with_compact(
+    client_name: &str,
+    tasks: bool,
+    compact_bash_output: bool,
+) -> serde_json::Value {
+    let mut extensions = serde_json::Map::new();
+    if tasks {
+        extensions.insert("io.modelcontextprotocol/tasks".to_string(), serde_json::json!({}));
+    }
+    if compact_bash_output {
+        extensions.insert("io.winx/compact-bash-output".to_string(), serde_json::json!({}));
+    }
+    let capabilities = if extensions.is_empty() {
         serde_json::json!({})
+    } else {
+        serde_json::json!({ "extensions": extensions })
     };
     serde_json::json!({
         "io.modelcontextprotocol/protocolVersion": "2026-07-28",
@@ -522,6 +535,67 @@ async fn command_output_cannot_spoof_structured_running_state() -> anyhow::Resul
     assert_eq!(structured["status"], "completed", "{response}");
     assert!(structured.get("nextAction").is_none(), "{response}");
     assert_eq!(structured["data"]["exit_code"], 0, "{response}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn compact_bash_output_requires_explicit_client_extension() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "compact-output",
+        "compact-output-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    let call = |id: &str, command: &str, compact: bool| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "_meta": modern_request_meta_with_compact(
+                    "compact-output-client",
+                    false,
+                    compact,
+                ),
+                "name": "BashCommand",
+                "arguments": {
+                    "action_json": {
+                        "type": "command",
+                        "command": command,
+                        "is_background": false
+                    },
+                    "thread_id": thread_id
+                }
+            }
+        })
+    };
+
+    let legacy = call("legacy-output", "printf legacy-body", false);
+    let legacy = post_json(address, "2026-07-28", "tools/call", &legacy.to_string()).await?;
+    let legacy = response_json(&legacy)?;
+    let legacy_text = legacy["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(legacy_text.contains("legacy-body"), "{legacy}");
+    assert!(legacy_text.contains("status = process exited"), "{legacy}");
+    assert!(legacy_text.contains("cwd ="), "{legacy}");
+    assert!(legacy["result"]["structuredContent"]["data"].get("output_format").is_none());
+
+    let compact = call("compact-output", "printf compact-body", true);
+    let compact = post_json(address, "2026-07-28", "tools/call", &compact.to_string()).await?;
+    let compact = response_json(&compact)?;
+    let compact_text = compact["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(compact_text.contains("compact-body"), "{compact}");
+    assert!(!compact_text.contains("status = process exited"), "{compact}");
+    assert!(!compact_text.contains("cwd ="), "{compact}");
+    assert_eq!(
+        compact["result"]["structuredContent"]["data"]["output_format"], "compact",
+        "{compact}"
+    );
     Ok(())
 }
 
@@ -1021,6 +1095,7 @@ async fn modern_bash_command_task_completes_through_tasks_get() -> anyhow::Resul
                     "command": "printf modern-task-output",
                     "is_background": false
                 },
+                "wait_policy": "until_complete",
                 "thread_id": initialized_thread
             }
         }
@@ -1055,6 +1130,19 @@ async fn modern_bash_command_task_completes_through_tasks_get() -> anyhow::Resul
                     response["result"]["result"]["structuredContent"]["status"], "completed",
                     "{response}"
                 );
+                let text = response["result"]["result"]["content"][0]["text"]
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("task result omitted text: {response}"))?;
+                assert_eq!(
+                    response["result"]["result"]["structuredContent"]["data"]["output_bytes"],
+                    text.len(),
+                    "aggregated Task metadata must describe the final returned content: {response}"
+                );
+                assert_eq!(
+                    response["result"]["result"]["structuredContent"]["data"]["output_truncated"],
+                    false,
+                    "{response}"
+                );
                 break;
             }
             Some("working") if Instant::now() < deadline => {
@@ -1063,6 +1151,434 @@ async fn modern_bash_command_task_completes_through_tasks_get() -> anyhow::Resul
             status => anyhow::bail!("task did not complete successfully ({status:?}): {response}"),
         }
     }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn immediate_task_cancel_stops_process_and_never_interrupts_following_command(
+) -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let marker = workspace.path().join("cancelled-task-marker.txt");
+    let next_marker = workspace.path().join("next-command-marker.txt");
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let request_meta = modern_request_meta("task-immediate-cancel", true);
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "task-immediate-cancel",
+        "task-immediate-cancel",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let command = format!(
+        "printf started > '{}'; sleep 1; printf continued >> '{}'",
+        marker.display(),
+        marker.display()
+    );
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "task-immediate-cancel-call",
+        "method": "tools/call",
+        "params": {
+            "_meta": request_meta,
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": command,
+                    "is_background": false,
+                    "allow_multi": true
+                },
+                "wait_policy": "until_complete",
+                "thread_id": thread_id
+            }
+        }
+    });
+    let call = post_json(address, "2026-07-28", "tools/call", &call.to_string()).await?;
+    let call = response_json(&call)?;
+    assert_eq!(call["result"]["resultType"], "task", "{call}");
+    let task_id = call["result"]["taskId"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing task id: {call}"))?;
+
+    let cancel = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "task-immediate-cancel-request",
+        "method": "tasks/cancel",
+        "params": { "_meta": request_meta, "taskId": task_id }
+    });
+    let cancel = post_json(address, "2026-07-28", "tasks/cancel", &cancel.to_string()).await?;
+    let cancel = response_json(&cancel)?;
+    assert!(cancel.get("error").is_none(), "{cancel}");
+
+    let next_command = format!("sleep 0.05; printf next > '{}'", next_marker.display());
+    let next = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "task-immediate-cancel-next",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("task-immediate-cancel", false),
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": next_command,
+                    "is_background": false,
+                    "allow_multi": true
+                },
+                "wait_for_seconds": 0.5,
+                "thread_id": thread_id
+            }
+        }
+    });
+    let next = post_json(address, "2026-07-28", "tools/call", &next.to_string()).await?;
+    let next = response_json(&next)?;
+    assert_eq!(next["result"]["structuredContent"]["status"], "completed", "{next}");
+
+    tokio::time::sleep(Duration::from_millis(1_100)).await;
+    let cancelled_output = std::fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        !cancelled_output.contains("continued"),
+        "cancelled process continued: {cancelled_output}"
+    );
+    assert_eq!(std::fs::read_to_string(next_marker)?, "next");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adaptive_and_return_early_only_create_tasks_when_appropriate() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let request_meta = modern_request_meta("task-policy-test", true);
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "task-policy-init",
+        "method": "tools/call",
+        "params": {
+            "_meta": request_meta,
+            "name": "Initialize",
+            "arguments": {
+                "type": "first_call",
+                "any_workspace_path": workspace.path(),
+                "mode_name": "wcgw",
+                "thread_id": "task_policy_test"
+            }
+        }
+    });
+    let initialize =
+        post_json(address, "2026-07-28", "tools/call", &initialize.to_string()).await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    let adaptive = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "adaptive-inline",
+        "method": "tools/call",
+        "params": {
+            "_meta": request_meta,
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": "printf adaptive-inline",
+                    "is_background": false
+                },
+                "thread_id": thread_id
+            }
+        }
+    });
+    let adaptive = post_json(address, "2026-07-28", "tools/call", &adaptive.to_string()).await?;
+    let adaptive = response_json(&adaptive)?;
+    assert_ne!(adaptive["result"]["resultType"], "task", "{adaptive}");
+    assert_eq!(adaptive["result"]["structuredContent"]["status"], "completed", "{adaptive}");
+
+    let return_early = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "return-early",
+        "method": "tools/call",
+        "params": {
+            "_meta": request_meta,
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": "sleep 0.2",
+                    "is_background": false
+                },
+                "wait_for_seconds": 0.01,
+                "wait_policy": "return_early",
+                "thread_id": thread_id
+            }
+        }
+    });
+    let return_early =
+        post_json(address, "2026-07-28", "tools/call", &return_early.to_string()).await?;
+    let return_early = response_json(&return_early)?;
+    assert_ne!(return_early["result"]["resultType"], "task", "{return_early}");
+    assert_eq!(return_early["result"]["structuredContent"]["status"], "running", "{return_early}");
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let status = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "return-early-status",
+        "method": "tools/call",
+        "params": {
+            "_meta": request_meta,
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": { "type": "status_check", "status_check": true },
+                "wait_for_seconds": 0.1,
+                "thread_id": thread_id
+            }
+        }
+    });
+    let status = post_json(address, "2026-07-28", "tools/call", &status.to_string()).await?;
+    let status = response_json(&status)?;
+    assert_eq!(status["result"]["structuredContent"]["status"], "completed", "{status}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn until_complete_uses_bounded_sync_fallback_without_tasks() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "until-complete-fallback",
+        "until-complete-fallback-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "until-complete-fallback",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("until-complete-fallback-client", false),
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": "sleep 0.05; printf sync-fallback",
+                    "is_background": false,
+                    "allow_multi": true
+                },
+                "wait_for_seconds": 0.5,
+                "wait_policy": "until_complete",
+                "thread_id": thread_id
+            }
+        }
+    });
+    let response = post_json(address, "2026-07-28", "tools/call", &call.to_string()).await?;
+    let response = response_json(&response)?;
+    assert_ne!(response["result"]["resultType"], "task", "{response}");
+    assert_eq!(response["result"]["structuredContent"]["status"], "completed", "{response}");
+    assert!(response["result"]["content"][0]["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("sync-fallback")));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adaptive_task_promotes_running_foreground_without_reexecution() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let marker = workspace.path().join("promotion-count.txt");
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let request_meta = modern_request_meta("task-promotion-test", true);
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "task-promotion-init",
+        "method": "tools/call",
+        "params": {
+            "_meta": request_meta,
+            "name": "Initialize",
+            "arguments": {
+                "type": "first_call",
+                "any_workspace_path": workspace.path(),
+                "mode_name": "wcgw",
+                "thread_id": "task_promotion_test"
+            }
+        }
+    });
+    let initialize =
+        post_json(address, "2026-07-28", "tools/call", &initialize.to_string()).await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let command = format!("printf x >> '{}'; sleep 0.2; printf promoted", marker.display());
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "adaptive-promotion",
+        "method": "tools/call",
+        "params": {
+            "_meta": request_meta,
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": command,
+                    "is_background": false,
+                    "allow_multi": true
+                },
+                "wait_for_seconds": 0.01,
+                "thread_id": thread_id
+            }
+        }
+    });
+    let call = post_json(address, "2026-07-28", "tools/call", &call.to_string()).await?;
+    let call = response_json(&call)?;
+    assert_eq!(call["result"]["resultType"], "task", "{call}");
+    let task_id = call["result"]["taskId"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing promoted task id: {call}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let get_task = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": "adaptive-promotion-get",
+            "method": "tasks/get",
+            "params": { "_meta": request_meta, "taskId": task_id }
+        });
+        let task = post_json(address, "2026-07-28", "tasks/get", &get_task.to_string()).await?;
+        let task = response_json(&task)?;
+        match task["result"]["status"].as_str() {
+            Some("completed") => {
+                assert!(task["result"]["result"].to_string().contains("promoted"), "{task}");
+                break;
+            }
+            Some("working") if Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            status => anyhow::bail!("promoted task did not complete ({status:?}): {task}"),
+        }
+    }
+    assert_eq!(std::fs::read_to_string(marker)?, "x");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adaptive_reserves_task_capacity_before_starting_the_command() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let marker = workspace.path().join("must-not-run.txt");
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let request_meta = modern_request_meta("task-saturation-test", true);
+    let initialize = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "task-saturation-init",
+        "method": "tools/call",
+        "params": {
+            "_meta": request_meta,
+            "name": "Initialize",
+            "arguments": {
+                "type": "first_call",
+                "any_workspace_path": workspace.path(),
+                "mode_name": "wcgw",
+                "thread_id": "task_saturation_test"
+            }
+        }
+    });
+    let initialize =
+        post_json(address, "2026-07-28", "tools/call", &initialize.to_string()).await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    for index in 0..32 {
+        let fill = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": format!("task-fill-{index}"),
+            "method": "tools/call",
+            "params": {
+                "_meta": request_meta,
+                "name": "BashCommand",
+                "arguments": {
+                    "action_json": {
+                        "type": "command",
+                        "command": "sleep 0.5",
+                        "is_background": false
+                    },
+                    "wait_policy": "until_complete",
+                    "thread_id": thread_id
+                }
+            }
+        });
+        let response = post_json(address, "2026-07-28", "tools/call", &fill.to_string()).await?;
+        let response = response_json(&response)?;
+        assert_eq!(response["result"]["resultType"], "task", "fill {index}: {response}");
+    }
+
+    let command = format!("printf started > '{}'", marker.display());
+    let adaptive = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "task-saturated-adaptive",
+        "method": "tools/call",
+        "params": {
+            "_meta": request_meta,
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": command,
+                    "is_background": false
+                },
+                "wait_for_seconds": 0.01,
+                "wait_policy": "adaptive",
+                "thread_id": thread_id
+            }
+        }
+    });
+    let response = post_json(address, "2026-07-28", "tools/call", &adaptive.to_string()).await?;
+    let response = response_json(&response)?;
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("task limit reached")),
+        "{response}"
+    );
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!marker.exists(), "adaptive command ran before Task capacity was reserved");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn until_complete_rejects_background_commands() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let request_meta = modern_request_meta("background-until-test", true);
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "background-until",
+        "background-until-test",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "background-until-call",
+        "method": "tools/call",
+        "params": {
+            "_meta": request_meta,
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": "sleep 1",
+                    "is_background": true
+                },
+                "wait_policy": "until_complete",
+                "thread_id": thread_id
+            }
+        }
+    });
+    let response = post_json(address, "2026-07-28", "tools/call", &call.to_string()).await?;
+    let response = response_json(&response)?;
+    assert!(
+        response["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("foreground Command")),
+        "{response}"
+    );
     Ok(())
 }
 

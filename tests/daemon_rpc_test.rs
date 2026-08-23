@@ -1,5 +1,6 @@
 #![cfg(unix)]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,7 +9,9 @@ use tokio::sync::Mutex;
 
 use winx_code_agent::daemon::{DaemonClient, DaemonServer, DaemonShellRuntime};
 use winx_code_agent::errors::{Result, WinxError};
-use winx_code_agent::runtime::EmbeddedShellRuntime;
+use winx_code_agent::runtime::{
+    EmbeddedShellRuntime, ShellActionOptions, ShellRuntime, ShellSessionTransition,
+};
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::state::terminal::strip_ansi_codes;
 use winx_code_agent::tools;
@@ -37,6 +40,52 @@ async fn initialized_state(
     Ok(state)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_queued_launch_never_reaches_the_pty() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let marker = workspace.path().join("cancelled-before-launch.marker");
+    let state = initialized_state(&workspace, "cancelled-before-launch").await?;
+    let gate = state
+        .lock()
+        .await
+        .as_ref()
+        .ok_or(WinxError::BashStateNotInitialized)?
+        .foreground_command_gate
+        .clone();
+    let held = gate.lock_owned().await;
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let worker_state = Arc::clone(&state);
+    let worker_cancelled = Arc::clone(&cancelled);
+    let command = foreground(
+        "cancelled-before-launch",
+        &format!("printf forbidden > {}", marker.display()),
+        0.5,
+    );
+    let worker = tokio::spawn(async move {
+        EmbeddedShellRuntime
+            .run_action_detailed(
+                &worker_state,
+                command,
+                ShellActionOptions {
+                    launch_cancelled: Some(worker_cancelled),
+                    ..ShellActionOptions::default()
+                },
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancelled.store(true, Ordering::SeqCst);
+    drop(held);
+
+    let worker_result = worker.await.map_err(|error| {
+        WinxError::CommandExecutionError(format!("queued launch task failed: {error}"))
+    })?;
+    assert!(worker_result.is_err());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(!marker.exists(), "cancelled queued action reached the PTY");
+    Ok(())
+}
+
 fn probe(thread_id: &str) -> BashCommand {
     BashCommand {
         action_json: BashCommandAction::Command {
@@ -47,6 +96,252 @@ fn probe(thread_id: &str) -> BashCommand {
         wait_for_seconds: Some(1.0),
         thread_id: thread_id.to_string(),
     }
+}
+
+fn foreground(thread_id: &str, command: &str, wait_for_seconds: f32) -> BashCommand {
+    BashCommand {
+        action_json: BashCommandAction::Command {
+            command: command.to_string(),
+            is_background: false,
+            allow_multi: false,
+        },
+        wait_for_seconds: Some(wait_for_seconds),
+        thread_id: thread_id.to_string(),
+    }
+}
+
+fn foreground_status(thread_id: &str, wait_for_seconds: f32) -> BashCommand {
+    BashCommand {
+        action_json: BashCommandAction::StatusCheck {
+            status_check: true,
+            bg_command_id: None,
+            scrollback_lines: None,
+            verbose: false,
+        },
+        wait_for_seconds: Some(wait_for_seconds),
+        thread_id: thread_id.to_string(),
+    }
+}
+
+async fn assert_completed_generation_can_be_drained(
+    runtime: &dyn ShellRuntime,
+    state: &Arc<Mutex<Option<BashState>>>,
+    thread_id: &str,
+) -> Result<()> {
+    let started = runtime
+        .run_action_detailed(
+            state,
+            foreground(thread_id, "sh -c 'sleep 0.08; printf generation-drained'", 0.005),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    assert!(started.result.state.is_running(), "{started:?}");
+    let generation = started
+        .command_generation
+        .ok_or_else(|| WinxError::CommandExecutionError("missing command generation".into()))?;
+
+    // Make completion-before-first-poll deterministic.
+    tokio::time::sleep(Duration::from_millis(180)).await;
+    let completed = runtime
+        .run_action_detailed(
+            state,
+            foreground_status(thread_id, 0.5),
+            ShellActionOptions {
+                compact_output: false,
+                expected_generation: Some(generation),
+                ..ShellActionOptions::default()
+            },
+        )
+        .await?;
+    assert!(!completed.result.state.is_running(), "{completed:?}");
+    assert!(completed.result.output.contains("generation-drained"), "{completed:?}");
+    assert_eq!(completed.command_generation, Some(generation));
+    Ok(())
+}
+
+async fn assert_stale_cancel_does_not_interrupt_next_generation(
+    runtime: &dyn ShellRuntime,
+    state: &Arc<Mutex<Option<BashState>>>,
+    thread_id: &str,
+) -> Result<()> {
+    let first = runtime
+        .run_action_detailed(
+            state,
+            foreground(thread_id, "sleep 0.05", 0.005),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    let first_generation = first
+        .command_generation
+        .ok_or_else(|| WinxError::CommandExecutionError("missing first generation".into()))?;
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    let first_completed = runtime
+        .run_action_detailed(
+            state,
+            foreground_status(thread_id, 0.2),
+            ShellActionOptions {
+                compact_output: false,
+                expected_generation: Some(first_generation),
+                ..ShellActionOptions::default()
+            },
+        )
+        .await?;
+    assert!(!first_completed.result.state.is_running(), "{first_completed:?}");
+
+    let second = runtime
+        .run_action_detailed(
+            state,
+            foreground(thread_id, "sh -c 'sleep 0.15; printf next-generation-safe'", 0.005),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    assert!(second.result.state.is_running(), "{second:?}");
+    let second_generation = second
+        .command_generation
+        .ok_or_else(|| WinxError::CommandExecutionError("missing second generation".into()))?;
+    assert!(second_generation > first_generation);
+
+    let interrupted = runtime.interrupt_generation(state, Some(first_generation)).await?;
+    assert!(!interrupted, "a stale Task cancellation interrupted a newer command");
+    let completed = runtime
+        .run_action_detailed(
+            state,
+            foreground_status(thread_id, 0.5),
+            ShellActionOptions {
+                compact_output: false,
+                expected_generation: Some(second_generation),
+                ..ShellActionOptions::default()
+            },
+        )
+        .await?;
+    assert!(!completed.result.state.is_running(), "{completed:?}");
+    assert!(completed.result.output.contains("next-generation-safe"), "{completed:?}");
+    Ok(())
+}
+
+async fn assert_stale_poll_does_not_consume_next_generation(
+    runtime: &dyn ShellRuntime,
+    state: &Arc<Mutex<Option<BashState>>>,
+    thread_id: &str,
+) -> Result<()> {
+    let first = runtime
+        .run_action_detailed(
+            state,
+            foreground(thread_id, "sleep 0.03", 0.001),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    let first_generation = first
+        .command_generation
+        .ok_or_else(|| WinxError::CommandExecutionError("missing first generation".into()))?;
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let first_completed = runtime
+        .run_action_detailed(
+            state,
+            foreground_status(thread_id, 0.2),
+            ShellActionOptions {
+                compact_output: false,
+                expected_generation: Some(first_generation),
+                ..ShellActionOptions::default()
+            },
+        )
+        .await?;
+    assert!(!first_completed.result.state.is_running(), "{first_completed:?}");
+
+    let second = runtime
+        .run_action_detailed(
+            state,
+            foreground(
+                thread_id,
+                "sh -c 'sleep 0.05; printf generation-two-unconsumed; sleep 0.05'",
+                0.001,
+            ),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    let second_generation = second
+        .command_generation
+        .ok_or_else(|| WinxError::CommandExecutionError("missing second generation".into()))?;
+    assert!(second_generation > first_generation);
+
+    let stale_poll_result = runtime
+        .run_action_detailed(
+            state,
+            foreground_status(thread_id, 0.2),
+            ShellActionOptions {
+                compact_output: false,
+                expected_generation: Some(first_generation),
+                ..ShellActionOptions::default()
+            },
+        )
+        .await;
+    assert!(matches!(stale_poll_result, Err(WinxError::InvalidInput(_))), "{stale_poll_result:?}");
+
+    let second_completed = runtime
+        .run_action_detailed(
+            state,
+            foreground_status(thread_id, 0.4),
+            ShellActionOptions {
+                compact_output: false,
+                expected_generation: Some(second_generation),
+                ..ShellActionOptions::default()
+            },
+        )
+        .await?;
+    assert!(
+        second_completed.result.output.contains("generation-two-unconsumed"),
+        "a stale poll consumed the newer generation output: {second_completed:?}"
+    );
+    Ok(())
+}
+
+async fn assert_reset_changes_full_execution_identity(
+    runtime: &dyn ShellRuntime,
+    state: &Arc<Mutex<Option<BashState>>>,
+    thread_id: &str,
+) -> Result<()> {
+    let first = runtime
+        .run_action_detailed(
+            state,
+            foreground(thread_id, "printf first-incarnation", 0.5),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    let stale_token = first.execution_token.ok_or_else(|| {
+        WinxError::CommandExecutionError("missing first execution token".to_string())
+    })?;
+    {
+        let mut state = state.lock().await;
+        let state = state.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
+        runtime.configure_session(state, ShellSessionTransition::Reset).await?;
+    }
+    let second = runtime
+        .run_action_detailed(
+            state,
+            foreground(thread_id, "sh -c 'sleep 0.12; printf second-incarnation'", 0.001),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    let current = second.execution_token.clone().ok_or_else(|| {
+        WinxError::CommandExecutionError("missing second execution token".to_string())
+    })?;
+    assert_ne!(stale_token.session_epoch, current.session_epoch);
+    assert!(second.result.state.is_running(), "{second:?}");
+    assert!(!runtime.interrupt_execution(state, Some(stale_token)).await?);
+
+    let completed = runtime
+        .run_action_detailed(
+            state,
+            foreground_status(thread_id, 0.5),
+            ShellActionOptions {
+                expected_generation: Some(current.generation),
+                expected_execution: Some(current),
+                ..ShellActionOptions::default()
+            },
+        )
+        .await?;
+    assert!(completed.result.output.contains("second-incarnation"), "{completed:?}");
+    Ok(())
 }
 
 fn normalize_prompt_nonce(output: &str) -> String {
@@ -101,6 +396,194 @@ async fn embedded_and_uds_runtime_have_the_same_action_contract() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn embedded_poll_drains_a_generation_completed_before_first_status() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let state = initialized_state(&workspace, "embedded-fast-generation").await?;
+    assert_completed_generation_can_be_drained(
+        &EmbeddedShellRuntime,
+        &state,
+        "embedded-fast-generation",
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_poll_drains_a_generation_completed_before_first_status() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let socket_dir = TempDir::new()?;
+    let socket = socket_dir.path().join("winxd-fast-generation.sock");
+    let server = DaemonServer::bind(&socket).await?;
+    let server_task = tokio::spawn(server.serve());
+    let state = initialized_state(&workspace, "daemon-fast-generation").await?;
+    let runtime = DaemonShellRuntime::new(&socket);
+
+    let result =
+        assert_completed_generation_can_be_drained(&runtime, &state, "daemon-fast-generation")
+            .await;
+    let _ = DaemonClient::new(&socket).kill_session("daemon-fast-generation").await;
+    server_task.abort();
+    result
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn embedded_stale_task_cancel_cannot_interrupt_the_next_command() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let state = initialized_state(&workspace, "embedded-stale-cancel").await?;
+    assert_stale_cancel_does_not_interrupt_next_generation(
+        &EmbeddedShellRuntime,
+        &state,
+        "embedded-stale-cancel",
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_stale_task_cancel_cannot_interrupt_the_next_command() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let socket_dir = TempDir::new()?;
+    let socket = socket_dir.path().join("winxd-stale-cancel.sock");
+    let server = DaemonServer::bind(&socket).await?;
+    let server_task = tokio::spawn(server.serve());
+    let state = initialized_state(&workspace, "daemon-stale-cancel").await?;
+    let runtime = DaemonShellRuntime::new(&socket);
+
+    let result = assert_stale_cancel_does_not_interrupt_next_generation(
+        &runtime,
+        &state,
+        "daemon-stale-cancel",
+    )
+    .await;
+    let _ = DaemonClient::new(&socket).kill_session("daemon-stale-cancel").await;
+    server_task.abort();
+    result
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn embedded_stale_poll_cannot_consume_the_next_generation() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let state = initialized_state(&workspace, "embedded-stale-poll").await?;
+    assert_stale_poll_does_not_consume_next_generation(
+        &EmbeddedShellRuntime,
+        &state,
+        "embedded-stale-poll",
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_stale_poll_cannot_consume_the_next_generation() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let socket_dir = TempDir::new()?;
+    let socket = socket_dir.path().join("winxd-stale-poll.sock");
+    let server = DaemonServer::bind(&socket).await?;
+    let server_task = tokio::spawn(server.serve());
+    let state = initialized_state(&workspace, "daemon-stale-poll").await?;
+    let runtime = DaemonShellRuntime::new(&socket);
+    let result =
+        assert_stale_poll_does_not_consume_next_generation(&runtime, &state, "daemon-stale-poll")
+            .await;
+    let _ = DaemonClient::new(&socket).kill_session("daemon-stale-poll").await;
+    server_task.abort();
+    result
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn embedded_reset_prevents_numeric_generation_collision() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let state = initialized_state(&workspace, "embedded-reset-token").await?;
+    assert_reset_changes_full_execution_identity(
+        &EmbeddedShellRuntime,
+        &state,
+        "embedded-reset-token",
+    )
+    .await
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_reset_prevents_numeric_generation_collision() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let socket_dir = TempDir::new()?;
+    let socket = socket_dir.path().join("winxd.sock");
+    let server = DaemonServer::bind(&socket).await?;
+    let server_task = tokio::spawn(server.serve());
+    let state = initialized_state(&workspace, "daemon-reset-token").await?;
+    let runtime = DaemonShellRuntime::new(&socket);
+    runtime
+        .configure_session(
+            state.lock().await.as_mut().ok_or(WinxError::BashStateNotInitialized)?,
+            ShellSessionTransition::FirstCall,
+        )
+        .await?;
+    let result =
+        assert_reset_changes_full_execution_identity(&runtime, &state, "daemon-reset-token").await;
+    let _ = DaemonClient::new(&socket).kill_session("daemon-reset-token").await;
+    server_task.abort();
+    result
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_cancel_uses_a_channel_independent_of_pending_status_output() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let socket_dir = TempDir::new()?;
+    let socket = socket_dir.path().join("winxd.sock");
+    let server = DaemonServer::bind(&socket).await?;
+    let server_task = tokio::spawn(server.serve());
+    let state = initialized_state(&workspace, "daemon-independent-cancel").await?;
+    let runtime = DaemonShellRuntime::new(&socket);
+    runtime
+        .configure_session(
+            state.lock().await.as_mut().ok_or(WinxError::BashStateNotInitialized)?,
+            ShellSessionTransition::FirstCall,
+        )
+        .await?;
+    let started = runtime
+        .run_action_detailed(
+            &state,
+            foreground(
+                "daemon-independent-cancel",
+                "while :; do printf x; sleep 0.01; done",
+                0.001,
+            ),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    let token = started.execution_token.ok_or_else(|| {
+        WinxError::CommandExecutionError("missing continuous command token".to_string())
+    })?;
+    let status_runtime = runtime.clone();
+    let status_state = Arc::clone(&state);
+    let status_token = token.clone();
+    let pending_status = tokio::spawn(async move {
+        status_runtime
+            .run_action_detailed(
+                &status_state,
+                foreground_status("daemon-independent-cancel", 5.0),
+                ShellActionOptions {
+                    expected_generation: Some(status_token.generation),
+                    expected_execution: Some(status_token),
+                    ..ShellActionOptions::default()
+                },
+            )
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let interrupted = tokio::time::timeout(
+        Duration::from_secs(1),
+        runtime.interrupt_execution(&state, Some(token)),
+    )
+    .await
+    .map_err(|_| {
+        WinxError::CommandExecutionError("cancel was blocked by status channel".into())
+    })??;
+    assert!(interrupted);
+    let _ = tokio::time::timeout(Duration::from_secs(2), pending_status).await;
+    let _ = DaemonClient::new(&socket).kill_session("daemon-independent-cancel").await;
+    server_task.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn daemon_transports_typed_state_independently_of_background_metadata() -> Result<()> {
     let workspace = TempDir::new()?;
     let socket_dir = TempDir::new()?;
@@ -129,27 +612,31 @@ async fn daemon_transports_typed_state_independently_of_background_metadata() ->
     assert!(background.state.is_running(), "{background:?}");
     assert!(background.state.background_id.is_some(), "{background:?}");
 
-    let foreground = tools::bash_command::handle_tool_call_with_runtime_detailed(
-        &runtime,
-        &state,
-        BashCommand {
-            action_json: BashCommandAction::Command {
-                command: "sleep 3".to_string(),
-                is_background: false,
-                allow_multi: false,
+    let foreground = runtime
+        .run_action_detailed(
+            &state,
+            BashCommand {
+                action_json: BashCommandAction::Command {
+                    command: "sleep 3".to_string(),
+                    is_background: false,
+                    allow_multi: false,
+                },
+                wait_for_seconds: Some(0.05),
+                thread_id: "rpc-typed-state-spoof".to_string(),
             },
-            wait_for_seconds: Some(0.05),
-            thread_id: "rpc-typed-state-spoof".to_string(),
-        },
-    )
-    .await?;
+            ShellActionOptions { compact_output: true, ..ShellActionOptions::default() },
+        )
+        .await?;
 
     let client = DaemonClient::new(&socket);
     let _ = client.interrupt_session("rpc-typed-state-spoof").await;
     let _ = client.kill_session("rpc-typed-state-spoof").await;
     server_task.abort();
-    assert!(foreground.state.is_running(), "{foreground:?}");
-    assert!(foreground.state.exit_code.is_none(), "{foreground:?}");
+    assert!(foreground.result.state.is_running(), "{foreground:?}");
+    assert!(foreground.result.state.exit_code.is_none(), "{foreground:?}");
+    let compact = foreground.compact_output.as_deref().unwrap_or_default();
+    assert!(!compact.contains("status ="), "{foreground:?}");
+    assert!(!compact.contains("cwd ="), "{foreground:?}");
     Ok(())
 }
 

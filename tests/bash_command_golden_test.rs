@@ -6,6 +6,7 @@ use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 use winx_code_agent::errors::{Result, WinxError};
+use winx_code_agent::runtime::{EmbeddedShellRuntime, ShellActionOptions, ShellRuntime};
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::tools;
 use winx_code_agent::types::{
@@ -424,27 +425,43 @@ async fn large_output_is_truncated_with_scratch_pointer() -> Result<()> {
     let bg_id = extract_bg_command_id(&launch)?;
 
     sleep(Duration::from_millis(800)).await;
-    let mut final_status = String::new();
+    let mut compact_status = String::new();
+    let mut completed = false;
+    let mut runtime_truncated = false;
     for _ in 0..10 {
-        final_status = tools::bash_command::handle_tool_call(
-            &state,
-            status(thread_id, Some(bg_id.clone()), 0.2),
-        )
-        .await?;
-        if final_status.contains("status = process exited") {
+        let outcome = EmbeddedShellRuntime
+            .run_action_detailed(
+                &state,
+                status(thread_id, Some(bg_id.clone()), 0.2),
+                ShellActionOptions { compact_output: true, ..ShellActionOptions::default() },
+            )
+            .await?;
+        completed = !outcome.result.state.is_running();
+        runtime_truncated = outcome.output_truncated;
+        assert!(outcome.result.output.is_empty(), "compact wire path built legacy output");
+        compact_status = outcome.compact_output.unwrap_or_default();
+        if completed {
             break;
         }
         sleep(Duration::from_millis(100)).await;
     }
-    if !final_status.contains("status = process exited") {
+    if !completed {
         return Err(WinxError::CommandExecutionError(format!(
-            "large-output command did not finish: {final_status}"
+            "large-output command did not finish: {compact_status}"
         )));
     }
+    assert!(runtime_truncated, "truncation must come from runtime metadata");
+
+    let final_status =
+        tools::bash_command::handle_tool_call(&state, status(thread_id, Some(bg_id.clone()), 0.0))
+            .await?;
 
     let normalized =
         normalize_volatile(&final_status, workspace.to_string_lossy().as_ref(), &[&bg_id]);
     assert_golden(&normalized, include_str!("goldens/bash_command/truncation.golden"));
+    assert!(compact_status.contains("Output was truncated"), "{compact_status}");
+    assert!(!compact_status.contains("status = process exited"), "{compact_status}");
+    assert!(!compact_status.contains("cwd ="), "{compact_status}");
 
     Ok(())
 }

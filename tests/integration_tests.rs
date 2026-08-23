@@ -455,6 +455,28 @@ fn test_bash_command_deserializer_accepts_top_level_command_shorthand(
 }
 
 #[test]
+fn test_bash_wait_policy_is_optional_and_accepts_all_modes(
+) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let legacy: BashCommand = serde_json::from_value(json!({ "command": "pwd" }))?;
+    assert_eq!(legacy.wait_for_seconds, None);
+
+    for wire in ["adaptive", "return_early", "until_complete"] {
+        let parsed: BashCommand = serde_json::from_value(json!({
+            "command": "pwd",
+            "wait_policy": wire
+        }))?;
+        assert!(matches!(parsed.action_json, BashCommandAction::Command { .. }));
+        assert!(serde_json::to_value(parsed)?.get("wait_policy").is_none());
+    }
+    assert!(serde_json::from_value::<BashCommand>(json!({
+        "command": "pwd",
+        "wait_policy": "invalid"
+    }))
+    .is_err());
+    Ok(())
+}
+
+#[test]
 fn test_bash_command_deserializer_sanitizes_json_nul_escape(
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     let command_with_nul = format!("printf '{}'", '\0');
