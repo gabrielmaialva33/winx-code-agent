@@ -463,13 +463,13 @@ mod whitelist_range_tests {
     fn coverage_from_different_file_versions_is_not_combined() {
         let mut state = BashState::new();
         state.record_read_coverage(
-            "/workspace/file.rs".to_string(),
+            "/workspace/file.rs",
             [(1, 50)],
             "old-hash".to_string(),
             100,
         );
         state.record_read_coverage(
-            "/workspace/file.rs".to_string(),
+            "/workspace/file.rs",
             [(51, 100)],
             "new-hash".to_string(),
             100,
@@ -485,8 +485,9 @@ mod whitelist_range_tests {
     fn whitelist_is_lru_bounded_and_recent_entries_survive() {
         let mut state = BashState::new();
         for index in 0..MAX_WHITELIST_FILES {
+            let path = format!("/workspace/file-{index:04}.rs");
             state.record_read_coverage(
-                format!("/workspace/file-{index:04}.rs"),
+                &path,
                 [(1, 1)],
                 format!("hash-{index}"),
                 1,
@@ -496,13 +497,13 @@ mod whitelist_range_tests {
         // Refresh the oldest entry, then force one eviction. The next-oldest
         // entry must be discarded while the refreshed one stays guarded.
         state.record_read_coverage(
-            "/workspace/file-0000.rs".to_string(),
+            "/workspace/file-0000.rs",
             [(1, 1)],
             "hash-0".to_string(),
             1,
         );
         state.record_read_coverage(
-            "/workspace/newest.rs".to_string(),
+            "/workspace/newest.rs",
             [(1, 1)],
             "newest-hash".to_string(),
             1,
