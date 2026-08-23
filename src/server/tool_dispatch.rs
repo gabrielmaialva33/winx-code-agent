@@ -85,6 +85,10 @@ impl ToolCallExecution {
     }
 }
 
+fn is_expected_recovery_status(status: &str) -> bool {
+    matches!(status, "needs_read" | "needs_initialize" | "not_found" | "invalid_input" | "conflict")
+}
+
 pub(super) struct BashCallExecution {
     result: CallToolResult,
     command_generation: Option<u64>,
@@ -146,6 +150,18 @@ impl WinxService {
 
         let elapsed_ms = started.elapsed().as_millis();
         match &result {
+            Ok(call)
+                if call.is_error == Some(true)
+                    && is_expected_recovery_status(&outcomes::result_status(call)) =>
+            {
+                info!(
+                    tool = %tool,
+                    ms = elapsed_ms,
+                    status = outcomes::result_status(call),
+                    response_bytes = outcomes::result_size_bytes(call),
+                    "tool call needs recovery — {summary}"
+                );
+            }
             Ok(call) if call.is_error == Some(true) => warn!(
                 tool = %tool,
                 ms = elapsed_ms,
@@ -736,7 +752,7 @@ fn append_command_section<const N: usize>(
 mod verification_tests {
     #![allow(clippy::expect_used)]
 
-    use super::{audit_summary, take_edit_verification};
+    use super::{audit_summary, is_expected_recovery_status, take_edit_verification};
     use serde_json::json;
 
     #[test]
@@ -776,5 +792,15 @@ mod verification_tests {
         let summary = audit_summary("FileWriteOrEdit", Some(&arguments));
         assert!(summary.contains("verify=true"));
         assert!(!summary.contains("secret command content"));
+    }
+
+    #[test]
+    fn expected_agent_recovery_states_do_not_raise_operational_warnings() {
+        for status in ["needs_read", "needs_initialize", "not_found", "invalid_input", "conflict"] {
+            assert!(is_expected_recovery_status(status), "{status}");
+        }
+        for status in ["denied", "failed", "verification_failed"] {
+            assert!(!is_expected_recovery_status(status), "{status}");
+        }
     }
 }
