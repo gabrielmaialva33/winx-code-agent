@@ -201,6 +201,15 @@ fn supports_compact_bash_output(context: &RequestContext<RoleServer>) -> bool {
     })
 }
 
+fn request_requires_bash_capability(request: &CallToolRequestParams) -> bool {
+    matches!(request.name.as_ref(), "FileWriteOrEdit" | "MultiFileEdit")
+        && request
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments.get("verify_command"))
+            .is_some_and(|command| !command.is_null())
+}
+
 fn normalized_wait_request(
     mut request: CallToolRequestParams,
     policy: BashWaitPolicy,
@@ -530,7 +539,12 @@ impl ServerHandler for WinxService {
         let principal = principal_from_context(&context);
         if principal
             .as_ref()
-            .is_some_and(|principal| !principal.tool_policy().allows(request.name.as_ref()))
+            .is_some_and(|principal| {
+                let policy = principal.tool_policy();
+                !policy.allows(request.name.as_ref())
+                    || (request_requires_bash_capability(&request)
+                        && !policy.allows("BashCommand"))
+            })
         {
             return Err(McpError::invalid_request(
                 format!("Tool is not available for this principal: {}", request.name),
