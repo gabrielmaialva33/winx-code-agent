@@ -15,7 +15,7 @@ use rmcp::{
 };
 use sha2::{Digest, Sha256};
 
-use super::catalog::{server_icon_data_uri, winx_prompts, winx_tools};
+use super::catalog::{server_icon_data_uri, winx_prompts, winx_tools, winx_tools_for_policy};
 use super::outcomes;
 use super::principal::{
     conversation_identity_from_context, principal_from_context, scope_tool_request,
@@ -418,9 +418,21 @@ impl ServerHandler for WinxService {
         _request: Option<PaginatedRequestParams>,
         ctx: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
-        let (ttl_ms, cache_scope) =
-            cache_hints_for_protocol(ctx.protocol_version(), CacheScope::Public);
-        let mut result = ListToolsResult::with_all_items(winx_tools());
+        let principal = principal_from_context(&ctx);
+        let (tools, scope) = principal.as_ref().map_or_else(
+            || (winx_tools(), CacheScope::Public),
+            |principal| {
+                let policy = principal.tool_policy();
+                let scope = if policy == crate::tool_policy::ToolPolicy::default() {
+                    CacheScope::Public
+                } else {
+                    CacheScope::Private
+                };
+                (winx_tools_for_policy(policy), scope)
+            },
+        );
+        let (ttl_ms, cache_scope) = cache_hints_for_protocol(ctx.protocol_version(), scope);
+        let mut result = ListToolsResult::with_all_items(tools);
         result.ttl_ms = ttl_ms;
         result.cache_scope = cache_scope;
         Ok(result)
@@ -516,6 +528,15 @@ impl ServerHandler for WinxService {
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         let principal = principal_from_context(&context);
+        if principal
+            .as_ref()
+            .is_some_and(|principal| !principal.tool_policy().allows(request.name.as_ref()))
+        {
+            return Err(McpError::invalid_request(
+                format!("Tool is not available for this principal: {}", request.name),
+                None,
+            ));
+        }
         let affinity = session_affinity_from_context(&context);
         let conversation_identity = conversation_identity_from_context(&context);
         let (request, scope) =

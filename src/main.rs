@@ -66,6 +66,21 @@ enum Commands {
         #[arg(long, value_name = "PATH", conflicts_with_all = ["token", "token_file"])]
         principal_config: Option<PathBuf>,
 
+        /// Curated MCP catalog for a single-token principal. `full` preserves
+        /// every tool; `coding`, `read-only`, and `terminal` reduce schemas and routing.
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = winx_code_agent::tool_policy::ToolProfile::Full,
+            conflicts_with = "principal_config"
+        )]
+        tool_profile: winx_code_agent::tool_policy::ToolProfile,
+
+        /// Exact tool name to permit for a single-token principal. Repeat to
+        /// build a custom catalog; when present, this replaces --tool-profile.
+        #[arg(long = "allow-tool", value_name = "NAME", conflicts_with = "principal_config")]
+        allowed_tools: Vec<String>,
+
         /// Permit a token shorter than 32 bytes. Intended only for local tests.
         #[arg(long)]
         allow_weak_token: bool,
@@ -190,6 +205,8 @@ async fn async_main(cli: Cli) -> Result<()> {
             token,
             token_file,
             principal_config,
+            tool_profile,
+            allowed_tools,
             allow_weak_token,
             allow_non_loopback,
             session_affinity,
@@ -203,6 +220,8 @@ async fn async_main(cli: Cli) -> Result<()> {
                 token,
                 token_file,
                 principal_config,
+                tool_profile,
+                allowed_tools,
                 allow_weak_token,
                 allow_non_loopback,
                 session_affinity,
@@ -392,6 +411,8 @@ async fn run_http_server(
     token: Option<String>,
     token_file: Option<PathBuf>,
     principal_config: Option<PathBuf>,
+    tool_profile: winx_code_agent::tool_policy::ToolProfile,
+    allowed_tools: Vec<String>,
     allow_weak_token: bool,
     allow_non_loopback: bool,
     session_affinity: winx_code_agent::config::HttpSessionAffinity,
@@ -403,11 +424,15 @@ async fn run_http_server(
     if token.is_some() {
         tracing::warn!("--token exposes the HTTP secret in process arguments; prefer --token-file");
     }
-    let principals = winx_code_agent::config::load_http_principals(
+    let explicit_tools = (!allowed_tools.is_empty()).then_some(allowed_tools.as_slice());
+    let tool_policy =
+        winx_code_agent::tool_policy::ToolPolicy::resolve(tool_profile, explicit_tools)?;
+    let principals = winx_code_agent::config::load_http_principals_with_policy(
         principal_config.as_deref(),
         token,
         token_file.as_deref(),
         allow_weak_token,
+        tool_policy,
     )?;
     let options = winx_code_agent::http_server::HttpServerOptions {
         bind: bind.clone(),

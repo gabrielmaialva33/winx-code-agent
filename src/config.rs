@@ -6,6 +6,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 use crate::errors::{Result, WinxError};
+use crate::tool_policy::{ToolPolicy, ToolProfile};
 
 /// Minimum accepted HTTP bearer-token length in bytes.
 pub const MIN_HTTP_TOKEN_BYTES: usize = 32;
@@ -54,6 +55,7 @@ pub struct HttpPrincipal {
     name: String,
     id: String,
     token_digest: [u8; 32],
+    tool_policy: ToolPolicy,
 }
 
 impl std::fmt::Debug for HttpPrincipal {
@@ -62,6 +64,7 @@ impl std::fmt::Debug for HttpPrincipal {
             .debug_struct("HttpPrincipal")
             .field("name", &self.name)
             .field("id", &self.id)
+            .field("tool_policy", &self.tool_policy)
             .field("token", &"[REDACTED]")
             .finish_non_exhaustive()
     }
@@ -69,6 +72,15 @@ impl std::fmt::Debug for HttpPrincipal {
 
 impl HttpPrincipal {
     pub fn new(name: impl Into<String>, token: &str, allow_weak_token: bool) -> Result<Self> {
+        Self::new_with_tool_policy(name, token, allow_weak_token, ToolPolicy::default())
+    }
+
+    pub fn new_with_tool_policy(
+        name: impl Into<String>,
+        token: &str,
+        allow_weak_token: bool,
+        tool_policy: ToolPolicy,
+    ) -> Result<Self> {
         let name = name.into().trim().to_string();
         if name.is_empty() {
             return Err(WinxError::ConfigurationError(
@@ -91,7 +103,7 @@ impl HttpPrincipal {
             let _ = write!(output, "{byte:02x}");
             output
         });
-        Ok(Self { name, id, token_digest })
+        Ok(Self { name, id, token_digest, tool_policy })
     }
 
     pub fn name(&self) -> &str {
@@ -114,6 +126,10 @@ impl HttpPrincipal {
         let digest: [u8; 32] = Sha256::digest(presented.as_bytes()).into();
         constant_time_digest_eq(&self.token_digest, &digest)
     }
+
+    pub fn tool_policy(&self) -> ToolPolicy {
+        self.tool_policy
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,6 +144,9 @@ struct PrincipalEntry {
     name: String,
     token_file: Option<PathBuf>,
     token_env: Option<String>,
+    #[serde(default)]
+    tool_profile: ToolProfile,
+    allowed_tools: Option<Vec<String>>,
 }
 
 /// Resolve either a legacy single principal or a multi-principal TOML file.
@@ -136,6 +155,24 @@ pub fn load_http_principals(
     command_token: Option<String>,
     command_token_file: Option<&Path>,
     allow_weak_token: bool,
+) -> Result<Vec<HttpPrincipal>> {
+    load_http_principals_with_policy(
+        principal_config,
+        command_token,
+        command_token_file,
+        allow_weak_token,
+        ToolPolicy::default(),
+    )
+}
+
+/// Resolve HTTP principals and apply `single_principal_policy` to legacy
+/// `--token`/`--token-file`/environment authentication.
+pub fn load_http_principals_with_policy(
+    principal_config: Option<&Path>,
+    command_token: Option<String>,
+    command_token_file: Option<&Path>,
+    allow_weak_token: bool,
+    single_principal_policy: ToolPolicy,
 ) -> Result<Vec<HttpPrincipal>> {
     if principal_config.is_some() && (command_token.is_some() || command_token_file.is_some()) {
         return Err(WinxError::ConfigurationError(
@@ -165,6 +202,8 @@ pub fn load_http_principals(
             .principals
             .into_iter()
             .map(|entry| {
+                let tool_policy =
+                    ToolPolicy::resolve(entry.tool_profile, entry.allowed_tools.as_deref())?;
                 let token = match (entry.token_file.as_deref(), entry.token_env.as_deref()) {
                     (Some(path), None) => load_secret_file(path)?,
                     (None, Some(name)) => std::env::var(name).map_err(|error| {
@@ -186,7 +225,12 @@ pub fn load_http_principals(
                         )))
                     }
                 };
-                HttpPrincipal::new(entry.name, token.trim(), allow_weak_token)
+                HttpPrincipal::new_with_tool_policy(
+                    entry.name,
+                    token.trim(),
+                    allow_weak_token,
+                    tool_policy,
+                )
             })
             .collect::<Result<Vec<_>>>()?
     } else {
@@ -200,7 +244,12 @@ pub fn load_http_principals(
             (None, Some(path)) => load_secret_file(path)?,
             (None, None) => env_text("WINX_HTTP_TOKEN").unwrap_or_default(),
         };
-        vec![HttpPrincipal::new("default", token.trim(), allow_weak_token)?]
+        vec![HttpPrincipal::new_with_tool_policy(
+            "default",
+            token.trim(),
+            allow_weak_token,
+            single_principal_policy,
+        )?]
     };
 
     reject_duplicate_principals(&principals)?;
@@ -350,7 +399,7 @@ mod tests {
         std::fs::write(
             &config,
             format!(
-                "[[principals]]\nname = \"left\"\ntoken_file = {left:?}\n\n[[principals]]\nname = \"right\"\ntoken_file = {right:?}\n"
+                "[[principals]]\nname = \"left\"\ntoken_file = {left:?}\ntool_profile = \"terminal\"\n\n[[principals]]\nname = \"right\"\ntoken_file = {right:?}\nallowed_tools = [\"Initialize\", \"ReadFiles\"]\n"
             ),
         )
         .expect("write principal config");
@@ -361,5 +410,13 @@ mod tests {
         assert!(principals[0].matches_token("left-0123456789abcdef0123456789abcdef"));
         assert!(principals[1].matches_token("right-0123456789abcdef0123456789abcdef"));
         assert_ne!(principals[0].session_prefix(), principals[1].session_prefix());
+        assert_eq!(
+            principals[0].tool_policy().names().collect::<Vec<_>>(),
+            vec!["Initialize", "BashCommand"]
+        );
+        assert_eq!(
+            principals[1].tool_policy().names().collect::<Vec<_>>(),
+            vec!["Initialize", "ReadFiles"]
+        );
     }
 }

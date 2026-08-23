@@ -5,6 +5,7 @@ use schemars::schema_for;
 use serde_json::Value;
 
 use super::outcomes::{CodeMapToolResultEnvelope, ToolResultEnvelope};
+use crate::tool_policy::ToolPolicy;
 use crate::types::{
     BashCommand, CodeMap, ContextSave, FileWriteOrEdit, Initialize, MultiFileEdit, ReadFiles,
     ReadImage, UndoEdit,
@@ -195,6 +196,15 @@ static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();
 
 pub(super) fn winx_tools() -> Vec<Tool> {
     WINX_TOOLS.get_or_init(build_winx_tools).clone()
+}
+
+pub(super) fn winx_tools_for_policy(policy: ToolPolicy) -> Vec<Tool> {
+    WINX_TOOLS
+        .get_or_init(build_winx_tools)
+        .iter()
+        .filter(|tool| policy.allows(tool.name.as_ref()))
+        .cloned()
+        .collect()
 }
 
 fn build_winx_tools() -> Vec<Tool> {

@@ -21,6 +21,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod server;
 pub mod state;
+pub mod tool_policy;
 pub mod tools;
 pub mod types;
 pub mod utils;
