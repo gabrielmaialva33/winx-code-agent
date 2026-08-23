@@ -1,25 +1,30 @@
-<p align="center">
-  <img src=".github/assets/fairy.png" alt="Winx fairy mascot" width="160" />
-</p>
+<div align="center">
+  <img src=".github/assets/fairy.png" alt="Winx Logo" width="150" />
 
-# ✨ Winx — Remote MCP Runtime for Coding Agents
+  # 🪄 Winx
+  ### *The High-Performance, Remote-First MCP Runtime for AI Coding Agents*
 
-<p align="center">
-  <strong>Streamable HTTP, durable PTYs, and guarded file operations — built in native Rust</strong>
-</p>
+  **Durable PTY Sessions • Streamable HTTP • Guarded File Operations • Blazing Fast Rust 🦀**
 
-<p align="center">
-  <img src="https://img.shields.io/badge/language-Rust-orange?style=flat&logo=rust" alt="Language" />
-  <img src="https://img.shields.io/badge/license-MIT-blue?style=flat" alt="License" />
-  <img src="https://img.shields.io/badge/MCP-2026--07--28-purple?style=flat" alt="MCP 2026-07-28" />
-  <img src="https://img.shields.io/badge/transport-Streamable_HTTP-2563eb?style=flat" alt="Streamable HTTP" />
-  <img src="https://img.shields.io/badge/auth-multi--principal-7c3aed?style=flat" alt="Multi-principal authentication" />
-  <img src="https://img.shields.io/badge/transport-stdio-2f855a?style=flat" alt="stdio transport" />
-</p>
+  <p align="center">
+    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust_2021-dea584?style=for-the-badge&logo=rust&logoColor=000" alt="Rust 2021" /></a>
+    <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-2026--07--28-7c3aed?style=for-the-badge&logo=anthropic&logoColor=fff" alt="MCP Spec" /></a>
+    <a href="docs/streamable-http.md"><img src="https://img.shields.io/badge/Transport-Streamable_HTTP-2563eb?style=for-the-badge" alt="Streamable HTTP" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-10b981?style=for-the-badge" alt="License MIT" /></a>
+  </p>
 
-<p align="center">
-  <em>Give remote and local agents durable, authenticated hands on your development machine.</em>
-</p>
+  <p align="center">
+    <em>"Give remote and local LLMs durable, authenticated hands on your development machine."</em>
+  </p>
+
+  <p align="center">
+    <a href="#remote-mcp-in-60-seconds">⚡ <b>Quickstart</b></a> &nbsp;•&nbsp;
+    <a href="#what-you-get">✨ <b>Features</b></a> &nbsp;•&nbsp;
+    <a href="#remote-architecture">🏗️ <b>Architecture</b></a> &nbsp;•&nbsp;
+    <a href="docs/streamable-http.md">🌐 <b>HTTP Guide</b></a> &nbsp;•&nbsp;
+    <a href="SECURITY.md">🛡️ <b>Security</b></a>
+  </p>
+</div>
 
 Winx is a **remote-first MCP runtime** for agents that need a real shell, guarded file-editing primitives, repository-aware
 code navigation, and sessions that survive dropped connections. Its primary deployment path is a hardened
