@@ -168,9 +168,10 @@ pub(super) fn edit_verification_result(
     } else {
         format!("{edit_text}\n\nVerification:\n{verification_text}")
     };
+    let verification_is_error = verification.is_error == Some(true);
     let nested = verification.structured_content.unwrap_or_else(|| {
         json!({
-            "status": if verification.is_error == Some(true) { "failed" } else { "completed" },
+            "status": if verification_is_error { "failed" } else { "completed" },
             "tool": "BashCommand",
             "message": "Verification returned no structured result."
         })
@@ -181,7 +182,7 @@ pub(super) fn edit_verification_result(
         .and_then(|data| data.get("exit_code"))
         .and_then(Value::as_i64);
     let nonzero_exit = exit_code.is_some_and(|code| code != 0);
-    let verification_error = verification.is_error == Some(true) || nonzero_exit;
+    let verification_error = verification_is_error || nonzero_exit;
     let active = matches!(nested_status, "running" | "awaiting_input" | "awaiting_approval");
     let outer_status = if nonzero_exit {
         "failed"
