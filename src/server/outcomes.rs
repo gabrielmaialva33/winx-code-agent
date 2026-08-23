@@ -163,11 +163,6 @@ pub(super) fn edit_verification_result(
     verification: CallToolResult,
 ) -> CallToolResult {
     let verification_text = result_text(&verification);
-    let combined_text = if verification_text.trim().is_empty() {
-        format!("{edit_text}\n\nVerification completed without output.")
-    } else {
-        format!("{edit_text}\n\nVerification:\n{verification_text}")
-    };
     let verification_is_error = verification.is_error == Some(true);
     let nested = verification.structured_content.unwrap_or_else(|| {
         json!({
@@ -195,6 +190,24 @@ pub(super) fn edit_verification_result(
         format!("{tool} applied the edit; verification is still {outer_status}.")
     } else {
         format!("{tool} applied the edit and verification completed.")
+    };
+    let verification_summary = if verification_error {
+        exit_code.map_or_else(
+            || "Verification failed; the edit remains applied.".to_string(),
+            |code| format!("Verification failed with exit code {code}; the edit remains applied."),
+        )
+    } else if active {
+        format!("Verification is still {outer_status}.")
+    } else {
+        exit_code.map_or_else(
+            || "Verification completed.".to_string(),
+            |code| format!("Verification completed with exit code {code}."),
+        )
+    };
+    let combined_text = if verification_text.trim().is_empty() {
+        format!("{edit_text}\n\n{verification_summary}")
+    } else {
+        format!("{edit_text}\n\n{verification_summary}\n{verification_text}")
     };
 
     let mut data = safe_success_data(tool, arguments, &combined_text, false);
