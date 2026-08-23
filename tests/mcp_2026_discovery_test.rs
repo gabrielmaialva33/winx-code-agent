@@ -1698,10 +1698,10 @@ async fn http_principals_isolate_the_same_external_thread_id() -> anyhow::Result
             .as_array()
             .into_iter()
             .flatten()
-            .filter_map(|tool| tool["name"].as_str())
+            .filter_map(|tool| tool["name"].as_str().map(ToString::to_string))
             .collect::<Vec<_>>()
     };
-    assert_eq!(tool_names(&left_tools), vec!["Initialize", "BashCommand"]);
+    assert_eq!(tool_names(&left_tools), vec!["Initialize".to_string(), "BashCommand".to_string()]);
     assert_eq!(left_tools["result"]["cacheScope"], "private", "{left_tools}");
     assert_eq!(tool_names(&right_tools).len(), 9, "{right_tools}");
     assert_eq!(right_tools["result"]["cacheScope"], "public", "{right_tools}");
