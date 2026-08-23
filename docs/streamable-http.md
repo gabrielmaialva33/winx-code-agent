@@ -315,8 +315,9 @@ initialized Winx mode and operating-system user.
 
 The MCP handshake leads with a deterministic sequencing contract: initialize once, preserve the returned `thread_id`, use
 `CodeMap` before broad reads, batch `ReadFiles`, read before editing, compose related fail-fast checks with `&&`, and never
-repeat a rejected call unchanged. It also reserves `<workspace_root>/.winx/tmp/` for necessary ephemeral helpers and
-forbids encoding source or tool output into carrier files, identifiers, filenames, or directory names. A finite post-edit
+repeat a rejected call unchanged. `Initialize` also returns a bounded `<workspace_root>/.winx/tmp/session-…/` directory
+for independently useful derived helpers. Those helpers remain non-canonical, preserve source-path/line provenance, and
+never encode payload in filesystem names or pollute the project root with `.winx-*`/`.winx_tmp` artifacts. A finite post-edit
 check can be supplied as `verify_command` on either edit tool, saving one network/model round trip. Extra
 `WINX_SERVER_INSTRUCTIONS` are appended after those stable rules and are also included in the `Initialize` response for
 clients that do not expose handshake instructions to the model.

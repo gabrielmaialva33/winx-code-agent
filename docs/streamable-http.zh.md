@@ -254,7 +254,7 @@ winx-code-agent serve --http --token-file ~/.config/winx-http-token \
 
 ## LLM 编排规范 (Orchestration Contract)
 
-MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、用 `&&` 合并相关的快速失败检查，并且绝不原样重复已被拒绝的调用。两个编辑工具都可通过 `verify_command` 在同一次调用中执行有限的编辑后检查，从而节省一次网络和模型往返。
+MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、用 `&&` 合并相关的快速失败检查，并且绝不原样重复已被拒绝的调用。`Initialize` 还会返回一个受限的 `<workspace_root>/.winx/tmp/session-…/` 目录，供确有独立用途的派生辅助文件使用。这些文件不是权威源，必须保留原始源码路径和行号来源，禁止把内容编码进文件名或目录名，也禁止用 `.winx-*`/`.winx_tmp` 文件污染项目根目录。两个编辑工具都可通过 `verify_command` 在同一次调用中执行有限的编辑后检查，从而节省一次网络和模型往返。
 
 `ReadFiles` 批次中的文件会在受限并行池中处理（`WINX_READ_PARALLELISM`，默认 `4`，最大 `32`），但响应内容和读取保护范围始终严格按请求顺序发布。
 

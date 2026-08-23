@@ -270,7 +270,7 @@ modo Winx inicializado e do usuário do sistema operacional.
 
 ## Contrato de Orquestração com LLM
 
-O handshake inicial do MCP estabelece um contrato de orquestração sequencial determinístico: inicializar uma vez, manter o `thread_id` retornado, utilizar `CodeMap` antes de leituras extensas, agrupar leituras com `ReadFiles`, ler arquivos antes de editá-los, compor verificações relacionadas e fail-fast com `&&` e nunca repetir chamadas rejeitadas sem alterações. Uma verificação finita pós-edição pode ser enviada como `verify_command` em qualquer uma das ferramentas de edição, economizando uma ida e volta entre rede e modelo.
+O handshake inicial do MCP estabelece um contrato de orquestração sequencial determinístico: inicializar uma vez, manter o `thread_id` retornado, utilizar `CodeMap` antes de leituras extensas, agrupar leituras com `ReadFiles`, ler arquivos antes de editá-los, compor verificações relacionadas e fail-fast com `&&` e nunca repetir chamadas rejeitadas sem alterações. `Initialize` também retorna um diretório limitado `<workspace_root>/.winx/tmp/session-…/` para helpers derivados que sejam realmente úteis. Eles permanecem não canônicos, preservam a proveniência de caminho/linha do código-fonte e nunca codificam payload nos nomes do sistema de arquivos nem poluem a raiz do projeto com artefatos `.winx-*`/`.winx_tmp`. Uma verificação finita pós-edição pode ser enviada como `verify_command` em qualquer uma das ferramentas de edição, economizando uma ida e volta entre rede e modelo.
 
 Os arquivos de um lote `ReadFiles` são processados em um pool paralelo limitado (`WINX_READ_PARALLELISM`, padrão `4`, máximo `32`). A resposta e a cobertura do guard rail continuam seguindo exatamente a ordem solicitada.
 
