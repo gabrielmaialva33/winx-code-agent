@@ -135,6 +135,12 @@ const EDIT_CHECKPOINT_CAP: usize = 10;
 /// aren't undoable.
 const EDIT_CHECKPOINT_MAX_CONTENT_BYTES: usize = 1_000_000;
 
+/// Maximum number of files whose read coverage is retained in one session.
+/// Evicting an old entry is fail-closed: a later edit simply has to read that
+/// file again, while long-lived HTTP/plugin sessions keep bounded memory and
+/// persisted state.
+const MAX_WHITELIST_FILES: usize = 1_024;
+
 /// A single file's pre-edit state, captured by `FileWriteOrEdit`/`MultiFileEdit`
 /// after a successful write so `UndoEdit` can restore it. Only existing files get
 /// one (a brand-new file's creation is not undoable - there is no prior content).
@@ -160,6 +166,10 @@ pub struct BashState {
     pub file_edit_mode: FileEditMode,
     pub write_if_empty_mode: WriteIfEmptyMode,
     pub whitelist_for_overwrite: HashMap<String, FileWhitelistData>,
+    /// Least-recently-used order for `whitelist_for_overwrite`, oldest first.
+    /// Snapshots intentionally persist only the guarded data; restored entries
+    /// receive a deterministic order when loaded.
+    whitelist_recency: VecDeque<String>,
     pub pty_shell: Arc<Mutex<Option<PtyShell>>>,
     /// Serializes foreground command startup across cloned request-local states.
     /// Status/input actions remain concurrent so callers can drive a running TUI.
@@ -194,6 +204,7 @@ impl BashState {
                 allowed_globs: AllowedGlobs::All("all".to_string()),
             },
             whitelist_for_overwrite: HashMap::new(),
+            whitelist_recency: VecDeque::new(),
             pty_shell: Arc::new(Mutex::new(None)),
             foreground_command_gate: Arc::new(Mutex::new(())),
             initialized: false,
@@ -224,6 +235,77 @@ impl BashState {
         let index =
             self.edit_checkpoints.iter().rposition(|cp| cp.file_path_str == file_path_str)?;
         self.edit_checkpoints.remove(index)
+    }
+
+    /// Merge visible read coverage for `path` and make it the newest guarded
+    /// entry. Coverage from a different file version is discarded instead of
+    /// being combined with the new hash, which could otherwise make disjoint
+    /// reads across two versions look like one complete read.
+    pub fn record_read_coverage(
+        &mut self,
+        path: String,
+        ranges: impl IntoIterator<Item = (usize, usize)>,
+        file_hash: String,
+        total_lines: usize,
+    ) {
+        let ranges = ranges.into_iter().collect::<Vec<_>>();
+        match self.whitelist_for_overwrite.get_mut(&path) {
+            Some(existing)
+                if existing.file_hash == file_hash && existing.total_lines == total_lines =>
+            {
+                existing.merge_ranges(ranges);
+            }
+            Some(existing) => {
+                *existing = FileWhitelistData::new(file_hash, ranges, total_lines);
+            }
+            None => {
+                self.whitelist_for_overwrite.insert(
+                    path.clone(),
+                    FileWhitelistData::new(file_hash, ranges, total_lines),
+                );
+            }
+        }
+        self.touch_whitelist(&path);
+        self.enforce_whitelist_cap();
+    }
+
+    /// Replace a whitelist entry after a successful edit or undo.
+    pub fn set_whitelist_entry(&mut self, path: String, entry: FileWhitelistData) {
+        self.whitelist_for_overwrite.insert(path.clone(), entry);
+        self.touch_whitelist(&path);
+        self.enforce_whitelist_cap();
+    }
+
+    /// Remove a whitelist entry and its LRU metadata.
+    pub fn remove_whitelist_entry(&mut self, path: &str) -> Option<FileWhitelistData> {
+        self.whitelist_recency.retain(|candidate| candidate != path);
+        self.whitelist_for_overwrite.remove(path)
+    }
+
+    fn touch_whitelist(&mut self, path: &str) {
+        self.whitelist_recency.retain(|candidate| candidate != path);
+        self.whitelist_recency.push_back(path.to_string());
+    }
+
+    fn rebuild_whitelist_recency(&mut self) {
+        let mut paths = self.whitelist_for_overwrite.keys().cloned().collect::<Vec<_>>();
+        paths.sort_unstable();
+        self.whitelist_recency = paths.into();
+        self.enforce_whitelist_cap();
+    }
+
+    fn enforce_whitelist_cap(&mut self) {
+        self.whitelist_recency
+            .retain(|path| self.whitelist_for_overwrite.contains_key(path));
+        while self.whitelist_for_overwrite.len() > MAX_WHITELIST_FILES {
+            let victim = self.whitelist_recency.pop_front().or_else(|| {
+                // The map remains public for compatibility, so tolerate callers
+                // that inserted directly without updating the LRU metadata.
+                self.whitelist_for_overwrite.keys().min().cloned()
+            });
+            let Some(victim) = victim else { break };
+            self.whitelist_for_overwrite.remove(&victim);
+        }
     }
 
     pub async fn init_pty_shell(&mut self) -> Result<()> {
@@ -295,6 +377,7 @@ impl BashState {
         self.file_edit_mode = emode;
         self.write_if_empty_mode = wmode;
         self.whitelist_for_overwrite = whitelist;
+        self.rebuild_whitelist_recency();
         self.current_thread_id = tid;
         self.initialized = true;
     }
@@ -332,7 +415,7 @@ pub fn generate_thread_id() -> String {
 
 #[cfg(test)]
 mod whitelist_range_tests {
-    use super::FileWhitelistData;
+    use super::{BashState, FileWhitelistData, MAX_WHITELIST_FILES};
 
     fn wl(ranges: &[(usize, usize)], total: usize) -> FileWhitelistData {
         FileWhitelistData::new("h".to_string(), ranges.to_vec(), total)
@@ -377,5 +460,60 @@ mod whitelist_range_tests {
         let w = wl(&[(0, 999)], 10);
         assert!((w.get_percentage_read() - 100.0).abs() < 1e-9);
         assert!(w.get_unread_ranges().is_empty());
+    }
+
+    #[test]
+    fn coverage_from_different_file_versions_is_not_combined() {
+        let mut state = BashState::new();
+        state.record_read_coverage(
+            "/workspace/file.rs".to_string(),
+            [(1, 50)],
+            "old-hash".to_string(),
+            100,
+        );
+        state.record_read_coverage(
+            "/workspace/file.rs".to_string(),
+            [(51, 100)],
+            "new-hash".to_string(),
+            100,
+        );
+
+        let coverage = &state.whitelist_for_overwrite["/workspace/file.rs"];
+        assert_eq!(coverage.file_hash, "new-hash");
+        assert_eq!(coverage.line_ranges_read, vec![(51, 100)]);
+        assert_eq!(coverage.get_unread_ranges(), vec![(1, 50)]);
+    }
+
+    #[test]
+    fn whitelist_is_lru_bounded_and_recent_entries_survive() {
+        let mut state = BashState::new();
+        for index in 0..MAX_WHITELIST_FILES {
+            state.record_read_coverage(
+                format!("/workspace/file-{index:04}.rs"),
+                [(1, 1)],
+                format!("hash-{index}"),
+                1,
+            );
+        }
+
+        // Refresh the oldest entry, then force one eviction. The next-oldest
+        // entry must be discarded while the refreshed one stays guarded.
+        state.record_read_coverage(
+            "/workspace/file-0000.rs".to_string(),
+            [(1, 1)],
+            "hash-0".to_string(),
+            1,
+        );
+        state.record_read_coverage(
+            "/workspace/newest.rs".to_string(),
+            [(1, 1)],
+            "newest-hash".to_string(),
+            1,
+        );
+
+        assert_eq!(state.whitelist_for_overwrite.len(), MAX_WHITELIST_FILES);
+        assert!(state.whitelist_for_overwrite.contains_key("/workspace/file-0000.rs"));
+        assert!(!state.whitelist_for_overwrite.contains_key("/workspace/file-0001.rs"));
+        assert!(state.whitelist_for_overwrite.contains_key("/workspace/newest.rs"));
     }
 }
