@@ -16,7 +16,7 @@ use tree_sitter_tags::{TagsConfiguration, TagsContext};
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
-use crate::types::{Outline, OutlineFile, OutlineOutput, OutlineSymbol};
+use crate::types::{CodeMapFallback, Outline, OutlineFile, OutlineOutput, OutlineSymbol};
 use crate::utils::mmap::read_file_to_string;
 use crate::utils::path::resolve_in_workspace;
 use crate::utils::path_prob::score_paths;
@@ -41,13 +41,17 @@ pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     args: Outline,
 ) -> Result<(String, serde_json::Value)> {
-    let (cwd, workspace_root) = {
+    let (cwd, workspace_root, thread_id) = {
         let guard = bash_state_arc.lock().await;
         let bash_state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-        (bash_state.cwd.clone(), bash_state.workspace_root.clone())
+        (
+            bash_state.cwd.clone(),
+            bash_state.workspace_root.clone(),
+            bash_state.current_thread_id.clone(),
+        )
     };
 
-    tokio::task::spawn_blocking(move || outline_with_paths(&args, &cwd, workspace_root))
+    tokio::task::spawn_blocking(move || outline_with_paths(&args, &cwd, workspace_root, &thread_id))
         .await
         .map_err(|error| {
             WinxError::CommandExecutionError(format!("CodeMap outline worker failed: {error}"))
@@ -58,6 +62,7 @@ fn outline_with_paths(
     args: &Outline,
     cwd: &Path,
     workspace_root: PathBuf,
+    thread_id: &str,
 ) -> Result<(String, serde_json::Value)> {
     let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
     let root = resolve_in_workspace(&args.path, cwd, &workspace_root).map_err(|e| {
@@ -68,7 +73,7 @@ fn outline_with_paths(
     let mut configs: Configs = HashMap::new();
 
     if root.is_file() {
-        outline_one(&root, &workspace_root, args, &mut context, &mut configs)
+        outline_one(&root, &workspace_root, thread_id, args, &mut context, &mut configs)
     } else if root.is_dir() {
         outline_repo(&root, &workspace_root, args, &mut context, &mut configs)
     } else {
@@ -81,12 +86,20 @@ fn outline_with_paths(
 }
 
 /// A `file`-mode result carrying only a status message (no symbols).
-fn empty_file_outline(message: String) -> Result<(String, serde_json::Value)> {
+fn empty_file_outline(
+    message: String,
+    extension: String,
+    language_supported: bool,
+    fallback: Option<CodeMapFallback>,
+) -> Result<(String, serde_json::Value)> {
     let structured = OutlineOutput {
         mode: "file".to_string(),
         files_shown: 0,
         files: Vec::new(),
         truncated: false,
+        file_extension: Some(extension),
+        language_supported: Some(language_supported),
+        fallback,
     };
     Ok((message, crate::tools::structured_json(&structured)?))
 }
@@ -119,6 +132,7 @@ fn to_output(syms: Vec<Symbol>) -> Vec<OutlineSymbol> {
 fn outline_one(
     file: &Path,
     workspace_root: &Path,
+    thread_id: &str,
     args: &Outline,
     context: &mut TagsContext,
     configs: &mut Configs,
@@ -130,17 +144,46 @@ fn outline_one(
     // Distinguish the real reasons we'd return no symbols instead of collapsing
     // them all into a misleading "no definitions" (no silent fallback).
     if !symbols::supports(&ext) {
-        return empty_file_outline(format!(
+        let temporary_artifact_dir =
+            crate::utils::agent_temp::session_info(workspace_root, thread_id).directory;
+        let fallback = CodeMapFallback {
+            tool: "ReadFiles".to_string(),
+            file_paths: vec![file.to_string_lossy().into_owned()],
+            reason: "unsupported_language".to_string(),
+            temporary_artifact_dir: temporary_artifact_dir.to_string_lossy().into_owned(),
+        };
+        return empty_file_outline(
+            format!(
             "No symbols in {rel}: unsupported language (extension `.{ext}`). Use ReadFiles for \
-             exact source text; do not create or encode a carrier file for CodeMap."
-        ));
+             exact canonical source; do not transform source solely to make CodeMap parse it. A \
+             genuinely useful derived helper may live in temporary_artifact_dir with short names \
+             and source-path/line provenance."
+        ),
+            ext,
+            false,
+            Some(fallback),
+        );
     }
     let text = match read_file_to_string(file, MAX_OUTLINE_FILE_SIZE) {
         Ok(text) => text,
-        Err(e) => return empty_file_outline(format!("Could not outline {rel}: {e}")),
+        Err(e) => {
+            return empty_file_outline(format!("Could not outline {rel}: {e}"), ext, true, None)
+        }
     };
     let Some(config) = config_for(configs, &ext) else {
-        return empty_file_outline(format!("No symbols in {rel}: no tags query for `.{ext}`."));
+        let temporary_artifact_dir =
+            crate::utils::agent_temp::session_info(workspace_root, thread_id).directory;
+        return empty_file_outline(
+            format!("No symbols in {rel}: the `.{ext}` tags query could not be loaded."),
+            ext,
+            true,
+            Some(CodeMapFallback {
+                tool: "ReadFiles".to_string(),
+                file_paths: vec![file.to_string_lossy().into_owned()],
+                reason: "parser_unavailable".to_string(),
+                temporary_artifact_dir: temporary_artifact_dir.to_string_lossy().into_owned(),
+            }),
+        );
     };
 
     let mut syms = symbols::extract(context, config, &text);
@@ -152,7 +195,7 @@ fn outline_one(
 
     let mut out = String::new();
     if syms.is_empty() {
-        return empty_file_outline(format!("No definitions found in {rel}."));
+        return empty_file_outline(format!("No definitions found in {rel}."), ext, true, None);
     }
     if truncated {
         let _ = writeln!(out, "{rel} ({} of {total} symbols):", syms.len());
@@ -170,6 +213,9 @@ fn outline_one(
         files_shown: 1,
         files: vec![OutlineFile { file: rel, symbols: to_output(syms) }],
         truncated,
+        file_extension: Some(ext),
+        language_supported: Some(true),
+        fallback: None,
     };
     Ok((out, crate::tools::structured_json(&structured)?))
 }
@@ -259,8 +305,15 @@ fn outline_repo(
     }
 
     let files_shown = out_files.len();
-    let structured =
-        OutlineOutput { mode: "repo".to_string(), files_shown, files: out_files, truncated };
+    let structured = OutlineOutput {
+        mode: "repo".to_string(),
+        files_shown,
+        files: out_files,
+        truncated,
+        file_extension: None,
+        language_supported: None,
+        fallback: None,
+    };
     Ok((out, crate::tools::structured_json(&structured)?))
 }
 
@@ -322,15 +375,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_language_directs_the_agent_to_read_files_without_a_carrier() {
+    async fn unsupported_language_returns_actionable_exact_source_fallback() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("module.ex"), "defmodule Demo do\nend\n").unwrap();
+        std::fs::write(dir.path().join("page.heex"), "<p><%= @name %></p>\n").unwrap();
         let st = state_in(&dir);
-        let (out, structured) = handle_tool_call(&st, args("module.ex")).await.unwrap();
+        let (out, structured) = handle_tool_call(&st, args("page.heex")).await.unwrap();
         assert!(out.contains("unsupported language"));
         assert!(out.contains("ReadFiles"));
-        assert!(out.contains("do not create or encode a carrier file"));
+        assert!(out.contains("do not transform source solely"));
         assert_eq!(structured["files_shown"], 0);
+        assert_eq!(structured["file_extension"], "heex");
+        assert_eq!(structured["language_supported"], false);
+        assert_eq!(structured["fallback"]["tool"], "ReadFiles");
+        assert_eq!(structured["fallback"]["reason"], "unsupported_language");
+        assert_eq!(
+            structured["fallback"]["file_paths"][0],
+            dir.path().join("page.heex").canonicalize().unwrap().to_string_lossy().as_ref()
+        );
+        assert!(structured["fallback"]["temporary_artifact_dir"]
+            .as_str()
+            .is_some_and(|path| path.contains("/.winx/tmp/session-")));
+    }
+
+    #[tokio::test]
+    async fn python_and_elixir_are_native_code_map_languages() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("service.py"),
+            "class Service:\n    def run(self):\n        pass\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("worker.ex"),
+            "defmodule Worker do\n  def run(), do: :ok\nend\n",
+        )
+        .unwrap();
+        let st = state_in(&dir);
+
+        let (python, python_data) = handle_tool_call(&st, args("service.py")).await.unwrap();
+        assert!(python.contains("Service"), "{python}");
+        assert!(python.contains("run"), "{python}");
+        assert_eq!(python_data["language_supported"], true);
+
+        let (elixir, elixir_data) = handle_tool_call(&st, args("worker.ex")).await.unwrap();
+        assert!(elixir.contains("Worker"), "{elixir}");
+        assert!(elixir.contains("run"), "{elixir}");
+        assert_eq!(elixir_data["language_supported"], true);
+    }
+
+    #[tokio::test]
+    async fn repo_map_prunes_winx_but_explicit_helper_outline_remains_available() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("main.py"), "def canonical():\n    pass\n").unwrap();
+        let helper = crate::utils::agent_temp::session_info(dir.path(), "helper-session")
+            .directory
+            .join("review_adapter.py");
+        std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        std::fs::write(&helper, "def derived_review():\n    pass\n").unwrap();
+        let st = state_in(&dir);
+
+        let (repo, _) = handle_tool_call(&st, args("")).await.unwrap();
+        assert!(repo.contains("canonical"), "{repo}");
+        assert!(!repo.contains("derived_review"), "{repo}");
+
+        let helper_relative = helper.strip_prefix(dir.path()).unwrap().to_string_lossy();
+        let (explicit, _) = handle_tool_call(&st, args(&helper_relative)).await.unwrap();
+        assert!(explicit.contains("derived_review"), "{explicit}");
     }
 
     #[tokio::test]

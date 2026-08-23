@@ -1180,6 +1180,20 @@ pub struct OutlineFile {
     pub symbols: Vec<OutlineSymbol>,
 }
 
+/// Actionable fallback when a single-file `CodeMap` outline cannot provide
+/// symbols. Exact source remains canonical; helpers are optional and derived.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct CodeMapFallback {
+    /// Tool that can retrieve the canonical source.
+    pub tool: String,
+    /// Absolute path ready for `ReadFiles.file_paths`.
+    pub file_paths: Vec<String>,
+    /// Stable machine-readable reason for the fallback.
+    pub reason: String,
+    /// Session-local location for a genuinely useful derived helper.
+    pub temporary_artifact_dir: String,
+}
+
 /// Structured result of an `Outline` call (mirrors the text block).
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct OutlineOutput {
@@ -1191,6 +1205,15 @@ pub struct OutlineOutput {
     pub files: Vec<OutlineFile>,
     /// True if the symbol map was capped (more files or symbols exist).
     pub truncated: bool,
+    /// Lowercase source extension in single-file mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_extension: Option<String>,
+    /// Whether Winx has a native tags query for the single-file language.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_supported: Option<bool>,
+    /// Exact-source recovery for an unsupported or unavailable parser.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<CodeMapFallback>,
 }
 
 /// Parameters for the `FindReferences` tool (tree-sitter symbol occurrences).
@@ -1253,6 +1276,9 @@ pub struct CodeMapStructuredOutput {
     pub mode: Option<String>,
     pub files_shown: Option<usize>,
     pub files: Option<Vec<OutlineFile>>,
+    pub file_extension: Option<String>,
+    pub language_supported: Option<bool>,
+    pub fallback: Option<CodeMapFallback>,
     pub name: Option<String>,
     pub definitions: Option<usize>,
     pub references: Option<usize>,

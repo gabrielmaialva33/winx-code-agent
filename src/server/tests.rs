@@ -853,9 +853,10 @@ mod schema_tests {
 
         let code_map = tools.iter().find(|tool| tool.name == "CodeMap").expect("CodeMap");
         let code_map_description = code_map.description.as_deref().expect("CodeMap description");
-        assert!(code_map_description.contains("use ReadFiles directly"));
-        assert!(code_map_description.contains("<workspace_root>/.winx/tmp/"));
-        assert!(code_map_description.contains("Never translate or encode source"));
+        assert!(code_map_description.contains("structured fallback to ReadFiles"));
+        assert!(code_map_description.contains("temporary_artifact_dir returned by Initialize"));
+        assert!(code_map_description.contains("never transform source solely"));
+        assert!(code_map_description.contains("13 languages"));
         let properties = code_map
             .output_schema
             .as_ref()
@@ -863,6 +864,8 @@ mod schema_tests {
             .and_then(serde_json::Value::as_object)
             .expect("CodeMap outputSchema properties");
         assert!(properties.contains_key("truncated"));
+        assert!(properties.contains_key("language_supported"));
+        assert!(properties.contains_key("fallback"));
     }
 
     #[test]
