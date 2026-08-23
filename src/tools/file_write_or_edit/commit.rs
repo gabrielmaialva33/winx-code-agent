@@ -27,6 +27,18 @@ impl PlannedEdit {
     pub(crate) fn target(&self) -> &str {
         &self.file_path_str
     }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub(crate) fn previous_bytes(&self) -> u64 {
+        self.previous.as_ref().map_or(0, |content| content.len() as u64)
+    }
+
+    pub(crate) fn new_bytes(&self) -> u64 {
+        self.new_content.len() as u64
+    }
 }
 
 pub(crate) fn plan_edit(
@@ -34,16 +46,20 @@ pub(crate) fn plan_edit(
     file_path: &str,
     percentage_to_change: u32,
     blocks: &str,
+    validate_temp_quota: bool,
 ) -> Result<PlannedEdit> {
     let expanded_path = expand_user(file_path);
-    let path = if Path::new(&expanded_path).is_absolute() {
+    let requested_path = if Path::new(&expanded_path).is_absolute() {
         PathBuf::from(&expanded_path)
     } else {
         bash_state.cwd.join(&expanded_path)
     };
-    let path = validate_path_in_workspace(&path, &bash_state.workspace_root).map_err(|error| {
-        WinxError::PathSecurityError { path: path.clone(), message: error.to_string() }
-    })?;
+    let path = validate_path_in_workspace(&requested_path, &bash_state.workspace_root).map_err(
+        |error| WinxError::PathSecurityError {
+            path: requested_path.clone(),
+            message: error.to_string(),
+        },
+    )?;
     let file_path_str = path.to_string_lossy().to_string();
 
     let search_replace = uses_search_replace(percentage_to_change, blocks);
@@ -109,6 +125,26 @@ pub(crate) fn plan_edit(
     } else {
         ("wrote", blocks.to_string(), Vec::new())
     };
+
+    crate::utils::agent_temp::validate_edit_target(
+        &bash_state.workspace_root,
+        &bash_state.current_thread_id,
+        &requested_path,
+        &path,
+        previous.as_ref().map(|content| content.len() as u64),
+        new_content.len() as u64,
+    )?;
+    if validate_temp_quota {
+        crate::utils::agent_temp::validate_batch_quota(
+            &bash_state.workspace_root,
+            &bash_state.current_thread_id,
+            &[crate::utils::agent_temp::TempEdit {
+                path: &path,
+                previous_bytes: previous.as_ref().map_or(0, |content| content.len() as u64),
+                new_bytes: new_content.len() as u64,
+            }],
+        )?;
+    }
 
     Ok(PlannedEdit {
         path,

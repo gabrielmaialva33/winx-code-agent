@@ -51,6 +51,7 @@ pub async fn handle_tool_call(
                 &file_write_or_edit.file_path,
                 file_write_or_edit.percentage_to_change,
                 &file_write_or_edit.text_or_search_replace_blocks,
+                true,
             )?;
             commit_edit(&mut state, planned)
         }))

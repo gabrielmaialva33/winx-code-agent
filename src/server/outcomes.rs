@@ -563,6 +563,20 @@ fn error_envelope(
                 &mut required_reads,
             );
         }
+        WinxError::TemporaryArtifactPolicy { temporary_artifact_dir, .. } => {
+            status = ToolResultStatus::InvalidInput;
+            error_code = "temporary_artifact_policy".to_string();
+            retryable = true;
+            next_action = Some(ToolNextAction {
+                tool: tool.to_string(),
+                instruction: format!(
+                    "Correct the helper path or content using temporary_artifact_dir `{}`; use a \
+                     short descriptive path and do not repeat the rejected call unchanged.",
+                    temporary_artifact_dir.display()
+                ),
+                arguments: None,
+            });
+        }
         WinxError::SearchBlockNotFound(_) | WinxError::SearchBlockAmbiguous { .. } => {
             status = ToolResultStatus::Conflict;
             error_code = if matches!(error, WinxError::SearchBlockAmbiguous { .. }) {
@@ -640,6 +654,16 @@ fn error_envelope(
         data.insert(
             "bound_workspace".to_string(),
             Value::String(bound_workspace.to_string_lossy().into_owned()),
+        );
+    }
+    if let WinxError::TemporaryArtifactPolicy { path, temporary_artifact_dir, .. } = error {
+        data.insert(
+            "rejected_path".to_string(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+        data.insert(
+            "temporary_artifact_dir".to_string(),
+            Value::String(temporary_artifact_dir.to_string_lossy().into_owned()),
         );
     }
     ToolResultEnvelope {
@@ -859,6 +883,37 @@ mod tests {
             json!(["/workspace/README.md:20-40", "/workspace/README.md:90-"])
         );
         assert_eq!(structured["nextAction"]["arguments"]["workspace_root"], "/workspace");
+    }
+
+    #[test]
+    fn temporary_artifact_policy_returns_a_correctable_structured_result() {
+        let error = WinxError::TemporaryArtifactPolicy {
+            path: "/workspace/.winx_tmp/carrier.py".into(),
+            temporary_artifact_dir: "/workspace/.winx/tmp/session-deadbeefdeadbeef".into(),
+            message: "use the managed session directory".to_string(),
+        };
+        let result = tool_failure(
+            "FileWriteOrEdit",
+            &error,
+            Some(&json!({
+                "thread_id":"thread",
+                "workspace_root":"/workspace",
+                "file_path":"/workspace/.winx_tmp/carrier.py"
+            })),
+        )
+        .expect("tool result");
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured policy result");
+        assert_eq!(structured["status"], "invalid_input");
+        assert_eq!(structured["errorCode"], "temporary_artifact_policy");
+        assert_eq!(structured["retryable"], true);
+        assert_eq!(structured["retrySameCall"], false);
+        assert_eq!(
+            structured["data"]["temporary_artifact_dir"],
+            "/workspace/.winx/tmp/session-deadbeefdeadbeef"
+        );
+        assert_eq!(structured["nextAction"]["tool"], "FileWriteOrEdit");
     }
 
     #[test]

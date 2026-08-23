@@ -3,12 +3,14 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
+use super::commit::{commit_edit, plan_edit};
 use super::matcher::{
     apply_blocks, apply_blocks_with_unescape_retry, closest_snippet, fix_indentation,
 };
 use super::parser::{parse_blocks, SearchReplaceBlock};
 use super::report::{change_summary, operation_result, MAX_DIFF_INPUT_BYTES, MAX_DIFF_LINES};
-use crate::errors::Result;
+use crate::errors::{Result, WinxError};
+use crate::state::bash_state::BashState;
 
 #[test]
 fn closest_snippet_search_longer_than_file_does_not_panic() {
@@ -178,4 +180,55 @@ fn change_summary_collapses_a_huge_diff() {
     let summary = change_summary("", &big).expect("content changed");
     assert!(summary.contains("diff too large to show"));
     assert!(!summary.contains("line 10"));
+}
+
+#[test]
+fn file_tool_creates_a_helper_only_in_its_advertised_session_directory() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let root = workspace.path().canonicalize()?;
+    let mut state = BashState::new();
+    state.cwd.clone_from(&root);
+    state.workspace_root.clone_from(&root);
+    state.current_thread_id = "temp-policy".to_string();
+    let helper = crate::utils::agent_temp::session_info(&root, &state.current_thread_id)
+        .directory
+        .join("review/adapter.py");
+
+    let planned = plan_edit(
+        &state,
+        helper.to_string_lossy().as_ref(),
+        100,
+        "# source_path: lib/original.ex:1-20\n",
+        true,
+    )?;
+    commit_edit(&mut state, planned)?;
+
+    assert_eq!(std::fs::read_to_string(helper)?, "# source_path: lib/original.ex:1-20\n");
+    Ok(())
+}
+
+#[test]
+fn file_tool_rejects_cross_session_and_legacy_root_helpers() -> Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let root = workspace.path().canonicalize()?;
+    let mut state = BashState::new();
+    state.cwd.clone_from(&root);
+    state.workspace_root.clone_from(&root);
+    state.current_thread_id = "active-temp-policy".to_string();
+
+    let other = crate::utils::agent_temp::session_info(&root, "another-session")
+        .directory
+        .join("adapter.py");
+    let error = plan_edit(&state, other.to_string_lossy().as_ref(), 100, "derived\n", true)
+        .err()
+        .expect("cross-session write must fail");
+    assert!(matches!(error, WinxError::TemporaryArtifactPolicy { .. }));
+
+    let legacy = root.join(".winx_tmp/payload/adapter.py");
+    let error = plan_edit(&state, legacy.to_string_lossy().as_ref(), 100, "derived\n", true)
+        .err()
+        .expect("legacy root write must fail");
+    assert!(matches!(error, WinxError::TemporaryArtifactPolicy { .. }));
+    assert!(!root.join(".winx_tmp").exists());
+    Ok(())
 }

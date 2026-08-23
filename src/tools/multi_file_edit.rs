@@ -108,6 +108,7 @@ fn apply_batch(bash_state: &mut BashState, files: &[FileEditEntry]) -> Result<St
             &entry.file_path,
             entry.percentage_to_change,
             &entry.text_or_search_replace_blocks,
+            false,
         )
         .map_err(|error| contextualize_plan_error(bash_state, index, entry, error))?;
         planned.push(edit);
@@ -127,6 +128,20 @@ fn apply_batch(bash_state: &mut BashState, files: &[FileEditEntry]) -> Result<St
             )));
         }
     }
+
+    let temp_edits = planned
+        .iter()
+        .map(|edit| crate::utils::agent_temp::TempEdit {
+            path: edit.path(),
+            previous_bytes: edit.previous_bytes(),
+            new_bytes: edit.new_bytes(),
+        })
+        .collect::<Vec<_>>();
+    crate::utils::agent_temp::validate_batch_quota(
+        &bash_state.workspace_root,
+        &bash_state.current_thread_id,
+        &temp_edits,
+    )?;
 
     // PHASE 2: commit sequentially. Each write is individually atomic (temp +
     // rename). On the first failure, stop and report honestly without rolling
@@ -168,6 +183,13 @@ fn contextualize_plan_error(
     match error {
         WinxError::FileAccessError { path, message } => {
             WinxError::FileAccessError { path, message: format!("{context}: {message}") }
+        }
+        WinxError::TemporaryArtifactPolicy { path, temporary_artifact_dir, message } => {
+            WinxError::TemporaryArtifactPolicy {
+                path,
+                temporary_artifact_dir,
+                message: format!("{context}: {message}"),
+            }
         }
         source @ (WinxError::SearchBlockNotFound(_) | WinxError::SearchBlockAmbiguous { .. }) => {
             WinxError::MultiFilePlanError {
