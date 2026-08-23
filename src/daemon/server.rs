@@ -42,7 +42,7 @@ enum ActionCompletion {
 enum ActionReservation {
     Owner(Arc<watch::Sender<Option<CachedActionResult>>>),
     Waiter(Arc<watch::Sender<Option<CachedActionResult>>>),
-    Cached(CachedActionResult),
+    Cached(Box<CachedActionResult>),
     Rejected { error: WinxError, preserve_cancellation: bool },
 }
 
@@ -682,7 +682,17 @@ async fn run_action(
         let now = Instant::now();
         prune_action_entries(&mut completed, now);
         if let Some(entry) = completed.get_mut(&request_key) {
-            if entry.fingerprint != fingerprint {
+            if entry.fingerprint == fingerprint {
+                entry.last_seen = now;
+                match &entry.completion {
+                    ActionCompletion::Complete(result) => {
+                        ActionReservation::Cached(Box::new((**result).clone()))
+                    }
+                    ActionCompletion::InFlight(sender) => {
+                        ActionReservation::Waiter(Arc::clone(sender))
+                    }
+                }
+            } else {
                 let preserve_cancellation = entry.cancellation_key == cancellation_key
                     && matches!(entry.completion, ActionCompletion::InFlight(_))
                     && !action_entry_is_terminal(entry);
@@ -692,39 +702,27 @@ async fn run_action(
                     ),
                     preserve_cancellation,
                 }
-            } else {
-                entry.last_seen = now;
-                match &entry.completion {
-                    ActionCompletion::Complete(result) => {
-                        ActionReservation::Cached((**result).clone())
-                    }
-                    ActionCompletion::InFlight(sender) => {
-                        ActionReservation::Waiter(Arc::clone(sender))
-                    }
-                }
             }
+        } else if evict_oldest_action_if_full(&mut completed) {
+            let completion = Arc::new(watch::channel(None).0);
+            completed.insert(
+                request_key.clone(),
+                ActionEntry {
+                    fingerprint,
+                    cancellation_key: cancellation_key.clone(),
+                    completion: ActionCompletion::InFlight(Arc::clone(&completion)),
+                    last_seen: now,
+                },
+            );
+            ActionReservation::Owner(completion)
         } else {
-            if !evict_oldest_action_if_full(&mut completed) {
-                ActionReservation::Rejected {
-                    error: WinxError::ResourceAllocationError {
-                        message: format!(
-                            "all {MAX_SESSION_CACHE_ENTRIES} shell action reservations are in flight; retry after one completes"
-                        ),
-                    },
-                    preserve_cancellation: false,
-                }
-            } else {
-                let completion = Arc::new(watch::channel(None).0);
-                completed.insert(
-                    request_key.clone(),
-                    ActionEntry {
-                        fingerprint,
-                        cancellation_key: cancellation_key.clone(),
-                        completion: ActionCompletion::InFlight(Arc::clone(&completion)),
-                        last_seen: now,
-                    },
-                );
-                ActionReservation::Owner(completion)
+            ActionReservation::Rejected {
+                error: WinxError::ResourceAllocationError {
+                    message: format!(
+                        "all {MAX_SESSION_CACHE_ENTRIES} shell action reservations are in flight; retry after one completes"
+                    ),
+                },
+                preserve_cancellation: false,
             }
         }
     };
@@ -732,7 +730,7 @@ async fn run_action(
     match reservation {
         ActionReservation::Cached(result) => {
             consume_unowned_launch_cancellation_flag(&session, cancellation_key.as_deref()).await;
-            cached_action_result(result)
+            cached_action_result(*result)
         }
         ActionReservation::Rejected { error, preserve_cancellation } => {
             if !preserve_cancellation {
