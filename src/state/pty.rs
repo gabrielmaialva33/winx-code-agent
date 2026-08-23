@@ -346,6 +346,17 @@ impl PtyShell {
     /// # Returns
     /// A new `PtyShell` instance with an active bash session
     pub fn new(initial_dir: &Path, restricted_mode: bool) -> Result<Self> {
+        Self::new_with_agent_paths(initial_dir, restricted_mode, None, None)
+    }
+
+    /// Create a PTY with Winx's stable workspace and managed helper paths in
+    /// the child environment. Direct callers keep using [`Self::new`].
+    pub(crate) fn new_with_agent_paths(
+        initial_dir: &Path,
+        restricted_mode: bool,
+        workspace_root: Option<&Path>,
+        temporary_artifact_dir: Option<&Path>,
+    ) -> Result<Self> {
         info!(
             "Creating new PTY shell (restricted: {}) in {}",
             restricted_mode,
@@ -372,6 +383,12 @@ impl PtyShell {
         cmd.env("GIT_PAGER", "cat");
         cmd.env("COLUMNS", DEFAULT_COLS.to_string());
         cmd.env("ROWS", DEFAULT_ROWS.to_string());
+        if let Some(workspace_root) = workspace_root {
+            cmd.env("WINX_WORKSPACE_ROOT", workspace_root);
+        }
+        if let Some(temporary_artifact_dir) = temporary_artifact_dir {
+            cmd.env("WINX_TEMP_DIR", temporary_artifact_dir);
+        }
         // Per-shell random nonce embedded in the prompt so command output can't
         // forge the completion marker. 64 bits of entropy in hex.
         let nonce = format!("{:016x}", rand::random::<u64>());
@@ -1218,6 +1235,25 @@ mod tests {
         let (output, _complete) = shell.read_output(2.0)?;
 
         assert!(output.contains("hello pty"), "Output should contain 'hello pty': {output}");
+        Ok(())
+    }
+
+    #[test]
+    fn agent_paths_are_exported_to_the_pty() -> Result<()> {
+        let workspace = TempDir::new()?;
+        let temporary_artifact_dir = workspace.path().join(".winx/tmp/session-test");
+        let mut shell = PtyShell::new_with_agent_paths(
+            workspace.path(),
+            false,
+            Some(workspace.path()),
+            Some(&temporary_artifact_dir),
+        )?;
+
+        shell.send_command("printf '%s\\n%s\\n' \"$WINX_WORKSPACE_ROOT\" \"$WINX_TEMP_DIR\"")?;
+        let (output, _complete) = shell.read_output(2.0)?;
+
+        assert!(output.contains(&workspace.path().to_string_lossy().to_string()), "{output}");
+        assert!(output.contains(&temporary_artifact_dir.to_string_lossy().to_string()), "{output}");
         Ok(())
     }
 
