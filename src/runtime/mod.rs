@@ -371,8 +371,7 @@ async fn interrupt_embedded_guarded(
     let (shell, _operation) = {
         let state = bash_state.lock().await;
         let Some(state) = state.as_ref() else { return Ok(false) };
-        let operation_barrier =
-            lock_session_store().operation_barrier(&state.current_thread_id);
+        let operation_barrier = lock_session_store().operation_barrier(&state.current_thread_id);
         let operation = operation_barrier.read_owned().await;
         (state.pty_shell.clone(), operation)
     };

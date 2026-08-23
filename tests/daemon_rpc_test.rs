@@ -564,6 +564,93 @@ async fn embedded_reset_waits_for_atomic_action_before_changing_incarnation() ->
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn embedded_reset_writer_wins_before_stale_action_and_interrupt_capture() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let thread_id = "embedded_writer_wins";
+    let marker = workspace.path().join("barrier-reader.marker");
+    let state = initialized_state(&workspace, thread_id).await?;
+    let stale_token = EmbeddedShellRuntime
+        .run_action_detailed(
+            &state,
+            foreground(thread_id, "printf stale-token", 0.5),
+            ShellActionOptions::default(),
+        )
+        .await?
+        .execution_token
+        .ok_or_else(|| WinxError::CommandExecutionError("missing stale token".into()))?;
+
+    // Hold the operation barrier with a real action, then queue reset while its
+    // caller owns BashState. Stale action/interrupt calls begin only after that
+    // writer has captured BashState, so both must observe the new incarnation.
+    let reader_state = Arc::clone(&state);
+    let reader_command =
+        foreground(thread_id, &format!("sh -c 'touch {}; sleep 0.25'", marker.display()), 0.6);
+    let reader = tokio::spawn(async move {
+        EmbeddedShellRuntime
+            .run_action_detailed(&reader_state, reader_command, ShellActionOptions::default())
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .map_err(|_| WinxError::CommandExecutionError("barrier reader never started".into()))?;
+
+    let reset_state = Arc::clone(&state);
+    let reset = tokio::spawn(async move {
+        let mut state = reset_state.lock().await;
+        EmbeddedShellRuntime
+            .configure_session(
+                state.as_mut().ok_or(WinxError::BashStateNotInitialized)?,
+                ShellSessionTransition::Reset,
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if state.try_lock().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .map_err(|_| WinxError::CommandExecutionError("reset never captured BashState".into()))?;
+
+    let stale_action_state = Arc::clone(&state);
+    let stale_action_token = stale_token.clone();
+    let stale_action = tokio::spawn(async move {
+        EmbeddedShellRuntime
+            .run_action_detailed(
+                &stale_action_state,
+                foreground_status(thread_id, 0.1),
+                ShellActionOptions {
+                    expected_generation: Some(stale_action_token.generation),
+                    expected_execution: Some(stale_action_token),
+                    ..ShellActionOptions::default()
+                },
+            )
+            .await
+    });
+    let stale_interrupt_state = Arc::clone(&state);
+    let stale_interrupt = tokio::spawn(async move {
+        EmbeddedShellRuntime.interrupt_execution(&stale_interrupt_state, Some(stale_token)).await
+    });
+
+    reader.await.map_err(|error| WinxError::CommandExecutionError(error.to_string()))??;
+    reset.await.map_err(|error| WinxError::CommandExecutionError(error.to_string()))??;
+    let stale_action =
+        stale_action.await.map_err(|error| WinxError::CommandExecutionError(error.to_string()))?;
+    assert!(matches!(stale_action, Err(WinxError::InvalidInput(_))));
+    assert!(!stale_interrupt
+        .await
+        .map_err(|error| WinxError::CommandExecutionError(error.to_string()))??);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn daemon_reset_prevents_numeric_generation_collision() -> Result<()> {
     let workspace = TempDir::new()?;
     let socket_dir = TempDir::new()?;
