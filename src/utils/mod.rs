@@ -3,6 +3,7 @@
 //! This module contains various utility functions and types used throughout
 //! the application, such as file and path handling, repository analysis, etc.
 
+pub mod agent_temp;
 pub mod bash_parser;
 pub mod display_tree;
 pub mod encoder;

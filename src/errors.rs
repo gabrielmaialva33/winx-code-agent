@@ -52,6 +52,10 @@ pub enum WinxError {
     #[error("Security violation: {message}")]
     PathSecurityError { path: PathBuf, message: String },
 
+    /// A model-owned helper violated the managed `.winx/tmp/<session>` contract.
+    #[error("Temporary artifact policy rejected {path}: {message}")]
+    TemporaryArtifactPolicy { path: PathBuf, temporary_artifact_dir: PathBuf, message: String },
+
     /// Error when a command is not allowed in the current mode
     #[error("Command not allowed: {0}")]
     CommandNotAllowed(String),
@@ -295,6 +299,13 @@ impl Clone for WinxError {
             Self::ArgumentParseError(msg) => Self::ArgumentParseError(msg.clone()),
             Self::FileAccessError { path, message } => {
                 Self::FileAccessError { path: path.clone(), message: message.clone() }
+            }
+            Self::TemporaryArtifactPolicy { path, temporary_artifact_dir, message } => {
+                Self::TemporaryArtifactPolicy {
+                    path: path.clone(),
+                    temporary_artifact_dir: temporary_artifact_dir.clone(),
+                    message: message.clone(),
+                }
             }
             Self::DeserializationError(msg) => Self::DeserializationError(msg.clone()),
             Self::SerializationError(msg) => Self::SerializationError(msg.clone()),
