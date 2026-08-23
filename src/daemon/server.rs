@@ -7,16 +7,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{watch, Mutex, Notify, RwLock};
 
 use super::protocol::{
     read_json_frame, write_json_frame, ConfigureSessionParams, ConfigureSessionResult,
     ConfigureSessionTransition, HelloResult, JournalRead, JournalReadParams, RpcError, RpcRequest,
     RpcResponse, RunActionParams, RunActionResult, SessionInfo, SessionParams, WireShellError,
-    MAX_FRAME_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR, TYPED_ACTION_RESULT_CAPABILITY,
+    COMPACT_ACTION_OUTPUT_CAPABILITY, GENERATION_BOUND_ACTIONS_CAPABILITY, MAX_FRAME_BYTES,
+    PROTOCOL_MAJOR, PROTOCOL_MINOR, TYPED_ACTION_RESULT_CAPABILITY,
 };
 use crate::errors::{Result, WinxError};
-use crate::runtime::{lock_session_store, ShellTarget};
+use crate::runtime::{lock_session_store, ShellExecutionToken, ShellTarget};
 use crate::state::bash_state::BashState;
 use crate::state::pty::SharedPtyShell;
 use crate::tools::bash_command::ShellDeliveryCursor;
@@ -29,9 +30,25 @@ struct TimedEntry<T> {
     last_seen: Instant,
 }
 
+#[derive(Clone)]
+enum ActionCompletion {
+    InFlight(Arc<watch::Sender<Option<std::result::Result<RunActionResult, String>>>>),
+    Complete(Box<std::result::Result<RunActionResult, String>>),
+}
+
+struct ActionEntry {
+    fingerprint: Vec<u8>,
+    completion: ActionCompletion,
+    last_seen: Instant,
+}
+
 struct DaemonSession {
     state: SharedState,
-    completed: Mutex<HashMap<String, TimedEntry<RunActionResult>>>,
+    /// Reset/configure takes the writer; actions, snapshots, cursors, and
+    /// interrupts take readers. This binds execution-token validation to the
+    /// exact shell incarnation on which the operation is performed.
+    operation_barrier: RwLock<()>,
+    completed: Mutex<HashMap<String, ActionEntry>>,
     journal: Mutex<OutputJournal>,
     observed: Mutex<HashMap<String, (u64, String)>>,
     background_ids: Mutex<HashSet<String>>,
@@ -43,6 +60,7 @@ struct DaemonSession {
     ever_ran_command: AtomicBool,
     drainer_started: AtomicBool,
     activity: Notify,
+    session_epoch: Mutex<String>,
 }
 
 impl DaemonSession {
@@ -50,6 +68,7 @@ impl DaemonSession {
         let now = unix_ms();
         Self {
             state: Arc::new(Mutex::new(None)),
+            operation_barrier: RwLock::new(()),
             completed: Mutex::new(HashMap::new()),
             journal: Mutex::new(OutputJournal::default()),
             observed: Mutex::new(HashMap::new()),
@@ -62,6 +81,7 @@ impl DaemonSession {
             ever_ran_command: AtomicBool::new(false),
             drainer_started: AtomicBool::new(false),
             activity: Notify::new(),
+            session_epoch: Mutex::new(new_epoch()),
         }
     }
 
@@ -74,6 +94,10 @@ impl DaemonSession {
         }
         self.activity.notify_one();
     }
+}
+
+fn new_epoch() -> String {
+    format!("{:016x}", rand::random::<u64>())
 }
 
 const MAX_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
@@ -258,15 +282,18 @@ async fn dispatch(
     }
 
     match request.method.as_str() {
-        "winx.hello" => rpc_result(
+        "winx.hello" | "session.negotiate" => rpc_result(
             request.id,
             &HelloResult {
                 protocol_major: PROTOCOL_MAJOR,
                 protocol_minor: PROTOCOL_MINOR,
                 capabilities: vec![
                     "session.configure".to_string(),
+                    "session.negotiate".to_string(),
                     "shell.run_action".to_string(),
                     TYPED_ACTION_RESULT_CAPABILITY.to_string(),
+                    COMPACT_ACTION_OUTPUT_CAPABILITY.to_string(),
+                    GENERATION_BOUND_ACTIONS_CAPABILITY.to_string(),
                     "session.list".to_string(),
                     "session.read_output".to_string(),
                     "session.kill".to_string(),
@@ -295,7 +322,7 @@ async fn dispatch(
                 Ok(params) => params,
                 Err(error) => return rpc_error(request.id, -32602, &error.to_string()),
             };
-            match run_action(sessions, params).await {
+            match run_action(sessions, params, epoch).await {
                 Ok(result) => rpc_result(request.id, &result),
                 Err(error) => rpc_error(request.id, -32603, &error.to_string()),
             }
@@ -375,8 +402,8 @@ async fn dispatch(
             let session =
                 sessions.lock().await.get(&normalize_thread_id(&params.thread_id)).cloned();
             match session {
-                Some(session) => match interrupt_session(&session).await {
-                    Ok(()) => rpc_result(request.id, &true),
+                Some(session) => match interrupt_session(&session, &params, epoch).await {
+                    Ok(interrupted) => rpc_result(request.id, &interrupted),
                     Err(error) => rpc_error(request.id, -32005, &error.to_string()),
                 },
                 None => rpc_error(request.id, -32004, "session not found"),
@@ -416,6 +443,7 @@ async fn configure_session(
     };
     ensure_drainer(&session);
     session.note_activity(false);
+    let _operation = session.operation_barrier.write().await;
 
     let (attach_hint, snapshot, attached_existing) = {
         let mut guard = session.state.lock().await;
@@ -447,6 +475,7 @@ async fn configure_session(
                 state.apply_snapshot(&params.snapshot);
                 state.cwd = daemon_cwd;
                 state.init_pty_shell().await?;
+                *session.session_epoch.lock().await = new_epoch();
             }
             ConfigureSessionTransition::WorkspaceChange => {
                 let state = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
@@ -466,11 +495,13 @@ async fn configure_session(
             && !attached_existing)
     {
         *session.command_id.lock().await = None;
-        session.completed.lock().await.clear();
+        // Idempotency entries intentionally survive reset. A response-lost
+        // owner or waiter must still observe the original operation result;
+        // its execution token identifies the old incarnation unambiguously.
         session.delivery_cursors.lock().await.clear();
         session.observed.lock().await.remove("main");
     }
-    capture_session_outputs(&session).await;
+    capture_session_outputs_locked(&session).await;
     session.activity.notify_one();
     Ok(ConfigureSessionResult { attach_hint, snapshot: Some(snapshot), attached_existing })
 }
@@ -479,6 +510,7 @@ async fn configure_session(
 async fn run_action(
     sessions: &Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     params: RunActionParams,
+    guardian_epoch: &str,
 ) -> Result<RunActionResult> {
     validate_identifier("request_key", &params.request_key)?;
     validate_identifier("consumer_id", &params.consumer_id)?;
@@ -489,27 +521,125 @@ async fn run_action(
         ));
     }
 
-    let is_command =
-        matches!(&params.command.action_json, crate::types::BashCommandAction::Command { .. });
+    let fingerprint = serde_json::to_vec(&(
+        &params.snapshot,
+        &params.command,
+        &params.consumer_id,
+        &params.options,
+    ))
+    .map_err(|error| WinxError::SerializationError(error.to_string()))?;
     let session = {
         let mut sessions = sessions.lock().await;
         sessions.entry(thread_id.clone()).or_insert_with(|| Arc::new(DaemonSession::new())).clone()
     };
-    ensure_drainer(&session);
-    session.note_activity(is_command);
 
-    let now = Instant::now();
-    let cached = {
-        let mut completed = session.completed.lock().await;
-        prune_timed_entries(&mut completed, now);
-        completed.get_mut(&params.request_key).map(|entry| {
-            entry.last_seen = now;
-            entry.value.clone()
-        })
-    };
-    if let Some(cached) = cached {
-        return Ok(cached);
+    loop {
+        let claim = {
+            let mut completed = session.completed.lock().await;
+            prune_action_entries(&mut completed, Instant::now());
+            if let Some(entry) = completed.get_mut(&params.request_key) {
+                if entry.fingerprint != fingerprint {
+                    return Err(WinxError::InvalidInput(
+                        "request_key was reused with different shell action parameters".to_string(),
+                    ));
+                }
+                entry.last_seen = Instant::now();
+                Some(entry.completion.clone())
+            } else {
+                evict_oldest_action_if_full(&mut completed);
+                completed.insert(
+                    params.request_key.clone(),
+                    ActionEntry {
+                        fingerprint: fingerprint.clone(),
+                        completion: ActionCompletion::InFlight(Arc::new(watch::channel(None).0)),
+                        last_seen: Instant::now(),
+                    },
+                );
+                None
+            }
+        };
+        match claim {
+            None => break,
+            Some(ActionCompletion::Complete(result)) => match *result {
+                Ok(result) => return Ok(result),
+                Err(error) => return Err(WinxError::CommandExecutionError(error)),
+            },
+            Some(ActionCompletion::InFlight(sender)) => {
+                let mut receiver = sender.subscribe();
+                if receiver.borrow().is_none() && receiver.changed().await.is_err() {
+                    return Err(WinxError::CommandExecutionError(
+                        "single-flight shell action owner disappeared".to_string(),
+                    ));
+                }
+            }
+        }
     }
+
+    let request_key = params.request_key.clone();
+    let outcome = execute_action(&session, params, guardian_epoch).await;
+    let cached = match &outcome {
+        Ok(result) => Ok(result.clone()),
+        Err(error) => Err(error.to_string()),
+    };
+    let sender = {
+        let mut completed = session.completed.lock().await;
+        let Some(entry) = completed.get_mut(&request_key) else {
+            return Err(WinxError::CommandExecutionError(
+                "single-flight reservation disappeared before completion".to_string(),
+            ));
+        };
+        let sender = match &entry.completion {
+            ActionCompletion::InFlight(sender) => Some(Arc::clone(sender)),
+            ActionCompletion::Complete(_) => None,
+        };
+        entry.completion = ActionCompletion::Complete(Box::new(cached.clone()));
+        entry.last_seen = Instant::now();
+        sender
+    };
+    if let Some(sender) = sender {
+        let _ = sender.send(Some(cached));
+    }
+    outcome
+}
+
+#[allow(clippy::too_many_lines)]
+async fn execute_action(
+    session: &Arc<DaemonSession>,
+    params: RunActionParams,
+    guardian_epoch: &str,
+) -> Result<RunActionResult> {
+    let _operation = session.operation_barrier.read().await;
+    if params
+        .options
+        .expected_guardian_epoch
+        .as_deref()
+        .is_some_and(|expected| expected != guardian_epoch)
+        || params
+            .options
+            .expected_execution
+            .as_ref()
+            .is_some_and(|expected| expected.guardian_epoch != guardian_epoch)
+    {
+        return Err(WinxError::InvalidInput(
+            "execution precondition refers to a different guardian epoch".to_string(),
+        ));
+    }
+    let session_epoch = session.session_epoch.lock().await.clone();
+    if params.options.expected_execution.as_ref().is_some_and(|expected| {
+        expected.session_epoch != session_epoch
+            || params
+                .options
+                .expected_generation
+                .is_some_and(|generation| generation != expected.generation)
+    }) {
+        return Err(WinxError::InvalidInput(
+            "execution precondition refers to a different session incarnation".to_string(),
+        ));
+    }
+    let is_command =
+        matches!(&params.command.action_json, crate::types::BashCommandAction::Command { .. });
+    ensure_drainer(session);
+    session.note_activity(is_command);
 
     {
         let mut guard = session.state.lock().await;
@@ -550,43 +680,81 @@ async fn run_action(
         entry.last_seen = now;
         entry.value.clone()
     };
-    let outcome = crate::tools::bash_command::handle_embedded_tool_call_with_cursor(
+    let outcome = crate::tools::bash_command::handle_embedded_tool_call_with_cursor_detailed(
         &session.state,
         params.command,
         &cursor,
+        params.options,
     )
     .await;
     if let Ok(result) = &outcome {
-        if let Some(id) = result.state.background_id.as_ref() {
+        if let Some(id) = result.result.state.background_id.as_ref() {
             session.background_ids.lock().await.insert(id.clone());
         }
     }
-    capture_session_outputs(&session).await;
+    capture_session_outputs_locked(session).await;
     let snapshot =
         session.state.lock().await.as_ref().ok_or(WinxError::BashStateNotInitialized)?.snapshot();
     let result = match outcome {
-        Ok(result) => RunActionResult {
-            output: Some(result.output),
-            state: Some(result.state),
-            snapshot,
-            error: None,
-        },
+        Ok(result) => {
+            let command_generation = result.command_generation;
+            let execution_token = command_generation.map(|generation| ShellExecutionToken {
+                guardian_epoch: guardian_epoch.to_string(),
+                session_epoch,
+                generation,
+            });
+            // Compact and legacy are mutually exclusive on the wire. Compact
+            // rendering leaves the stable legacy string empty at runtime.
+            let (output, compact_output) = match result.compact_output {
+                Some(compact) => (None, Some(compact)),
+                None => (Some(result.result.output), None),
+            };
+            RunActionResult {
+                output,
+                compact_output,
+                command_generation,
+                execution_token,
+                output_truncated: result.output_truncated,
+                state: Some(result.result.state),
+                snapshot,
+                error: None,
+            }
+        }
         Err(error) => RunActionResult {
             output: None,
+            compact_output: None,
+            command_generation: None,
+            execution_token: None,
+            output_truncated: false,
             state: None,
             snapshot,
             error: Some(to_wire_error(error)),
         },
     };
 
-    let mut completed = session.completed.lock().await;
-    let now = Instant::now();
-    prune_timed_entries(&mut completed, now);
-    evict_oldest_if_full(&mut completed, &params.request_key);
-    completed.insert(params.request_key, TimedEntry { value: result.clone(), last_seen: now });
-    drop(completed);
     session.activity.notify_one();
     Ok(result)
+}
+
+fn prune_action_entries(entries: &mut HashMap<String, ActionEntry>, now: Instant) {
+    entries.retain(|_, entry| {
+        matches!(entry.completion, ActionCompletion::InFlight(_))
+            || now.duration_since(entry.last_seen) <= SESSION_CACHE_TTL
+    });
+}
+
+fn evict_oldest_action_if_full(entries: &mut HashMap<String, ActionEntry>) {
+    if entries.len() < MAX_SESSION_CACHE_ENTRIES {
+        return;
+    }
+    if let Some(oldest) = entries
+        .iter()
+        .filter(|(_, entry)| matches!(entry.completion, ActionCompletion::Complete(_)))
+        .min_by_key(|(_, entry)| entry.last_seen)
+        .map(|(key, _)| key.clone())
+    {
+        entries.remove(&oldest);
+    }
 }
 
 fn delivery_cursor_key(consumer_id: &str, action: &crate::types::BashCommandAction) -> String {
@@ -628,6 +796,11 @@ fn ensure_drainer(session: &Arc<DaemonSession>) {
 }
 
 async fn capture_session_outputs(session: &Arc<DaemonSession>) -> CaptureState {
+    let _operation = session.operation_barrier.read().await;
+    capture_session_outputs_locked(session).await
+}
+
+async fn capture_session_outputs_locked(session: &Arc<DaemonSession>) -> CaptureState {
     let (thread_id, main) = {
         let state = session.state.lock().await;
         let Some(state) = state.as_ref() else { return CaptureState::default() };
@@ -742,16 +915,24 @@ async fn active_background_command_ids(
     active
 }
 
-async fn interrupt_session(session: &Arc<DaemonSession>) -> Result<()> {
+async fn interrupt_session(
+    session: &Arc<DaemonSession>,
+    expected_generation: Option<u64>,
+) -> Result<bool> {
     session.note_activity(false);
     let shell = {
         let state = session.state.lock().await;
         state.as_ref().map(|state| state.pty_shell.clone())
     };
-    let Some(shell) = shell else { return Ok(()) };
+    let Some(shell) = shell else { return Ok(false) };
     {
         let mut guard = shell.lock().await;
         if let Some(shell) = guard.as_mut() {
+            if expected_generation.is_some_and(|expected| {
+                shell.command_generation() != expected || !shell.command_running
+            }) {
+                return Ok(false);
+            }
             shell.send_interrupt().map_err(|error| {
                 WinxError::CommandExecutionError(format!("failed to interrupt shell: {error}"))
             })?;
@@ -768,7 +949,7 @@ async fn interrupt_session(session: &Arc<DaemonSession>) -> Result<()> {
         };
         if recovered {
             capture_session_outputs(session).await;
-            return Ok(());
+            return Ok(true);
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
@@ -839,7 +1020,41 @@ fn same_uid(stream: &UnixStream) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_identifier, CaptureState, OutputJournal, MAX_SESSION_CACHE_ENTRIES};
+    #![allow(clippy::expect_used)]
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use tokio::sync::Mutex;
+
+    use super::{
+        run_action, validate_identifier, CaptureState, DaemonSession, OutputJournal,
+        MAX_SESSION_CACHE_ENTRIES,
+    };
+    use crate::daemon::protocol::RunActionParams;
+    use crate::runtime::ShellActionOptions;
+    use crate::state::bash_state::BashState;
+    use crate::types::BashCommand;
+
+    fn action_params(state: &BashState, command: &str, request_key: &str) -> RunActionParams {
+        let command: BashCommand = serde_json::from_value(serde_json::json!({
+            "action_json": {
+                "type": "command",
+                "command": command,
+                "is_background": false,
+                "allow_multi": true
+            },
+            "thread_id": state.current_thread_id,
+            "wait_for_seconds": 2.0
+        }))
+        .expect("valid command");
+        RunActionParams {
+            snapshot: state.snapshot(),
+            command,
+            request_key: request_key.to_string(),
+            consumer_id: "single-flight-test".to_string(),
+            options: ShellActionOptions::default(),
+        }
+    }
 
     #[test]
     fn late_consumer_is_told_when_journal_head_was_dropped() {
@@ -878,5 +1093,50 @@ mod tests {
             CaptureState { changed: false, active: true }.next_delay()
                 < CaptureState { changed: false, active: false }.next_delay()
         );
+    }
+
+    #[tokio::test]
+    async fn request_key_is_single_flight_and_replays_lost_response() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let marker = temp.path().join("single-flight.marker");
+        let mut state = BashState::new();
+        state.cwd = temp.path().to_path_buf();
+        state.workspace_root = temp.path().to_path_buf();
+        state.current_thread_id = "single_flight".to_string();
+        let command = format!("printf x >> {}; sleep 0.1", marker.display());
+        let params = action_params(&state, &command, "same-request");
+        let sessions = Arc::new(Mutex::new(HashMap::<String, Arc<DaemonSession>>::new()));
+
+        let (first, concurrent) = tokio::join!(
+            run_action(&sessions, params.clone(), "guardian-a"),
+            run_action(&sessions, params.clone(), "guardian-a")
+        );
+        assert!(first.expect("owner result").error.is_none());
+        assert!(concurrent.expect("shared result").error.is_none());
+        let replay = run_action(&sessions, params, "guardian-a").await.expect("cached replay");
+        assert!(replay.error.is_none());
+        assert_eq!(std::fs::read_to_string(marker).expect("marker"), "x");
+    }
+
+    #[tokio::test]
+    async fn request_key_collision_rejects_different_parameters() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut state = BashState::new();
+        state.cwd = temp.path().to_path_buf();
+        state.workspace_root = temp.path().to_path_buf();
+        state.current_thread_id = "request_collision".to_string();
+        let sessions = Arc::new(Mutex::new(HashMap::<String, Arc<DaemonSession>>::new()));
+        run_action(&sessions, action_params(&state, "printf first", "collision"), "guardian-a")
+            .await
+            .expect("first action");
+
+        let error = run_action(
+            &sessions,
+            action_params(&state, "printf second", "collision"),
+            "guardian-a",
+        )
+        .await
+        .expect_err("collision must fail");
+        assert!(error.to_string().contains("different shell action parameters"));
     }
 }

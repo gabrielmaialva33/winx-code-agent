@@ -150,11 +150,15 @@ impl GuardianLifecycle {
         });
     }
 
-    pub(crate) async fn ensure_guardian(&self, thread_id: &str, socket: &Path) -> Result<()> {
+    pub(crate) async fn ensure_guardian(
+        &self,
+        thread_id: &str,
+        socket: &Path,
+    ) -> Result<HelloResult> {
         let _gate = self.mutation_gate.lock().await;
         if let Some(hello) = hello_with_retry(socket).await {
             self.record_activity(socket, thread_id, hello.daemon_pid).await?;
-            return Ok(());
+            return Ok(hello);
         }
 
         // Reclaim dead sockets and expired idle guardians before refusing a new
@@ -178,7 +182,8 @@ impl GuardianLifecycle {
 
         ensure_daemon_at(socket, &self.guardian_binary).await?;
         let hello = DaemonClient::new(socket).hello().await?;
-        self.record_activity(socket, thread_id, hello.daemon_pid).await
+        self.record_activity(socket, thread_id, hello.daemon_pid).await?;
+        Ok(hello)
     }
 
     pub(crate) async fn note_activity(&self, socket: &Path, thread_id: &str, guardian_pid: u32) {
