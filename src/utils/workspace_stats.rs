@@ -5,6 +5,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const MAX_ACTIVE_FILES: usize = 30;
+/// Bound the persisted per-workspace history. This is deliberately much larger
+/// than either consumer's top-N view, while preventing monorepos and long-lived
+/// plugin sessions from growing the JSON file forever.
+const MAX_TRACKED_FILES: usize = 4_096;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct WorkspaceStats {
@@ -19,15 +23,20 @@ struct FileStats {
 }
 
 pub fn record_read(root: &Path, path: &Path) -> Result<()> {
-    record(root, path, |stats| stats.reads += 1)
+    record(root, path, Activity::Read)
+}
+
+/// Record one `ReadFiles` batch with a single load/save cycle.
+pub fn record_reads(root: &Path, paths: &[PathBuf]) -> Result<()> {
+    record_many(root, paths.iter().map(PathBuf::as_path), Activity::Read)
 }
 
 pub fn record_write(root: &Path, path: &Path) -> Result<()> {
-    record(root, path, |stats| stats.writes += 1)
+    record(root, path, Activity::Write)
 }
 
 pub fn record_edit(root: &Path, path: &Path) -> Result<()> {
-    record(root, path, |stats| stats.edits += 1)
+    record(root, path, Activity::Edit)
 }
 
 pub fn active_files(root: &Path) -> Vec<String> {
@@ -37,7 +46,10 @@ pub fn active_files(root: &Path) -> Vec<String> {
 
     let mut files = stats.files.into_iter().collect::<Vec<_>>();
     files.sort_by_key(|(path, stats)| {
-        let score = stats.reads + (stats.edits * 4) + (stats.writes * 3);
+        let score = stats
+            .reads
+            .saturating_add(stats.edits.saturating_mul(4))
+            .saturating_add(stats.writes.saturating_mul(3));
         (std::cmp::Reverse(score), path.clone())
     });
     files.truncate(MAX_ACTIVE_FILES);
@@ -55,18 +67,69 @@ pub fn active_files_for_context(root: &Path) -> Vec<String> {
 
     let mut files = stats.files.into_iter().collect::<Vec<_>>();
     files.sort_by_key(|(path, stats)| {
-        let score = (stats.reads * 2) + stats.edits + stats.writes;
+        let score = stats
+            .reads
+            .saturating_mul(2)
+            .saturating_add(stats.edits)
+            .saturating_add(stats.writes);
         (std::cmp::Reverse(score), path.clone())
     });
     files.truncate(CONTEXT_ACTIVE_FILES);
     files.into_iter().map(|(path, _)| path).collect()
 }
 
-fn record(root: &Path, path: &Path, update: impl FnOnce(&mut FileStats)) -> Result<()> {
-    let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string();
+#[derive(Clone, Copy)]
+enum Activity {
+    Read,
+    Write,
+    Edit,
+}
+
+fn record(root: &Path, path: &Path, activity: Activity) -> Result<()> {
+    record_many(root, std::iter::once(path), activity)
+}
+
+fn record_many<'a>(
+    root: &Path,
+    paths: impl IntoIterator<Item = &'a Path>,
+    activity: Activity,
+) -> Result<()> {
     let mut stats = load(root).unwrap_or_default();
-    update(stats.files.entry(relative).or_default());
+    let mut last_recorded = None;
+    for path in paths {
+        let relative = path.strip_prefix(root).unwrap_or(path).to_string_lossy().to_string();
+        let file = stats.files.entry(relative.clone()).or_default();
+        match activity {
+            Activity::Read => file.reads = file.reads.saturating_add(1),
+            Activity::Write => file.writes = file.writes.saturating_add(1),
+            Activity::Edit => file.edits = file.edits.saturating_add(1),
+        }
+        last_recorded = Some(relative);
+    }
+    let Some(last_recorded) = last_recorded else { return Ok(()) };
+    prune_stats(&mut stats, &last_recorded);
     save(root, &stats)
+}
+
+fn prune_stats(stats: &mut WorkspaceStats, preserve: &str) {
+    let remove_count = stats.files.len().saturating_sub(MAX_TRACKED_FILES);
+    if remove_count == 0 {
+        return;
+    }
+
+    let mut candidates = stats
+        .files
+        .iter()
+        .filter(|(path, _)| path.as_str() != preserve)
+        .map(|(path, file)| {
+            let activity = file.reads.saturating_add(file.writes).saturating_add(file.edits);
+            (activity, path.clone())
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_unstable();
+    for (_, path) in candidates.into_iter().take(remove_count) {
+        stats.files.remove(&path);
+    }
 }
 
 fn load(root: &Path) -> Result<WorkspaceStats> {
@@ -122,4 +185,29 @@ fn stats_key(root: &Path) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     abs.to_string_lossy().hash(&mut hasher);
     format!("{name}_{:016x}", hasher.finish())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{prune_stats, FileStats, WorkspaceStats, MAX_TRACKED_FILES};
+
+    #[test]
+    fn persisted_history_is_bounded_and_preserves_current_file() {
+        let mut stats = WorkspaceStats::default();
+        for index in 0..(MAX_TRACKED_FILES + 3) {
+            stats.files.insert(
+                format!("file-{index:04}.rs"),
+                FileStats { reads: index as u64, writes: 0, edits: 0 },
+            );
+        }
+        let current = "file-0000.rs";
+
+        prune_stats(&mut stats, current);
+
+        assert_eq!(stats.files.len(), MAX_TRACKED_FILES);
+        assert!(stats.files.contains_key(current));
+        assert!(!stats.files.contains_key("file-0001.rs"));
+        assert!(!stats.files.contains_key("file-0002.rs"));
+        assert!(!stats.files.contains_key("file-0003.rs"));
+    }
 }
