@@ -46,6 +46,19 @@ pub async fn handle_tool_call(
         let bash_state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
         (bash_state.cwd.clone(), bash_state.workspace_root.clone())
     };
+
+    tokio::task::spawn_blocking(move || outline_with_paths(args, cwd, workspace_root))
+        .await
+        .map_err(|error| {
+            WinxError::CommandExecutionError(format!("CodeMap outline worker failed: {error}"))
+        })?
+}
+
+fn outline_with_paths(
+    args: Outline,
+    cwd: PathBuf,
+    workspace_root: PathBuf,
+) -> Result<(String, serde_json::Value)> {
     let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
     let root = resolve_in_workspace(&args.path, &cwd, &workspace_root).map_err(|e| {
         WinxError::PathSecurityError { path: PathBuf::from(&args.path), message: e.to_string() }

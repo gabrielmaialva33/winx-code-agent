@@ -40,6 +40,19 @@ pub async fn handle_tool_call(
         let bash_state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
         (bash_state.cwd.clone(), bash_state.workspace_root.clone())
     };
+
+    tokio::task::spawn_blocking(move || references_with_paths(args, cwd, workspace_root))
+        .await
+        .map_err(|error| {
+            WinxError::CommandExecutionError(format!("CodeMap references worker failed: {error}"))
+        })?
+}
+
+fn references_with_paths(
+    args: FindReferences,
+    cwd: PathBuf,
+    workspace_root: PathBuf,
+) -> Result<(String, serde_json::Value)> {
     let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
 
     if args.name.trim().is_empty() {
