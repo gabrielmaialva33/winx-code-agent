@@ -41,7 +41,7 @@ pub async fn handle_tool_call(
         (bash_state.cwd.clone(), bash_state.workspace_root.clone())
     };
 
-    tokio::task::spawn_blocking(move || references_with_paths(args, cwd, workspace_root))
+    tokio::task::spawn_blocking(move || references_with_paths(args, &cwd, workspace_root))
         .await
         .map_err(|error| {
             WinxError::CommandExecutionError(format!("CodeMap references worker failed: {error}"))
@@ -50,7 +50,7 @@ pub async fn handle_tool_call(
 
 fn references_with_paths(
     args: FindReferences,
-    cwd: PathBuf,
+    cwd: &Path,
     workspace_root: PathBuf,
 ) -> Result<(String, serde_json::Value)> {
     let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);

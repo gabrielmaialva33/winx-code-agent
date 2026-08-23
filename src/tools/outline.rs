@@ -47,7 +47,7 @@ pub async fn handle_tool_call(
         (bash_state.cwd.clone(), bash_state.workspace_root.clone())
     };
 
-    tokio::task::spawn_blocking(move || outline_with_paths(args, cwd, workspace_root))
+    tokio::task::spawn_blocking(move || outline_with_paths(&args, &cwd, workspace_root))
         .await
         .map_err(|error| {
             WinxError::CommandExecutionError(format!("CodeMap outline worker failed: {error}"))
@@ -55,8 +55,8 @@ pub async fn handle_tool_call(
 }
 
 fn outline_with_paths(
-    args: Outline,
-    cwd: PathBuf,
+    args: &Outline,
+    cwd: &Path,
     workspace_root: PathBuf,
 ) -> Result<(String, serde_json::Value)> {
     let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
@@ -68,9 +68,9 @@ fn outline_with_paths(
     let mut configs: Configs = HashMap::new();
 
     if root.is_file() {
-        outline_one(&root, &workspace_root, &args, &mut context, &mut configs)
+        outline_one(&root, &workspace_root, args, &mut context, &mut configs)
     } else if root.is_dir() {
-        outline_repo(&root, &workspace_root, &args, &mut context, &mut configs)
+        outline_repo(&root, &workspace_root, args, &mut context, &mut configs)
     } else {
         // Don't silently degrade a typo'd file path into a whole-workspace scan.
         Err(WinxError::FileAccessError {
