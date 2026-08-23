@@ -1,6 +1,8 @@
+use std::collections::HashMap;
 use std::net::TcpListener as StdTcpListener;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -10,6 +12,13 @@ const TEST_TOKEN: &str = "modern-test-token-0123456789abcdef";
 const LEFT_TOKEN: &str = "left-principal-token-0123456789abcdef";
 const RIGHT_TOKEN: &str = "right-principal-token-0123456789abcdef";
 const USAGE_READ_MARKER: &str = "winx-file-content-must-not-be-logged";
+
+type TestBindings = HashMap<(String, String), String>;
+static TEST_BINDINGS: OnceLock<Mutex<TestBindings>> = OnceLock::new();
+
+fn test_bindings() -> &'static Mutex<TestBindings> {
+    TEST_BINDINGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 struct ServerProcess(Child);
 
@@ -22,6 +31,20 @@ impl Drop for ServerProcess {
 
 fn spawn_single_token_server(address: std::net::SocketAddr) -> anyhow::Result<ServerProcess> {
     spawn_single_token_server_with_affinity(address, "workspace")
+}
+
+fn spawn_single_token_root_access_server(
+    address: std::net::SocketAddr,
+) -> anyhow::Result<ServerProcess> {
+    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+        .args(["serve", "--http", "--bind", &address.to_string(), "--token", TEST_TOKEN])
+        .env("WINX_EMBEDDED", "1")
+        .env("WINX_ALLOW_PATHS", "/")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(ServerProcess(child))
 }
 
 fn spawn_single_token_allowlist_server(
@@ -144,10 +167,11 @@ async fn post_json_with_session_as(
     body: &str,
     token: &str,
 ) -> anyhow::Result<String> {
+    let body = add_known_workspace_binding(body, token);
     let mut stream = TcpStream::connect(address).await?;
     let method_header =
         method.map_or_else(String::new, |method| format!("MCP-Method: {method}\r\n"));
-    let body_json = serde_json::from_str::<serde_json::Value>(body).ok();
+    let body_json = serde_json::from_str::<serde_json::Value>(&body).ok();
     let name_key = match method {
         Some("tools/call" | "prompts/get") => Some("name"),
         Some("resources/read" | "resources/subscribe" | "resources/unsubscribe") => Some("uri"),
@@ -175,7 +199,71 @@ async fn post_json_with_session_as(
             String::from_utf8_lossy(&response)
         ),
     }
-    Ok(String::from_utf8_lossy(&response).into_owned())
+    let response = String::from_utf8_lossy(&response).into_owned();
+    remember_initialize_binding(&body, &response, token);
+    Ok(response)
+}
+
+fn add_known_workspace_binding(body: &str, token: &str) -> String {
+    let Ok(mut request) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.to_string();
+    };
+    let Some(params) = request.get_mut("params").and_then(serde_json::Value::as_object_mut) else {
+        return body.to_string();
+    };
+    if params.get("name").and_then(serde_json::Value::as_str) == Some("Initialize") {
+        return body.to_string();
+    }
+    let Some(arguments) = params.get_mut("arguments").and_then(serde_json::Value::as_object_mut)
+    else {
+        return body.to_string();
+    };
+    if arguments.contains_key("workspace_root") {
+        return request.to_string();
+    }
+    let Some(thread_id) = arguments
+        .get("thread_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|thread_id| !thread_id.is_empty())
+    else {
+        return request.to_string();
+    };
+    let key = (token.to_string(), thread_id.to_string());
+    let workspace_root = test_bindings()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .cloned();
+    if let Some(workspace_root) = workspace_root {
+        arguments.insert("workspace_root".to_string(), serde_json::Value::String(workspace_root));
+    }
+    request.to_string()
+}
+
+fn remember_initialize_binding(body: &str, response: &str, token: &str) {
+    let is_initialize = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|request| request.get("params")?.get("name")?.as_str().map(str::to_string))
+        .as_deref()
+        == Some("Initialize");
+    if !is_initialize {
+        return;
+    }
+    let Ok(response) = response_json(response) else {
+        return;
+    };
+    let data = &response["result"]["structuredContent"]["data"];
+    let Some(thread_id) = data.get("thread_id").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let Some(workspace_root) = data.get("workspace_root").and_then(serde_json::Value::as_str)
+    else {
+        return;
+    };
+    test_bindings()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert((token.to_string(), thread_id.to_string()), workspace_root.to_string());
 }
 
 async fn get_path(address: std::net::SocketAddr, path: &str) -> anyhow::Result<String> {
@@ -209,6 +297,14 @@ fn response_json(response: &str) -> anyhow::Result<serde_json::Value> {
         .split_once("\r\n\r\n")
         .ok_or_else(|| anyhow::anyhow!("response has no HTTP body: {response}"))?;
     Ok(serde_json::from_str(body.trim())?)
+}
+
+async fn post_tool_value(
+    address: std::net::SocketAddr,
+    request: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let response = post_json(address, "2026-07-28", "tools/call", &request.to_string()).await?;
+    response_json(&response)
 }
 
 fn modern_request_meta(client_name: &str, tasks: bool) -> serde_json::Value {
@@ -422,6 +518,14 @@ fn initialized_thread_id(response: &str) -> anyhow::Result<String> {
                 .map(str::to_string)
         })
         .ok_or_else(|| anyhow::anyhow!("Initialize response has no thread_id instruction: {text}"))
+}
+
+fn initialized_workspace_root(response: &str) -> anyhow::Result<String> {
+    let response = response_json(response)?;
+    response["result"]["structuredContent"]["data"]["workspace_root"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow::anyhow!("Initialize response has no workspace_root: {response}"))
 }
 
 fn assert_compact_initialize_response(
@@ -1308,6 +1412,12 @@ fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing ReadFiles usage event: {contents}"))?;
     assert_eq!(read_call["fields"]["batch_items"], 2);
     assert_eq!(read_call["fields"]["worker_limit"], 3);
+    assert_eq!(read_call["fields"]["workspace_coherence"], "validated");
+    assert_eq!(read_call["fields"]["conversation_source"], "none");
+    assert!(
+        read_call["fields"]["workspace_id"].as_str().is_some_and(|id| id.starts_with("w_")),
+        "missing privacy-preserving workspace fingerprint: {read_call}"
+    );
     assert!(read_call["fields"]["duration_ms"].as_u64().is_some());
     assert!(
         entries.iter().any(|entry| {
@@ -1892,6 +2002,112 @@ async fn http_workspace_affinity_reuses_one_session_for_unstable_thread_ids() ->
 
     let pwd = pwd_as(address, TEST_TOKEN, &second_thread, "workspace-affinity-pwd").await?;
     assert!(pwd.contains(&nested.display().to_string()), "{pwd}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn root_path_authority_does_not_weaken_workspace_session_coherence() -> anyhow::Result<()> {
+    let first_workspace = tempfile::tempdir()?;
+    let second_workspace = tempfile::tempdir()?;
+    let outside = tempfile::tempdir()?;
+    let outside_file = outside.path().join("shared-support-file.txt");
+    std::fs::write(&outside_file, "outside-workspace-readable")?;
+    let blocked_marker = outside.path().join("cross-project-command-ran");
+    let (address, _server) =
+        spawn_server_on_free_port(spawn_single_token_root_access_server).await?;
+
+    let first = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        first_workspace.path(),
+        "first-project",
+        "root-authority-first",
+    )
+    .await?;
+    let first_thread = initialized_thread_id(&first)?;
+    let first_root = initialized_workspace_root(&first)?;
+
+    let outside_read = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "outside-workspace-read",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("root-authority-read", false),
+            "name": "ReadFiles",
+            "arguments": {
+                "file_paths": [outside_file],
+                "thread_id": first_thread,
+                "workspace_root": first_root
+            }
+        }
+    });
+    let outside_read = post_tool_value(address, &outside_read).await?;
+    assert_eq!(outside_read["result"]["isError"], false, "{outside_read}");
+    assert!(
+        outside_read["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("outside-workspace-readable")),
+        "{outside_read}"
+    );
+
+    let second = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        second_workspace.path(),
+        "second-project",
+        "root-authority-second",
+    )
+    .await?;
+    let second_thread = initialized_thread_id(&second)?;
+    let mismatched = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "cross-project-command",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("root-authority-mismatch", false),
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": format!("touch {}", blocked_marker.display()),
+                    "is_background": false
+                },
+                "thread_id": second_thread,
+                "workspace_root": first_root
+            }
+        }
+    });
+    let mismatched = post_tool_value(address, &mismatched).await?;
+    assert_eq!(mismatched["result"]["isError"], true, "{mismatched}");
+    assert_eq!(
+        mismatched["result"]["structuredContent"]["errorCode"], "workspace_thread_mismatch",
+        "{mismatched}"
+    );
+    assert!(!blocked_marker.exists(), "mismatched command reached the shell");
+
+    let in_place_change = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "in-place-workspace-change",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("root-authority-change", false),
+            "name": "Initialize",
+            "arguments": {
+                "type": "user_asked_change_workspace",
+                "any_workspace_path": second_workspace.path(),
+                "mode_name": "wcgw",
+                "thread_id": first_thread
+            }
+        }
+    });
+    let in_place_change = post_tool_value(address, &in_place_change).await?;
+    assert_eq!(
+        in_place_change["result"]["structuredContent"]["errorCode"],
+        "workspace_change_requires_new_session",
+        "{in_place_change}"
+    );
+    let pwd = pwd_as(address, TEST_TOKEN, &first_thread, "root-authority-still-first").await?;
+    assert!(pwd.contains(&first_root), "original binding changed: {pwd}");
     Ok(())
 }
 
