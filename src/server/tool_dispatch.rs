@@ -366,8 +366,20 @@ impl WinxService {
         {
             Ok(outcome) => {
                 self.persist_state(&slot).await;
+                let workspace_root = slot
+                    .lock()
+                    .await
+                    .as_ref()
+                    .map(|state| state.workspace_root.to_string_lossy().into_owned())
+                    .ok_or_else(|| {
+                        McpError::internal_error(
+                            "Initialize completed without a bound workspace",
+                            None,
+                        )
+                    })?;
                 let mut result = CallToolResult::success(vec![ContentBlock::text(outcome.text)]);
                 result.structured_content = Some(json!({
+                    "workspace_root": workspace_root,
                     "initialize_transition": outcome.transition.as_str(),
                     "initialize_reused": outcome.transition
                         == crate::tools::initialize::InitializeTransition::AttachedExisting,
@@ -522,6 +534,9 @@ impl WinxService {
             },
             "thread_id": thread_id
         });
+        if let Some(workspace_root) = recovery_args.get("workspace_root").and_then(Value::as_str) {
+            arguments["workspace_root"] = Value::String(workspace_root.to_string());
+        }
         if let Some(wait) = verification.wait_for_seconds {
             arguments["wait_for_seconds"] = json!(wait);
         }

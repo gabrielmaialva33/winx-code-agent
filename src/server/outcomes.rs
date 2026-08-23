@@ -390,7 +390,6 @@ fn bash_next_action(
     arguments: Option<&Value>,
     bash_state: &BashCommandState,
 ) -> Option<ToolNextAction> {
-    let thread_id = string_argument(arguments, "thread_id");
     match status {
         ToolResultStatus::Running => {
             let mut action = json!({
@@ -399,9 +398,7 @@ fn bash_next_action(
                     "status_check": true
                 }
             });
-            if let Some(thread_id) = thread_id {
-                action["thread_id"] = Value::String(thread_id);
-            }
+            copy_session_binding(arguments, &mut action);
             if let Some(background_id) = bash_state.background_id.as_ref() {
                 action["action_json"]["bg_command_id"] = Value::String(background_id.clone());
             }
@@ -447,6 +444,7 @@ fn safe_success_data(
         "id",
         "mode_name",
         "any_workspace_path",
+        "workspace_root",
     ] {
         if let Some(value) = string_argument(arguments, key) {
             data.insert(key.to_string(), Value::String(value));
@@ -516,6 +514,35 @@ fn error_envelope(
                     .to_string(),
                 arguments: None,
             });
+        }
+        WinxError::WorkspaceBindingRequired { .. } => {
+            status = ToolResultStatus::NeedsInitialize;
+            error_code = "workspace_binding_required".to_string();
+            retryable = true;
+            next_action = Some(ToolNextAction {
+                tool: "Initialize".to_string(),
+                instruction: "Initialize the intended workspace once, then copy the returned thread_id/workspace_root pair into every later call."
+                    .to_string(),
+                arguments: None,
+            });
+        }
+        WinxError::WorkspaceThreadMismatch { workspace_root, .. } => {
+            status = ToolResultStatus::Conflict;
+            error_code = "workspace_thread_mismatch".to_string();
+            retryable = true;
+            next_action = Some(initialize_workspace_action(workspace_root));
+        }
+        WinxError::WorkspaceBindingMismatch { requested_workspace, .. } => {
+            status = ToolResultStatus::Conflict;
+            error_code = "workspace_binding_mismatch".to_string();
+            retryable = true;
+            next_action = Some(initialize_workspace_action(requested_workspace));
+        }
+        WinxError::WorkspaceChangeRequiresNewSession { workspace_root } => {
+            status = ToolResultStatus::NeedsInitialize;
+            error_code = "workspace_change_requires_new_session".to_string();
+            retryable = true;
+            next_action = Some(initialize_workspace_action(workspace_root));
         }
         WinxError::CommandAlreadyRunning { .. } => {
             status = ToolResultStatus::Running;
@@ -606,6 +633,15 @@ fn error_envelope(
     if let Some(thread_id) = string_argument(arguments, "thread_id") {
         data.insert("thread_id".to_string(), Value::String(thread_id));
     }
+    if let Some(workspace_root) = string_argument(arguments, "workspace_root") {
+        data.insert("workspace_root".to_string(), Value::String(workspace_root));
+    }
+    if let WinxError::WorkspaceBindingMismatch { bound_workspace, .. } = error {
+        data.insert(
+            "bound_workspace".to_string(),
+            Value::String(bound_workspace.to_string_lossy().into_owned()),
+        );
+    }
     ToolResultEnvelope {
         status,
         tool: tool.to_string(),
@@ -667,9 +703,7 @@ fn status_check_action(arguments: Option<&Value>) -> ToolNextAction {
             "status_check": true
         }
     });
-    if let Some(thread_id) = string_argument(arguments, "thread_id") {
-        value["thread_id"] = Value::String(thread_id);
-    }
+    copy_session_binding(arguments, &mut value);
     ToolNextAction {
         tool: "BashCommand".to_string(),
         instruction: "Check the running command instead of submitting the original command again."
@@ -688,15 +722,36 @@ fn read_action(arguments: Option<&Value>, path: &str, ranges: &[String]) -> Opti
         ranges.iter().map(|range| Value::String(format!("{path}:{range}"))).collect()
     };
     let mut value = json!({"file_paths": file_paths});
-    if let Some(thread_id) = string_argument(arguments, "thread_id") {
-        value["thread_id"] = Value::String(thread_id);
-    }
+    copy_session_binding(arguments, &mut value);
     Some(ToolNextAction {
         tool: "ReadFiles".to_string(),
         instruction: "Perform every required read before retrying the edit. Do not retry the same edit unchanged first."
             .to_string(),
         arguments: Some(value),
     })
+}
+
+fn initialize_workspace_action(workspace_root: &std::path::Path) -> ToolNextAction {
+    ToolNextAction {
+        tool: "Initialize".to_string(),
+        instruction: "Initialize this intended project as a separate coherent session, then use the returned thread_id/workspace_root pair."
+            .to_string(),
+        arguments: Some(json!({
+            "type": "first_call",
+            "any_workspace_path": workspace_root.to_string_lossy(),
+            "initial_files_to_read": [],
+            "mode_name": "wcgw",
+            "thread_id": ""
+        })),
+    }
+}
+
+fn copy_session_binding(arguments: Option<&Value>, target: &mut Value) {
+    for key in ["thread_id", "workspace_root"] {
+        if let Some(value) = string_argument(arguments, key) {
+            target[key] = Value::String(value);
+        }
+    }
 }
 
 fn unread_ranges(message: &str) -> Vec<String> {
