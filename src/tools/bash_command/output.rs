@@ -36,26 +36,32 @@ fn char_safe_tail(text: &str, max_len: usize) -> &str {
     &text[start..]
 }
 
-pub(super) fn truncate_to_token_budget(text: &str, max_tokens: usize) -> std::borrow::Cow<'_, str> {
+pub(super) fn truncate_to_token_budget(
+    text: &str,
+    max_tokens: usize,
+) -> (std::borrow::Cow<'_, str>, bool) {
     if crate::utils::encoder::definitely_fits_token_budget(text, max_tokens) {
-        return std::borrow::Cow::Borrowed(text);
+        return (std::borrow::Cow::Borrowed(text), false);
     }
 
     let Some(tokens) = crate::utils::encoder::encode_ids(text) else {
-        return std::borrow::Cow::Owned(format!(
-            "(...truncated)\n{}",
-            char_safe_tail(text, MAX_OUTPUT_LENGTH)
-        ));
+        return (
+            std::borrow::Cow::Owned(format!(
+                "(...truncated)\n{}",
+                char_safe_tail(text, MAX_OUTPUT_LENGTH)
+            )),
+            true,
+        );
     };
     if tokens.len() <= max_tokens {
-        return std::borrow::Cow::Borrowed(text);
+        return (std::borrow::Cow::Borrowed(text), false);
     }
 
     let keep = max_tokens.saturating_sub(1);
     let tail = &tokens[tokens.len() - keep..];
     let decoded = crate::utils::encoder::decode_ids(tail)
         .unwrap_or_else(|| char_safe_tail(text, MAX_OUTPUT_LENGTH).to_string());
-    std::borrow::Cow::Owned(format!("(...truncated)\n{decoded}"))
+    (std::borrow::Cow::Owned(format!("(...truncated)\n{decoded}")), true)
 }
 
 pub(super) fn status_state(
@@ -131,18 +137,18 @@ pub(super) fn insert_note_before_status(
     }
 }
 
-fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> String {
-    let truncated = truncate_to_token_budget(text, MAX_OUTPUT_TOKENS);
+fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> (String, bool) {
+    let (truncated, output_truncated) = truncate_to_token_budget(text, MAX_OUTPUT_TOKENS);
     let text = truncated.as_ref();
 
     if last_pending_output.is_empty() {
         let rendered = render_terminal_output(text);
-        return rstrip_lines(&rendered).trim_start().to_string();
+        return (rstrip_lines(&rendered).trim_start().to_string(), output_truncated);
     }
 
     let last_rendered = render_terminal_output(last_pending_output);
     if last_rendered.is_empty() {
-        return rstrip_lines(&render_terminal_output(text));
+        return (rstrip_lines(&render_terminal_output(text)), output_truncated);
     }
 
     let text_after_last = if text.len() > last_pending_output.len() {
@@ -153,7 +159,7 @@ fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> String {
     };
     let combined = format!("{}\n{}", last_rendered.join("\n"), text_after_last);
     let new_rendered = render_terminal_output(&combined);
-    rstrip_lines(&get_incremental_output(&last_rendered, &new_rendered))
+    (rstrip_lines(&get_incremental_output(&last_rendered, &new_rendered)), output_truncated)
 }
 
 fn extract_prompt_cwd(output: &str) -> Option<PathBuf> {
@@ -338,7 +344,7 @@ pub(super) async fn wait_for_output(
 
     if !complete && is_status_check {
         let mut patience = OUTPUT_WAIT_PATIENCE;
-        let mut last_incremental = wcgw_incremental_text(&output, &previously_delivered);
+        let (mut last_incremental, _) = wcgw_incremental_text(&output, &previously_delivered);
         if last_incremental.is_empty() {
             patience -= 1;
         }
@@ -357,7 +363,7 @@ pub(super) async fn wait_for_output(
                 break;
             }
 
-            let new_incremental = wcgw_incremental_text(&new_output, &previously_delivered);
+            let (new_incremental, _) = wcgw_incremental_text(&new_output, &previously_delivered);
             if new_incremental == last_incremental {
                 patience -= 1;
             } else {
@@ -374,7 +380,7 @@ pub(super) async fn wait_for_output(
         }
     }
 
-    let rendered = wcgw_incremental_text(&output, &previously_delivered);
+    let (rendered, source_token_truncated) = wcgw_incremental_text(&output, &previously_delivered);
     if let Some(cursor) = delivery_cursor {
         cursor.delivered_output.clone_from(&output);
     } else {
@@ -399,8 +405,10 @@ pub(super) async fn wait_for_output(
             None => rendered,
         }
     };
-    let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
-    let (running_for, exit_code, shell_cwd, scratch, output_truncated) =
+    let (rendered, rendered_token_truncated) =
+        truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS);
+    let rendered = rendered.into_owned();
+    let (running_for, exit_code, shell_cwd, scratch, shell_output_truncated) =
         read_status_extras(shell, complete, expected_generation).await?;
     let cwd = shell_cwd.as_deref().unwrap_or(&bash_state.cwd);
     let state = status_state(background_id, !complete, running_for, exit_code, cwd, None);
@@ -411,7 +419,7 @@ pub(super) async fn wait_for_output(
         state,
         compact_output,
         Some(generation),
-        output_truncated,
+        shell_output_truncated || source_token_truncated || rendered_token_truncated,
     ))
 }
 
@@ -463,8 +471,11 @@ pub(super) fn finalize_tombstone(
         BashCommandAction::StatusCheck { .. }
         | BashCommandAction::Screen { .. }
         | BashCommandAction::WaitForTurn { .. } => {
-            let rendered = wcgw_incremental_text(final_output.as_ref(), "");
-            let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
+            let (rendered, source_token_truncated) =
+                wcgw_incremental_text(final_output.as_ref(), "");
+            let (rendered, rendered_token_truncated) =
+                truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS);
+            let rendered = rendered.into_owned();
             let state = status_state(Some(id), false, None, exit_code, &cwd, None);
             let pointer = scratch_pointer(output_truncated, scratch_path.as_deref());
             let status = render_status(bash_state, &state);
@@ -474,7 +485,7 @@ pub(super) fn finalize_tombstone(
                 state,
                 compact_output,
                 None,
-                output_truncated,
+                output_truncated || source_token_truncated || rendered_token_truncated,
             ))
         }
         BashCommandAction::SendText { .. }
@@ -546,7 +557,7 @@ pub(super) async fn execute_status_check(
     .await?;
 
     if !verbose && scrollback_lines.is_none() {
-        let (fingerprint, running_for, running, exit_code, cwd) = {
+        let (fingerprint, running_for, running, exit_code, cwd, output_truncated) = {
             let guard = shell.lock().await;
             let Some(shell) = guard.as_ref() else {
                 return Err(WinxError::BashStateNotInitialized);
@@ -557,6 +568,7 @@ pub(super) async fn execute_status_check(
                 shell.command_running,
                 (!shell.command_running).then_some(shell.last_exit_code).flatten(),
                 shell.current_cwd().to_path_buf(),
+                shell.output_truncated,
             )
         };
         let previous_hash = if let Some(cursor) = delivery_cursor.as_mut() {
@@ -574,7 +586,7 @@ pub(super) async fn execute_status_check(
                 state,
                 options.compact_output,
                 Some(generation),
-                false,
+                output_truncated,
             ));
         }
     } else if !verbose {
@@ -604,14 +616,22 @@ pub(super) async fn execute_status_check(
                 let count = scrollback.lines().count();
                 let mut response = response;
                 if let Some(output) = response.compact_output.as_mut() {
-                    *output = format!(
+                    let combined = format!(
                         "--- scrollback ({count} lines) ---\n{scrollback}\n--- latest ---\n{output}"
                     );
+                    let (rendered, truncated) =
+                        truncate_to_token_budget(&combined, MAX_OUTPUT_TOKENS);
+                    *output = rendered.into_owned();
+                    response.output_truncated |= truncated;
                 } else {
-                    response.result.output = format!(
+                    let combined = format!(
                         "--- scrollback ({count} lines) ---\n{scrollback}\n--- latest ---\n{}",
                         response.result.output
                     );
+                    let (rendered, truncated) =
+                        truncate_to_token_budget(&combined, MAX_OUTPUT_TOKENS);
+                    response.result.output = rendered.into_owned();
+                    response.output_truncated |= truncated;
                 }
                 return Ok(response);
             }
@@ -627,7 +647,8 @@ mod tests {
     #[test]
     fn token_budget_applies_below_the_byte_fallback_cap() {
         let input = "alpha beta gamma delta ".repeat(100);
-        let rendered = truncate_to_token_budget(&input, 20);
+        let (rendered, output_truncated) = truncate_to_token_budget(&input, 20);
+        assert!(output_truncated);
         assert!(rendered.starts_with("(...truncated)\n"));
         assert_ne!(rendered.as_ref(), input);
         let tail = rendered.strip_prefix("(...truncated)\n").unwrap_or_default();

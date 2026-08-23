@@ -63,14 +63,15 @@ pub(super) async fn execute_screen(
             None,
         );
         let status = render_status(bash_state, &state);
-        let body = match update {
-            ScreenUpdate::Unchanged => "(no change since last screen)".to_string(),
+        let (body, output_truncated) = match update {
+            ScreenUpdate::Unchanged => ("(no change since last screen)".to_string(), false),
             ScreenUpdate::Diff(changed) => {
                 let mut output = String::from("(changed lines only)\n");
                 for (row, content) in changed {
                     let _ = writeln!(output, "{row:>4}: {content}");
                 }
-                output
+                let (output, truncated) = truncate_to_token_budget(&output, MAX_OUTPUT_TOKENS);
+                (output.into_owned(), truncated)
             }
             ScreenUpdate::Full(snapshot) => render_snapshot(&snapshot),
         };
@@ -82,7 +83,7 @@ pub(super) async fn execute_screen(
             state,
             compact_output,
             None,
-            false,
+            output_truncated,
         ));
     }
 
@@ -106,7 +107,7 @@ pub(super) async fn execute_screen(
         }
     };
 
-    let body = render_snapshot(&snapshot);
+    let (body, output_truncated) = render_snapshot(&snapshot);
     let alt = if in_alt { " [alt-screen]" } else { "" };
     let (cursor_row, cursor_column) = cursor;
     let state = status_state(
@@ -124,16 +125,17 @@ pub(super) async fn execute_screen(
         state,
         compact_output,
         None,
-        false,
+        output_truncated,
     ))
 }
 
-fn render_snapshot(snapshot: &[String]) -> String {
+fn render_snapshot(snapshot: &[String]) -> (String, bool) {
     let joined = snapshot.join("\n");
     if joined.trim().is_empty() {
-        "(screen is empty)".to_string()
+        ("(screen is empty)".to_string(), false)
     } else {
-        truncate_to_token_budget(&joined, MAX_OUTPUT_TOKENS).into_owned()
+        let (rendered, truncated) = truncate_to_token_budget(&joined, MAX_OUTPUT_TOKENS);
+        (rendered.into_owned(), truncated)
     }
 }
 
@@ -261,7 +263,7 @@ pub(super) async fn execute_wait_for_turn(
             timed_out,
             wait_through_busy,
         ) {
-            let body = render_snapshot(&snapshot);
+            let (body, output_truncated) = render_snapshot(&snapshot);
             let alt = if in_alt { " [alt-screen]" } else { "" };
             let header = format!(
                 "--- turn: {} ({}, recognizer={}, waited {:.1}s){} ---",
@@ -286,7 +288,7 @@ pub(super) async fn execute_wait_for_turn(
                 result_state,
                 compact_output,
                 None,
-                false,
+                output_truncated,
             ));
         }
 
@@ -296,7 +298,7 @@ pub(super) async fn execute_wait_for_turn(
 
 #[cfg(test)]
 mod tests {
-    use super::wait_turn_outcome;
+    use super::{render_snapshot, wait_turn_outcome};
     use crate::state::turn::TurnState;
     use std::time::Duration;
 
@@ -392,5 +394,13 @@ mod tests {
             call(TurnState::Unknown, Duration::ZERO, Duration::ZERO, false, false, false,),
             None
         );
+    }
+
+    #[test]
+    fn screen_and_wait_snapshot_report_token_budget_truncation() {
+        let snapshot = vec!["token-budget ".repeat(50_000)];
+        let (rendered, output_truncated) = render_snapshot(&snapshot);
+        assert!(output_truncated);
+        assert!(rendered.starts_with("(...truncated)\n"));
     }
 }
