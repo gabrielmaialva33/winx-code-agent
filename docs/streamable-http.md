@@ -4,9 +4,9 @@
   <b>English</b> • <a href="streamable-http.pt.md">Português</a> • <a href="streamable-http.zh.md">中文</a>
 </p>
 
-Winx exposes its full MCP toolset through an authenticated **Streamable HTTP** endpoint for ChatGPT, hosted agents,
-remote automation, and clients that cannot launch a local stdio process. The endpoint is `/mcp`; the default listener is
-`127.0.0.1:8000`.
+Winx exposes a configurable MCP toolset through an authenticated **Streamable HTTP** endpoint for ChatGPT, hosted
+agents, remote automation, and clients that cannot launch a local stdio process. The endpoint is `/mcp`; the default
+listener is `127.0.0.1:8000`, and the default tool profile remains `full`.
 
 The endpoint grants real shell and filesystem capabilities. Winx therefore fails closed: it requires a strong credential,
 refuses non-loopback binding unless explicitly acknowledged, bounds request cost, and isolates authenticated principals.
@@ -225,14 +225,17 @@ Create a TOML file:
 [[principals]]
 name = "chatgpt"
 token_file = "/home/alice/.config/winx-chatgpt-token"
+tool_profile = "coding"
 
 [[principals]]
 name = "automation"
 token_file = "/home/alice/.config/winx-automation-token"
+tool_profile = "terminal"
 
 [[principals]]
 name = "ci"
 token_env = "WINX_CI_MCP_TOKEN"
+allowed_tools = ["Initialize", "BashCommand", "ReadFiles"]
 ```
 
 Then start:
@@ -251,10 +254,41 @@ Principal rules:
 - token files must be regular non-symlink files;
 - Unix token-file permissions must exclude group and other access;
 - tokens must contain at least 32 bytes unless `--allow-weak-token` is explicitly enabled for local testing.
+- `tool_profile` defaults to `full`; `allowed_tools`, when present, is an exact replacement and cannot be empty;
+- allowlist names are case-sensitive and unknown tools prevent startup.
 
 Thread IDs and MCP Task IDs are scoped before they reach the shared service. Normal results, structured content, Task
 results, and errors are translated back before leaving the server. A principal cannot get, update, or cancel another
 principal's Task.
+
+### Tool catalog profiles
+
+Profiles reduce the `tools/list` schema payload for clients that do not need every capability. Winx also checks the same
+policy before dispatch, so a client cannot call a hidden tool by name.
+
+| Profile     | Advertised tools                                                                                      |
+|-------------|-------------------------------------------------------------------------------------------------------|
+| `full`      | All nine tools (backward-compatible default)                                                          |
+| `coding`    | `Initialize`, `BashCommand`, `ReadFiles`, both edit tools, `UndoEdit`, and `CodeMap`                  |
+| `read-only` | `Initialize`, `ReadFiles`, `ReadImage`, and `CodeMap`                                                 |
+| `terminal`  | `Initialize` and `BashCommand`                                                                        |
+
+For a single-token server, select a profile on the command line:
+
+```bash
+winx-code-agent serve --http --token-file ~/.config/winx-http-token \
+  --tool-profile coding
+```
+
+Or construct an exact catalog by repeating `--allow-tool`; explicit names replace `--tool-profile`:
+
+```bash
+winx-code-agent serve --http --token-file ~/.config/winx-http-token \
+  --allow-tool Initialize --allow-tool BashCommand --allow-tool ReadFiles
+```
+
+Catalog policy is not a shell sandbox. Any profile containing `BashCommand` still grants the command capabilities of the
+initialized Winx mode and operating-system user.
 
 ## LLM orchestration contract
 
@@ -509,7 +543,9 @@ Winx intentionally does not trust forwarded-IP headers by default.
 | `--token-file <PATH>`         | Preferred single-principal credential source       |
 | `--principal-config <PATH>`   | Multi-principal TOML configuration                 |
 | `--token <VALUE>`             | Compatibility source; visible in process arguments |
-| `--session-affinity <MODE>`     | Select `workspace`, `conversation`, or caller-owned `thread` IDs |
+| `--tool-profile <PROFILE>`    | Single-principal catalog: `full`, `coding`, `read-only`, or `terminal` |
+| `--allow-tool <NAME>`         | Build an exact single-principal catalog; repeatable |
+| `--session-affinity <MODE>`   | Select `workspace`, `conversation`, or caller-owned `thread` IDs |
 | `--allow-weak-token`          | Permit a short token for local tests only          |
 | `--allow-non-loopback`        | Explicitly permit a non-loopback listener          |
 | `--allowed-host <HOST>`       | Extend accepted Host authorities; repeatable       |
@@ -639,8 +675,9 @@ Authentication separates clients; it does not make arbitrary shell execution har
 - leaked tokens should be rotated immediately;
 - remote access should be stopped when no longer needed.
 
-Winx does not currently provide built-in TLS, OAuth/OIDC, mTLS, or per-principal tool policy. Those controls belong at a
-reviewed network edge when required. Read [SECURITY.md](../SECURITY.md) before exposing a shell-capable principal.
+Winx does not currently provide built-in TLS, OAuth/OIDC, or mTLS. Those controls belong at a reviewed network edge when
+required. Per-principal tool policy narrows MCP discovery and dispatch but is not a substitute for transport security or
+an operating-system sandbox. Read [SECURITY.md](../SECURITY.md) before exposing a shell-capable principal.
 
 ## Verification coverage
 
@@ -651,6 +688,7 @@ Automated coverage includes:
 - public well-known probes returning 404 while `/mcp` remains authenticated;
 - rejection of non-loopback binding without acknowledgement;
 - rate limiting and duplicate-principal rejection;
+- per-principal tool discovery and dispatch enforcement;
 - modern stateless discovery and tool listing;
 - legacy HTTP session initialization;
 - MCP Task completion over HTTP;
