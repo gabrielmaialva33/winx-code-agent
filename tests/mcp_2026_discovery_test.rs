@@ -502,7 +502,7 @@ async fn single_principal_cli_allowlist_replaces_the_full_catalog() -> anyhow::R
             "_meta": modern_request_meta("allowlist-client", false),
             "name": "FileWriteOrEdit",
             "arguments": {
-                "file_path": forbidden_path,
+                "file_path": &forbidden_path,
                 "percentage_to_change": 100,
                 "text_or_search_replace_blocks": "content",
                 "verify_command": "true",
@@ -510,14 +510,9 @@ async fn single_principal_cli_allowlist_replaces_the_full_catalog() -> anyhow::R
             }
         }
     });
-    let forbidden = post_json_as(
-        address,
-        "2026-07-28",
-        "tools/call",
-        &forbidden.to_string(),
-        TEST_TOKEN,
-    )
-    .await?;
+    let forbidden =
+        post_json_as(address, "2026-07-28", "tools/call", &forbidden.to_string(), TEST_TOKEN)
+            .await?;
     let forbidden = response_json(&forbidden)?;
     assert!(
         forbidden["error"]["message"]
@@ -704,8 +699,7 @@ async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::
     assert!(passing["result"].get("isError").is_none(), "{passing}");
     assert_eq!(passing["result"]["structuredContent"]["status"], "completed", "{passing}");
     assert_eq!(
-        passing["result"]["structuredContent"]["data"]["verification_exit_code"],
-        0,
+        passing["result"]["structuredContent"]["data"]["verification_exit_code"], 0,
         "{passing}"
     );
     assert!(passing.to_string().contains("verify-ok"), "{passing}");
@@ -723,8 +717,7 @@ async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::
     assert_eq!(failing["result"]["isError"], true, "{failing}");
     assert_eq!(failing["result"]["structuredContent"]["status"], "failed", "{failing}");
     assert_eq!(
-        failing["result"]["structuredContent"]["errorCode"],
-        "verification_failed",
+        failing["result"]["structuredContent"]["errorCode"], "verification_failed",
         "{failing}"
     );
     assert_eq!(std::fs::read_to_string(&failing_path)?, "verified content\n");
