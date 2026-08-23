@@ -395,6 +395,7 @@ impl WinxService {
                     "code_writer_policy_strength": outcome.code_writer_policy_strength,
                     "shell_spawners_present": outcome.shell_spawners_present,
                     "temporary_artifact_dir": outcome.temporary_artifact_dir,
+                    "temporary_artifact_env": "WINX_TEMP_DIR",
                     "temporary_artifact_ttl_seconds": outcome.temporary_artifact_ttl_seconds,
                     "temporary_artifact_max_bytes": outcome.temporary_artifact_max_bytes,
                     "temporary_artifact_max_file_bytes": outcome.temporary_artifact_max_file_bytes,

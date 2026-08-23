@@ -559,6 +559,10 @@ fn assert_compact_initialize_response(
     assert_eq!(initialized_thread_id(response)?, expected_thread_id);
     let temporary_artifact_dir = initialized_temporary_artifact_dir(response)?;
     assert!(temporary_artifact_dir.contains("/.winx/tmp/session-"), "{response}");
+    assert_eq!(
+        parsed["result"]["structuredContent"]["data"]["temporary_artifact_env"], "WINX_TEMP_DIR",
+        "{response}"
+    );
     Ok(())
 }
 
