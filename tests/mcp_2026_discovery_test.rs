@@ -366,6 +366,37 @@ async fn bash_as(
     post_json_as(address, "2026-07-28", "tools/call", &request.to_string(), token).await
 }
 
+async fn write_with_verification(
+    address: std::net::SocketAddr,
+    thread_id: &str,
+    request_id: &str,
+    file_path: &Path,
+    verify_command: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("edit-verification-client", false),
+            "name": "FileWriteOrEdit",
+            "arguments": {
+                "file_path": file_path,
+                "percentage_to_change": 100,
+                "text_or_search_replace_blocks": "verified content\n",
+                "verify_command": verify_command,
+                "verify_wait_for_seconds": 5,
+                "thread_id": thread_id
+            }
+        }
+    });
+    let response = post_json(address, "2026-07-28", "tools/call", &request.to_string()).await?;
+    if !response.starts_with("HTTP/1.1 200") {
+        anyhow::bail!("edit verification failed at HTTP layer: {response}");
+    }
+    response_json(&response)
+}
+
 async fn pwd_as(
     address: std::net::SocketAddr,
     token: &str,
