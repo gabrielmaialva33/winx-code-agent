@@ -642,6 +642,71 @@ async fn recoverable_edit_failure_is_a_structured_tool_result() -> anyhow::Resul
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "edit-verification",
+        "edit-verification-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    let passing_path = workspace.path().join("passing.txt");
+    let passing = write_with_verification(
+        address,
+        &thread_id,
+        "passing-verification",
+        &passing_path,
+        "test -f passing.txt && printf verify-ok",
+    )
+    .await?;
+    assert!(passing["result"].get("isError").is_none(), "{passing}");
+    assert_eq!(passing["result"]["structuredContent"]["status"], "completed", "{passing}");
+    assert_eq!(
+        passing["result"]["structuredContent"]["data"]["verification_exit_code"],
+        0,
+        "{passing}"
+    );
+    assert!(passing.to_string().contains("verify-ok"), "{passing}");
+    assert_eq!(std::fs::read_to_string(&passing_path)?, "verified content\n");
+
+    let failing_path = workspace.path().join("failing.txt");
+    let failing = write_with_verification(
+        address,
+        &thread_id,
+        "failing-verification",
+        &failing_path,
+        "false",
+    )
+    .await?;
+    assert_eq!(failing["result"]["isError"], true, "{failing}");
+    assert_eq!(failing["result"]["structuredContent"]["status"], "failed", "{failing}");
+    assert_eq!(
+        failing["result"]["structuredContent"]["errorCode"],
+        "verification_failed",
+        "{failing}"
+    );
+    assert_eq!(std::fs::read_to_string(&failing_path)?, "verified content\n");
+
+    let rejected_path = workspace.path().join("rejected.txt");
+    let rejected = write_with_verification(
+        address,
+        &thread_id,
+        "rejected-verification",
+        &rejected_path,
+        "printf one; printf two",
+    )
+    .await?;
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    assert!(!rejected_path.exists(), "invalid verification must be rejected before editing");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn command_output_cannot_spoof_structured_running_state() -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
     let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
