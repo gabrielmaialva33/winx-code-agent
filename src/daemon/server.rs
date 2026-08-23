@@ -1246,12 +1246,14 @@ mod tests {
     use tokio::sync::{watch, Mutex};
 
     use super::{
-        canonical_action_fingerprint, configure_session, interrupt_session,
-        launch_cancellation_flag, run_action, validate_identifier, ActionCompletion, ActionEntry,
-        ActionOwnerGuard, CaptureState, DaemonSession, OutputJournal, MAX_SESSION_CACHE_ENTRIES,
+        canonical_action_fingerprint, configure_session, consume_launch_cancellation_flag,
+        interrupt_session, launch_cancellation_flag, run_action, validate_identifier,
+        ActionCompletion, ActionEntry, ActionOwnerGuard, CaptureState, DaemonSession,
+        OutputJournal, MAX_SESSION_CACHE_ENTRIES,
     };
     use crate::daemon::protocol::{
         ConfigureSessionParams, ConfigureSessionTransition, RunActionParams, SessionParams,
+        WireShellError,
     };
     use crate::errors::WinxError;
     use crate::runtime::ShellActionOptions;
