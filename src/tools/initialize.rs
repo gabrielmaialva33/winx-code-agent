@@ -52,6 +52,10 @@ pub(crate) struct InitializeOutcome {
     pub(crate) compact_response: bool,
     pub(crate) code_writer_policy_strength: Option<&'static str>,
     pub(crate) shell_spawners_present: bool,
+    pub(crate) temporary_artifact_dir: PathBuf,
+    pub(crate) temporary_artifact_ttl_seconds: u64,
+    pub(crate) temporary_artifact_max_bytes: u64,
+    pub(crate) temporary_artifact_max_file_bytes: u64,
 }
 
 /// Create a unique scratch workspace under the system temp dir, used when the
@@ -593,13 +597,31 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
         }
     }
 
-    if let Some(state) = bash_state_guard.as_ref() {
-        let _ = writeln!(
-            response,
-            "\nUse thread_id={thread_id} for all winx tool calls.\nUse workspace_root={} for all winx tool calls.\nBefore every reuse, confirm workspace_root still matches the user's current project. Keep this exact pair together. workspace_root identifies this project session; it does not restrict target paths allowed by policy.",
-            state.workspace_root.display()
-        );
-    }
+    let state = bash_state_guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+    let temporary_artifact = if compact_response {
+        crate::utils::agent_temp::session_info(&state.workspace_root, &state.current_thread_id)
+    } else {
+        crate::utils::agent_temp::prepare_session(&state.workspace_root, &state.current_thread_id)
+    };
+    let temporary_artifact_instruction = if compact_response {
+        format!(
+            "Use temporary_artifact_dir={} for session-local derived helpers.",
+            temporary_artifact.directory.display()
+        )
+    } else {
+        format!(
+            "Use temporary_artifact_dir={} for session-local derived helpers only; keep names \
+             short, preserve source-path/line provenance, and treat helpers as non-canonical. The \
+             directory is created on demand and expired after {} seconds of inactivity.",
+            temporary_artifact.directory.display(),
+            temporary_artifact.ttl_seconds,
+        )
+    };
+    let _ = writeln!(
+        response,
+        "\nUse thread_id={thread_id} for all winx tool calls.\nUse workspace_root={} for all winx tool calls.\n{temporary_artifact_instruction}\nBefore every reuse, confirm workspace_root still matches the user's current project. Keep this exact pair together. workspace_root identifies this project session; it does not restrict target paths allowed by policy.",
+        state.workspace_root.display(),
+    );
 
     let (code_writer_policy_strength, bypass) =
         bash_state_guard.as_ref().map_or((None, Vec::new()), active_code_writer_policy);
@@ -628,5 +650,9 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
         compact_response,
         code_writer_policy_strength,
         shell_spawners_present: !bypass.is_empty(),
+        temporary_artifact_dir: temporary_artifact.directory,
+        temporary_artifact_ttl_seconds: temporary_artifact.ttl_seconds,
+        temporary_artifact_max_bytes: temporary_artifact.max_total_bytes,
+        temporary_artifact_max_file_bytes: temporary_artifact.max_file_bytes,
     })
 }

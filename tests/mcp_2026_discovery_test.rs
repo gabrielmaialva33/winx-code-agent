@@ -533,6 +533,16 @@ fn initialized_workspace_root(response: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("Initialize response has no workspace_root: {response}"))
 }
 
+fn initialized_temporary_artifact_dir(response: &str) -> anyhow::Result<String> {
+    let response = response_json(response)?;
+    response["result"]["structuredContent"]["data"]["temporary_artifact_dir"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Initialize response has no temporary_artifact_dir: {response}")
+        })
+}
+
 fn assert_compact_initialize_response(
     response: &str,
     expected_thread_id: &str,
@@ -547,6 +557,8 @@ fn assert_compact_initialize_response(
         "{response}"
     );
     assert_eq!(initialized_thread_id(response)?, expected_thread_id);
+    let temporary_artifact_dir = initialized_temporary_artifact_dir(response)?;
+    assert!(temporary_artifact_dir.contains("/.winx/tmp/session-"), "{response}");
     Ok(())
 }
 

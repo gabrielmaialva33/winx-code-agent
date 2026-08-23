@@ -53,6 +53,12 @@ async fn test_initialize_first_call_wcgw_mode() -> Result<()> {
     // Verify response contains expected content
     assert!(response.contains("Initialized"));
     assert!(response.contains("thread_id"));
+    assert!(response.contains("temporary_artifact_dir="));
+    assert!(response.contains(".winx/tmp/session-"));
+    assert!(
+        !temp_dir.path().join(".winx/tmp").exists(),
+        "Initialize should advertise the path without polluting an unused workspace"
+    );
 
     // Verify bash state was set
     let state = bash_state_arc.lock().await;
@@ -129,6 +135,7 @@ async fn repeated_first_call_is_compact_and_preserves_the_active_mode() -> Resul
     .await?;
 
     assert!(repeated.contains("Context and instructions are unchanged"), "{repeated}");
+    assert!(repeated.contains("temporary_artifact_dir="), "{repeated}");
     assert!(!repeated.contains("large context marker"), "{repeated}");
     assert!(!repeated.contains("# Winx orchestration contract"), "{repeated}");
     assert!(repeated.len() * 4 < first.len(), "first={} repeated={}", first.len(), repeated.len());
