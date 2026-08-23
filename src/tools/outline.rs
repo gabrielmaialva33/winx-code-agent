@@ -426,8 +426,9 @@ mod tests {
     #[tokio::test]
     async fn repo_map_prunes_winx_but_explicit_helper_outline_remains_available() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(dir.path().join("main.py"), "def canonical():\n    pass\n").unwrap();
-        let helper = crate::utils::agent_temp::session_info(dir.path(), "helper-session")
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("main.py"), "def canonical():\n    pass\n").unwrap();
+        let helper = crate::utils::agent_temp::session_info(&root, "helper-session")
             .directory
             .join("review_adapter.py");
         std::fs::create_dir_all(helper.parent().unwrap()).unwrap();
@@ -438,7 +439,7 @@ mod tests {
         assert!(repo.contains("canonical"), "{repo}");
         assert!(!repo.contains("derived_review"), "{repo}");
 
-        let helper_relative = helper.strip_prefix(dir.path()).unwrap().to_string_lossy();
+        let helper_relative = helper.strip_prefix(&root).unwrap().to_string_lossy();
         let (explicit, _) = handle_tool_call(&st, args(&helper_relative)).await.unwrap();
         assert!(explicit.contains("derived_review"), "{explicit}");
     }
