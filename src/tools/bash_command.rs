@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
 use tracing::{error, info};
 
 pub use super::background_shell::{BackgroundShellManager, ExitedShellInfo};
@@ -32,6 +32,36 @@ use output::{execute_status_check, finalize_tombstone};
 use tui::{execute_screen, execute_wait_for_turn};
 
 type SharedPtyShell = Arc<Mutex<Option<PtyShell>>>;
+
+/// Guardian-only ownership of one session operation. Automatic PTY recovery
+/// promotes the reader to a writer, rotates the execution incarnation before
+/// replacing the shell, and then downgrades back to a reader.
+pub(crate) struct ShellResetTransition {
+    barrier: Arc<RwLock<()>>,
+    operation: Option<OwnedRwLockReadGuard<()>>,
+    session_epoch: Arc<Mutex<String>>,
+    next_epoch: String,
+}
+
+impl ShellResetTransition {
+    pub(crate) fn new(
+        barrier: Arc<RwLock<()>>,
+        operation: OwnedRwLockReadGuard<()>,
+        session_epoch: Arc<Mutex<String>>,
+        next_epoch: String,
+    ) -> Self {
+        Self { barrier, operation: Some(operation), session_epoch, next_epoch }
+    }
+
+    async fn reset_shell(&mut self, state: &mut BashState) -> Result<()> {
+        drop(self.operation.take());
+        let operation = Arc::clone(&self.barrier).write_owned().await;
+        *self.session_epoch.lock().await = self.next_epoch.clone();
+        let result = state.init_pty_shell().await;
+        self.operation = Some(operation.downgrade());
+        result
+    }
+}
 
 /// Authoritative process state produced by the shell runtime. It is transported
 /// separately from human-readable terminal output, so command text cannot spoof
@@ -209,9 +239,15 @@ pub(crate) async fn handle_embedded_tool_call(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
 ) -> Result<BashCommandResult> {
-    Ok(handle_embedded_tool_call_inner(bash_state, command, None, ShellActionOptions::default())
-        .await?
-        .result)
+    Ok(handle_embedded_tool_call_inner(
+        bash_state,
+        command,
+        None,
+        ShellActionOptions::default(),
+        None,
+    )
+    .await?
+    .result)
 }
 
 pub(crate) async fn handle_embedded_tool_call_detailed(
@@ -219,7 +255,7 @@ pub(crate) async fn handle_embedded_tool_call_detailed(
     command: BashCommand,
     options: ShellActionOptions,
 ) -> Result<BashCommandRuntimeResult> {
-    handle_embedded_tool_call_inner(bash_state, command, None, options).await
+    handle_embedded_tool_call_inner(bash_state, command, None, options, None).await
 }
 
 pub(crate) async fn handle_embedded_tool_call_with_cursor_detailed(
@@ -227,9 +263,17 @@ pub(crate) async fn handle_embedded_tool_call_with_cursor_detailed(
     command: BashCommand,
     delivery_cursor: &Arc<Mutex<ShellDeliveryCursor>>,
     options: ShellActionOptions,
+    reset_transition: Option<ShellResetTransition>,
 ) -> Result<BashCommandRuntimeResult> {
     let mut delivery_cursor = delivery_cursor.lock().await;
-    handle_embedded_tool_call_inner(bash_state, command, Some(&mut delivery_cursor), options).await
+    handle_embedded_tool_call_inner(
+        bash_state,
+        command,
+        Some(&mut delivery_cursor),
+        options,
+        reset_transition,
+    )
+    .await
 }
 
 async fn capture_embedded_state(
@@ -249,6 +293,7 @@ async fn handle_embedded_tool_call_inner(
     command: BashCommand,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
     options: ShellActionOptions,
+    reset_transition: Option<ShellResetTransition>,
 ) -> Result<BashCommandRuntimeResult> {
     let action_kind = match &command.action_json {
         BashCommandAction::Command { .. } => "command",
@@ -326,6 +371,7 @@ async fn handle_embedded_tool_call_inner(
         timeout_secs,
         delivery_cursor,
         options,
+        reset_transition,
     )
     .await;
 
@@ -385,6 +431,7 @@ async fn execute_bash_action(
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
     options: ShellActionOptions,
+    mut reset_transition: Option<ShellResetTransition>,
 ) -> Result<BashCommandRuntimeResult> {
     let mut is_background = false;
     let mut background_id: Option<String> = None;
@@ -439,6 +486,7 @@ async fn execute_bash_action(
                 timeout_secs,
                 delivery_cursor,
                 &options,
+                reset_transition.as_mut(),
             )
             .await
         }
