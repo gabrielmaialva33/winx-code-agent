@@ -317,8 +317,12 @@ The MCP handshake leads with a deterministic sequencing contract: initialize onc
 `CodeMap` before broad reads, batch `ReadFiles`, read before editing, compose related fail-fast checks with `&&`, and never
 repeat a rejected call unchanged. `Initialize` also returns a bounded `<workspace_root>/.winx/tmp/session-…/` directory
 for independently useful derived helpers. Those helpers remain non-canonical, preserve source-path/line provenance, and
-never encode payload in filesystem names or pollute the project root with `.winx-*`/`.winx_tmp` artifacts. A finite post-edit
-check can be supplied as `verify_command` on either edit tool, saving one network/model round trip. Extra
+never encode payload in filesystem names or pollute the project root with `.winx-*`/`.winx_tmp` artifacts. Every foreground
+and background PTY exports the exact directory as `WINX_TEMP_DIR`; statically visible shell writes that bypass it are
+rejected with `temporary_artifact_policy`. If `Initialize` returns `initialize_workspace_already_bound` or
+`workspace_change_requires_new_session`, that call is terminal for the current conversation: keep its bound pair for
+allowed absolute targets, or start a new conversation for a genuinely different project. A finite post-edit check can be
+supplied as `verify_command` on either edit tool, saving one network/model round trip. Extra
 `WINX_SERVER_INSTRUCTIONS` are appended after those stable rules and are also included in the `Initialize` response for
 clients that do not expose handshake instructions to the model.
 
