@@ -11,8 +11,9 @@ use tokio::sync::Mutex;
 
 use super::lifecycle::{GuardianLifecycle, GuardianLimits};
 use super::protocol::{
-    read_json_frame, write_json_frame, ConfigureSessionParams, HelloResult, JournalReadParams,
-    PruneParams, RpcError, RpcRequest, RpcResponse, RunActionParams, SessionInfo, SessionParams,
+    read_json_frame, write_json_frame, CancelActionParams, ConfigureSessionParams, HelloResult,
+    JournalReadParams, PruneParams, RpcError, RpcRequest, RpcResponse, RunActionParams,
+    SessionInfo, SessionParams, CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY,
     COMPACT_ACTION_OUTPUT_CAPABILITY, GENERATION_BOUND_ACTIONS_CAPABILITY, MAX_FRAME_BYTES,
     PROTOCOL_MAJOR, PROTOCOL_MINOR, TYPED_ACTION_RESULT_CAPABILITY,
 };
@@ -26,6 +27,7 @@ pub struct ControlServer {
     socket_path: PathBuf,
     lifecycle: Arc<GuardianLifecycle>,
     guardian_capabilities: Arc<Mutex<HashMap<PathBuf, CachedGuardian>>>,
+    guardian_negotiation_gates: Arc<Mutex<HashMap<PathBuf, GuardianNegotiationGate>>>,
     epoch: String,
 }
 
@@ -40,6 +42,11 @@ struct CachedGuardian {
 struct SocketIdentity {
     device: u64,
     inode: u64,
+}
+
+struct GuardianNegotiationGate {
+    gate: Arc<Mutex<()>>,
+    last_seen: Instant,
 }
 
 const MAX_GUARDIAN_NEGOTIATIONS: usize = 256;
@@ -79,6 +86,7 @@ impl ControlServer {
             socket_path,
             lifecycle,
             guardian_capabilities: Arc::new(Mutex::new(HashMap::new())),
+            guardian_negotiation_gates: Arc::new(Mutex::new(HashMap::new())),
             epoch: format!("{:016x}", rand::random::<u64>()),
         })
     }
@@ -93,10 +101,17 @@ impl ControlServer {
             }
             let lifecycle = self.lifecycle.clone();
             let guardian_capabilities = self.guardian_capabilities.clone();
+            let guardian_negotiation_gates = self.guardian_negotiation_gates.clone();
             let epoch = self.epoch.clone();
             tokio::spawn(async move {
-                if let Err(error) =
-                    serve_connection(stream, lifecycle, guardian_capabilities, epoch).await
+                if let Err(error) = serve_connection(
+                    stream,
+                    lifecycle,
+                    guardian_capabilities,
+                    guardian_negotiation_gates,
+                    epoch,
+                )
+                .await
                 {
                     tracing::debug!("winxd control client disconnected: {error}");
                 }
@@ -115,6 +130,7 @@ async fn serve_connection(
     mut stream: UnixStream,
     lifecycle: Arc<GuardianLifecycle>,
     guardian_capabilities: Arc<Mutex<HashMap<PathBuf, CachedGuardian>>>,
+    guardian_negotiation_gates: Arc<Mutex<HashMap<PathBuf, GuardianNegotiationGate>>>,
     epoch: String,
 ) -> Result<()> {
     loop {
@@ -123,7 +139,14 @@ async fn serve_connection(
             Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(()),
             Err(error) => return Err(error.into()),
         };
-        let response = dispatch(request, &lifecycle, &guardian_capabilities, &epoch).await;
+        let response = dispatch(
+            request,
+            &lifecycle,
+            &guardian_capabilities,
+            &guardian_negotiation_gates,
+            &epoch,
+        )
+        .await;
         write_json_frame(&mut stream, &response).await?;
     }
 }
@@ -133,6 +156,7 @@ async fn dispatch(
     mut request: RpcRequest,
     lifecycle: &GuardianLifecycle,
     guardian_capabilities: &Mutex<HashMap<PathBuf, CachedGuardian>>,
+    guardian_negotiation_gates: &Mutex<HashMap<PathBuf, GuardianNegotiationGate>>,
     epoch: &str,
 ) -> RpcResponse {
     if request.jsonrpc != "2.0" {
@@ -158,6 +182,7 @@ async fn dispatch(
                     TYPED_ACTION_RESULT_CAPABILITY.to_string(),
                     COMPACT_ACTION_OUTPUT_CAPABILITY.to_string(),
                     GENERATION_BOUND_ACTIONS_CAPABILITY.to_string(),
+                    CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY.to_string(),
                     "session.list".to_string(),
                     "session.read_output".to_string(),
                     "session.kill".to_string(),
@@ -206,6 +231,7 @@ async fn dispatch(
         return match negotiated_guardian(
             lifecycle,
             guardian_capabilities,
+            guardian_negotiation_gates,
             &thread_id,
             &guardian_socket,
             true,
@@ -229,6 +255,7 @@ async fn dispatch(
     let mut hello = match negotiated_guardian(
         lifecycle,
         guardian_capabilities,
+        guardian_negotiation_gates,
         &thread_id,
         &guardian_socket,
         create_if_missing,
@@ -269,6 +296,7 @@ async fn dispatch(
                 let refreshed = match negotiated_guardian(
                     lifecycle,
                     guardian_capabilities,
+                    guardian_negotiation_gates,
                     &thread_id,
                     &guardian_socket,
                     create_if_missing,
@@ -330,6 +358,7 @@ fn request_thread_id(request: &RpcRequest) -> Result<String> {
             decode::<ConfigureSessionParams>(request.params.clone())?.snapshot.chat_id
         }
         "shell.run_action" => decode::<RunActionParams>(request.params.clone())?.command.thread_id,
+        "shell.cancel_action" => decode::<CancelActionParams>(request.params.clone())?.thread_id,
         "session.read_output" => decode::<JournalReadParams>(request.params.clone())?.thread_id,
         "session.negotiate" | "session.info" | "session.kill" | "session.interrupt" => {
             decode::<SessionParams>(request.params.clone())?.thread_id
@@ -347,10 +376,16 @@ fn request_thread_id(request: &RpcRequest) -> Result<String> {
 async fn negotiated_guardian(
     lifecycle: &GuardianLifecycle,
     cache: &Mutex<HashMap<PathBuf, CachedGuardian>>,
+    gates: &Mutex<HashMap<PathBuf, GuardianNegotiationGate>>,
     thread_id: &str,
     socket: &Path,
     create_if_missing: bool,
 ) -> Result<HelloResult> {
+    if let Some(hello) = cached_guardian(cache, socket).await {
+        return Ok(hello);
+    }
+    let negotiation_gate = guardian_negotiation_gate(gates, socket).await?;
+    let _single_flight = negotiation_gate.lock().await;
     if let Some(hello) = cached_guardian(cache, socket).await {
         return Ok(hello);
     }
@@ -386,6 +421,45 @@ async fn cached_guardian(
 
 fn prune_guardian_cache(cache: &mut HashMap<PathBuf, CachedGuardian>, now: Instant) {
     cache.retain(|_, entry| now.duration_since(entry.last_seen) <= GUARDIAN_NEGOTIATION_TTL);
+}
+
+async fn guardian_negotiation_gate(
+    gates: &Mutex<HashMap<PathBuf, GuardianNegotiationGate>>,
+    socket: &Path,
+) -> Result<Arc<Mutex<()>>> {
+    let now = Instant::now();
+    let mut gates = gates.lock().await;
+    gates.retain(|_, entry| {
+        now.duration_since(entry.last_seen) <= GUARDIAN_NEGOTIATION_TTL
+            || Arc::strong_count(&entry.gate) > 1
+    });
+    if let Some(entry) = gates.get_mut(socket) {
+        entry.last_seen = now;
+        return Ok(Arc::clone(&entry.gate));
+    }
+    if gates.len() >= MAX_GUARDIAN_NEGOTIATIONS {
+        let oldest = gates
+            .iter()
+            .filter(|(_, entry)| Arc::strong_count(&entry.gate) == 1)
+            .min_by_key(|(_, entry)| entry.last_seen)
+            .map(|(path, _)| path.clone());
+        if let Some(oldest) = oldest {
+            gates.remove(&oldest);
+        }
+    }
+    if gates.len() >= MAX_GUARDIAN_NEGOTIATIONS {
+        return Err(WinxError::ResourceAllocationError {
+            message: format!(
+                "all {MAX_GUARDIAN_NEGOTIATIONS} guardian negotiation slots are active"
+            ),
+        });
+    }
+    let gate = Arc::new(Mutex::new(()));
+    gates.insert(
+        socket.to_path_buf(),
+        GuardianNegotiationGate { gate: Arc::clone(&gate), last_seen: now },
+    );
+    Ok(gate)
 }
 
 async fn cache_guardian(
@@ -452,6 +526,13 @@ fn normalize_guardian_request(request: &mut RpcRequest, hello: &HelloResult) -> 
                 "the running guardian does not support generation-bound shell actions".to_string(),
             ));
         }
+        if params.options.cancellation_key.is_some()
+            && !has(CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY)
+        {
+            return Err(WinxError::InvalidInput(
+                "the running guardian does not support cancellable action reservations".to_string(),
+            ));
+        }
         if !has(COMPACT_ACTION_OUTPUT_CAPABILITY) {
             params.options.compact_output = false;
         }
@@ -479,6 +560,22 @@ fn normalize_guardian_request(request: &mut RpcRequest, hello: &HelloResult) -> 
                 "the running guardian does not support generation-bound interruption".to_string(),
             ));
         }
+    } else if request.method == "shell.cancel_action" {
+        let params = decode::<CancelActionParams>(request.params.clone())?;
+        if !has(CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY) {
+            return Err(WinxError::InvalidInput(
+                "the running guardian does not support cancellable action reservations".to_string(),
+            ));
+        }
+        if params
+            .expected_guardian_epoch
+            .as_deref()
+            .is_some_and(|expected| expected != hello.daemon_epoch)
+        {
+            return Err(WinxError::InvalidInput(
+                "cancel precondition refers to a different effective guardian epoch".to_string(),
+            ));
+        }
     }
     Ok(())
 }
@@ -490,7 +587,8 @@ fn request_requires_live_guardian(request: &RpcRequest) -> Result<bool> {
             Ok(params.options.require_generation_binding
                 || params.options.expected_generation.is_some()
                 || params.options.expected_execution.is_some()
-                || params.options.expected_guardian_epoch.is_some())
+                || params.options.expected_guardian_epoch.is_some()
+                || params.options.cancellation_key.is_some())
         }
         "session.interrupt" => {
             let params = decode::<SessionParams>(request.params.clone())?;
@@ -498,6 +596,7 @@ fn request_requires_live_guardian(request: &RpcRequest) -> Result<bool> {
                 || params.expected_execution.is_some()
                 || params.expected_guardian_epoch.is_some())
         }
+        "shell.cancel_action" => Ok(true),
         _ => Ok(false),
     }
 }
@@ -769,6 +868,21 @@ mod tests {
             cache_guardian(&cache, PathBuf::from(format!("guardian-{index}.sock")), hello).await;
         }
         assert_eq!(cache.lock().await.len(), MAX_GUARDIAN_NEGOTIATIONS);
+    }
+
+    #[tokio::test]
+    async fn concurrent_cold_guardian_negotiation_uses_one_gate() {
+        let gates = Mutex::new(HashMap::new());
+        let socket = PathBuf::from("same-guardian.sock");
+        let (first, second) = tokio::join!(
+            guardian_negotiation_gate(&gates, &socket),
+            guardian_negotiation_gate(&gates, &socket)
+        );
+        assert!(Arc::ptr_eq(
+            &first.expect("first negotiation gate"),
+            &second.expect("concurrent negotiation gate")
+        ));
+        assert_eq!(gates.lock().await.len(), 1);
     }
 
     #[tokio::test]

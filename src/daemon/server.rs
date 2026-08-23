@@ -10,9 +10,10 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{watch, Mutex, Notify, RwLock};
 
 use super::protocol::{
-    read_json_frame, write_json_frame, ConfigureSessionParams, ConfigureSessionResult,
-    ConfigureSessionTransition, HelloResult, JournalRead, JournalReadParams, RpcError, RpcRequest,
-    RpcResponse, RunActionParams, RunActionResult, SessionInfo, SessionParams, WireShellError,
+    read_json_frame, write_json_frame, CancelActionParams, ConfigureSessionParams,
+    ConfigureSessionResult, ConfigureSessionTransition, HelloResult, JournalRead,
+    JournalReadParams, RpcError, RpcRequest, RpcResponse, RunActionParams, RunActionResult,
+    SessionInfo, SessionParams, WireShellError, CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY,
     COMPACT_ACTION_OUTPUT_CAPABILITY, GENERATION_BOUND_ACTIONS_CAPABILITY, MAX_FRAME_BYTES,
     PROTOCOL_MAJOR, PROTOCOL_MINOR, TYPED_ACTION_RESULT_CAPABILITY,
 };
@@ -30,10 +31,37 @@ struct TimedEntry<T> {
     last_seen: Instant,
 }
 
+type CachedActionResult = std::result::Result<RunActionResult, String>;
+
 #[derive(Clone)]
 enum ActionCompletion {
-    InFlight(Arc<watch::Sender<Option<std::result::Result<RunActionResult, String>>>>),
-    Complete(Box<std::result::Result<RunActionResult, String>>),
+    InFlight(Arc<watch::Sender<Option<CachedActionResult>>>),
+    Complete(Box<CachedActionResult>),
+}
+
+struct ActionOwnerGuard {
+    completion: Arc<watch::Sender<Option<CachedActionResult>>>,
+    armed: bool,
+}
+
+impl ActionOwnerGuard {
+    fn new(completion: Arc<watch::Sender<Option<CachedActionResult>>>) -> Self {
+        Self { completion, armed: true }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for ActionOwnerGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            self.completion.send_replace(Some(Err(
+                "single-flight shell action owner disappeared before completion".to_string(),
+            )));
+        }
+    }
 }
 
 struct ActionEntry {
@@ -54,6 +82,7 @@ struct DaemonSession {
     background_ids: Mutex<HashSet<String>>,
     command_id: Mutex<Option<String>>,
     delivery_cursors: Mutex<HashMap<String, TimedEntry<Arc<Mutex<ShellDeliveryCursor>>>>>,
+    launch_reservations: Mutex<HashMap<String, TimedEntry<Arc<AtomicBool>>>>,
     created_at_unix_ms: u64,
     last_activity_unix_ms: AtomicU64,
     last_command_at_unix_ms: AtomicU64,
@@ -75,6 +104,7 @@ impl DaemonSession {
             background_ids: Mutex::new(HashSet::new()),
             command_id: Mutex::new(None),
             delivery_cursors: Mutex::new(HashMap::new()),
+            launch_reservations: Mutex::new(HashMap::new()),
             created_at_unix_ms: now,
             last_activity_unix_ms: AtomicU64::new(now),
             last_command_at_unix_ms: AtomicU64::new(0),
@@ -104,6 +134,7 @@ const MAX_JOURNAL_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SESSION_CACHE_ENTRIES: usize = 256;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const SESSION_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+const ACTION_OWNER_TIMEOUT: Duration = Duration::from_secs(11 * 60);
 const DRAIN_CHANGED_INTERVAL: Duration = Duration::from_millis(20);
 const DRAIN_ACTIVE_INTERVAL: Duration = Duration::from_millis(100);
 const DRAIN_IDLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -152,6 +183,21 @@ fn evict_oldest_if_full<T>(entries: &mut HashMap<String, TimedEntry<T>>, incomin
     {
         entries.remove(&oldest);
     }
+}
+
+async fn launch_cancellation_flag(
+    session: &DaemonSession,
+    cancellation_key: &str,
+) -> Arc<AtomicBool> {
+    let now = Instant::now();
+    let mut reservations = session.launch_reservations.lock().await;
+    prune_timed_entries(&mut reservations, now);
+    evict_oldest_if_full(&mut reservations, cancellation_key);
+    let entry = reservations
+        .entry(cancellation_key.to_string())
+        .or_insert_with(|| TimedEntry { value: Arc::new(AtomicBool::new(false)), last_seen: now });
+    entry.last_seen = now;
+    Arc::clone(&entry.value)
 }
 
 fn validate_identifier(label: &str, value: &str) -> Result<()> {
@@ -294,6 +340,7 @@ async fn dispatch(
                     TYPED_ACTION_RESULT_CAPABILITY.to_string(),
                     COMPACT_ACTION_OUTPUT_CAPABILITY.to_string(),
                     GENERATION_BOUND_ACTIONS_CAPABILITY.to_string(),
+                    CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY.to_string(),
                     "session.list".to_string(),
                     "session.read_output".to_string(),
                     "session.kill".to_string(),
@@ -325,6 +372,28 @@ async fn dispatch(
             match run_action(sessions, params, epoch).await {
                 Ok(result) => rpc_result(request.id, &result),
                 Err(error) => rpc_error(request.id, -32603, &error.to_string()),
+            }
+        }
+        "shell.cancel_action" => {
+            let params: CancelActionParams = match serde_json::from_value(request.params) {
+                Ok(params) => params,
+                Err(error) => return rpc_error(request.id, -32602, &error.to_string()),
+            };
+            if params.expected_guardian_epoch.as_deref().is_some_and(|expected| expected != epoch) {
+                return rpc_result(request.id, &false);
+            }
+            if let Err(error) = validate_identifier("cancellation_key", &params.cancellation_key) {
+                return rpc_error(request.id, -32602, &error.to_string());
+            }
+            let session =
+                sessions.lock().await.get(&normalize_thread_id(&params.thread_id)).cloned();
+            match session {
+                Some(session) => {
+                    let flag = launch_cancellation_flag(&session, &params.cancellation_key).await;
+                    flag.store(true, Ordering::SeqCst);
+                    rpc_result(request.id, &true)
+                }
+                None => rpc_result(request.id, &false),
             }
         }
         "session.list" => {
@@ -510,11 +579,14 @@ async fn configure_session(
 #[allow(clippy::too_many_lines)] // session setup, execution, capture, and idempotent caching
 async fn run_action(
     sessions: &Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
-    params: RunActionParams,
+    mut params: RunActionParams,
     guardian_epoch: &str,
 ) -> Result<RunActionResult> {
     validate_identifier("request_key", &params.request_key)?;
     validate_identifier("consumer_id", &params.consumer_id)?;
+    if let Some(key) = params.options.cancellation_key.as_deref() {
+        validate_identifier("cancellation_key", key)?;
+    }
     let thread_id = normalize_thread_id(&params.command.thread_id);
     if thread_id.is_empty() {
         return Err(WinxError::ThreadIdMismatch(
@@ -522,85 +594,142 @@ async fn run_action(
         ));
     }
 
-    let fingerprint = serde_json::to_vec(&(
+    let session = {
+        let mut sessions = sessions.lock().await;
+        sessions.entry(thread_id.clone()).or_insert_with(|| Arc::new(DaemonSession::new())).clone()
+    };
+    if let Some(key) = params.options.cancellation_key.as_deref() {
+        params.options.launch_cancelled = Some(launch_cancellation_flag(&session, key).await);
+    }
+    let fingerprint = canonical_action_fingerprint(&params)?;
+
+    let request_key = params.request_key.clone();
+    let (completion, owner) = {
+        let mut completed = session.completed.lock().await;
+        let now = Instant::now();
+        prune_action_entries(&mut completed, now);
+        if let Some(entry) = completed.get_mut(&request_key) {
+            if entry.fingerprint != fingerprint {
+                return Err(WinxError::InvalidInput(
+                    "request_key was reused with different shell action parameters".to_string(),
+                ));
+            }
+            entry.last_seen = now;
+            match &entry.completion {
+                ActionCompletion::Complete(result) => {
+                    return cached_action_result((**result).clone())
+                }
+                ActionCompletion::InFlight(sender) => (Arc::clone(sender), false),
+            }
+        } else {
+            if !evict_oldest_action_if_full(&mut completed) {
+                return Err(WinxError::ResourceAllocationError {
+                    message: format!(
+                        "all {MAX_SESSION_CACHE_ENTRIES} shell action reservations are in flight; retry after one completes"
+                    ),
+                });
+            }
+            let completion = Arc::new(watch::channel(None).0);
+            completed.insert(
+                request_key.clone(),
+                ActionEntry {
+                    fingerprint,
+                    completion: ActionCompletion::InFlight(Arc::clone(&completion)),
+                    last_seen: now,
+                },
+            );
+            (completion, true)
+        }
+    };
+
+    if owner {
+        let owner_session = Arc::clone(&session);
+        let owner_epoch = guardian_epoch.to_string();
+        let owner_completion = Arc::clone(&completion);
+        tokio::spawn(async move {
+            let mut owner_guard = ActionOwnerGuard::new(Arc::clone(&owner_completion));
+            let outcome = match tokio::time::timeout(
+                ACTION_OWNER_TIMEOUT,
+                execute_action(&owner_session, params, &owner_epoch),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => Err(WinxError::CommandTimeout {
+                    command: "guardian shell action".to_string(),
+                    timeout_seconds: ACTION_OWNER_TIMEOUT.as_secs(),
+                }),
+            };
+            let cached = outcome.map_err(|error| error.to_string());
+            complete_action(&owner_session, &request_key, cached, &owner_completion).await;
+            owner_guard.disarm();
+        });
+    }
+
+    wait_for_action_completion(completion.subscribe()).await
+}
+
+fn cached_action_result(cached: CachedActionResult) -> Result<RunActionResult> {
+    cached.map_err(WinxError::CommandExecutionError)
+}
+
+async fn wait_for_action_completion(
+    mut completion: watch::Receiver<Option<CachedActionResult>>,
+) -> Result<RunActionResult> {
+    loop {
+        if let Some(result) = completion.borrow().clone() {
+            return cached_action_result(result);
+        }
+        if completion.changed().await.is_err() {
+            return Err(WinxError::CommandExecutionError(
+                "single-flight shell action owner disappeared".to_string(),
+            ));
+        }
+    }
+}
+
+async fn complete_action(
+    session: &DaemonSession,
+    request_key: &str,
+    cached: CachedActionResult,
+    completion: &watch::Sender<Option<CachedActionResult>>,
+) {
+    {
+        let mut completed = session.completed.lock().await;
+        if let Some(entry) = completed.get_mut(request_key) {
+            entry.completion = ActionCompletion::Complete(Box::new(cached.clone()));
+            entry.last_seen = Instant::now();
+        }
+    }
+    completion.send_replace(Some(cached));
+}
+
+fn canonical_action_fingerprint(params: &RunActionParams) -> Result<Vec<u8>> {
+    let value = serde_json::to_value((
         &params.snapshot,
         &params.command,
         &params.consumer_id,
         &params.options,
     ))
     .map_err(|error| WinxError::SerializationError(error.to_string()))?;
-    let session = {
-        let mut sessions = sessions.lock().await;
-        sessions.entry(thread_id.clone()).or_insert_with(|| Arc::new(DaemonSession::new())).clone()
-    };
+    serde_json::to_vec(&canonical_json(value))
+        .map_err(|error| WinxError::SerializationError(error.to_string()))
+}
 
-    loop {
-        let claim = {
-            let mut completed = session.completed.lock().await;
-            prune_action_entries(&mut completed, Instant::now());
-            if let Some(entry) = completed.get_mut(&params.request_key) {
-                if entry.fingerprint != fingerprint {
-                    return Err(WinxError::InvalidInput(
-                        "request_key was reused with different shell action parameters".to_string(),
-                    ));
-                }
-                entry.last_seen = Instant::now();
-                Some(entry.completion.clone())
-            } else {
-                evict_oldest_action_if_full(&mut completed);
-                completed.insert(
-                    params.request_key.clone(),
-                    ActionEntry {
-                        fingerprint: fingerprint.clone(),
-                        completion: ActionCompletion::InFlight(Arc::new(watch::channel(None).0)),
-                        last_seen: Instant::now(),
-                    },
-                );
-                None
-            }
-        };
-        match claim {
-            None => break,
-            Some(ActionCompletion::Complete(result)) => match *result {
-                Ok(result) => return Ok(result),
-                Err(error) => return Err(WinxError::CommandExecutionError(error)),
-            },
-            Some(ActionCompletion::InFlight(sender)) => {
-                let mut receiver = sender.subscribe();
-                if receiver.borrow().is_none() && receiver.changed().await.is_err() {
-                    return Err(WinxError::CommandExecutionError(
-                        "single-flight shell action owner disappeared".to_string(),
-                    ));
-                }
-            }
+fn canonical_json(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonical_json).collect())
         }
+        serde_json::Value::Object(values) => {
+            let mut entries = values.into_iter().collect::<Vec<_>>();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            serde_json::Value::Object(
+                entries.into_iter().map(|(key, value)| (key, canonical_json(value))).collect(),
+            )
+        }
+        scalar => scalar,
     }
-
-    let request_key = params.request_key.clone();
-    let outcome = execute_action(&session, params, guardian_epoch).await;
-    let cached = match &outcome {
-        Ok(result) => Ok(result.clone()),
-        Err(error) => Err(error.to_string()),
-    };
-    let sender = {
-        let mut completed = session.completed.lock().await;
-        let Some(entry) = completed.get_mut(&request_key) else {
-            return Err(WinxError::CommandExecutionError(
-                "single-flight reservation disappeared before completion".to_string(),
-            ));
-        };
-        let sender = match &entry.completion {
-            ActionCompletion::InFlight(sender) => Some(Arc::clone(sender)),
-            ActionCompletion::Complete(_) => None,
-        };
-        entry.completion = ActionCompletion::Complete(Box::new(cached.clone()));
-        entry.last_seen = Instant::now();
-        sender
-    };
-    if let Some(sender) = sender {
-        let _ = sender.send(Some(cached));
-    }
-    outcome
 }
 
 #[allow(clippy::too_many_lines)]
@@ -739,23 +868,30 @@ async fn execute_action(
 
 fn prune_action_entries(entries: &mut HashMap<String, ActionEntry>, now: Instant) {
     entries.retain(|_, entry| {
-        matches!(entry.completion, ActionCompletion::InFlight(_))
-            || now.duration_since(entry.last_seen) <= SESSION_CACHE_TTL
+        !action_entry_is_terminal(entry) || now.duration_since(entry.last_seen) <= SESSION_CACHE_TTL
     });
 }
 
-fn evict_oldest_action_if_full(entries: &mut HashMap<String, ActionEntry>) {
+fn action_entry_is_terminal(entry: &ActionEntry) -> bool {
+    match &entry.completion {
+        ActionCompletion::Complete(_) => true,
+        ActionCompletion::InFlight(completion) => completion.borrow().is_some(),
+    }
+}
+
+fn evict_oldest_action_if_full(entries: &mut HashMap<String, ActionEntry>) -> bool {
     if entries.len() < MAX_SESSION_CACHE_ENTRIES {
-        return;
+        return true;
     }
     if let Some(oldest) = entries
         .iter()
-        .filter(|(_, entry)| matches!(entry.completion, ActionCompletion::Complete(_)))
+        .filter(|(_, entry)| action_entry_is_terminal(entry))
         .min_by_key(|(_, entry)| entry.last_seen)
         .map(|(key, _)| key.clone())
     {
         entries.remove(&oldest);
     }
+    entries.len() < MAX_SESSION_CACHE_ENTRIES
 }
 
 fn delivery_cursor_key(consumer_id: &str, action: &crate::types::BashCommandAction) -> String {
@@ -1045,14 +1181,19 @@ mod tests {
     #![allow(clippy::expect_used)]
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
-    use tokio::sync::Mutex;
+    use tokio::sync::{watch, Mutex};
 
     use super::{
-        run_action, validate_identifier, CaptureState, DaemonSession, OutputJournal,
-        MAX_SESSION_CACHE_ENTRIES,
+        canonical_action_fingerprint, configure_session, interrupt_session, run_action,
+        validate_identifier, ActionCompletion, ActionEntry, ActionOwnerGuard, CaptureState,
+        DaemonSession, OutputJournal, MAX_SESSION_CACHE_ENTRIES,
     };
-    use crate::daemon::protocol::RunActionParams;
+    use crate::daemon::protocol::{
+        ConfigureSessionParams, ConfigureSessionTransition, RunActionParams, SessionParams,
+    };
+    use crate::errors::WinxError;
     use crate::runtime::ShellActionOptions;
     use crate::state::bash_state::BashState;
     use crate::types::BashCommand;
@@ -1160,5 +1301,199 @@ mod tests {
         .await
         .expect_err("collision must fail");
         assert!(error.to_string().contains("different shell action parameters"));
+    }
+
+    #[test]
+    fn action_fingerprint_is_canonical_across_map_insertion_order() {
+        let mut first = BashState::new();
+        first.current_thread_id = "canonical".to_string();
+        first.whitelist_for_overwrite.insert(
+            "z".to_string(),
+            crate::state::bash_state::FileWhitelistData::new("z".into(), vec![(1, 1)], 1),
+        );
+        first.whitelist_for_overwrite.insert(
+            "a".to_string(),
+            crate::state::bash_state::FileWhitelistData::new("a".into(), vec![(1, 1)], 1),
+        );
+        let mut second = BashState::new();
+        second.current_thread_id = "canonical".to_string();
+        second.whitelist_for_overwrite.insert(
+            "a".to_string(),
+            crate::state::bash_state::FileWhitelistData::new("a".into(), vec![(1, 1)], 1),
+        );
+        second.whitelist_for_overwrite.insert(
+            "z".to_string(),
+            crate::state::bash_state::FileWhitelistData::new("z".into(), vec![(1, 1)], 1),
+        );
+
+        assert_eq!(
+            canonical_action_fingerprint(&action_params(&first, "printf stable", "key"))
+                .expect("first fingerprint"),
+            canonical_action_fingerprint(&action_params(&second, "printf stable", "key"))
+                .expect("second fingerprint")
+        );
+    }
+
+    #[tokio::test]
+    async fn action_cache_applies_backpressure_when_every_entry_is_in_flight() {
+        let state = BashState::new();
+        let session = Arc::new(DaemonSession::new());
+        {
+            let mut completed = session.completed.lock().await;
+            for index in 0..MAX_SESSION_CACHE_ENTRIES {
+                completed.insert(
+                    format!("working-{index}"),
+                    ActionEntry {
+                        fingerprint: vec![u8::try_from(index % 255).unwrap_or_default()],
+                        completion: ActionCompletion::InFlight(Arc::new(watch::channel(None).0)),
+                        last_seen: Instant::now(),
+                    },
+                );
+            }
+        }
+        let sessions =
+            Arc::new(Mutex::new(HashMap::from([(state.current_thread_id.clone(), session)])));
+        let error = run_action(
+            &sessions,
+            action_params(&state, "printf blocked", "overflow"),
+            "guardian-a",
+        )
+        .await
+        .expect_err("all-in-flight cache must reject new reservations");
+        assert!(matches!(error, WinxError::ResourceAllocationError { .. }));
+    }
+
+    #[tokio::test]
+    async fn abandoned_action_owner_notifies_waiters() {
+        let completion = Arc::new(watch::channel(None).0);
+        let receiver = completion.subscribe();
+        drop(ActionOwnerGuard::new(completion));
+        let error = super::wait_for_action_completion(receiver)
+            .await
+            .expect_err("abandoned owner must fail its waiters");
+        assert!(error.to_string().contains("owner disappeared"));
+    }
+
+    #[tokio::test]
+    async fn reset_is_atomic_with_action_status_and_interrupt_across_generation_collision() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut state = BashState::new();
+        state.cwd = temp.path().to_path_buf();
+        state.workspace_root = temp.path().to_path_buf();
+        state.current_thread_id = "atomic_reset".to_string();
+        let session = Arc::new(DaemonSession::new());
+        let sessions = Arc::new(Mutex::new(HashMap::from([(
+            state.current_thread_id.clone(),
+            Arc::clone(&session),
+        )])));
+        let held = session.operation_barrier.write().await;
+        let owner_sessions = Arc::clone(&sessions);
+        let first_params =
+            action_params(&state, "sh -c 'sleep 0.25; printf old-incarnation'", "old-action");
+        let first =
+            tokio::spawn(
+                async move { run_action(&owner_sessions, first_params, "guardian-a").await },
+            );
+
+        while !session.completed.lock().await.contains_key("old-action") {
+            tokio::task::yield_now().await;
+        }
+        // Let the owner reach the barrier while the test-held writer makes the
+        // queue ordering deterministic, then enqueue reset behind it.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let reset_sessions = Arc::clone(&sessions);
+        let reset_snapshot = state.snapshot();
+        let mut reset = tokio::spawn(async move {
+            configure_session(
+                &reset_sessions,
+                ConfigureSessionParams {
+                    snapshot: reset_snapshot,
+                    transition: ConfigureSessionTransition::Reset,
+                },
+            )
+            .await
+        });
+        drop(held);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut reset).await.is_err(),
+            "reset crossed an in-flight action's session barrier"
+        );
+
+        let first = tokio::time::timeout(Duration::from_secs(5), first)
+            .await
+            .expect("first action timeout")
+            .expect("first join")
+            .expect("first result");
+        let stale = first.execution_token.expect("old execution token");
+        tokio::time::timeout(Duration::from_secs(5), reset)
+            .await
+            .expect("reset timeout")
+            .expect("reset join")
+            .expect("reset result");
+
+        let mut new_action =
+            action_params(&state, "sh -c 'sleep 0.15; printf new-incarnation'", "new-action");
+        new_action.command.wait_for_seconds = Some(0.001);
+        let current = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_action(&sessions, new_action, "guardian-a"),
+        )
+        .await
+        .expect("new action timeout")
+        .expect("new action");
+        let current_token = current.execution_token.expect("current execution token");
+        assert_eq!(stale.generation, current_token.generation);
+        assert_ne!(stale.session_epoch, current_token.session_epoch);
+
+        let mut stale_status = action_params(&state, "printf unused", "stale-status");
+        stale_status.command = serde_json::from_value(serde_json::json!({
+            "action_json": {"type": "status_check", "status_check": true},
+            "thread_id": "atomic_reset",
+            "wait_for_seconds": 0.01
+        }))
+        .expect("status command");
+        stale_status.options.expected_generation = Some(stale.generation);
+        stale_status.options.expected_execution = Some(stale.clone());
+        assert!(tokio::time::timeout(
+            Duration::from_secs(5),
+            run_action(&sessions, stale_status, "guardian-a"),
+        )
+        .await
+        .expect("stale status timeout")
+        .is_err());
+
+        assert!(!interrupt_session(
+            &session,
+            &SessionParams {
+                thread_id: "atomic_reset".to_string(),
+                expected_generation: Some(stale.generation),
+                expected_execution: Some(stale),
+                expected_guardian_epoch: Some("guardian-a".to_string()),
+            },
+            "guardian-a",
+        )
+        .await
+        .expect("stale interrupt"));
+
+        let mut current_status = action_params(&state, "printf unused", "current-status");
+        current_status.command = serde_json::from_value(serde_json::json!({
+            "action_json": {"type": "status_check", "status_check": true},
+            "thread_id": "atomic_reset",
+            "wait_for_seconds": 1.0
+        }))
+        .expect("current status command");
+        current_status.options.expected_generation = Some(current_token.generation);
+        current_status.options.expected_execution = Some(current_token);
+        let drained = tokio::time::timeout(
+            Duration::from_secs(5),
+            run_action(&sessions, current_status, "guardian-a"),
+        )
+        .await
+        .expect("current status timeout")
+        .expect("current status");
+        assert!(
+            drained.output.as_deref().is_some_and(|output| output.contains("new-incarnation")),
+            "stale operations consumed or interrupted the new incarnation: {drained:?}"
+        );
     }
 }

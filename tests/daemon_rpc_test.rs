@@ -325,6 +325,10 @@ async fn assert_reset_changes_full_execution_identity(
     let current = second.execution_token.clone().ok_or_else(|| {
         WinxError::CommandExecutionError("missing second execution token".to_string())
     })?;
+    assert_eq!(
+        stale_token.generation, current.generation,
+        "the regression requires a numeric generation collision across incarnations"
+    );
     assert_ne!(stale_token.session_epoch, current.session_epoch);
     assert!(second.result.state.is_running(), "{second:?}");
     assert!(!runtime.interrupt_execution(state, Some(stale_token)).await?);
@@ -579,6 +583,73 @@ async fn daemon_cancel_uses_a_channel_independent_of_pending_status_output() -> 
     assert!(interrupted);
     let _ = tokio::time::timeout(Duration::from_secs(2), pending_status).await;
     let _ = DaemonClient::new(&socket).kill_session("daemon-independent-cancel").await;
+    server_task.abort();
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_multi_adapter_cancelled_queued_launch_never_creates_marker() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let socket_dir = TempDir::new()?;
+    let socket = socket_dir.path().join("winxd.sock");
+    let server = DaemonServer::bind(&socket).await?;
+    let server_task = tokio::spawn(server.serve());
+    let thread_id = "daemon-multi-adapter-cancel";
+    let state = initialized_state(&workspace, thread_id).await?;
+    let first_runtime = DaemonShellRuntime::with_consumer_id(&socket, "adapter-one");
+    first_runtime
+        .configure_session(
+            state.lock().await.as_mut().ok_or(WinxError::BashStateNotInitialized)?,
+            ShellSessionTransition::FirstCall,
+        )
+        .await?;
+
+    let first_state = Arc::clone(&state);
+    let first = tokio::spawn(async move {
+        first_runtime
+            .run_action_detailed(
+                &first_state,
+                foreground(thread_id, "sh -c 'sleep 0.4'", 0.6),
+                ShellActionOptions::default(),
+            )
+            .await
+    });
+
+    let cancellation_key = "queued-task-cancellation";
+    let marker = workspace.path().join("queued-task.marker");
+    let queued_runtime = DaemonShellRuntime::with_consumer_id(&socket, "adapter-two");
+    let queued_state = Arc::clone(&state);
+    let queued_command =
+        foreground(thread_id, &format!("printf forbidden > {}", marker.display()), 0.2);
+    let queued = tokio::spawn(async move {
+        queued_runtime
+            .run_action_detailed(
+                &queued_state,
+                queued_command,
+                ShellActionOptions {
+                    cancellation_key: Some(cancellation_key.to_string()),
+                    ..ShellActionOptions::default()
+                },
+            )
+            .await
+    });
+
+    // The cancellation endpoint records a tombstone even if it wins the race
+    // with remote reservation creation, making this deterministic across
+    // independently negotiated adapter channels.
+    let cancel_runtime = DaemonShellRuntime::with_consumer_id(&socket, "adapter-three");
+    assert!(
+        cancel_runtime.cancel_pending_action(&state, cancellation_key).await?,
+        "guardian did not record the pending launch cancellation"
+    );
+
+    first.await.map_err(|error| WinxError::CommandExecutionError(error.to_string()))??;
+    let queued =
+        queued.await.map_err(|error| WinxError::CommandExecutionError(error.to_string()))?;
+    assert!(queued.is_err(), "cancelled queued action unexpectedly launched");
+    assert!(!marker.exists(), "cancelled multi-adapter launch reached the PTY");
+
+    let _ = DaemonClient::new(&socket).kill_session(thread_id).await;
     server_task.abort();
     Ok(())
 }

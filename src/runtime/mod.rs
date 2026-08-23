@@ -85,6 +85,10 @@ pub struct ShellActionOptions {
     /// by an MCP Task and therefore cannot fall back to an unbound process.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub require_generation_binding: bool,
+    /// Stable key for cancelling a launch that is queued inside a remote
+    /// guardian before an execution token exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancellation_key: Option<String>,
     /// In-process launch gate. Skipped on the wire; control/guardian safety is
     /// represented by the serializable preconditions above.
     #[serde(skip)]
@@ -98,6 +102,7 @@ impl ShellActionOptions {
             && self.expected_execution.is_none()
             && self.expected_guardian_epoch.is_none()
             && !self.require_generation_binding
+            && self.cancellation_key.is_none()
     }
 
     pub(crate) fn is_launch_cancelled(&self) -> bool {
@@ -112,6 +117,7 @@ impl PartialEq for ShellActionOptions {
             && self.expected_execution == other.expected_execution
             && self.expected_guardian_epoch == other.expected_guardian_epoch
             && self.require_generation_binding == other.require_generation_binding
+            && self.cancellation_key == other.cancellation_key
     }
 }
 
@@ -205,6 +211,17 @@ pub trait ShellRuntime: Send + Sync {
         expected: Option<ShellExecutionToken>,
     ) -> ShellRuntimeBoolFuture<'a> {
         self.interrupt_generation(bash_state, expected.map(|token| token.generation))
+    }
+
+    /// Cancel a command that is reserved remotely but has not reached the PTY.
+    /// Embedded runtimes use the in-process cancellation flag and need no
+    /// additional reservation protocol.
+    fn cancel_pending_action<'a>(
+        &'a self,
+        _bash_state: &'a Arc<Mutex<Option<BashState>>>,
+        _cancellation_key: &'a str,
+    ) -> ShellRuntimeBoolFuture<'a> {
+        Box::pin(async { Ok(false) })
     }
 
     /// Release the runtime-owned resources for one logical session.

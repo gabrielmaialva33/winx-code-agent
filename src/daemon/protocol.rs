@@ -13,6 +13,7 @@ pub const PROTOCOL_MINOR: u16 = 5;
 pub const TYPED_ACTION_RESULT_CAPABILITY: &str = "typed_action_result";
 pub const COMPACT_ACTION_OUTPUT_CAPABILITY: &str = "compact_action_output";
 pub const GENERATION_BOUND_ACTIONS_CAPABILITY: &str = "generation_bound_actions";
+pub const CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY: &str = "cancellable_action_reservations";
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,6 +149,14 @@ pub(crate) struct SessionParams {
     pub expected_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_execution: Option<crate::runtime::ShellExecutionToken>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_guardian_epoch: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct CancelActionParams {
+    pub thread_id: String,
+    pub cancellation_key: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_guardian_epoch: Option<String>,
 }

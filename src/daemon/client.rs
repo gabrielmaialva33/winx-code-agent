@@ -7,10 +7,11 @@ use tokio::net::UnixStream;
 use tokio::sync::Mutex;
 
 use super::protocol::{
-    read_json_frame, write_json_frame, ConfigureSessionParams, ConfigureSessionResult,
-    ConfigureSessionTransition, HelloResult, JournalRead, JournalReadParams, PruneParams,
-    PruneResult, RpcRequest, RpcResponse, RunActionParams, RunActionResult, SessionInfo,
-    SessionParams, WireShellError, COMPACT_ACTION_OUTPUT_CAPABILITY,
+    read_json_frame, write_json_frame, CancelActionParams, ConfigureSessionParams,
+    ConfigureSessionResult, ConfigureSessionTransition, HelloResult, JournalRead,
+    JournalReadParams, PruneParams, PruneResult, RpcRequest, RpcResponse, RunActionParams,
+    RunActionResult, SessionInfo, SessionParams, WireShellError,
+    CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY, COMPACT_ACTION_OUTPUT_CAPABILITY,
     GENERATION_BOUND_ACTIONS_CAPABILITY, PROTOCOL_MAJOR, TYPED_ACTION_RESULT_CAPABILITY,
 };
 use crate::errors::{Result, WinxError};
@@ -34,11 +35,18 @@ pub struct DaemonShellRuntime {
 #[derive(Debug, Default)]
 struct NegotiationCache {
     sessions: HashMap<String, CachedNegotiation>,
+    gates: HashMap<String, NegotiationGate>,
 }
 
 #[derive(Debug)]
 struct CachedNegotiation {
     session: Arc<Mutex<NegotiatedSession>>,
+    last_seen: Instant,
+}
+
+#[derive(Debug)]
+struct NegotiationGate {
+    gate: Arc<Mutex<()>>,
     last_seen: Instant,
 }
 
@@ -243,6 +251,44 @@ impl DaemonClient {
         )
         .await
     }
+
+    async fn cancel_pending_action(&self, thread_id: &str, cancellation_key: &str) -> Result<bool> {
+        // Like interruption, prelaunch cancellation must not share the action
+        // channel that may itself be queued behind another foreground command.
+        let (mut stream, _) = self.connected_with_hello().await?;
+        let hello: HelloResult = DaemonShellRuntime::request(
+            &mut stream,
+            rand::random::<u64>(),
+            "session.negotiate",
+            serde_json::to_value(SessionParams {
+                thread_id: thread_id.to_string(),
+                expected_generation: None,
+                expected_execution: None,
+                expected_guardian_epoch: None,
+            })
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?,
+        )
+        .await?;
+        if !hello
+            .capabilities
+            .iter()
+            .any(|capability| capability == CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY)
+        {
+            return Ok(false);
+        }
+        DaemonShellRuntime::request(
+            &mut stream,
+            rand::random::<u64>(),
+            "shell.cancel_action",
+            serde_json::to_value(CancelActionParams {
+                thread_id: thread_id.to_string(),
+                cancellation_key: cancellation_key.to_string(),
+                expected_guardian_epoch: Some(hello.daemon_epoch),
+            })
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?,
+        )
+        .await
+    }
 }
 
 impl DaemonShellRuntime {
@@ -263,6 +309,18 @@ impl DaemonShellRuntime {
     }
 
     async fn negotiated_session(&self, thread_id: &str) -> Result<Arc<Mutex<NegotiatedSession>>> {
+        {
+            let now = Instant::now();
+            let mut cache = self.negotiations.lock().await;
+            prune_negotiations(&mut cache, now);
+            if let Some(entry) = cache.sessions.get_mut(thread_id) {
+                entry.last_seen = now;
+                return Ok(Arc::clone(&entry.session));
+            }
+        }
+
+        let negotiation_gate = self.negotiation_gate(thread_id).await?;
+        let _single_flight = negotiation_gate.lock().await;
         {
             let now = Instant::now();
             let mut cache = self.negotiations.lock().await;
@@ -310,6 +368,40 @@ impl DaemonShellRuntime {
         }
         cache_negotiation(&mut cache, thread_id, Arc::clone(&session), now);
         Ok(session)
+    }
+
+    async fn negotiation_gate(&self, thread_id: &str) -> Result<Arc<Mutex<()>>> {
+        let now = Instant::now();
+        let mut cache = self.negotiations.lock().await;
+        prune_negotiations(&mut cache, now);
+        if let Some(entry) = cache.gates.get_mut(thread_id) {
+            entry.last_seen = now;
+            return Ok(Arc::clone(&entry.gate));
+        }
+        if cache.gates.len() >= MAX_NEGOTIATED_SESSIONS {
+            let oldest = cache
+                .gates
+                .iter()
+                .filter(|(_, entry)| Arc::strong_count(&entry.gate) == 1)
+                .min_by_key(|(_, entry)| entry.last_seen)
+                .map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
+                cache.gates.remove(&oldest);
+            }
+        }
+        if cache.gates.len() >= MAX_NEGOTIATED_SESSIONS {
+            return Err(WinxError::ResourceAllocationError {
+                message: format!(
+                    "all {MAX_NEGOTIATED_SESSIONS} daemon negotiation slots are active"
+                ),
+            });
+        }
+        let gate = Arc::new(Mutex::new(()));
+        cache.gates.insert(
+            thread_id.to_string(),
+            NegotiationGate { gate: Arc::clone(&gate), last_seen: now },
+        );
+        Ok(gate)
     }
 
     async fn live_negotiated_session(
@@ -545,6 +637,9 @@ fn prune_negotiations(cache: &mut NegotiationCache, now: Instant) {
         now.duration_since(entry.last_seen) <= NEGOTIATION_TTL
             || Arc::strong_count(&entry.session) > 1
     });
+    cache.gates.retain(|_, entry| {
+        now.duration_since(entry.last_seen) <= NEGOTIATION_TTL || Arc::strong_count(&entry.gate) > 1
+    });
 }
 
 fn cache_negotiation(
@@ -616,10 +711,9 @@ impl ShellRuntime for DaemonShellRuntime {
                 .current_thread_id
                 .clone();
             let hello = self.negotiated_guardian(&thread_id).await?;
-            Ok(hello
-                .capabilities
+            Ok([GENERATION_BOUND_ACTIONS_CAPABILITY, CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY]
                 .iter()
-                .any(|capability| capability == GENERATION_BOUND_ACTIONS_CAPABILITY))
+                .all(|required| hello.capabilities.iter().any(|capability| capability == required)))
         })
     }
 
@@ -677,6 +771,25 @@ impl ShellRuntime for DaemonShellRuntime {
         })
     }
 
+    fn cancel_pending_action<'a>(
+        &'a self,
+        bash_state: &'a std::sync::Arc<tokio::sync::Mutex<Option<BashState>>>,
+        cancellation_key: &'a str,
+    ) -> ShellRuntimeBoolFuture<'a> {
+        Box::pin(async move {
+            let thread_id = bash_state
+                .lock()
+                .await
+                .as_ref()
+                .ok_or(WinxError::BashStateNotInitialized)?
+                .current_thread_id
+                .clone();
+            DaemonClient::new(&self.socket_path)
+                .cancel_pending_action(&thread_id, cancellation_key)
+                .await
+        })
+    }
+
     fn terminate_session<'a>(&'a self, thread_id: &'a str) -> ShellRuntimeUnitFuture<'a> {
         Box::pin(async move {
             let _ = DaemonClient::new(&self.socket_path).kill_session(thread_id).await?;
@@ -714,6 +827,11 @@ fn action_options_for_guardian(
     }
     if options.expected_generation.is_some() || options.require_generation_binding {
         options.expected_guardian_epoch = Some(hello.daemon_epoch.clone());
+    }
+    if options.cancellation_key.is_some() && !has(CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY) {
+        return Err(WinxError::InvalidInput(
+            "the running guardian does not support cancellable action reservations".to_string(),
+        ));
     }
     if !has(COMPACT_ACTION_OUTPUT_CAPABILITY) {
         options.compact_output = false;
@@ -865,10 +983,12 @@ mod tests {
         let mut state = BashState::new();
         state.current_thread_id = "legacy-guardian".to_string();
         let state = Arc::new(Mutex::new(Some(state)));
-        assert!(!runtime
-            .supports_generation_bound_actions_for(&state)
-            .await
-            .expect("capability probe"));
+        let (first_probe, concurrent_probe) = tokio::join!(
+            runtime.supports_generation_bound_actions_for(&state),
+            runtime.supports_generation_bound_actions_for(&state)
+        );
+        assert!(!first_probe.expect("first capability probe"));
+        assert!(!concurrent_probe.expect("concurrent capability probe"));
         assert!(!tokio::time::timeout(
             std::time::Duration::from_millis(100),
             runtime.supports_generation_bound_actions_for(&state),
