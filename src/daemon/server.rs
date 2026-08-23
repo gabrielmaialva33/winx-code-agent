@@ -1462,6 +1462,128 @@ mod tests {
         assert!(error.to_string().contains("different shell action parameters"));
     }
 
+    #[tokio::test]
+    async fn non_launching_action_paths_consume_unowned_cancellation_tombstones() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut state = BashState::new();
+        state.cwd = temp.path().to_path_buf();
+        state.workspace_root = temp.path().to_path_buf();
+        state.current_thread_id = "early_cancellation_cleanup".to_string();
+        let session = Arc::new(DaemonSession::new());
+        let sessions = Arc::new(Mutex::new(HashMap::from([(
+            state.current_thread_id.clone(),
+            Arc::clone(&session),
+        )])));
+
+        let mut replay = action_params(&state, "printf replay", "replay-request");
+        replay.options.cancellation_key = Some("replay-cancel".to_string());
+        run_action(&sessions, replay.clone(), "guardian-a").await.expect("initial replay action");
+        let replay_tombstone =
+            launch_cancellation_flag(&session, "replay-cancel").await.expect("replay tombstone");
+        replay_tombstone.store(true, Ordering::Release);
+        drop(replay_tombstone);
+        run_action(&sessions, replay, "guardian-a").await.expect("cached replay");
+        assert!(!session.launch_reservations.lock().await.contains_key("replay-cancel"));
+
+        let mut first_collision =
+            action_params(&state, "printf collision-one", "collision-request");
+        first_collision.options.cancellation_key = Some("collision-cancel".to_string());
+        run_action(&sessions, first_collision, "guardian-a")
+            .await
+            .expect("initial collision action");
+        let collision_tombstone = launch_cancellation_flag(&session, "collision-cancel")
+            .await
+            .expect("collision tombstone");
+        collision_tombstone.store(true, Ordering::Release);
+        drop(collision_tombstone);
+        let mut collision = action_params(&state, "printf collision-two", "collision-request");
+        collision.options.cancellation_key = Some("collision-cancel".to_string());
+        assert!(run_action(&sessions, collision, "guardian-a").await.is_err());
+        assert!(!session.launch_reservations.lock().await.contains_key("collision-cancel"));
+
+        {
+            let mut completed = session.completed.lock().await;
+            completed.clear();
+            for index in 0..MAX_SESSION_CACHE_ENTRIES {
+                completed.insert(
+                    format!("working-{index}"),
+                    ActionEntry {
+                        fingerprint: vec![u8::try_from(index % 255).unwrap_or_default()],
+                        cancellation_key: None,
+                        completion: ActionCompletion::InFlight(Arc::new(watch::channel(None).0)),
+                        last_seen: Instant::now(),
+                    },
+                );
+            }
+        }
+        let saturation_tombstone = launch_cancellation_flag(&session, "saturation-cancel")
+            .await
+            .expect("saturation tombstone");
+        saturation_tombstone.store(true, Ordering::Release);
+        drop(saturation_tombstone);
+        let mut saturated = action_params(&state, "printf blocked", "overflow-request");
+        saturated.options.cancellation_key = Some("saturation-cancel".to_string());
+        assert!(matches!(
+            run_action(&sessions, saturated, "guardian-a").await,
+            Err(WinxError::ResourceAllocationError { .. })
+        ));
+        assert!(!session.launch_reservations.lock().await.contains_key("saturation-cancel"));
+    }
+
+    #[tokio::test]
+    async fn action_waiter_does_not_consume_the_owners_cancellation_reservation() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let started = temp.path().join("single-flight-started.marker");
+        let release = temp.path().join("single-flight-release.marker");
+        let mut state = BashState::new();
+        state.cwd = temp.path().to_path_buf();
+        state.workspace_root = temp.path().to_path_buf();
+        state.current_thread_id = "waiter_cancellation_owner".to_string();
+        let session = Arc::new(DaemonSession::new());
+        let sessions = Arc::new(Mutex::new(HashMap::from([(
+            state.current_thread_id.clone(),
+            Arc::clone(&session),
+        )])));
+        let mut params = action_params(
+            &state,
+            &format!(
+                "sh -c 'touch {}; while [ ! -e {} ]; do sleep 0.01; done'",
+                started.display(),
+                release.display()
+            ),
+            "shared-cancel-request",
+        );
+        params.options.cancellation_key = Some("shared-cancel-key".to_string());
+
+        let owner_sessions = Arc::clone(&sessions);
+        let owner_params = params.clone();
+        let owner =
+            tokio::spawn(
+                async move { run_action(&owner_sessions, owner_params, "guardian-a").await },
+            );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("owner command never started");
+
+        let waiter_sessions = Arc::clone(&sessions);
+        let waiter =
+            tokio::spawn(async move { run_action(&waiter_sessions, params, "guardian-a").await });
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(
+            session.launch_reservations.lock().await.contains_key("shared-cancel-key"),
+            "a waiter consumed the owner's launch reservation"
+        );
+
+        std::fs::write(release, b"release").expect("release owner command");
+        owner.await.expect("owner join").expect("owner result");
+        waiter.await.expect("waiter join").expect("waiter result");
+        assert!(!session.launch_reservations.lock().await.contains_key("shared-cancel-key"));
+    }
+
     #[test]
     fn action_fingerprint_is_canonical_across_map_insertion_order() {
         let mut first = BashState::new();
