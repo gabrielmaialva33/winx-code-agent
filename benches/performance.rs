@@ -9,6 +9,13 @@ use tokio::sync::Mutex;
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::types::ReadFiles;
 
+fn or_abort<T, E>(result: Result<T, E>) -> T {
+    match result {
+        Ok(value) => value,
+        Err(_) => std::process::abort(),
+    }
+}
+
 fn generated_lines(count: usize, mut append: impl FnMut(&mut String, usize)) -> String {
     (0..count).fold(String::new(), |mut output, index| {
         append(&mut output, index);
@@ -86,8 +93,8 @@ fn benchmark_output_compression(criterion: &mut Criterion) {
 }
 
 fn benchmark_read_files_batch(criterion: &mut Criterion) {
-    let workspace = tempfile::tempdir().expect("create benchmark workspace");
-    let root = workspace.path().canonicalize().expect("canonicalize benchmark workspace");
+    let workspace = or_abort(tempfile::tempdir());
+    let root = or_abort(workspace.path().canonicalize());
     let payload = generated_lines(4_000, |output, index| {
         let _ = writeln!(
             output,
@@ -97,7 +104,7 @@ fn benchmark_read_files_batch(criterion: &mut Criterion) {
     let mut file_paths = Vec::new();
     for index in 0..8 {
         let path = root.join(format!("batch-{index}.rs"));
-        std::fs::write(&path, &payload).expect("write benchmark fixture");
+        or_abort(std::fs::write(&path, &payload));
         file_paths.push(path.to_string_lossy().into_owned());
     }
 
@@ -116,11 +123,12 @@ fn benchmark_read_files_batch(criterion: &mut Criterion) {
         file_paths,
         thread_id: "benchmark".to_string(),
     };
-    let runtime = tokio::runtime::Builder::new_multi_thread()
+    let runtime = or_abort(
+        tokio::runtime::Builder::new_multi_thread()
         .worker_threads(4)
         .enable_all()
         .build()
-        .expect("create benchmark runtime");
+    );
 
     let mut group = criterion.benchmark_group("read_files_batch");
     group.sample_size(20);
@@ -131,12 +139,12 @@ fn benchmark_read_files_batch(criterion: &mut Criterion) {
         std::env::set_var("WINX_READ_PARALLELISM", workers.to_string());
         group.bench_with_input(BenchmarkId::new("workers", workers), &workers, |bencher, _| {
             bencher.iter(|| {
-                let outcome = runtime
-                    .block_on(winx_code_agent::tools::read_files::handle_tool_call_detailed(
+                let outcome = or_abort(runtime.block_on(
+                    winx_code_agent::tools::read_files::handle_tool_call_detailed(
                         &bash_state,
                         request.clone(),
-                    ))
-                    .expect("read benchmark batch");
+                    ),
+                ));
                 black_box((outcome.successful_files, outcome.text.len()))
             });
         });
