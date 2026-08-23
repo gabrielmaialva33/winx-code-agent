@@ -1316,25 +1316,31 @@ mod tests {
 
         let revision = runtime.local_revision("local-revision").await.expect("revision");
         let captured = revision.load(Ordering::SeqCst);
-        {
-            let mut guard = state.lock().await;
-            // configure_remote performs this bump while its caller holds the
-            // same BashState lock.
-            revision.fetch_add(1, Ordering::SeqCst);
-            guard.as_mut().expect("state").cwd = PathBuf::from("/new-config-cwd");
-        }
-
-        assert!(
-            !runtime
+        let mut configure_guard = state.lock().await;
+        let apply_runtime = runtime.clone();
+        let apply_state = Arc::clone(&state);
+        let apply_revision = Arc::clone(&revision);
+        let stale_apply = tokio::spawn(async move {
+            apply_runtime
                 .apply_snapshot_if_current(
-                    &state,
+                    &apply_state,
                     "local-revision",
-                    &revision,
+                    &apply_revision,
                     captured,
                     &stale_snapshot,
                 )
                 .await
-        );
+        });
+        tokio::task::yield_now().await;
+
+        // configure_remote performs this bump while its caller holds the same
+        // BashState lock. The stale action writeback is already concurrent and
+        // waiting for that lock, so it must revalidate after configuration.
+        revision.fetch_add(1, Ordering::SeqCst);
+        configure_guard.as_mut().expect("state").cwd = PathBuf::from("/new-config-cwd");
+        drop(configure_guard);
+
+        assert!(!stale_apply.await.expect("stale writeback task"));
         assert_eq!(
             state.lock().await.as_ref().expect("state").cwd,
             PathBuf::from("/new-config-cwd")
