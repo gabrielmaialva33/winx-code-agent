@@ -4,7 +4,7 @@
   <a href="streamable-http.md">English</a> • <a href="streamable-http.pt.md">Português</a> • <b>中文</b>
 </p>
 
-Winx 通过经过身份验证的 **Streamable HTTP** 端点向 ChatGPT、云端智能体、远程自动化流程以及无法直接启动本地 stdio 进程的客户端公开其全部 MCP 工具集。端点统一为 `/mcp`，默认监听在 `127.0.0.1:8000`。
+Winx 通过经过身份验证的 **Streamable HTTP** 端点向 ChatGPT、云端智能体、远程自动化流程以及无法直接启动本地 stdio 进程的客户端公开可配置的 MCP 工具集。端点统一为 `/mcp`，默认监听在 `127.0.0.1:8000`，默认工具配置仍为 `full`。
 
 由于该端点提供了真实的 Shell 和文件系统控制能力，Winx 采取了**安全失败（Fail-Closed）**的设计策略：强制要求强凭证、除非显式声明否则拒绝非回环绑定、对请求资源消耗设置严格上限，并在不同主体之间进行严格的安全隔离。
 
@@ -179,14 +179,17 @@ openssl rand -hex 32 > ~/.config/winx-automation-token
 [[principals]]
 name = "chatgpt"
 token_file = "/home/alice/.config/winx-chatgpt-token"
+tool_profile = "coding"
 
 [[principals]]
 name = "automation"
 token_file = "/home/alice/.config/winx-automation-token"
+tool_profile = "terminal"
 
 [[principals]]
 name = "ci"
 token_env = "WINX_CI_MCP_TOKEN"
+allowed_tools = ["Initialize", "BashCommand", "ReadFiles"]
 ```
 
 启动服务：
@@ -200,9 +203,38 @@ winx-code-agent serve --http \
 主体规则要求：
 - 名称仅包含 ASCII 字母、数字、`_` 和 `-`；
 - 每个条目精确配置 `token_file` 或 `token_env` 之一；
-- 主体名称和 Token 必须全剧唯一；
+- 主体名称和 Token 必须全局唯一；
 - Token 文件必须为常规文件且权限为 `0600`；
-- Token 长度至少为 32 字节。
+- Token 长度至少为 32 字节；
+- `tool_profile` 默认为 `full`；若提供 `allowed_tools`，它将完全替代该配置且不得为空；
+- 工具名称区分大小写，未知名称会阻止服务启动。
+
+### 工具目录配置
+
+配置可为不需要全部能力的客户端缩小 `tools/list` Schema 载荷。Winx 在分发前也会执行同一策略，因此客户端无法按名称调用未公开的工具。
+
+| 配置 | 公开的工具 |
+| :--- | :--- |
+| `full` | 全部九个工具（向后兼容的默认值） |
+| `coding` | `Initialize`、`BashCommand`、`ReadFiles`、两个编辑工具、`UndoEdit` 和 `CodeMap` |
+| `read-only` | `Initialize`、`ReadFiles`、`ReadImage` 和 `CodeMap` |
+| `terminal` | `Initialize` 和 `BashCommand` |
+
+单主体服务可通过命令行选择配置：
+
+```bash
+winx-code-agent serve --http --token-file ~/.config/winx-http-token \
+  --tool-profile coding
+```
+
+也可以重复使用 `--allow-tool` 构造精确目录；显式名称会替代 `--tool-profile`：
+
+```bash
+winx-code-agent serve --http --token-file ~/.config/winx-http-token \
+  --allow-tool Initialize --allow-tool BashCommand --allow-tool ReadFiles
+```
+
+工具目录策略不是 Shell 沙箱。任何包含 `BashCommand` 的配置仍拥有已初始化 Winx 模式和操作系统用户所允许的命令能力。
 
 ## LLM 编排规范 (Orchestration Contract)
 
@@ -328,6 +360,8 @@ winx-code-agent serve --http \
 | `--bind <IP:PORT>` | 监听地址（默认 `127.0.0.1:8000`） |
 | `--token-file <PATH>` | 单主体 Token 文件路径 |
 | `--principal-config <PATH>` | 多主体 TOML 配置文件路径 |
+| `--tool-profile <PROFILE>` | 单主体目录：`full`、`coding`、`read-only` 或 `terminal` |
+| `--allow-tool <NAME>` | 构造精确的单主体目录；可重复使用 |
 | `--session-affinity <MODE>` | 亲和性模式：`workspace`、`conversation` 或 `thread` |
 | `--allow-weak-token` | 允许少于 32 字节的弱 Token（仅限测试） |
 | `--allow-non-loopback` | 允许绑定非回环网络地址 |
