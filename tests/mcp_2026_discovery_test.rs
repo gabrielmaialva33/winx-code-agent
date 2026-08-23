@@ -1771,20 +1771,7 @@ async fn http_principals_isolate_the_same_external_thread_id() -> anyhow::Result
     })
     .await?;
 
-    let left_tools = list_tools_as(address, LEFT_TOKEN, "left-catalog").await?;
-    let right_tools = list_tools_as(address, RIGHT_TOKEN, "right-catalog").await?;
-    let tool_names = |response: &serde_json::Value| {
-        response["result"]["tools"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|tool| tool["name"].as_str().map(ToString::to_string))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(tool_names(&left_tools), vec!["Initialize".to_string(), "BashCommand".to_string()]);
-    assert_eq!(left_tools["result"]["cacheScope"], "private", "{left_tools}");
-    assert_eq!(tool_names(&right_tools).len(), 9, "{right_tools}");
-    assert_eq!(right_tools["result"]["cacheScope"], "public", "{right_tools}");
+    assert_principal_tool_policies(address).await?;
 
     let shared_thread = "shared_external_thread";
     let left_initialize = initialize_modern_as(
@@ -1807,31 +1794,6 @@ async fn http_principals_isolate_the_same_external_thread_id() -> anyhow::Result
     assert!(right_initialize.starts_with("HTTP/1.1 200"), "{right_initialize}");
     assert!(left_initialize.contains(shared_thread), "{left_initialize}");
     assert!(right_initialize.contains(shared_thread), "{right_initialize}");
-
-    let forbidden = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": "left-forbidden-read",
-        "method": "tools/call",
-        "params": {
-            "_meta": modern_request_meta("left-client", false),
-            "name": "ReadFiles",
-            "arguments": {
-                "file_paths": [left_workspace.path()],
-                "thread_id": shared_thread
-            }
-        }
-    });
-    let forbidden =
-        post_json_as(address, "2026-07-28", "tools/call", &forbidden.to_string(), LEFT_TOKEN)
-            .await?;
-    let forbidden = response_json(&forbidden)?;
-    assert_eq!(forbidden["error"]["code"], -32600, "{forbidden}");
-    assert!(
-        forbidden["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("not available for this principal")),
-        "{forbidden}"
-    );
 
     let left_pwd = pwd_as(address, LEFT_TOKEN, shared_thread, "left-client").await?;
     let right_pwd = pwd_as(address, RIGHT_TOKEN, shared_thread, "right-client").await?;
