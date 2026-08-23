@@ -547,9 +547,7 @@ async fn embedded_reset_waits_for_atomic_action_before_changing_incarnation() ->
         .map_err(|error| WinxError::CommandExecutionError(error.to_string()))??
         .execution_token
         .ok_or_else(|| WinxError::CommandExecutionError("missing old token".into()))?;
-    reset
-        .await
-        .map_err(|error| WinxError::CommandExecutionError(error.to_string()))??;
+    reset.await.map_err(|error| WinxError::CommandExecutionError(error.to_string()))??;
 
     let current = EmbeddedShellRuntime
         .run_action_detailed(

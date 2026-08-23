@@ -305,7 +305,7 @@ async fn handle_embedded_tool_call_inner(
 
     lock_session_store().bind_main(&local_state.current_thread_id, &local_state.pty_shell);
     let timeout_secs = effective_wait_for_seconds(command.wait_for_seconds);
-    let result = execute_bash_action(
+    let mut result = execute_bash_action(
         &mut local_state,
         &command.action_json,
         timeout_secs,
@@ -314,37 +314,47 @@ async fn handle_embedded_tool_call_inner(
     )
     .await;
 
-    if let Some(state) = bash_state.lock().await.as_mut() {
-        state.cwd.clone_from(&local_state.cwd);
+    let completed_session_epoch = local_state.pty_shell.lock().await.as_ref().map_or_else(
+        || "uninitialized".to_string(),
+        |shell| format!("{:016x}", shell.incarnation()),
+    );
+    if let Ok(outcome) = &mut result {
+        if let Some(generation) = outcome.command_generation {
+            outcome.execution_token = Some(ShellExecutionToken {
+                guardian_epoch: "embedded".to_string(),
+                session_epoch: completed_session_epoch.clone(),
+                generation,
+            });
+        }
+        if let BashCommandAction::Command { ref command, .. } = command.action_json {
+            let command = command.trim();
+            if outcome.result.output.starts_with(command) {
+                outcome.result.output = outcome.result.output[command.len()..].to_string();
+            }
+            if outcome.compact_output.as_ref().is_some_and(|output| output.starts_with(command)) {
+                let output = outcome.compact_output.take().unwrap_or_default();
+                outcome.compact_output = Some(output[command.len()..].to_string());
+            }
+        }
     }
 
-    match result {
-        Ok(mut outcome) => {
-            if let Some(generation) = outcome.command_generation {
-                outcome.execution_token = Some(ShellExecutionToken {
-                    guardian_epoch: "embedded".to_string(),
-                    session_epoch: local_state.pty_shell.lock().await.as_ref().map_or_else(
-                        || "uninitialized".to_string(),
-                        |shell| format!("{:016x}", shell.incarnation()),
-                    ),
-                    generation,
-                });
-            }
-            if let BashCommandAction::Command { ref command, .. } = command.action_json {
-                let command = command.trim();
-                if outcome.result.output.starts_with(command) {
-                    outcome.result.output = outcome.result.output[command.len()..].to_string();
-                }
-                if outcome.compact_output.as_ref().is_some_and(|output| output.starts_with(command))
-                {
-                    let output = outcome.compact_output.take().unwrap_or_default();
-                    outcome.compact_output = Some(output[command.len()..].to_string());
-                }
-            }
-            Ok(outcome)
+    // Never wait for the public BashState mutex while holding the session
+    // operation barrier: configure_session callers already own that mutex
+    // before taking the write side. If reset won the race after this action,
+    // its new incarnation is authoritative and the completed action must not
+    // copy stale cwd state over it.
+    drop(_operation);
+    if let Some(state) = bash_state.lock().await.as_mut() {
+        let current_session_epoch = state.pty_shell.lock().await.as_ref().map_or_else(
+            || "uninitialized".to_string(),
+            |shell| format!("{:016x}", shell.incarnation()),
+        );
+        if current_session_epoch == completed_session_epoch {
+            state.cwd.clone_from(&local_state.cwd);
         }
-        Err(error) => Err(error),
     }
+
+    result
 }
 
 #[allow(clippy::too_many_lines)]
