@@ -217,6 +217,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn finds_python_and_elixir_definitions_and_calls() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("service.py"),
+            "def python_target():\n    return 1\n\npython_target()\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("worker.ex"),
+            "defmodule Worker do\n  def elixir_target(), do: :ok\n  def run(), do: elixir_target()\nend\n",
+        )
+        .unwrap();
+        let st = state_in(&dir);
+
+        let (_, python) = handle_tool_call(&st, args("python_target")).await.unwrap();
+        assert_eq!(python["definitions"], 1);
+        assert!(python["references"].as_u64().unwrap() >= 1, "{python}");
+
+        let (_, elixir) = handle_tool_call(&st, args("elixir_target")).await.unwrap();
+        assert_eq!(elixir["definitions"], 1);
+        assert!(elixir["references"].as_u64().unwrap() >= 1, "{elixir}");
+    }
+
+    #[tokio::test]
     async fn empty_name_errors() {
         let dir = TempDir::new().unwrap();
         let st = state_in(&dir);

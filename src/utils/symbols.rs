@@ -2,8 +2,9 @@
 //! `TAGS_QUERY` — the same engine GitHub uses for code navigation. We surface
 //! only definitions (functions, types, methods, ...), not references.
 //!
-//! 11 languages have a tags query (rust, js/ts, go, c, c++, java, ruby, c#, php,
-//! lua); the others (bash/css/html/json) have no code symbols and return empty.
+//! 13 languages have a tags query (rust, js/ts, python, elixir, go, c, c++, java,
+//! ruby, c#, php, lua); the others (bash/css/html/json) have no code symbols and
+//! return empty.
 
 use tree_sitter_tags::{TagsConfiguration, TagsContext};
 
@@ -33,6 +34,8 @@ fn lang_and_query(ext: &str) -> Option<(tree_sitter::Language, &'static str)> {
             (tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(), tree_sitter_typescript::TAGS_QUERY)
         }
         "tsx" => (tree_sitter_typescript::LANGUAGE_TSX.into(), tree_sitter_typescript::TAGS_QUERY),
+        "py" | "pyi" => (tree_sitter_python::LANGUAGE.into(), tree_sitter_python::TAGS_QUERY),
+        "ex" | "exs" => (tree_sitter_elixir::LANGUAGE.into(), tree_sitter_elixir::TAGS_QUERY),
         "go" => (tree_sitter_go::LANGUAGE.into(), tree_sitter_go::TAGS_QUERY),
         "c" | "h" => (tree_sitter_c::LANGUAGE.into(), tree_sitter_c::TAGS_QUERY),
         "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => {
@@ -133,5 +136,31 @@ mod tests {
         assert!(!supports("css"));
         assert!(supports("rs"));
         assert!(supports("ts"));
+        assert!(supports("py"));
+        assert!(supports("ex"));
+    }
+
+    #[test]
+    fn extracts_python_symbols() {
+        let mut ctx = TagsContext::new();
+        let cfg = config_for("py").expect("python config");
+        let src = "class Greeter:\n    def hello(self, name):\n        return name\n\ndef top():\n    return Greeter()\n";
+        let syms = extract(&mut ctx, &cfg, src);
+        let names: Vec<&str> = syms.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert!(names.contains(&"Greeter"), "got {names:?}");
+        assert!(names.contains(&"hello"), "got {names:?}");
+        assert!(names.contains(&"top"), "got {names:?}");
+    }
+
+    #[test]
+    fn extracts_elixir_symbols() {
+        let mut ctx = TagsContext::new();
+        let cfg = config_for("ex").expect("elixir config");
+        let src = "defmodule Demo do\n  def hello(name), do: name\n  defmacro traced(expr), do: expr\nend\n";
+        let syms = extract(&mut ctx, &cfg, src);
+        let names: Vec<&str> = syms.iter().map(|symbol| symbol.name.as_str()).collect();
+        assert!(names.contains(&"Demo"), "got {names:?}");
+        assert!(names.contains(&"hello"), "got {names:?}");
+        assert!(names.contains(&"traced"), "got {names:?}");
     }
 }

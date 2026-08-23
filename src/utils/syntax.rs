@@ -78,6 +78,10 @@ pub fn syntax_warning(path: &Path, content: &str) -> Option<String> {
             let language = tree_sitter_lua::LANGUAGE.into();
             tree_sitter_warning(content, &language, "Lua")
         }
+        "ex" | "exs" => {
+            let language = tree_sitter_elixir::LANGUAGE.into();
+            tree_sitter_warning(content, &language, "Elixir")
+        }
         // Python keeps the interpreter `compile()` check (not tree-sitter): the
         // tree-sitter-python grammar silently accepts IndentationError and py2
         // `print` statements, and indentation is *the* classic Python mistake —
@@ -256,5 +260,11 @@ mod tests {
     fn checks_php() {
         assert!(syntax_warning(Path::new("a.php"), "<?php echo 1; ?>\n").is_none());
         assert!(syntax_warning(Path::new("a.php"), "<?php echo (1; ?>\n").is_some());
+    }
+
+    #[test]
+    fn checks_elixir() {
+        assert!(syntax_warning(Path::new("worker.ex"), "defmodule Worker do\nend\n").is_none());
+        assert!(syntax_warning(Path::new("worker.ex"), "defmodule Worker do\n").is_some());
     }
 }
