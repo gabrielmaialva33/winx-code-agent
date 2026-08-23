@@ -377,48 +377,49 @@ pub async fn handle_tool_call_detailed(
                 )))
             });
             match result {
-            Ok((content, truncated, _, canon_path, line_range, file_hash, total_lines)) => {
-                successful_files = successful_files.saturating_add(1);
-                let entry = file_ranges_dict
-                    .entry(canon_path.clone())
-                    .or_insert_with(|| (Vec::new(), file_hash.clone(), total_lines));
-                entry.0.push(line_range);
-                entry.1 = file_hash;
-                entry.2 = total_lines;
-                let _ = write!(
-                    message,
-                    "\n{}{}\n```\n{content}\n```",
-                    clean_path,
-                    range_format(request.start_line_num, request.end_line_num)
-                );
-                stats_paths.push(PathBuf::from(&canon_path));
+                Ok((content, truncated, _, canon_path, line_range, file_hash, total_lines)) => {
+                    successful_files = successful_files.saturating_add(1);
+                    let entry = file_ranges_dict
+                        .entry(canon_path.clone())
+                        .or_insert_with(|| (Vec::new(), file_hash.clone(), total_lines));
+                    entry.0.push(line_range);
+                    entry.1 = file_hash;
+                    entry.2 = total_lines;
+                    let _ = write!(
+                        message,
+                        "\n{}{}\n```\n{content}\n```",
+                        request.clean_path,
+                        range_format(request.start_line_num, request.end_line_num)
+                    );
+                    stats_paths.push(PathBuf::from(&canon_path));
 
-                if truncated {
-                    let remaining = read_files
-                        .file_paths
-                        .len()
-                        .saturating_sub(request.index + 1);
-                    if remaining > 0 {
-                        let _ = write!(
-                            message,
-                            "\n\n(Not reading the remaining {remaining} file(s) due to the token \
-                             limit. Call ReadFiles again for them.)"
-                        );
+                    if truncated {
+                        let remaining = read_files
+                            .file_paths
+                            .len()
+                            .saturating_sub(request.index + 1);
+                        if remaining > 0 {
+                            let _ = write!(
+                                message,
+                                "\n\n(Not reading the remaining {remaining} file(s) due to the \
+                                 token limit. Call ReadFiles again for them.)"
+                            );
+                        }
+                        // `spawn_blocking` jobs already running cannot be cancelled,
+                        // but abort prevents queued work from starting. No result is
+                        // recorded or whitelisted unless it was returned to the caller.
+                        for (_, pending) in tasks {
+                            pending.abort();
+                        }
+                        break 'batches;
                     }
-                    // `spawn_blocking` jobs already running cannot be cancelled,
-                    // but abort prevents queued work from starting. No result is
-                    // recorded or whitelisted unless it was returned to the caller.
-                    for (_, pending) in tasks {
-                        pending.abort();
-                    }
-                    break 'batches;
+                }
+                Err(error) => {
+                    let _ =
+                        write!(message, "\nError reading {}: {error}", request.requested_path);
+                    errors.push(error);
                 }
             }
-            Err(error) => {
-                let _ = write!(message, "\nError reading {}: {error}", request.requested_path);
-                errors.push(error);
-            }
-        }
         }
     }
 

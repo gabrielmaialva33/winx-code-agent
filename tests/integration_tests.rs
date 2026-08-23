@@ -596,6 +596,10 @@ async fn test_read_files_multiple_files() -> Result<()> {
 
     assert!(response.contains("Content of file 1"));
     assert!(response.contains("Content of file 2"));
+    assert!(
+        response.find("Content of file 1") < response.find("Content of file 2"),
+        "parallel reads must preserve request order: {response}"
+    );
 
     Ok(())
 }
