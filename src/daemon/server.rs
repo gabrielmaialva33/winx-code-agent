@@ -1375,6 +1375,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::too_many_lines)] // One deterministic reset/action/interrupt schedule.
     async fn reset_is_atomic_with_action_status_and_interrupt_across_generation_collision() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let mut state = BashState::new();
@@ -1424,7 +1425,7 @@ mod tests {
             .expect("first action timeout")
             .expect("first join")
             .expect("first result");
-        let stale = first.execution_token.expect("old execution token");
+        let stale_execution = first.execution_token.expect("old execution token");
         tokio::time::timeout(Duration::from_secs(5), reset)
             .await
             .expect("reset timeout")
@@ -1442,8 +1443,8 @@ mod tests {
         .expect("new action timeout")
         .expect("new action");
         let current_token = current.execution_token.expect("current execution token");
-        assert_eq!(stale.generation, current_token.generation);
-        assert_ne!(stale.session_epoch, current_token.session_epoch);
+        assert_eq!(stale_execution.generation, current_token.generation);
+        assert_ne!(stale_execution.session_epoch, current_token.session_epoch);
 
         let mut stale_status = action_params(&state, "printf unused", "stale-status");
         stale_status.command = serde_json::from_value(serde_json::json!({
@@ -1452,8 +1453,8 @@ mod tests {
             "wait_for_seconds": 0.01
         }))
         .expect("status command");
-        stale_status.options.expected_generation = Some(stale.generation);
-        stale_status.options.expected_execution = Some(stale.clone());
+        stale_status.options.expected_generation = Some(stale_execution.generation);
+        stale_status.options.expected_execution = Some(stale_execution.clone());
         assert!(tokio::time::timeout(
             Duration::from_secs(5),
             run_action(&sessions, stale_status, "guardian-a"),
@@ -1466,8 +1467,8 @@ mod tests {
             &session,
             &SessionParams {
                 thread_id: "atomic_reset".to_string(),
-                expected_generation: Some(stale.generation),
-                expected_execution: Some(stale),
+                expected_generation: Some(stale_execution.generation),
+                expected_execution: Some(stale_execution),
                 expected_guardian_epoch: Some("guardian-a".to_string()),
             },
             "guardian-a",

@@ -285,7 +285,7 @@ async fn handle_embedded_tool_call_inner(
     }
 
     let operation_barrier = lock_session_store().operation_barrier(&thread_id);
-    let _operation = operation_barrier.read().await;
+    let operation_guard = operation_barrier.read().await;
 
     if let Some(expected) = options.expected_execution.as_ref() {
         if expected.guardian_epoch == "embedded" {
@@ -338,12 +338,20 @@ async fn handle_embedded_tool_call_inner(
         }
     }
 
-    // Never wait for the public BashState mutex while holding the session
-    // operation barrier: configure_session callers already own that mutex
-    // before taking the write side. If reset won the race after this action,
-    // its new incarnation is authoritative and the completed action must not
-    // copy stale cwd state over it.
-    drop(_operation);
+    drop(operation_guard);
+    sync_embedded_cwd_if_current(bash_state, &local_state, &completed_session_epoch).await;
+
+    result
+}
+
+async fn sync_embedded_cwd_if_current(
+    bash_state: &Arc<Mutex<Option<BashState>>>,
+    local_state: &BashState,
+    completed_session_epoch: &str,
+) {
+    // configure_session callers own BashState before taking the operation
+    // barrier. Acquire BashState only after releasing the read side above and
+    // never let a completed old incarnation overwrite reset's cwd.
     if let Some(state) = bash_state.lock().await.as_mut() {
         let current_session_epoch = state.pty_shell.lock().await.as_ref().map_or_else(
             || "uninitialized".to_string(),
@@ -353,8 +361,6 @@ async fn handle_embedded_tool_call_inner(
             state.cwd.clone_from(&local_state.cwd);
         }
     }
-
-    result
 }
 
 #[allow(clippy::too_many_lines)]
