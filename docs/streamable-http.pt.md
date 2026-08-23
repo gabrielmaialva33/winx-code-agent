@@ -247,7 +247,7 @@ modo Winx inicializado e do usuário do sistema operacional.
 
 ## Contrato de Orquestração com LLM
 
-O handshake inicial do MCP estabelece um contrato de orquestração sequencial determinístico: inicializar uma vez, manter o `thread_id` retornado, utilizar `CodeMap` antes de leituras extensas, agrupar leituras com `ReadFiles`, ler arquivos antes de editá-los e nunca repetir chamadas rejeitadas sem alterações.
+O handshake inicial do MCP estabelece um contrato de orquestração sequencial determinístico: inicializar uma vez, manter o `thread_id` retornado, utilizar `CodeMap` antes de leituras extensas, agrupar leituras com `ReadFiles`, ler arquivos antes de editá-los, compor verificações relacionadas e fail-fast com `&&` e nunca repetir chamadas rejeitadas sem alterações. Uma verificação finita pós-edição pode ser enviada como `verify_command` em qualquer uma das ferramentas de edição, economizando uma ida e volta entre rede e modelo.
 
 Cada ferramenta define um `outputSchema` e retorna um envelope `structuredContent`:
 
@@ -274,6 +274,13 @@ Cada ferramenta define um `outputSchema` e retorna um envelope `structuredConten
 ```
 
 Falhas recuperáveis retornam resposta com sucesso HTTP/JSON-RPC e `isError: true` no protocolo MCP, incluindo a próxima ação corretiva (`nextAction`).
+
+`FileWriteOrEdit` e `MultiFileEdit` aceitam `verify_command` e `verify_wait_for_seconds` opcionais (padrão `15`, máximo
+`60`). A verificação só roda depois de um commit bem-sucedido, em foreground e sob a mesma allowlist de modo do
+`BashCommand`. Exit code zero conclui o resultado combinado. Um exit code diferente de zero retorna `isError: true`,
+`errorCode: verification_failed` e `data.edit_applied: true`; o Winx nunca afirma falsamente que desfez a edição. Se a
+verificação continuar executando ao final da espera limitada, o resultado fornece a ação `status_check` normal do
+`BashCommand`. O principal precisa autorizar tanto a ferramenta de edição quanto `BashCommand` para usar essa opção.
 
 ## Ciclo de Vida do Guardian
 
