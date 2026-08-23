@@ -165,7 +165,7 @@ fn effective_wait_for_seconds(wait_for_seconds: Option<f32>) -> f64 {
 /// or foreground-command gates are acquired.
 pub(crate) async fn guardian_foreground_shell_needs_reset(
     bash_state: &mut BashState,
-    _options: &ShellActionOptions,
+    options: &ShellActionOptions,
 ) -> anyhow::Result<bool> {
     let shell = main_shell(bash_state);
     let (missing, running) = {
@@ -181,7 +181,9 @@ pub(crate) async fn guardian_foreground_shell_needs_reset(
     }
     let cleared = output::clear_to_run_async(&shell, DEFAULT_TIMEOUT).await;
     #[cfg(test)]
-    let cleared = cleared && !_options.force_clear_to_run_failure;
+    let cleared = cleared && !options.force_clear_to_run_failure;
+    #[cfg(not(test))]
+    let _ = options;
     Ok(!cleared)
 }
 

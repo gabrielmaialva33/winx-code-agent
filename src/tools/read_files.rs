@@ -386,6 +386,8 @@ pub async fn handle_tool_call_detailed(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::{read_file, trim_to_last_line_boundary};
     use crate::state::bash_state::FileWhitelistData;
 
@@ -403,52 +405,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn token_truncation_whitelists_only_complete_visible_lines() {
-        let temp = tempfile::tempdir().expect("temporary directory");
+    async fn token_truncation_whitelists_only_complete_visible_lines() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
         let path = temp.path().join("large.txt");
-        let source = (1..=200)
-            .map(|line| format!("line {line}: enough repeated content to consume tokens quickly\n"))
-            .collect::<String>();
-        std::fs::write(&path, source).expect("write fixture");
+        let mut source = String::new();
+        for line in 1..=200 {
+            writeln!(source, "line {line}: enough repeated content to consume tokens quickly")?;
+        }
+        std::fs::write(&path, source)?;
+        let path = path.to_str().ok_or_else(|| anyhow::anyhow!("fixture path is not UTF-8"))?;
 
-        let (content, truncated, _, _, range, hash, total_lines) = read_file(
-            path.to_str().expect("UTF-8 path"),
-            Some(50),
-            temp.path(),
-            temp.path(),
-            false,
-            None,
-            None,
-        )
-        .await
-        .expect("truncated read");
+        let (content, truncated, _, _, range, hash, total_lines) =
+            read_file(path, Some(50), temp.path(), temp.path(), false, None, None).await?;
 
         assert!(truncated);
-        let visible = content.split("\n(...truncated)").next().expect("visible prefix");
+        let visible = content
+            .split_once("\n(...truncated)")
+            .map(|(visible, _)| visible)
+            .ok_or_else(|| anyhow::anyhow!("truncation marker is missing"))?;
         let visible_lines = visible.lines().count();
         assert_eq!(range, (1, visible_lines));
         let coverage = FileWhitelistData::new(hash, vec![range], total_lines);
         assert!(!coverage.is_read_enough());
         assert_eq!(coverage.get_unread_ranges(), vec![(visible_lines + 1, total_lines)]);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn oversized_first_line_records_no_read_coverage() {
-        let temp = tempfile::tempdir().expect("temporary directory");
+    async fn oversized_first_line_records_no_read_coverage() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
         let path = temp.path().join("single-line.txt");
-        std::fs::write(&path, "x".repeat(10_000)).expect("write fixture");
+        std::fs::write(&path, "x".repeat(10_000))?;
+        let path = path.to_str().ok_or_else(|| anyhow::anyhow!("fixture path is not UTF-8"))?;
 
-        let (content, truncated, _, _, range, hash, total_lines) = read_file(
-            path.to_str().expect("UTF-8 path"),
-            Some(10),
-            temp.path(),
-            temp.path(),
-            false,
-            None,
-            None,
-        )
-        .await
-        .expect("truncated read");
+        let (content, truncated, _, _, range, hash, total_lines) =
+            read_file(path, Some(10), temp.path(), temp.path(), false, None, None).await?;
 
         assert!(truncated);
         assert!(content.starts_with("\n(...truncated) Showing up to line 0"));
@@ -456,5 +447,6 @@ mod tests {
         let coverage = FileWhitelistData::new(hash, vec![range], total_lines);
         assert!(coverage.line_ranges_read.is_empty());
         assert_eq!(coverage.get_unread_ranges(), vec![(1, 1)]);
+        Ok(())
     }
 }
