@@ -231,6 +231,46 @@ async fn list_tools_as(
     response_json(&response)
 }
 
+async fn assert_principal_tool_policies(address: std::net::SocketAddr) -> anyhow::Result<()> {
+    let left_tools = list_tools_as(address, LEFT_TOKEN, "left-catalog").await?;
+    let right_tools = list_tools_as(address, RIGHT_TOKEN, "right-catalog").await?;
+    let tool_names = |response: &serde_json::Value| {
+        response["result"]["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool["name"].as_str().map(ToString::to_string))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(tool_names(&left_tools), vec!["Initialize", "BashCommand"]);
+    assert_eq!(left_tools["result"]["cacheScope"], "private", "{left_tools}");
+    assert_eq!(tool_names(&right_tools).len(), 9, "{right_tools}");
+    assert_eq!(right_tools["result"]["cacheScope"], "public", "{right_tools}");
+
+    let forbidden = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "left-forbidden-read",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("left-client", false),
+            "name": "ReadFiles",
+            "arguments": { "file_paths": ["."], "thread_id": "policy-check" }
+        }
+    });
+    let forbidden =
+        post_json_as(address, "2026-07-28", "tools/call", &forbidden.to_string(), LEFT_TOKEN)
+            .await?;
+    let forbidden = response_json(&forbidden)?;
+    assert_eq!(forbidden["error"]["code"], -32600, "{forbidden}");
+    assert!(
+        forbidden["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("not available for this principal")),
+        "{forbidden}"
+    );
+    Ok(())
+}
+
 fn modern_request_meta_with_compact(
     client_name: &str,
     tasks: bool,
