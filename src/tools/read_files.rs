@@ -300,7 +300,7 @@ fn select_max_tokens(file_path: &str) -> usize {
     }
 }
 
-fn read_parallelism() -> usize {
+pub(crate) fn configured_parallelism() -> usize {
     parse_read_parallelism(crate::config::env_text("WINX_READ_PARALLELISM").as_deref())
 }
 
@@ -372,7 +372,7 @@ async fn execute_read_requests(
     // Files are independent, so perform blocking filesystem/tokenizer work in a
     // bounded pool. Results are still consumed in request order, preserving the
     // stable response and the rule that a truncated file stops the visible batch.
-    'batches: for batch in requests.chunks(read_parallelism()) {
+    'batches: for batch in requests.chunks(configured_parallelism()) {
         let mut tasks = Vec::with_capacity(batch.len());
         for request in batch.iter().cloned() {
             let worker_path = request.clean_path.clone();
