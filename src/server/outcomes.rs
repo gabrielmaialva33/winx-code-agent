@@ -110,7 +110,30 @@ pub(super) fn tool_failure(
         return Err(McpError::internal_error(format!("{tool} failed: {error}"), None));
     }
 
-    let text = format!("{tool} failed: {error}");
+    let text = match (tool, error) {
+        (
+            "Initialize",
+            WinxError::WorkspaceBindingMismatch { requested_workspace, bound_workspace, .. },
+        ) => format!(
+            "Initialize rejected: this conversation is already bound to {}. Do not call \
+             Initialize again for {}. Keep the existing thread_id/workspace_root pair; an \
+             allowed target outside that workspace can be accessed by its absolute path without \
+             rebinding. If the user truly intends a different project, start a new conversation \
+             or client session.",
+            bound_workspace.display(),
+            requested_workspace.display()
+        ),
+        ("Initialize", WinxError::WorkspaceChangeRequiresNewSession { workspace_root }) => {
+            format!(
+                "Initialize rejected: an existing remote conversation cannot change its project \
+                 identity in place to {}. Keep using the current binding for allowed external \
+                 paths, or start a new conversation/client session for that project. Do not \
+                 repeat this Initialize call.",
+                workspace_root.display()
+            )
+        }
+        _ => format!("{tool} failed: {error}"),
+    };
     let envelope = error_envelope(tool, error, arguments, text.clone());
     let mut result = CallToolResult::error(vec![ContentBlock::text(text)]);
     result.structured_content = serde_json::to_value(envelope).ok();
@@ -488,6 +511,22 @@ fn safe_success_data(
         if let Some(action) = bash_action(arguments) {
             data.insert("action".to_string(), Value::String(action));
         }
+        if let (Some(thread_id), Some(workspace_root)) =
+            (string_argument(arguments, "thread_id"), string_argument(arguments, "workspace_root"))
+        {
+            let temporary_artifact = crate::utils::agent_temp::session_info(
+                std::path::Path::new(&workspace_root),
+                &thread_id,
+            );
+            data.insert(
+                "temporary_artifact_dir".to_string(),
+                Value::String(temporary_artifact.directory.to_string_lossy().into_owned()),
+            );
+            data.insert(
+                "temporary_artifact_env".to_string(),
+                Value::String("WINX_TEMP_DIR".into()),
+            );
+        }
     }
     data
 }
@@ -535,17 +574,21 @@ fn error_envelope(
             retryable = true;
             next_action = Some(initialize_workspace_action(workspace_root));
         }
+        WinxError::WorkspaceBindingMismatch { .. } if tool == "Initialize" => {
+            status = ToolResultStatus::Conflict;
+            error_code = "initialize_workspace_already_bound".to_string();
+            retryable = false;
+        }
         WinxError::WorkspaceBindingMismatch { requested_workspace, .. } => {
             status = ToolResultStatus::Conflict;
             error_code = "workspace_binding_mismatch".to_string();
             retryable = true;
             next_action = Some(initialize_workspace_action(requested_workspace));
         }
-        WinxError::WorkspaceChangeRequiresNewSession { workspace_root } => {
-            status = ToolResultStatus::NeedsInitialize;
+        WinxError::WorkspaceChangeRequiresNewSession { .. } => {
+            status = ToolResultStatus::Conflict;
             error_code = "workspace_change_requires_new_session".to_string();
-            retryable = true;
-            next_action = Some(initialize_workspace_action(workspace_root));
+            retryable = false;
         }
         WinxError::CommandAlreadyRunning { .. } => {
             status = ToolResultStatus::Running;
@@ -653,11 +696,20 @@ fn error_envelope(
     if let Some(workspace_root) = string_argument(arguments, "workspace_root") {
         data.insert("workspace_root".to_string(), Value::String(workspace_root));
     }
-    if let WinxError::WorkspaceBindingMismatch { bound_workspace, .. } = error {
+    if let WinxError::WorkspaceBindingMismatch { requested_workspace, bound_workspace, .. } = error
+    {
         data.insert(
             "bound_workspace".to_string(),
             Value::String(bound_workspace.to_string_lossy().into_owned()),
         );
+        data.insert(
+            "requested_workspace".to_string(),
+            Value::String(requested_workspace.to_string_lossy().into_owned()),
+        );
+        if tool == "Initialize" {
+            data.insert("continue_with_bound_session".to_string(), Value::Bool(true));
+            data.insert("external_targets_require_reinitialize".to_string(), Value::Bool(false));
+        }
     }
     if let WinxError::TemporaryArtifactPolicy { path, temporary_artifact_dir, .. } = error {
         data.insert(
@@ -983,6 +1035,53 @@ mod tests {
     }
 
     #[test]
+    fn repeated_initialize_for_another_workspace_is_terminal() {
+        let error = WinxError::WorkspaceBindingMismatch {
+            thread_id: "current-thread".to_string(),
+            requested_workspace: "/external/target".into(),
+            bound_workspace: "/current/project".into(),
+        };
+        let result = tool_failure(
+            "Initialize",
+            &error,
+            Some(&json!({
+                "thread_id": "current-thread",
+                "any_workspace_path": "/external/target"
+            })),
+        )
+        .expect("tool-level coherence error");
+
+        let text = result_text(&result);
+        assert!(text.contains("Do not call Initialize again"), "{text}");
+        assert!(text.contains("absolute path without rebinding"), "{text}");
+        let structured = result.structured_content.expect("structured coherence error");
+        assert_eq!(structured["status"], "conflict");
+        assert_eq!(structured["errorCode"], "initialize_workspace_already_bound");
+        assert_eq!(structured["retryable"], false);
+        assert_eq!(structured["retrySameCall"], false);
+        assert!(structured.get("nextAction").is_none(), "{structured}");
+        assert_eq!(structured["data"]["bound_workspace"], "/current/project");
+        assert_eq!(structured["data"]["requested_workspace"], "/external/target");
+        assert_eq!(structured["data"]["continue_with_bound_session"], true);
+        assert_eq!(structured["data"]["external_targets_require_reinitialize"], false);
+    }
+
+    #[test]
+    fn in_place_remote_workspace_change_is_not_retryable() {
+        let error = WinxError::WorkspaceChangeRequiresNewSession {
+            workspace_root: "/another/project".into(),
+        };
+        let result =
+            tool_failure("Initialize", &error, None).expect("tool-level workspace-change error");
+
+        let structured = result.structured_content.expect("structured coherence error");
+        assert_eq!(structured["status"], "conflict");
+        assert_eq!(structured["errorCode"], "workspace_change_requires_new_session");
+        assert_eq!(structured["retryable"], false);
+        assert!(structured.get("nextAction").is_none(), "{structured}");
+    }
+
+    #[test]
     fn command_output_cannot_spoof_runtime_owned_state() {
         let result = bash_success_result(
             Some(
@@ -1015,6 +1114,46 @@ mod tests {
         assert!(structured.get("nextAction").is_none());
         assert_eq!(structured["data"]["exit_code"], 0);
         assert_eq!(structured["data"]["output_truncated"], false);
+    }
+
+    #[test]
+    fn bash_success_repeats_the_managed_temp_contract() {
+        let result = bash_success_result(
+            Some(&json!({
+                "thread_id": "thread",
+                "workspace_root": "/workspace",
+                "action_json": {"type":"command", "command":"pwd"}
+            })),
+            BashCommandRuntimeResult {
+                result: crate::tools::bash_command::BashCommandResult {
+                    output: String::new(),
+                    state: BashCommandState {
+                        process_status: crate::tools::bash_command::BashProcessStatus::Exited,
+                        background_id: None,
+                        running_for_seconds: None,
+                        exit_code: Some(0),
+                        cwd: "/workspace".into(),
+                        turn_state: None,
+                    },
+                },
+                compact_output: None,
+                command_generation: Some(1),
+                execution_token: None,
+                generation_bound_actions: true,
+                output_truncated: false,
+            },
+            false,
+        )
+        .expect("typed BashCommand result");
+
+        let structured = result.structured_content.expect("structured success");
+        assert_eq!(structured["data"]["temporary_artifact_env"], "WINX_TEMP_DIR");
+        assert!(
+            structured["data"]["temporary_artifact_dir"]
+                .as_str()
+                .is_some_and(|path| path.starts_with("/workspace/.winx/tmp/session-")),
+            "{structured}"
+        );
     }
 
     fn exited_verification(exit_code: i32) -> CallToolResult {
