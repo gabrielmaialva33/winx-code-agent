@@ -159,7 +159,7 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
 pub(super) fn edit_verification_result(
     tool: &str,
     arguments: Option<&Value>,
-    edit_text: String,
+    edit_text: &str,
     verification: CallToolResult,
 ) -> CallToolResult {
     let verification_text = result_text(&verification);
