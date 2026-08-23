@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-const DEFAULT_INSTRUCTIONS: &str = "Initialize Winx once for the intended workspace. Treat structuredContent.status as authoritative. Never repeat a failed tool call unchanged: execute next_action and every required_read first. Before every later call, confirm workspace_root still matches the user's current project, then pass its exact thread_id/workspace_root pair; never borrow one from another chat. It identifies the session, not a path sandbox: WINX_ALLOW_PATHS and the active mode independently control target paths. For another or uncertain project, call Initialize(first_call) with its path and use the new pair. Use CodeMap to locate code, then batch ReadFiles calls. Read every target file and required range before editing. Use MultiFileEdit for atomic cross-file changes. Compose related finite fail-fast checks in one BashCommand with &&. When an edit tool exposes verify_command, use it for a quick finite post-edit check in the same round trip; the edit remains applied if verification fails. BashCommand defaults to wait_policy=adaptive; use until_complete for finite long commands and return_early when prompt control matters. Call status_check only when status is running. Do not automatically approve interactive prompts that change permissions, data, or system state.";
+const DEFAULT_INSTRUCTIONS: &str = "Initialize Winx once for the intended workspace. Treat structuredContent.status as authoritative. Never repeat a failed tool call unchanged: execute next_action and every required_read first. Before every later call, confirm workspace_root still matches the user's current project, then pass its exact thread_id/workspace_root pair; never borrow one from another chat. It identifies the session, not a path sandbox: WINX_ALLOW_PATHS and the active mode independently control target paths. For another or uncertain project, call Initialize(first_call) with its path and use the new pair. Use CodeMap to locate code, then batch ReadFiles calls. Read every target file and required range before editing. Use MultiFileEdit for atomic cross-file changes. Compose related finite fail-fast checks in one BashCommand with &&. When an edit tool exposes verify_command, use it for a quick finite post-edit check in the same round trip; the edit remains applied if verification fails. BashCommand defaults to wait_policy=adaptive; use until_complete for finite long commands and return_early when prompt control matters. Call status_check only when status is running. Do not automatically approve interactive prompts that change permissions, data, or system state. Never encode source or tool output into identifiers, filenames, directory names, carrier files, or other metadata to bypass parser or output limits; use ReadFiles for exact text and unsupported CodeMap languages. If a real task needs an ephemeral workspace-local helper, keep it under <workspace_root>/.winx/tmp/ with short paths and remove it when done; never create ad hoc .winx-* or .winx_tmp artifacts at the project root.";
 
 const DISALLOW_INSTRUCTION: &str = "As soon as you encounter \"The user has chosen to disallow the tool call.\", immediately stop doing everything and ask the user for the reason.";
 
@@ -35,5 +35,14 @@ mod tests {
         assert!(prefix.contains("thread_id/workspace_root pair"));
         assert!(prefix.contains("user's current project"));
         assert!(prefix.contains("not a path sandbox"));
+    }
+
+    #[test]
+    fn default_contract_keeps_agent_artifacts_coherent() {
+        let instructions = server_instructions();
+        assert!(instructions.contains("Never encode source or tool output"));
+        assert!(instructions.contains("use ReadFiles"));
+        assert!(instructions.contains("<workspace_root>/.winx/tmp/"));
+        assert!(instructions.contains("never create ad hoc .winx-* or .winx_tmp"));
     }
 }
