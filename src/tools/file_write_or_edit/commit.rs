@@ -224,9 +224,10 @@ fn refresh_whitelist_and_stats(
 ) {
     let hash = hash_content(new_content);
     let total_lines = new_content.lines().count();
-    bash_state
-        .whitelist_for_overwrite
-        .insert(file_path_str, FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines));
+    bash_state.set_whitelist_entry(
+        file_path_str,
+        FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines),
+    );
 
     let (kind, stats) = if uses_search_replace {
         ("edit", crate::utils::workspace_stats::record_edit(&bash_state.workspace_root, path))
