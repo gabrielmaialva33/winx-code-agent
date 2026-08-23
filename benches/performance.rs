@@ -124,10 +124,7 @@ fn benchmark_read_files_batch(criterion: &mut Criterion) {
         thread_id: "benchmark".to_string(),
     };
     let runtime = or_abort(
-        tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(4)
-        .enable_all()
-        .build()
+        tokio::runtime::Builder::new_multi_thread().worker_threads(4).enable_all().build(),
     );
 
     let mut group = criterion.benchmark_group("read_files_batch");
