@@ -852,6 +852,10 @@ mod schema_tests {
         }
 
         let code_map = tools.iter().find(|tool| tool.name == "CodeMap").expect("CodeMap");
+        let code_map_description = code_map.description.as_deref().expect("CodeMap description");
+        assert!(code_map_description.contains("use ReadFiles directly"));
+        assert!(code_map_description.contains("<workspace_root>/.winx/tmp/"));
+        assert!(code_map_description.contains("Never translate or encode source"));
         let properties = code_map
             .output_schema
             .as_ref()

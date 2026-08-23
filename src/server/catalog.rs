@@ -237,6 +237,7 @@ const BASH_COMMAND_DESCRIPTION: &str =
 const READ_FILES_DESCRIPTION: &str =
     "- Read full file content of one or more files. \
      - Prefer this over reading files with BashCommand (cat/head/tail): the output is token-budgeted and the read is recorded so FileWriteOrEdit can edit the file afterward. \
+     - Use this for exact source text and languages CodeMap does not support. Never manufacture a parseable carrier by encoding source into generated identifiers, filenames, or directory names. \
      - Do NOT use this for binary files or images — use ReadImage for images. \
      - Provide absolute paths only (~ allowed) \
      - Only if the task requires line numbers understanding: \
@@ -271,6 +272,8 @@ const CODE_MAP_DESCRIPTION: &str =
      - operation=\"references\": find where a symbol is defined and referenced (called/used), by name. `name` is required (exact identifier). Counts only real symbol occurrences, never matches inside strings or comments. Output lists definitions first, then references, as `def|ref  file:line  kind  name`. \
      - Scope either operation with `path` (file or directory; empty = the whole workspace); cap with `max_results`. gitignore-aware, workspace-confined, works in every mode. \
      - 11 languages (rust, js/ts, go, c, c++, java, ruby, c#, php, lua); other files return no symbols. Note: C/C++ grammars tag definitions only, so references reads 0 for `.c`/`.h`/`.cpp`. \
+     - CodeMap returns symbols, not source text. For unsupported languages or exact code, use ReadFiles directly. Never translate or encode source into a supported language, identifiers, filenames, directory names, carrier files, or other metadata to make CodeMap expose it. \
+     - If a real task needs an ephemeral workspace-local helper, keep it under `<workspace_root>/.winx/tmp/` with short paths and remove it when done; never create `.winx-*` or `.winx_tmp` artifacts at the project root. \
      - For plain-text/regex search or file discovery, use rg / grep / fd / find via BashCommand.";
 
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
