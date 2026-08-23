@@ -23,6 +23,10 @@ fn spawn_single_token_server(address: std::net::SocketAddr) -> anyhow::Result<Se
     spawn_single_token_server_with_affinity(address, "workspace")
 }
 
+fn canonical_path_string(path: &Path) -> anyhow::Result<String> {
+    Ok(std::fs::canonicalize(path)?.to_string_lossy().into_owned())
+}
+
 fn spawn_single_token_server_with_affinity(
     address: std::net::SocketAddr,
     affinity: &str,
@@ -500,7 +504,7 @@ async fn recoverable_edit_failure_is_a_structured_tool_result() -> anyhow::Resul
     assert_eq!(structured["nextAction"]["tool"], "ReadFiles", "{response}");
     assert_eq!(
         structured["nextAction"]["arguments"]["file_paths"],
-        serde_json::json!([target.to_string_lossy()]),
+        serde_json::json!([canonical_path_string(&target)?]),
         "{response}"
     );
     assert_eq!(std::fs::read_to_string(&target)?, "original\n");
@@ -809,7 +813,11 @@ async fn multi_file_edit_preserves_needs_read_recovery() -> anyhow::Result<()> {
     assert_eq!(structured["status"], "needs_read", "{response}");
     assert_eq!(structured["errorCode"], "read_required", "{response}");
     assert_eq!(structured["nextAction"]["tool"], "ReadFiles", "{response}");
-    assert_eq!(structured["requiredReads"][0]["path"].as_str(), first.to_str(), "{response}");
+    assert_eq!(
+        structured["requiredReads"][0]["path"].as_str(),
+        Some(canonical_path_string(&first)?.as_str()),
+        "{response}"
+    );
     assert_eq!(std::fs::read_to_string(&first)?, "first original\n");
     assert_eq!(std::fs::read_to_string(&second)?, "second original\n");
     Ok(())
@@ -883,7 +891,11 @@ async fn multi_file_edit_preserves_stale_file_recovery() -> anyhow::Result<()> {
     assert_eq!(structured["status"], "needs_read", "{response}");
     assert_eq!(structured["errorCode"], "read_required", "{response}");
     assert_eq!(structured["nextAction"]["tool"], "ReadFiles", "{response}");
-    assert_eq!(structured["requiredReads"][0]["path"].as_str(), first.to_str(), "{response}");
+    assert_eq!(
+        structured["requiredReads"][0]["path"].as_str(),
+        Some(canonical_path_string(&first)?.as_str()),
+        "{response}"
+    );
     assert_eq!(std::fs::read_to_string(&first)?, "changed outside winx\n");
     assert_eq!(std::fs::read_to_string(&second)?, "second original\n");
     Ok(())
@@ -956,7 +968,11 @@ async fn multi_file_edit_preserves_search_conflict_recovery() -> anyhow::Result<
     assert_eq!(structured["status"], "conflict", "{response}");
     assert_eq!(structured["errorCode"], "search_block_not_found", "{response}");
     assert_eq!(structured["nextAction"]["tool"], "ReadFiles", "{response}");
-    assert_eq!(structured["requiredReads"][0]["path"].as_str(), second.to_str(), "{response}");
+    assert_eq!(
+        structured["requiredReads"][0]["path"].as_str(),
+        Some(canonical_path_string(&second)?.as_str()),
+        "{response}"
+    );
     assert_eq!(std::fs::read_to_string(&first)?, "first original\n");
     assert_eq!(std::fs::read_to_string(&second)?, "second original\n");
     Ok(())
