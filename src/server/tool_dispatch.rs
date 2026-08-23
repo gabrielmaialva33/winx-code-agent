@@ -11,9 +11,64 @@ use super::{outcomes, SharedBashState, WinxService};
 use crate::runtime::{ShellActionOptions, ShellExecutionToken};
 use crate::state::bash_state::generate_thread_id;
 use crate::types::{
-    normalize_thread_id, BashCommand, CodeMap, ContextSave, FileWriteOrEdit, Initialize,
-    MultiFileEdit, ReadFiles, ReadImage, UndoEdit,
+    normalize_thread_id, BashCommand, BashCommandAction, CodeMap, ContextSave, FileWriteOrEdit,
+    Initialize, MultiFileEdit, ReadFiles, ReadImage, UndoEdit,
 };
+
+const MAX_VERIFY_WAIT_SECONDS: f32 = 60.0;
+
+#[derive(Clone, Debug)]
+struct EditVerification {
+    command: String,
+    wait_for_seconds: Option<f32>,
+}
+
+fn take_edit_verification(args: &mut Value) -> Result<Option<EditVerification>, McpError> {
+    let map = args.as_object_mut().ok_or_else(|| {
+        McpError::invalid_request("Edit tool parameters must be an object", None)
+    })?;
+    let command = match map.remove("verify_command") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(command)) if !command.trim().is_empty() => {
+            Some(command.trim().to_string())
+        }
+        Some(Value::String(_)) => {
+            return Err(McpError::invalid_request("verify_command must not be empty", None));
+        }
+        Some(_) => {
+            return Err(McpError::invalid_request("verify_command must be a string", None));
+        }
+    };
+    let wait_for_seconds = match map.remove("verify_wait_for_seconds") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let wait = serde_json::from_value::<f32>(value).map_err(|error| {
+                McpError::invalid_request(
+                    format!("Invalid verify_wait_for_seconds: {error}"),
+                    None,
+                )
+            })?;
+            if !wait.is_finite() || !(0.0..=MAX_VERIFY_WAIT_SECONDS).contains(&wait) {
+                return Err(McpError::invalid_request(
+                    format!(
+                        "verify_wait_for_seconds must be between 0 and {MAX_VERIFY_WAIT_SECONDS}"
+                    ),
+                    None,
+                ));
+            }
+            Some(wait)
+        }
+    };
+
+    match command {
+        Some(command) => Ok(Some(EditVerification { command, wait_for_seconds })),
+        None if wait_for_seconds.is_some() => Err(McpError::invalid_request(
+            "verify_wait_for_seconds requires verify_command",
+            None,
+        )),
+        None => Ok(None),
+    }
+}
 
 pub(super) struct ToolCallExecution {
     pub result: CallToolResult,
@@ -56,7 +111,10 @@ impl WinxService {
         let (result, bash_runtime) = match tool.as_str() {
             "Initialize" => (self.handle_initialize(args_value).await, None),
             "BashCommand" => {
-                match self.handle_bash_command_with_output(args_value, bash_options).await {
+                match self
+                    .handle_bash_command_with_output(args_value, bash_options.clone())
+                    .await
+                {
                     Ok(execution) => (
                         Ok(execution.result),
                         Some((
@@ -69,8 +127,12 @@ impl WinxService {
                 }
             }
             "ReadFiles" => (self.handle_read_files(args_value).await, None),
-            "FileWriteOrEdit" => (self.handle_file_write_or_edit(args_value).await, None),
-            "MultiFileEdit" => (self.handle_multi_file_edit(args_value).await, None),
+            "FileWriteOrEdit" => {
+                (self.handle_file_write_or_edit(args_value, bash_options.clone()).await, None)
+            }
+            "MultiFileEdit" => {
+                (self.handle_multi_file_edit(args_value, bash_options).await, None)
+            }
             "UndoEdit" => (self.handle_undo_edit(args_value).await, None),
             "ContextSave" => (self.handle_context_save(args_value).await, None),
             "ReadImage" => (self.handle_read_image(args_value).await, None),
