@@ -23,6 +23,30 @@ fn spawn_single_token_server(address: std::net::SocketAddr) -> anyhow::Result<Se
     spawn_single_token_server_with_affinity(address, "workspace")
 }
 
+fn spawn_single_token_allowlist_server(
+    address: std::net::SocketAddr,
+) -> anyhow::Result<ServerProcess> {
+    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+        .args([
+            "serve",
+            "--http",
+            "--bind",
+            &address.to_string(),
+            "--token",
+            TEST_TOKEN,
+            "--allow-tool",
+            "Initialize",
+            "--allow-tool",
+            "ReadFiles",
+        ])
+        .env("WINX_EMBEDDED", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(ServerProcess(child))
+}
+
 fn canonical_path_string(path: &Path) -> anyhow::Result<String> {
     Ok(std::fs::canonicalize(path)?.to_string_lossy().into_owned())
 }
@@ -378,6 +402,23 @@ async fn modern_stateless_tools_list_exposes_bash_command() -> anyhow::Result<()
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("tools/list response has no tools array: {response}"))?;
     assert_eq!(tools.iter().filter(|tool| tool["name"] == "BashCommand").count(), 1, "{response}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn single_principal_cli_allowlist_replaces_the_full_catalog() -> anyhow::Result<()> {
+    let (address, _server) =
+        spawn_server_on_free_port(spawn_single_token_allowlist_server).await?;
+    let response = list_tools_as(address, TEST_TOKEN, "allowlist-client").await?;
+    let names = response["result"]["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(names, vec!["Initialize", "ReadFiles"], "{response}");
+    assert_eq!(response["result"]["cacheScope"], "private", "{response}");
     Ok(())
 }
 
