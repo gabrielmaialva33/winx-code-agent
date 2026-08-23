@@ -126,6 +126,15 @@ fn stale_anchor_falls_back_to_normal_search() -> Result<()> {
 }
 
 #[test]
+fn later_anchor_uses_original_lines_when_an_earlier_block_changes_line_count() -> Result<()> {
+    let raw = "<<<<<<< SEARCH @2\nfirst target\n=======\ninserted one\ninserted two\n>>>>>>> REPLACE\n<<<<<<< SEARCH @4\nsecond target\n=======\nSECOND\n>>>>>>> REPLACE";
+    let content = "start\nfirst target\nmiddle\nsecond target\nend\n";
+    let (output, _) = apply_blocks_with_unescape_retry(content, raw)?;
+    assert_eq!(output, "start\ninserted one\ninserted two\nmiddle\nSECOND\nend\n");
+    Ok(())
+}
+
+#[test]
 fn change_summary_is_none_for_identical_content() {
     assert!(change_summary("a\nb\nc\n", "a\nb\nc\n").is_none());
 }
