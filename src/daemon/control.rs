@@ -886,6 +886,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn guardian_negotiation_gates_apply_backpressure_without_evicting_active_slots() {
+        let gates = Mutex::new(HashMap::new());
+        let mut active = Vec::with_capacity(MAX_GUARDIAN_NEGOTIATIONS);
+        for index in 0..MAX_GUARDIAN_NEGOTIATIONS {
+            active.push(
+                guardian_negotiation_gate(
+                    &gates,
+                    &PathBuf::from(format!("active-guardian-{index}.sock")),
+                )
+                .await
+                .expect("active gate"),
+            );
+        }
+
+        let overflow =
+            guardian_negotiation_gate(&gates, &PathBuf::from("overflow-guardian.sock")).await;
+        assert!(matches!(overflow, Err(WinxError::ResourceAllocationError { .. })));
+        assert_eq!(gates.lock().await.len(), MAX_GUARDIAN_NEGOTIATIONS);
+
+        drop(active.pop());
+        guardian_negotiation_gate(&gates, &PathBuf::from("replacement-guardian.sock"))
+            .await
+            .expect("inactive slot can be replaced");
+        assert_eq!(gates.lock().await.len(), MAX_GUARDIAN_NEGOTIATIONS);
+    }
+
+    #[tokio::test]
     async fn recreated_guardian_socket_invalidates_negotiation_cache() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let socket = temp.path().join("guardian.sock");

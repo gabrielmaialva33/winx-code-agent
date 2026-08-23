@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::net::UnixStream;
@@ -421,8 +421,7 @@ impl DaemonShellRuntime {
         let mut cache = self.negotiations.lock().await;
         let Some(current) = cache.local_revisions.get_mut(thread_id) else { return false };
         current.last_seen = Instant::now();
-        Arc::ptr_eq(&current.revision, expected)
-            && current.revision.load(Ordering::SeqCst) == value
+        Arc::ptr_eq(&current.revision, expected) && current.revision.load(Ordering::SeqCst) == value
     }
 
     async fn apply_snapshot_if_current(
@@ -435,10 +434,7 @@ impl DaemonShellRuntime {
     ) -> bool {
         let mut state = bash_state.lock().await;
         let Some(state) = state.as_mut() else { return false };
-        if !self
-            .local_revision_is_current(thread_id, expected_revision, revision_value)
-            .await
-        {
+        if !self.local_revision_is_current(thread_id, expected_revision, revision_value).await {
             return false;
         }
         state.apply_snapshot(snapshot);
@@ -1297,13 +1293,9 @@ mod tests {
             },
             stream,
         }));
-        let error = cache_negotiation(
-            &mut cache,
-            "overflow",
-            Arc::clone(&overflow),
-            Instant::now(),
-        )
-        .expect_err("all active sessions must apply backpressure");
+        let error =
+            cache_negotiation(&mut cache, "overflow", Arc::clone(&overflow), Instant::now())
+                .expect_err("all active sessions must apply backpressure");
         assert!(matches!(error, WinxError::ResourceAllocationError { .. }));
         assert_eq!(cache.sessions.len(), MAX_NEGOTIATED_SESSIONS);
 
