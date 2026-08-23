@@ -7,10 +7,12 @@
   **Durable PTY Sessions • Streamable HTTP • Guarded File Operations • Blazing Fast Rust 🦀**
 
   <p align="center">
-    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust_2021-dea584?style=for-the-badge&logo=rust&logoColor=000" alt="Rust 2021" /></a>
-    <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-2026--07--28-7c3aed?style=for-the-badge&logo=anthropic&logoColor=fff" alt="MCP Spec" /></a>
-    <a href="docs/streamable-http.md"><img src="https://img.shields.io/badge/Transport-Streamable_HTTP-2563eb?style=for-the-badge" alt="Streamable HTTP" /></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-10b981?style=for-the-badge" alt="License MIT" /></a>
+    <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/language-Rust_2021-orange?style=flat&logo=rust" alt="Rust 2021" /></a>
+    <a href="https://modelcontextprotocol.io/"><img src="https://img.shields.io/badge/MCP-2026--07--28-purple?style=flat" alt="MCP Spec" /></a>
+    <a href="docs/streamable-http.md"><img src="https://img.shields.io/badge/transport-Streamable_HTTP-2563eb?style=flat" alt="Streamable HTTP" /></a>
+    <a href="SECURITY.md"><img src="https://img.shields.io/badge/auth-multi--principal-7c3aed?style=flat" alt="Multi-principal authentication" /></a>
+    <a href="#choose-your-transport"><img src="https://img.shields.io/badge/transport-stdio-2f855a?style=flat" alt="stdio transport" /></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat" alt="License MIT" /></a>
   </p>
 
   <p align="center">
