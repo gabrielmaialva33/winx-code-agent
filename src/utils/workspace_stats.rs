@@ -67,11 +67,8 @@ pub fn active_files_for_context(root: &Path) -> Vec<String> {
 
     let mut files = stats.files.into_iter().collect::<Vec<_>>();
     files.sort_by_key(|(path, stats)| {
-        let score = stats
-            .reads
-            .saturating_mul(2)
-            .saturating_add(stats.edits)
-            .saturating_add(stats.writes);
+        let score =
+            stats.reads.saturating_mul(2).saturating_add(stats.edits).saturating_add(stats.writes);
         (std::cmp::Reverse(score), path.clone())
     });
     files.truncate(CONTEXT_ACTIVE_FILES);

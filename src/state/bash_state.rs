@@ -259,10 +259,8 @@ impl BashState {
                 *existing = FileWhitelistData::new(file_hash, ranges, total_lines);
             }
             None => {
-                self.whitelist_for_overwrite.insert(
-                    path.clone(),
-                    FileWhitelistData::new(file_hash, ranges, total_lines),
-                );
+                self.whitelist_for_overwrite
+                    .insert(path.clone(), FileWhitelistData::new(file_hash, ranges, total_lines));
             }
         }
         self.touch_whitelist(&path);
@@ -295,8 +293,7 @@ impl BashState {
     }
 
     fn enforce_whitelist_cap(&mut self) {
-        self.whitelist_recency
-            .retain(|path| self.whitelist_for_overwrite.contains_key(path));
+        self.whitelist_recency.retain(|path| self.whitelist_for_overwrite.contains_key(path));
         while self.whitelist_for_overwrite.len() > MAX_WHITELIST_FILES {
             let victim = self.whitelist_recency.pop_front().or_else(|| {
                 // The map remains public for compatibility, so tolerate callers
