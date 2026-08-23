@@ -407,8 +407,7 @@ async fn modern_stateless_tools_list_exposes_bash_command() -> anyhow::Result<()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn single_principal_cli_allowlist_replaces_the_full_catalog() -> anyhow::Result<()> {
-    let (address, _server) =
-        spawn_server_on_free_port(spawn_single_token_allowlist_server).await?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_allowlist_server).await?;
     let response = list_tools_as(address, TEST_TOKEN, "allowlist-client").await?;
     let names = response["result"]["tools"]
         .as_array()
