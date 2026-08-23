@@ -38,6 +38,8 @@ fn spawn_single_token_allowlist_server(
             "Initialize",
             "--allow-tool",
             "ReadFiles",
+            "--allow-tool",
+            "FileWriteOrEdit",
         ])
         .env("WINX_EMBEDDED", "1")
         .stdin(Stdio::null())
@@ -487,8 +489,40 @@ async fn single_principal_cli_allowlist_replaces_the_full_catalog() -> anyhow::R
         .filter_map(|tool| tool["name"].as_str())
         .collect::<Vec<_>>();
 
-    assert_eq!(names, vec!["Initialize", "ReadFiles"], "{response}");
+    assert_eq!(names, vec!["Initialize", "ReadFiles", "FileWriteOrEdit"], "{response}");
     assert_eq!(response["result"]["cacheScope"], "private", "{response}");
+
+    let forbidden = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "verification-without-bash",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("allowlist-client", false),
+            "name": "FileWriteOrEdit",
+            "arguments": {
+                "file_path": "/tmp/not-written-by-policy-test",
+                "percentage_to_change": 100,
+                "text_or_search_replace_blocks": "content",
+                "verify_command": "true",
+                "thread_id": "policy-test"
+            }
+        }
+    });
+    let forbidden = post_json_as(
+        address,
+        "2026-07-28",
+        "tools/call",
+        &forbidden.to_string(),
+        TEST_TOKEN,
+    )
+    .await?;
+    let forbidden = response_json(&forbidden)?;
+    assert!(
+        forbidden["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("requires BashCommand")),
+        "{forbidden}"
+    );
     Ok(())
 }
 
