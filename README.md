@@ -758,6 +758,16 @@ cargo audit --deny warnings
 cargo +nightly fuzz build
 ```
 
+To compare the ordered `ReadFiles` batch path with one versus four blocking workers on the current machine:
+
+```bash
+cargo bench --bench performance --locked -- read_files_batch
+```
+
+Criterion reports throughput and latency for both `workers/1` and `workers/4`. Treat absolute numbers as machine-specific;
+use the same host and power profile when comparing revisions. For production latency, enable `WINX_USAGE_LOG` and aggregate
+the metadata-only `duration_ms`, `response_bytes`, `batch_items`, and `worker_limit` fields described in the HTTP guide.
+
 CI runs these contracts in dedicated jobs, including the ignored real-PTY/TUI tests on Linux. If you touch PTY, terminal,
 BashCommand, file editing, authentication, or persistence, run the focused regression suite before the full matrix.
 
