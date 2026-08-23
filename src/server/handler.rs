@@ -54,6 +54,18 @@ fn bash_task_route(
     }
 }
 
+fn adaptive_action_options(compact_output: bool) -> ShellActionOptions {
+    ShellActionOptions {
+        compact_output,
+        // Adaptive promotion is already backed by a Task reservation. Require
+        // the effective guardian epoch to be checked live before this first
+        // action so a recreated guardian cannot launch an untracked process
+        // under a stale adapter cache.
+        require_generation_binding: true,
+        ..ShellActionOptions::default()
+    }
+}
+
 /// One structured `winx::usage` event per tool call. Only metadata is logged —
 /// never tool arguments, command text, or file contents (secrets/PII).
 struct UsageEvent {
@@ -593,19 +605,7 @@ impl ServerHandler for WinxService {
                 let inline_request =
                     normalized_wait_request(request, BashWaitPolicy::Adaptive, true)?;
                 match self
-                    .execute_tool_call(
-                        inline_request,
-                        ShellActionOptions {
-                            compact_output: compact_bash_output,
-                            // Adaptive promotion is already backed by a Task
-                            // reservation. Require the effective guardian
-                            // epoch to be checked live before this first action
-                            // so a recreated guardian cannot launch an
-                            // untracked process under a stale adapter cache.
-                            require_generation_binding: true,
-                            ..ShellActionOptions::default()
-                        },
-                    )
+                    .execute_tool_call(inline_request, adaptive_action_options(compact_bash_output))
                     .await
                 {
                     Ok(execution) if outcomes::result_status(&execution.result) == "running" => {
@@ -742,6 +742,13 @@ mod tests {
             bash_task_route(true, true, false, BashWaitPolicy::UntilComplete),
             BashTaskRoute::Synchronous
         );
+    }
+
+    #[test]
+    fn adaptive_action_requires_live_generation_binding() {
+        let options = adaptive_action_options(true);
+        assert!(options.compact_output);
+        assert!(options.require_generation_binding);
     }
 
     #[test]

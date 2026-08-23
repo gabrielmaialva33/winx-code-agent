@@ -235,6 +235,122 @@ mod task_lifecycle_tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct PollFailureAfterBindingRuntime {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        current_generation: Arc<std::sync::atomic::AtomicU64>,
+        interrupted: Arc<std::sync::Mutex<Vec<crate::runtime::ShellExecutionToken>>>,
+        next_generation_interrupted: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl ShellRuntime for PollFailureAfterBindingRuntime {
+        fn configure_session<'a>(
+            &'a self,
+            _bash_state: &'a mut BashState,
+            _transition: crate::runtime::ShellSessionTransition,
+        ) -> crate::runtime::ShellRuntimeConfigureFuture<'a> {
+            Box::pin(async { Ok(crate::runtime::ShellSessionConfiguration::default()) })
+        }
+
+        fn run_action<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+            _command: BashCommand,
+        ) -> crate::runtime::ShellRuntimeFuture<'a> {
+            Box::pin(async {
+                Err(WinxError::CommandExecutionError(
+                    "use detailed task runtime".to_string(),
+                ))
+            })
+        }
+
+        fn run_action_detailed<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+            _command: BashCommand,
+            _options: crate::runtime::ShellActionOptions,
+        ) -> crate::runtime::ShellRuntimeDetailedFuture<'a> {
+            let calls = Arc::clone(&self.calls);
+            let current_generation = Arc::clone(&self.current_generation);
+            Box::pin(async move {
+                let call = calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call > 0 {
+                    // Model a second client starting generation 2 after
+                    // generation 1 completed but before the Task's first poll
+                    // response was delivered.
+                    current_generation.store(2, std::sync::atomic::Ordering::SeqCst);
+                    return Err(WinxError::CommandExecutionError(
+                        "simulated status transport failure".to_string(),
+                    ));
+                }
+                current_generation.store(1, std::sync::atomic::Ordering::SeqCst);
+                let mut result = crate::runtime::BashCommandRuntimeResult::legacy(
+                    crate::tools::bash_command::BashCommandResult {
+                        output: "generation-one-running".to_string(),
+                        state: crate::tools::bash_command::BashCommandState {
+                            process_status:
+                                crate::tools::bash_command::BashProcessStatus::Running,
+                            background_id: None,
+                            running_for_seconds: Some(0),
+                            exit_code: None,
+                            cwd: std::env::temp_dir(),
+                            turn_state: None,
+                        },
+                    },
+                );
+                result.command_generation = Some(1);
+                result.execution_token = Some(crate::runtime::ShellExecutionToken {
+                    guardian_epoch: "guardian-a".to_string(),
+                    session_epoch: "session-a".to_string(),
+                    generation: 1,
+                });
+                result.generation_bound_actions = true;
+                Ok(result)
+            })
+        }
+
+        fn supports_generation_bound_actions(&self) -> crate::runtime::ShellRuntimeBoolFuture<'_> {
+            Box::pin(async { Ok(true) })
+        }
+
+        fn interrupt<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+        ) -> crate::runtime::ShellRuntimeUnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn interrupt_execution<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+            expected: Option<crate::runtime::ShellExecutionToken>,
+        ) -> crate::runtime::ShellRuntimeBoolFuture<'a> {
+            let current = Arc::clone(&self.current_generation);
+            let interrupted = Arc::clone(&self.interrupted);
+            let next_interrupted = Arc::clone(&self.next_generation_interrupted);
+            Box::pin(async move {
+                let Some(expected) = expected else { return Ok(false) };
+                interrupted
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(expected.clone());
+                let matches = current.load(std::sync::atomic::Ordering::SeqCst)
+                    == expected.generation;
+                if matches && expected.generation == 2 {
+                    next_interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+                Ok(matches)
+            })
+        }
+
+        fn terminate_session<'a>(
+            &'a self,
+            _thread_id: &'a str,
+        ) -> crate::runtime::ShellRuntimeUnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
     #[tokio::test]
     async fn failed_promotion_interrupts_full_execution_token_and_releases_reservation() {
         let runtime = PromotionContractRuntime::default();
@@ -348,6 +464,103 @@ mod task_lifecycle_tests {
         );
         let terminated = terminated.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         assert!(terminated.is_empty(), "invalid/tool errors must not terminate the session");
+    }
+
+    #[tokio::test]
+    async fn abnormal_poll_cleans_exact_token_without_interrupting_next_client_generation() {
+        let runtime = PollFailureAfterBindingRuntime::default();
+        let interrupted = Arc::clone(&runtime.interrupted);
+        let next_interrupted = Arc::clone(&runtime.next_generation_interrupted);
+        let service = WinxService::with_runtime(SessionIsolation::Lenient, Arc::new(runtime));
+        let (slot, guard) = service.session_for("abnormal-bound-task").await;
+        *slot.lock().await = Some(BashState::new());
+        drop(guard);
+        let request = rmcp::model::CallToolRequestParams::new("BashCommand").with_arguments(
+            serde_json::json!({
+                "action_json": {
+                    "type": "command",
+                    "command": "first-client-generation",
+                    "is_background": false
+                },
+                "thread_id": "abnormal-bound-task"
+            })
+            .as_object()
+            .expect("request object")
+            .clone(),
+        );
+        let reservation = service
+            .reserve_bash_task(&request, &crate::server::principal::RequestScope::default())
+            .await
+            .expect("reservation");
+        let task_id = reservation.task_id.clone();
+        service
+            .start_reserved_bash_task(
+                reservation,
+                request,
+                crate::server::principal::RequestScope::default(),
+                None,
+                false,
+            )
+            .await
+            .expect("returned Task");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while service
+            .tasks
+            .lock()
+            .await
+            .get(&task_id)
+            .is_some_and(|entry| entry.task.status == rmcp::model::TaskStatus::Working)
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            service.tasks.lock().await.get(&task_id).map(|entry| entry.task.status),
+            Some(rmcp::model::TaskStatus::Failed),
+            "returned Task must retain its terminal failure"
+        );
+        let interrupted = interrupted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].generation, 1);
+        assert!(!next_interrupted.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn task_capacity_is_reserved_before_any_adaptive_runtime_action() {
+        let service = WinxService::with_runtime(
+            SessionIsolation::Lenient,
+            Arc::new(PromotionContractRuntime::default()),
+        );
+        let request = rmcp::model::CallToolRequestParams::new("BashCommand").with_arguments(
+            serde_json::json!({
+                "action_json": {
+                    "type": "command",
+                    "command": "must-not-run",
+                    "is_background": false
+                },
+                "thread_id": "deterministic-saturation"
+            })
+            .as_object()
+            .expect("request object")
+            .clone(),
+        );
+        let scope = crate::server::principal::RequestScope::default();
+        let mut reservations = Vec::new();
+        for _ in 0..crate::state::task_state::MAX_TASKS {
+            reservations.push(
+                service
+                    .reserve_bash_task(&request, &scope)
+                    .await
+                    .expect("working registry reservation"),
+            );
+        }
+        let error = service
+            .reserve_bash_task(&request, &scope)
+            .await
+            .expect_err("full working registry must reject before runtime execution");
+        assert!(error.message.contains("task limit reached"), "{error:?}");
+        assert_eq!(reservations.len(), crate::state::task_state::MAX_TASKS);
     }
 
     #[tokio::test]
