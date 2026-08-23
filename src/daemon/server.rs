@@ -858,12 +858,12 @@ async fn execute_action(
             state.pty_shell.lock().await.as_ref().map(crate::state::pty::PtyShell::incarnation);
         incarnation
     };
-    let session_epoch = if pty_incarnation_before != pty_incarnation_after {
+    let session_epoch = if pty_incarnation_before == pty_incarnation_after {
+        session_epoch
+    } else {
         let next = new_epoch();
         *session.session_epoch.lock().await = next.clone();
         next
-    } else {
-        session_epoch
     };
     if let Ok(result) = &outcome {
         if let Some(id) = result.result.state.background_id.as_ref() {
@@ -1451,14 +1451,14 @@ mod tests {
         )
         .await
         .expect("first action");
-        let stale = first.execution_token.expect("first execution token");
+        let prior_token = first.execution_token.expect("first execution token");
 
         let mut forced = action_params(&state, "printf reset-incarnation", "forced-auto-reset");
         forced.options.force_clear_to_run_failure = true;
         let reset = run_action(&sessions, forced, "guardian-a").await.expect("reset action");
         let current = reset.execution_token.expect("reset execution token");
-        assert_eq!(stale.generation, current.generation);
-        assert_ne!(stale.session_epoch, current.session_epoch);
+        assert_eq!(prior_token.generation, current.generation);
+        assert_ne!(prior_token.session_epoch, current.session_epoch);
 
         let mut stale_status = action_params(&state, "printf unused", "stale-after-auto-reset");
         stale_status.command = serde_json::from_value(serde_json::json!({
@@ -1467,8 +1467,8 @@ mod tests {
             "wait_for_seconds": 0.0
         }))
         .expect("status command");
-        stale_status.options.expected_generation = Some(stale.generation);
-        stale_status.options.expected_execution = Some(stale);
+        stale_status.options.expected_generation = Some(prior_token.generation);
+        stale_status.options.expected_execution = Some(prior_token);
         assert!(run_action(&sessions, stale_status, "guardian-a").await.is_err());
     }
 

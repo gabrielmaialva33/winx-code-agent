@@ -102,13 +102,20 @@ pub struct ShellActionOptions {
 
 impl ShellActionOptions {
     pub(crate) fn is_default(&self) -> bool {
-        !self.compact_output
+        let is_default = !self.compact_output
             && self.expected_generation.is_none()
             && self.expected_execution.is_none()
             && self.expected_guardian_epoch.is_none()
             && !self.require_generation_binding
-            && self.cancellation_key.is_none()
-            && self.test_clear_to_run_is_unforced()
+            && self.cancellation_key.is_none();
+        #[cfg(test)]
+        {
+            is_default && !self.force_clear_to_run_failure
+        }
+        #[cfg(not(test))]
+        {
+            is_default
+        }
     }
 
     pub(crate) fn is_launch_cancelled(&self) -> bool {
@@ -118,25 +125,19 @@ impl ShellActionOptions {
 
 impl PartialEq for ShellActionOptions {
     fn eq(&self, other: &Self) -> bool {
-        self.compact_output == other.compact_output
+        let equal = self.compact_output == other.compact_output
             && self.expected_generation == other.expected_generation
             && self.expected_execution == other.expected_execution
             && self.expected_guardian_epoch == other.expected_guardian_epoch
             && self.require_generation_binding == other.require_generation_binding
-            && self.cancellation_key == other.cancellation_key
-            && self.test_clear_to_run_is_unforced() == other.test_clear_to_run_is_unforced()
-    }
-}
-
-impl ShellActionOptions {
-    const fn test_clear_to_run_is_unforced(&self) -> bool {
+            && self.cancellation_key == other.cancellation_key;
         #[cfg(test)]
         {
-            !self.force_clear_to_run_failure
+            equal && self.force_clear_to_run_failure == other.force_clear_to_run_failure
         }
         #[cfg(not(test))]
         {
-            true
+            equal
         }
     }
 }

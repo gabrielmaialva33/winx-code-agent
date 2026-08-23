@@ -552,10 +552,11 @@ mod task_lifecycle_tests {
                     .expect("working registry reservation"),
             );
         }
-        let error = match service.reserve_bash_task(&request, &scope).await {
-            Ok(_) => panic!("full working registry accepted another reservation"),
-            Err(error) => error,
-        };
+        let error = service
+            .reserve_bash_task(&request, &scope)
+            .await
+            .err()
+            .expect("full working registry must reject before runtime execution");
         assert!(error.message.contains("task limit reached"), "{error:?}");
         assert_eq!(reservations.len(), crate::state::task_state::MAX_TASKS);
     }

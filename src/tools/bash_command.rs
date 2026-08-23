@@ -232,6 +232,17 @@ pub(crate) async fn handle_embedded_tool_call_with_cursor_detailed(
     handle_embedded_tool_call_inner(bash_state, command, Some(&mut delivery_cursor), options).await
 }
 
+async fn capture_embedded_state(
+    bash_state: &Arc<Mutex<Option<BashState>>>,
+    thread_id: &str,
+) -> Result<(BashState, tokio::sync::OwnedRwLockReadGuard<()>)> {
+    let guard = bash_state.lock().await;
+    let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+    let operation_barrier = lock_session_store().operation_barrier(thread_id);
+    let operation_guard = operation_barrier.read_owned().await;
+    Ok((state.clone(), operation_guard))
+}
+
 #[tracing::instrument(level = "info", skip(bash_state, command, delivery_cursor))]
 async fn handle_embedded_tool_call_inner(
     bash_state: &Arc<Mutex<Option<BashState>>>,
@@ -288,13 +299,7 @@ async fn handle_embedded_tool_call_inner(
     // configure_session. Keep BashState locked until the owned read guard is
     // acquired so reset cannot replace the incarnation after capture but
     // before token validation/action execution.
-    let (captured_state, operation_guard) = {
-        let guard = bash_state.lock().await;
-        let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-        let operation_barrier = lock_session_store().operation_barrier(&thread_id);
-        let operation_guard = operation_barrier.read_owned().await;
-        (state.clone(), operation_guard)
-    };
+    let (captured_state, operation_guard) = capture_embedded_state(bash_state, &thread_id).await?;
     local_state = captured_state;
 
     if let Some(expected) = options.expected_execution.as_ref() {
