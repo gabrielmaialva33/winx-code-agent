@@ -290,6 +290,14 @@ prevent a valid tool result from being serialized remain JSON-RPC errors. `BashC
 The shell runtime produces a separate `BashCommandState` containing process status, cwd, exit code, background ID, elapsed
 time, and optional interactive turn state. The MCP adapter and MCP Tasks consume only that typed value; rendered output,
 child output, and unescaped-looking command metadata are presentation data and cannot spoof orchestration.
+`BashCommand.wait_policy` selects generic execution behavior: `adaptive` (default) keeps short calls inline and promotes
+an already-running foreground command only when Tasks and generation-bound runtime actions were negotiated; `until_complete` is accepted only for a foreground Command and creates a Task immediately or
+uses a 60-second bounded synchronous fallback; `return_early` always stays inline and caps `wait_for_seconds` at 5 seconds. `wait_for_seconds` is bounded by the chosen policy. Task routing never depends on client
+identity. A client that advertises the `io.winx/compact-bash-output` extension receives the runtime's trailer-free payload;
+without that explicit capability, the historical text output is unchanged.
+Generation-bound routing is negotiated with the effective per-session guardian, not inferred from the control daemon's
+version. The adapter keeps that guardian negotiation on an epoch-bound session channel, so ordinary daemon calls add no
+repeated control hello round trips; generation-bound actions perform a final guardian check before relay. A closed channel forces renegotiation before another Task-bound launch.
 
 A `ReadFiles` batch containing one or more failed paths returns `isError: true`; content from successful paths remains in the
 same response, with `successful_files` and `failed_files` counts. `MultiFileEdit` preserves planning failure semantics:
@@ -521,6 +529,9 @@ Remote Roots bootstrap is disabled on the shared HTTP service; the explicit `Ini
 
 ## Upgrade notes for 0.2.333 and later
 
+- Protocol `1.5` adds an optional trailer-free runtime payload and generation-bound actions. Protocol-1.4 guardians
+  remain usable through bounded synchronous wait-policy fallback; adapters use legacy output when the compact field is
+  absent. A newer control plane never substitutes its own capabilities for those of an older session guardian.
 - Protocol `1.4` adds the `typed_action_result` capability and transports runtime-owned `BashCommandState` separately from
   terminal text. The control plane upgrades automatically when possible. Existing older guardians remain listable and
   attachable, but execution fails closed until the affected durable session is removed and initialized again; no
