@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::net::UnixStream;
@@ -36,6 +37,7 @@ pub struct DaemonShellRuntime {
 struct NegotiationCache {
     sessions: HashMap<String, CachedNegotiation>,
     gates: HashMap<String, NegotiationGate>,
+    local_revisions: HashMap<String, LocalRevision>,
 }
 
 #[derive(Debug)]
@@ -47,6 +49,12 @@ struct CachedNegotiation {
 #[derive(Debug)]
 struct NegotiationGate {
     gate: Arc<Mutex<()>>,
+    last_seen: Instant,
+}
+
+#[derive(Debug)]
+struct LocalRevision {
+    revision: Arc<AtomicU64>,
     last_seen: Instant,
 }
 
@@ -366,8 +374,75 @@ impl DaemonShellRuntime {
             existing.last_seen = now;
             return Ok(Arc::clone(&existing.session));
         }
-        cache_negotiation(&mut cache, thread_id, Arc::clone(&session), now);
+        cache_negotiation(&mut cache, thread_id, Arc::clone(&session), now)?;
         Ok(session)
+    }
+
+    async fn local_revision(&self, thread_id: &str) -> Result<Arc<AtomicU64>> {
+        let now = Instant::now();
+        let mut cache = self.negotiations.lock().await;
+        prune_negotiations(&mut cache, now);
+        if let Some(entry) = cache.local_revisions.get_mut(thread_id) {
+            entry.last_seen = now;
+            return Ok(Arc::clone(&entry.revision));
+        }
+        if cache.local_revisions.len() >= MAX_NEGOTIATED_SESSIONS {
+            let oldest = cache
+                .local_revisions
+                .iter()
+                .filter(|(_, entry)| Arc::strong_count(&entry.revision) == 1)
+                .min_by_key(|(_, entry)| entry.last_seen)
+                .map(|(thread_id, _)| thread_id.clone());
+            if let Some(oldest) = oldest {
+                cache.local_revisions.remove(&oldest);
+            }
+        }
+        if cache.local_revisions.len() >= MAX_NEGOTIATED_SESSIONS {
+            return Err(WinxError::ResourceAllocationError {
+                message: format!(
+                    "all {MAX_NEGOTIATED_SESSIONS} daemon local session revisions are active"
+                ),
+            });
+        }
+        let revision = Arc::new(AtomicU64::new(0));
+        cache.local_revisions.insert(
+            thread_id.to_string(),
+            LocalRevision { revision: Arc::clone(&revision), last_seen: now },
+        );
+        Ok(revision)
+    }
+
+    async fn local_revision_is_current(
+        &self,
+        thread_id: &str,
+        expected: &Arc<AtomicU64>,
+        value: u64,
+    ) -> bool {
+        let mut cache = self.negotiations.lock().await;
+        let Some(current) = cache.local_revisions.get_mut(thread_id) else { return false };
+        current.last_seen = Instant::now();
+        Arc::ptr_eq(&current.revision, expected)
+            && current.revision.load(Ordering::SeqCst) == value
+    }
+
+    async fn apply_snapshot_if_current(
+        &self,
+        bash_state: &Arc<Mutex<Option<BashState>>>,
+        thread_id: &str,
+        expected_revision: &Arc<AtomicU64>,
+        revision_value: u64,
+        snapshot: &crate::state::persistence::BashStateSnapshot,
+    ) -> bool {
+        let mut state = bash_state.lock().await;
+        let Some(state) = state.as_mut() else { return false };
+        if !self
+            .local_revision_is_current(thread_id, expected_revision, revision_value)
+            .await
+        {
+            return false;
+        }
+        state.apply_snapshot(snapshot);
+        true
     }
 
     async fn negotiation_gate(&self, thread_id: &str) -> Result<Arc<Mutex<()>>> {
@@ -509,9 +584,18 @@ impl DaemonShellRuntime {
         command: BashCommand,
         requested_options: ShellActionOptions,
     ) -> Result<BashCommandRuntimeResult> {
-        let snapshot =
-            bash_state.lock().await.as_ref().ok_or(WinxError::BashStateNotInitialized)?.snapshot();
         let thread_id = command.thread_id.clone();
+        // Capture state and its adapter-local configuration revision under the
+        // BashState lock. configure_remote uses the same lock order, so a
+        // concurrent Initialize/Reset/Mode/Workspace transition cannot land
+        // between these two values.
+        let (snapshot, local_revision, captured_revision) = {
+            let state = bash_state.lock().await;
+            let state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+            let revision = self.local_revision(&thread_id).await?;
+            let value = revision.load(Ordering::SeqCst);
+            (state.snapshot(), revision, value)
+        };
         let mut session = self.live_negotiated_session(&thread_id).await?;
         let hello = session.lock().await.guardian.clone();
         let (options, mut generation_bound_actions) =
@@ -567,9 +651,14 @@ impl DaemonShellRuntime {
             }
         };
 
-        if let Some(state) = bash_state.lock().await.as_mut() {
-            state.apply_snapshot(&result.snapshot);
-        }
+        self.apply_snapshot_if_current(
+            bash_state,
+            &thread_id,
+            &local_revision,
+            captured_revision,
+            &result.snapshot,
+        )
+        .await;
         match (result.output, result.compact_output, result.state, result.error) {
             (output, compact_output, Some(state), None)
                 if output.is_some() || compact_output.is_some() => {
@@ -610,6 +699,10 @@ impl DaemonShellRuntime {
             ShellSessionTransition::WorkspaceChange => ConfigureSessionTransition::WorkspaceChange,
         };
         let thread_id = bash_state.current_thread_id.clone();
+        // The caller owns BashState for this entire future. Bump before any
+        // remote I/O so every older action response is stale even when this
+        // transition ultimately returns an error.
+        self.local_revision(&thread_id).await?.fetch_add(1, Ordering::SeqCst);
         let session = self.live_negotiated_session(&thread_id).await?;
         let result: ConfigureSessionResult = Self::negotiated_request(
             &session,
@@ -640,6 +733,10 @@ fn prune_negotiations(cache: &mut NegotiationCache, now: Instant) {
     cache.gates.retain(|_, entry| {
         now.duration_since(entry.last_seen) <= NEGOTIATION_TTL || Arc::strong_count(&entry.gate) > 1
     });
+    cache.local_revisions.retain(|_, entry| {
+        now.duration_since(entry.last_seen) <= NEGOTIATION_TTL
+            || Arc::strong_count(&entry.revision) > 1
+    });
 }
 
 fn cache_negotiation(
@@ -647,18 +744,25 @@ fn cache_negotiation(
     thread_id: &str,
     session: Arc<Mutex<NegotiatedSession>>,
     now: Instant,
-) {
+) -> Result<()> {
     if cache.sessions.len() >= MAX_NEGOTIATED_SESSIONS {
         if let Some(oldest) = cache
             .sessions
             .iter()
+            .filter(|(_, entry)| Arc::strong_count(&entry.session) == 1)
             .min_by_key(|(_, entry)| entry.last_seen)
             .map(|(thread_id, _)| thread_id.clone())
         {
             cache.sessions.remove(&oldest);
         }
     }
+    if cache.sessions.len() >= MAX_NEGOTIATED_SESSIONS {
+        return Err(WinxError::ResourceAllocationError {
+            message: format!("all {MAX_NEGOTIATED_SESSIONS} daemon sessions are active"),
+        });
+    }
     cache.sessions.insert(thread_id.to_string(), CachedNegotiation { session, last_seen: now });
+    Ok(())
 }
 
 impl ShellRuntime for DaemonShellRuntime {
@@ -1145,8 +1249,103 @@ mod tests {
                 },
                 stream,
             }));
-            cache_negotiation(&mut cache, &format!("thread-{index}"), session, Instant::now());
+            cache_negotiation(&mut cache, &format!("thread-{index}"), session, Instant::now())
+                .expect("inactive cache entry should be evictable");
         }
         assert_eq!(cache.sessions.len(), MAX_NEGOTIATED_SESSIONS);
+    }
+
+    #[tokio::test]
+    async fn adapter_negotiation_cache_never_evicts_active_sessions() {
+        let mut cache = NegotiationCache::default();
+        let mut active = Vec::new();
+        for index in 0..MAX_NEGOTIATED_SESSIONS {
+            let (stream, peer) = UnixStream::pair().expect("unix stream pair");
+            drop(peer);
+            let session = Arc::new(Mutex::new(NegotiatedSession {
+                control_epoch: "control".to_string(),
+                guardian: HelloResult {
+                    protocol_major: PROTOCOL_MAJOR,
+                    protocol_minor: 5,
+                    capabilities: vec![TYPED_ACTION_RESULT_CAPABILITY.to_string()],
+                    max_frame_bytes: super::super::protocol::MAX_FRAME_BYTES,
+                    daemon_epoch: format!("active-{index}"),
+                    daemon_pid: u32::try_from(index).unwrap_or(u32::MAX),
+                },
+                stream,
+            }));
+            cache_negotiation(
+                &mut cache,
+                &format!("active-{index}"),
+                Arc::clone(&session),
+                Instant::now(),
+            )
+            .expect("active slot");
+            active.push(session);
+        }
+        let (stream, peer) = UnixStream::pair().expect("overflow pair");
+        drop(peer);
+        let overflow = Arc::new(Mutex::new(NegotiatedSession {
+            control_epoch: "control".to_string(),
+            guardian: HelloResult {
+                protocol_major: PROTOCOL_MAJOR,
+                protocol_minor: 5,
+                capabilities: vec![],
+                max_frame_bytes: super::super::protocol::MAX_FRAME_BYTES,
+                daemon_epoch: "overflow".to_string(),
+                daemon_pid: 999,
+            },
+            stream,
+        }));
+        let error = cache_negotiation(
+            &mut cache,
+            "overflow",
+            Arc::clone(&overflow),
+            Instant::now(),
+        )
+        .expect_err("all active sessions must apply backpressure");
+        assert!(matches!(error, WinxError::ResourceAllocationError { .. }));
+        assert_eq!(cache.sessions.len(), MAX_NEGOTIATED_SESSIONS);
+
+        drop(active.pop());
+        cache_negotiation(&mut cache, "overflow", overflow, Instant::now())
+            .expect("an inactive session can be evicted");
+        assert_eq!(cache.sessions.len(), MAX_NEGOTIATED_SESSIONS);
+    }
+
+    #[tokio::test]
+    async fn stale_daemon_action_snapshot_cannot_overwrite_local_reconfiguration() {
+        let runtime = DaemonShellRuntime::new("unused.sock");
+        let mut initial = BashState::new();
+        initial.current_thread_id = "local-revision".to_string();
+        initial.cwd = PathBuf::from("/old-action-cwd");
+        let stale_snapshot = initial.snapshot();
+        let state = Arc::new(Mutex::new(Some(initial)));
+
+        let revision = runtime.local_revision("local-revision").await.expect("revision");
+        let captured = revision.load(Ordering::SeqCst);
+        {
+            let mut guard = state.lock().await;
+            // configure_remote performs this bump while its caller holds the
+            // same BashState lock.
+            revision.fetch_add(1, Ordering::SeqCst);
+            guard.as_mut().expect("state").cwd = PathBuf::from("/new-config-cwd");
+        }
+
+        assert!(
+            !runtime
+                .apply_snapshot_if_current(
+                    &state,
+                    "local-revision",
+                    &revision,
+                    captured,
+                    &stale_snapshot,
+                )
+                .await
+        );
+        assert_eq!(
+            state.lock().await.as_ref().expect("state").cwd,
+            PathBuf::from("/new-config-cwd")
+        );
     }
 }

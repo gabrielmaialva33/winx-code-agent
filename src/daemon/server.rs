@@ -188,16 +188,39 @@ fn evict_oldest_if_full<T>(entries: &mut HashMap<String, TimedEntry<T>>, incomin
 async fn launch_cancellation_flag(
     session: &DaemonSession,
     cancellation_key: &str,
-) -> Arc<AtomicBool> {
+) -> Result<Arc<AtomicBool>> {
     let now = Instant::now();
     let mut reservations = session.launch_reservations.lock().await;
-    prune_timed_entries(&mut reservations, now);
-    evict_oldest_if_full(&mut reservations, cancellation_key);
+    reservations.retain(|_, entry| {
+        now.duration_since(entry.last_seen) <= SESSION_CACHE_TTL
+            || Arc::strong_count(&entry.value) > 1
+    });
+    if !reservations.contains_key(cancellation_key)
+        && reservations.len() >= MAX_SESSION_CACHE_ENTRIES
+    {
+        let oldest = reservations
+            .iter()
+            .filter(|(_, entry)| Arc::strong_count(&entry.value) == 1)
+            .min_by_key(|(_, entry)| entry.last_seen)
+            .map(|(key, _)| key.clone());
+        if let Some(oldest) = oldest {
+            reservations.remove(&oldest);
+        }
+    }
+    if !reservations.contains_key(cancellation_key)
+        && reservations.len() >= MAX_SESSION_CACHE_ENTRIES
+    {
+        return Err(WinxError::ResourceAllocationError {
+            message: format!(
+                "all {MAX_SESSION_CACHE_ENTRIES} action cancellation reservations are active"
+            ),
+        });
+    }
     let entry = reservations
         .entry(cancellation_key.to_string())
         .or_insert_with(|| TimedEntry { value: Arc::new(AtomicBool::new(false)), last_seen: now });
     entry.last_seen = now;
-    Arc::clone(&entry.value)
+    Ok(Arc::clone(&entry.value))
 }
 
 fn validate_identifier(label: &str, value: &str) -> Result<()> {
@@ -389,9 +412,13 @@ async fn dispatch(
                 sessions.lock().await.get(&normalize_thread_id(&params.thread_id)).cloned();
             match session {
                 Some(session) => {
-                    let flag = launch_cancellation_flag(&session, &params.cancellation_key).await;
-                    flag.store(true, Ordering::SeqCst);
-                    rpc_result(request.id, &true)
+                    match launch_cancellation_flag(&session, &params.cancellation_key).await {
+                        Ok(flag) => {
+                            flag.store(true, Ordering::SeqCst);
+                            rpc_result(request.id, &true)
+                        }
+                        Err(error) => rpc_error(request.id, -32603, &error.to_string()),
+                    }
                 }
                 None => rpc_result(request.id, &false),
             }
@@ -599,7 +626,7 @@ async fn run_action(
         sessions.entry(thread_id.clone()).or_insert_with(|| Arc::new(DaemonSession::new())).clone()
     };
     if let Some(key) = params.options.cancellation_key.as_deref() {
-        params.options.launch_cancelled = Some(launch_cancellation_flag(&session, key).await);
+        params.options.launch_cancelled = Some(launch_cancellation_flag(&session, key).await?);
     }
     let fingerprint = canonical_action_fingerprint(&params)?;
 
@@ -788,6 +815,13 @@ async fn execute_action(
             state.init_pty_shell().await?;
         }
     }
+    let pty_incarnation_before = {
+        let guard = session.state.lock().await;
+        let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+        let incarnation =
+            state.pty_shell.lock().await.as_ref().map(crate::state::pty::PtyShell::incarnation);
+        incarnation
+    };
 
     if is_command {
         *session.command_id.lock().await = Some(params.request_key.clone());
@@ -817,6 +851,20 @@ async fn execute_action(
         params.options,
     )
     .await;
+    let pty_incarnation_after = {
+        let guard = session.state.lock().await;
+        let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+        let incarnation =
+            state.pty_shell.lock().await.as_ref().map(crate::state::pty::PtyShell::incarnation);
+        incarnation
+    };
+    let session_epoch = if pty_incarnation_before != pty_incarnation_after {
+        let next = new_epoch();
+        *session.session_epoch.lock().await = next.clone();
+        next
+    } else {
+        session_epoch
+    };
     if let Ok(result) = &outcome {
         if let Some(id) = result.result.state.background_id.as_ref() {
             session.background_ids.lock().await.insert(id.clone());
