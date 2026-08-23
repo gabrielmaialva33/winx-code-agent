@@ -84,6 +84,10 @@ Winx validates workspace paths and tracks read-before-edit state. Security-sensi
 - background command identifiers;
 - clear behavior for interrupts and input forwarding.
 
+The optional `verify_command` on edit tools is shell execution: it uses the same command/mode checks as `BashCommand`,
+is rejected before writing when its syntax or mode policy is invalid, and requires `BashCommand` in an HTTP principal's
+tool policy. A verification failure does not roll back an already-committed edit and must be reported as such.
+
 ## HTTP Authentication and Isolation
 
 HTTP bearer tokens must be at least 32 bytes unless the operator explicitly enables weak local-development tokens.
@@ -108,9 +112,10 @@ path. Workspace paths and timing remain sensitive operational metadata despite t
 
 Authentication is not authorization inside a shell. A principal permitted to use Winx still receives the capabilities of
 the selected Winx mode. Use `architect`, a constrained `code_writer`, containers, and OS-level isolation where needed.
-Winx does not currently provide built-in TLS, OAuth/OIDC, mTLS, or per-principal tool policy; those controls belong at a
-reviewed network edge when required. OAuth/OIDC well-known probes are intentionally ordinary `404 Not Found` responses;
-only `/mcp` is protected by Winx bearer authentication.
+Per-principal tool policies narrow MCP discovery and reject dispatch outside the configured catalog, but a catalog that
+contains `BashCommand` is still shell access and is not an operating-system sandbox. Winx does not currently provide
+built-in TLS, OAuth/OIDC, or mTLS; those controls belong at a reviewed network edge when required. OAuth/OIDC well-known
+probes are intentionally ordinary `404 Not Found` responses; only `/mcp` is protected by Winx bearer authentication.
 
 ## Guardian Lifecycle Safety
 
