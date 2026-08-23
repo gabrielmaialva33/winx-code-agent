@@ -823,6 +823,70 @@ mod tests {
         assert_eq!(structured["data"]["output_truncated"], false);
     }
 
+    fn exited_verification(exit_code: i32) -> CallToolResult {
+        bash_success_result(
+            Some(&json!({"thread_id":"thread","action_json":{"type":"command"}})),
+            BashCommandRuntimeResult {
+                result: crate::tools::bash_command::BashCommandResult {
+                    output: format!("verification output {exit_code}"),
+                    state: BashCommandState {
+                        process_status: crate::tools::bash_command::BashProcessStatus::Exited,
+                        background_id: None,
+                        running_for_seconds: None,
+                        exit_code: Some(exit_code),
+                        cwd: "/workspace".into(),
+                        turn_state: None,
+                    },
+                },
+                compact_output: None,
+                command_generation: Some(1),
+                execution_token: None,
+                generation_bound_actions: true,
+                output_truncated: false,
+            },
+            false,
+        )
+        .expect("typed verification result")
+    }
+
+    #[test]
+    fn edit_verification_surfaces_success_without_losing_edit_metadata() {
+        let arguments = json!({"thread_id":"thread","file_path":"/workspace/lib.rs"});
+        let mut result = edit_verification_result(
+            "FileWriteOrEdit",
+            Some(&arguments),
+            "Successfully edited /workspace/lib.rs",
+            exited_verification(0),
+        );
+        decorate_success("FileWriteOrEdit", Some(&arguments), &mut result);
+
+        assert_ne!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured verification");
+        assert_eq!(structured["status"], "completed");
+        assert_eq!(structured["data"]["edit_applied"], true);
+        assert_eq!(structured["data"]["verification_exit_code"], 0);
+        assert_eq!(structured["data"]["file_path"], "/workspace/lib.rs");
+    }
+
+    #[test]
+    fn failed_edit_verification_is_an_error_but_never_claims_rollback() {
+        let result = edit_verification_result(
+            "MultiFileEdit",
+            Some(&json!({"thread_id":"thread","files":[]})),
+            "MultiFileEdit applied all edits",
+            exited_verification(7),
+        );
+
+        assert_eq!(result.is_error, Some(true));
+        let text = result.content[0].as_text().expect("text result");
+        assert!(text.text.contains("edit remains applied"));
+        let structured = result.structured_content.expect("structured verification");
+        assert_eq!(structured["status"], "failed");
+        assert_eq!(structured["errorCode"], "verification_failed");
+        assert_eq!(structured["data"]["edit_applied"], true);
+        assert_eq!(structured["data"]["verification_exit_code"], 7);
+    }
+
     #[test]
     fn compact_negotiation_falls_back_to_legacy_runtime_output() {
         let legacy = "child output\n\n---\n\nstatus = process exited\ncwd = /workspace";
