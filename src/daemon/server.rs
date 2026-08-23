@@ -1234,9 +1234,9 @@ mod tests {
     use tokio::sync::{watch, Mutex};
 
     use super::{
-        canonical_action_fingerprint, configure_session, interrupt_session, run_action,
-        validate_identifier, ActionCompletion, ActionEntry, ActionOwnerGuard, CaptureState,
-        DaemonSession, OutputJournal, MAX_SESSION_CACHE_ENTRIES,
+        canonical_action_fingerprint, configure_session, interrupt_session,
+        launch_cancellation_flag, run_action, validate_identifier, ActionCompletion, ActionEntry,
+        ActionOwnerGuard, CaptureState, DaemonSession, OutputJournal, MAX_SESSION_CACHE_ENTRIES,
     };
     use crate::daemon::protocol::{
         ConfigureSessionParams, ConfigureSessionTransition, RunActionParams, SessionParams,
@@ -1409,6 +1409,67 @@ mod tests {
         .await
         .expect_err("all-in-flight cache must reject new reservations");
         assert!(matches!(error, WinxError::ResourceAllocationError { .. }));
+    }
+
+    #[tokio::test]
+    async fn cancellation_reservations_never_evict_active_flags() {
+        let session = DaemonSession::new();
+        let mut active = Vec::new();
+        for index in 0..MAX_SESSION_CACHE_ENTRIES {
+            active.push(
+                launch_cancellation_flag(&session, &format!("active-{index}"))
+                    .await
+                    .expect("active cancellation reservation"),
+            );
+        }
+        let error = launch_cancellation_flag(&session, "overflow")
+            .await
+            .expect_err("all active cancellation flags must apply backpressure");
+        assert!(matches!(error, WinxError::ResourceAllocationError { .. }));
+        assert_eq!(session.launch_reservations.lock().await.len(), MAX_SESSION_CACHE_ENTRIES);
+
+        drop(active.pop());
+        launch_cancellation_flag(&session, "overflow")
+            .await
+            .expect("inactive cancellation flag should be evictable");
+        assert_eq!(session.launch_reservations.lock().await.len(), MAX_SESSION_CACHE_ENTRIES);
+    }
+
+    #[tokio::test]
+    async fn automatic_pty_reset_advances_guardian_incarnation() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let mut state = BashState::new();
+        state.cwd = temp.path().to_path_buf();
+        state.workspace_root = temp.path().to_path_buf();
+        state.current_thread_id = "automatic_pty_reset".to_string();
+        let sessions = Arc::new(Mutex::new(HashMap::new()));
+
+        let first = run_action(
+            &sessions,
+            action_params(&state, "printf first-incarnation", "before-auto-reset"),
+            "guardian-a",
+        )
+        .await
+        .expect("first action");
+        let stale = first.execution_token.expect("first execution token");
+
+        let mut forced = action_params(&state, "printf reset-incarnation", "forced-auto-reset");
+        forced.options.force_clear_to_run_failure = true;
+        let reset = run_action(&sessions, forced, "guardian-a").await.expect("reset action");
+        let current = reset.execution_token.expect("reset execution token");
+        assert_eq!(stale.generation, current.generation);
+        assert_ne!(stale.session_epoch, current.session_epoch);
+
+        let mut stale_status = action_params(&state, "printf unused", "stale-after-auto-reset");
+        stale_status.command = serde_json::from_value(serde_json::json!({
+            "action_json": {"type": "status_check", "status_check": true},
+            "thread_id": "automatic_pty_reset",
+            "wait_for_seconds": 0.0
+        }))
+        .expect("status command");
+        stale_status.options.expected_generation = Some(stale.generation);
+        stale_status.options.expected_execution = Some(stale);
+        assert!(run_action(&sessions, stale_status, "guardian-a").await.is_err());
     }
 
     #[tokio::test]
