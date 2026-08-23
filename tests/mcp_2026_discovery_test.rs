@@ -696,7 +696,7 @@ async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::
         "test -f passing.txt && printf verify-ok",
     )
     .await?;
-    assert!(passing["result"].get("isError").is_none(), "{passing}");
+    assert_eq!(passing["result"]["isError"], false, "{passing}");
     assert_eq!(passing["result"]["structuredContent"]["status"], "completed", "{passing}");
     assert_eq!(
         passing["result"]["structuredContent"]["data"]["verification_exit_code"], 0,
