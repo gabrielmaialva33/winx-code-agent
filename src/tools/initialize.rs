@@ -456,8 +456,7 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
                 let _ = writeln!(
                     response,
                     "Attached to the existing durable Winx session; PTY, cwd, mode, and prior \
-                     context were preserved.\nUse thread_id={thread_id} for all winx tool calls.\n\
-                     cwd={}\nmode={}",
+                     context were preserved.\ncwd={}\nmode={}",
                     state.cwd.display(),
                     state.mode
                 );
@@ -496,7 +495,6 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
                     );
                 }
 
-                let _ = writeln!(response, "\nUse thread_id={thread_id} for all winx tool calls.");
                 if let Some(attach_hint) = configured.attach_hint.as_deref() {
                     let _ = writeln!(response, "\nAttach terminal: {attach_hint}");
                 }
@@ -593,6 +591,14 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
                 return Err(WinxError::BashStateNotInitialized);
             }
         }
+    }
+
+    if let Some(state) = bash_state_guard.as_ref() {
+        let _ = writeln!(
+            response,
+            "\nUse thread_id={thread_id} for all winx tool calls.\nUse workspace_root={} for all winx tool calls.\nKeep this exact pair together. workspace_root identifies this project session; it does not restrict target paths allowed by policy.",
+            state.workspace_root.display()
+        );
     }
 
     let (code_writer_policy_strength, bypass) =
