@@ -25,9 +25,9 @@ struct EditVerification {
 }
 
 fn take_edit_verification(args: &mut Value) -> Result<Option<EditVerification>, McpError> {
-    let map = args.as_object_mut().ok_or_else(|| {
-        McpError::invalid_request("Edit tool parameters must be an object", None)
-    })?;
+    let map = args
+        .as_object_mut()
+        .ok_or_else(|| McpError::invalid_request("Edit tool parameters must be an object", None))?;
     let command = match map.remove("verify_command") {
         None | Some(Value::Null) => None,
         Some(Value::String(command)) if !command.trim().is_empty() => {
@@ -44,10 +44,7 @@ fn take_edit_verification(args: &mut Value) -> Result<Option<EditVerification>, 
         None | Some(Value::Null) => None,
         Some(value) => {
             let wait = serde_json::from_value::<f32>(value).map_err(|error| {
-                McpError::invalid_request(
-                    format!("Invalid verify_wait_for_seconds: {error}"),
-                    None,
-                )
+                McpError::invalid_request(format!("Invalid verify_wait_for_seconds: {error}"), None)
             })?;
             if !wait.is_finite() || !(0.0..=MAX_VERIFY_WAIT_SECONDS).contains(&wait) {
                 return Err(McpError::invalid_request(
@@ -63,10 +60,9 @@ fn take_edit_verification(args: &mut Value) -> Result<Option<EditVerification>, 
 
     match command {
         Some(command) => Ok(Some(EditVerification { command, wait_for_seconds })),
-        None if wait_for_seconds.is_some() => Err(McpError::invalid_request(
-            "verify_wait_for_seconds requires verify_command",
-            None,
-        )),
+        None if wait_for_seconds.is_some() => {
+            Err(McpError::invalid_request("verify_wait_for_seconds requires verify_command", None))
+        }
         None => Ok(None),
     }
 }
@@ -112,10 +108,7 @@ impl WinxService {
         let (result, bash_runtime) = match tool.as_str() {
             "Initialize" => (self.handle_initialize(args_value).await, None),
             "BashCommand" => {
-                match self
-                    .handle_bash_command_with_output(args_value, bash_options.clone())
-                    .await
-                {
+                match self.handle_bash_command_with_output(args_value, bash_options.clone()).await {
                     Ok(execution) => (
                         Ok(execution.result),
                         Some((
@@ -131,9 +124,7 @@ impl WinxService {
             "FileWriteOrEdit" => {
                 (self.handle_file_write_or_edit(args_value, bash_options.clone()).await, None)
             }
-            "MultiFileEdit" => {
-                (self.handle_multi_file_edit(args_value, bash_options).await, None)
-            }
+            "MultiFileEdit" => (self.handle_multi_file_edit(args_value, bash_options).await, None),
             "UndoEdit" => (self.handle_undo_edit(args_value).await, None),
             "ContextSave" => (self.handle_context_save(args_value).await, None),
             "ReadImage" => (self.handle_read_image(args_value).await, None),
@@ -474,10 +465,7 @@ impl WinxService {
             ));
         }
         let allow_shell_probe = matches!(state.mode, crate::types::Modes::Wcgw);
-        crate::utils::bash_parser::assert_single_statement(
-            &verification.command,
-            allow_shell_probe,
-        )
+        crate::utils::bash_parser::assert_single_statement(&verification.command, allow_shell_probe)
     }
 
     async fn finish_edit_verification(
@@ -504,9 +492,7 @@ impl WinxService {
         if let Some(wait) = verification.wait_for_seconds {
             arguments["wait_for_seconds"] = json!(wait);
         }
-        let execution = self
-            .handle_bash_command_with_output(Some(arguments), bash_options)
-            .await?;
+        let execution = self.handle_bash_command_with_output(Some(arguments), bash_options).await?;
         Ok(outcomes::edit_verification_result(
             tool,
             Some(recovery_args),
@@ -531,11 +517,7 @@ impl WinxService {
         let (slot, _session_guard) = self.session_for(&thread_id).await;
         if let Some(verification) = verification.as_ref() {
             if let Err(error) = Self::validate_edit_verification(&slot, verification).await {
-                return outcomes::tool_failure(
-                    "FileWriteOrEdit",
-                    &error,
-                    Some(&recovery_args),
-                );
+                return outcomes::tool_failure("FileWriteOrEdit", &error, Some(&recovery_args));
             }
         }
         match crate::tools::file_write_or_edit::handle_tool_call(&slot, edit).await {
@@ -687,13 +669,14 @@ pub(super) fn audit_summary(tool: &str, args: Option<&Value>) -> String {
                 format!("action={kind}")
             }
         }
-        "FileWriteOrEdit" | "ReadImage" | "UndoEdit" => {
+        "FileWriteOrEdit" => {
             format!(
                 "path={} verify={}",
                 string("file_path"),
                 args.get("verify_command").is_some_and(|value| !value.is_null())
             )
         }
+        "ReadImage" | "UndoEdit" => format!("path={}", string("file_path")),
         "MultiFileEdit" => {
             format!(
                 "files={} verify={}",
