@@ -15,6 +15,11 @@ use crate::state::pty::PtyShell;
 
 const COMMAND_CHUNK_SIZE: usize = 64;
 
+pub(super) struct CommandExecutionContext<'a> {
+    pub(super) options: &'a ShellActionOptions,
+    pub(super) reset_transition: Option<&'a mut ShellResetTransition>,
+}
+
 fn spawn_background_reaper(owner_thread_id: String, background_id: String) {
     tokio::spawn(async move {
         loop {
@@ -79,9 +84,9 @@ pub(super) async fn execute_command(
     allow_multi: bool,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-    options: &ShellActionOptions,
-    reset_transition: Option<&mut ShellResetTransition>,
+    context: CommandExecutionContext<'_>,
 ) -> Result<BashCommandRuntimeResult> {
+    let CommandExecutionContext { options, reset_transition } = context;
     let stripped_command = strip_tail_pipe(command);
     let command = stripped_command.as_str();
     debug!(bytes = command.len(), allow_multi, "Processing Command action");
