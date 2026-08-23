@@ -579,6 +579,125 @@ fn assert_initialize_usage(entries: &[serde_json::Value]) {
     }));
 }
 
+fn assert_terminal_initialize_failure(
+    response: &serde_json::Value,
+    error_code: &str,
+    instruction: &str,
+) {
+    let structured = &response["result"]["structuredContent"];
+    assert_eq!(structured["errorCode"], error_code, "{response}");
+    assert_eq!(structured["retryable"], false, "{response}");
+    assert!(structured.get("nextAction").is_none(), "{response}");
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains(instruction)),
+        "{response}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bash_temp_contract_is_env_backed_and_blocks_legacy_destinations() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialized = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "temp-policy",
+        "temp-policy-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialized)?;
+    let temporary_artifact_dir = initialized_temporary_artifact_dir(&initialized)?;
+
+    let rejected = bash_as(
+        address,
+        TEST_TOKEN,
+        &thread_id,
+        "temp-policy-rejected",
+        "printf rejected > .winx-review-carrier.js",
+    )
+    .await?;
+    let rejected = response_json(&rejected)?;
+    assert_eq!(rejected["result"]["isError"], true, "{rejected}");
+    assert_eq!(
+        rejected["result"]["structuredContent"]["errorCode"], "temporary_artifact_policy",
+        "{rejected}"
+    );
+    assert!(!workspace.path().join(".winx-review-carrier.js").exists());
+
+    let accepted = bash_as(
+        address,
+        TEST_TOKEN,
+        &thread_id,
+        "temp-policy-accepted",
+        "mkdir -p \"$WINX_TEMP_DIR\" && printf accepted > \"$WINX_TEMP_DIR/helper.txt\"",
+    )
+    .await?;
+    let accepted = response_json(&accepted)?;
+    assert_eq!(accepted["result"]["isError"], false, "{accepted}");
+    assert_eq!(
+        accepted["result"]["structuredContent"]["data"]["temporary_artifact_env"], "WINX_TEMP_DIR",
+        "{accepted}"
+    );
+    assert_eq!(
+        accepted["result"]["structuredContent"]["data"]["temporary_artifact_dir"],
+        temporary_artifact_dir,
+        "{accepted}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(Path::new(&temporary_artifact_dir).join("helper.txt"))?,
+        "accepted"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_initialize_for_another_workspace_is_terminal_over_http() -> anyhow::Result<()> {
+    let first_workspace = tempfile::tempdir()?;
+    let second_workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(|address| {
+        spawn_single_token_server_with_affinity(address, "thread")
+    })
+    .await?;
+
+    let first = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        first_workspace.path(),
+        "one-chat",
+        "terminal-rebind-first",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&first)?;
+    let bound_workspace = initialized_workspace_root(&first)?;
+
+    let repeated = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        second_workspace.path(),
+        &thread_id,
+        "terminal-rebind-second",
+    )
+    .await?;
+    let repeated = response_json(&repeated)?;
+    assert_terminal_initialize_failure(
+        &repeated,
+        "initialize_workspace_already_bound",
+        "Do not call Initialize again",
+    );
+    assert_eq!(
+        repeated["result"]["structuredContent"]["data"]["bound_workspace"], bound_workspace,
+        "{repeated}"
+    );
+    assert_eq!(
+        repeated["result"]["structuredContent"]["data"]["continue_with_bound_session"], true,
+        "{repeated}"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn oauth_well_known_probes_return_404_without_bearer_auth() -> anyhow::Result<()> {
     let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
@@ -2118,10 +2237,10 @@ async fn root_path_authority_does_not_weaken_workspace_session_coherence() -> an
         }
     });
     let in_place_change = post_tool_value(address, &in_place_change).await?;
-    assert_eq!(
-        in_place_change["result"]["structuredContent"]["errorCode"],
+    assert_terminal_initialize_failure(
+        &in_place_change,
         "workspace_change_requires_new_session",
-        "{in_place_change}"
+        "Do not repeat this Initialize call",
     );
     let pwd = pwd_as(address, TEST_TOKEN, &first_thread, "root-authority-still-first").await?;
     assert!(pwd.contains(&first_root), "original binding changed: {pwd}");
