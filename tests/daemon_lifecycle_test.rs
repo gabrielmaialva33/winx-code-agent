@@ -569,7 +569,10 @@ async fn repeated_first_call_attaches_without_resetting_the_guardian_pty() -> an
     )
     .await?;
     let after = client.session_info(thread_id).await?;
-    assert!(response.contains("Attached to the existing durable session"), "{response}");
+    assert!(response.contains("Attached to the existing durable Winx session"), "{response}");
+    assert!(response.contains("Context and instructions are unchanged"), "{response}");
+    assert!(!response.contains("# Workspace structure"), "{response}");
+    assert!(!response.contains("# Winx orchestration contract"), "{response}");
     assert_eq!(before.shell_pid, after.shell_pid, "reattach replaced the PTY owner");
     assert_eq!(Path::new(&after.cwd).canonicalize()?, nested.canonicalize()?);
     // The guardian snapshot reports the shell's logical cwd; on macOS the

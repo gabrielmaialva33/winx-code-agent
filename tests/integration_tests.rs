@@ -90,6 +90,58 @@ async fn test_initialize_loads_agent_guidelines() -> Result<()> {
 }
 
 #[tokio::test]
+async fn repeated_first_call_is_compact_and_preserves_the_active_mode() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    std::fs::write(temp_dir.path().join("AGENTS.md"), "large context marker\n".repeat(200))?;
+    let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
+    let thread_id = "compact-repeat";
+
+    let first = winx_code_agent::tools::initialize::handle_tool_call(
+        &bash_state_arc,
+        Initialize {
+            init_type: InitializeType::FirstCall,
+            mode_name: ModeName::Wcgw,
+            any_workspace_path: temp_dir.path().to_string_lossy().into_owned(),
+            thread_id: thread_id.to_string(),
+            code_writer_config: None,
+            initial_files_to_read: vec![],
+            task_id_to_resume: String::new(),
+        },
+    )
+    .await?;
+    assert!(first.contains("large context marker"), "{first}");
+
+    // The redundant request deliberately supplies code_writer without its required
+    // config. Reattaching must preserve the active mode instead of validating or
+    // applying unused replacement settings.
+    let repeated = winx_code_agent::tools::initialize::handle_tool_call(
+        &bash_state_arc,
+        Initialize {
+            init_type: InitializeType::FirstCall,
+            mode_name: ModeName::CodeWriter,
+            any_workspace_path: temp_dir.path().join("ignored").to_string_lossy().into_owned(),
+            thread_id: thread_id.to_string(),
+            code_writer_config: None,
+            initial_files_to_read: vec![],
+            task_id_to_resume: String::new(),
+        },
+    )
+    .await?;
+
+    assert!(repeated.contains("Context and instructions are unchanged"), "{repeated}");
+    assert!(!repeated.contains("large context marker"), "{repeated}");
+    assert!(!repeated.contains("# Winx orchestration contract"), "{repeated}");
+    assert!(repeated.len() * 4 < first.len(), "first={} repeated={}", first.len(), repeated.len());
+    assert!(!temp_dir.path().join("ignored").exists());
+    let state = bash_state_arc.lock().await;
+    assert!(matches!(
+        state.as_ref().map(|state| state.mode),
+        Some(winx_code_agent::types::Modes::Wcgw)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_context_save_resume_restores_task_context() -> Result<()> {
     let temp_dir = TempDir::new()?;
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));

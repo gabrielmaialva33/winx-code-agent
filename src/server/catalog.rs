@@ -170,6 +170,7 @@ fn with_output_schema<T: schemars::JsonSchema>(mut tool: Tool) -> Tool {
 
 const INITIALIZE_DESCRIPTION: &str =
     "- Call this at the start of the conversation before using shell tools, unless a local MCP client supplied Roots and Winx initialized that workspace automatically. \
+     - Do not call Initialize again while this conversation already has a valid Winx thread_id. A repeated first_call only reattaches the durable session and returns compact unchanged-context metadata; use ReadFiles, CodeMap, BashCommand, or edit tools directly. \
      - Use `any_workspace_path` to initialize the shell in the appropriate project directory. \
      - If the user has mentioned a workspace or project root or any other file or folder use it to set `any_workspace_path`. \
      - If user has mentioned any files use `initial_files_to_read` to read, use absolute paths only (~ allowed) \

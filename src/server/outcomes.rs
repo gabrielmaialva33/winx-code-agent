@@ -132,7 +132,17 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
     let text = result_text(result);
     let mut data = safe_success_data(tool, arguments, &text, false);
     if let Some(existing) = existing.as_ref() {
-        data.insert("result".to_string(), existing.clone());
+        if tool == "Initialize" {
+            if let Value::Object(metadata) = existing {
+                for (key, value) in metadata {
+                    data.entry(key.clone()).or_insert_with(|| value.clone());
+                }
+            } else {
+                data.insert("result".to_string(), existing.clone());
+            }
+        } else {
+            data.insert("result".to_string(), existing.clone());
+        }
     }
 
     let envelope = ToolResultEnvelope {
@@ -742,6 +752,29 @@ fn string_argument(arguments: Option<&Value>, key: &str) -> Option<String> {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn initialize_metadata_is_flattened_into_the_shared_data_envelope() {
+        let mut result = CallToolResult::success(vec![ContentBlock::text("attached")]);
+        result.structured_content = Some(json!({
+            "initialize_transition": "attached_existing",
+            "initialize_reused": true,
+            "initialize_response_mode": "compact",
+            "context_bytes": 0
+        }));
+        decorate_success(
+            "Initialize",
+            Some(&json!({"thread_id":"thread","mode_name":"wcgw"})),
+            &mut result,
+        );
+
+        let structured = result.structured_content.expect("structured Initialize result");
+        assert_eq!(structured["status"], "completed");
+        assert_eq!(structured["data"]["initialize_transition"], "attached_existing");
+        assert_eq!(structured["data"]["initialize_reused"], true);
+        assert_eq!(structured["data"]["initialize_response_mode"], "compact");
+        assert!(structured["data"].get("result").is_none());
+    }
 
     #[test]
     fn unread_file_error_provides_exact_read_call() {

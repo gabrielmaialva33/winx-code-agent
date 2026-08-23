@@ -357,16 +357,33 @@ impl WinxService {
         }
         let (slot, _session_guard) = self.session_for(&thread_id).await;
 
-        match crate::tools::initialize::handle_tool_call_with_runtime(
+        match crate::tools::initialize::handle_tool_call_with_runtime_detailed(
             self.shell_runtime.as_ref(),
             &slot,
             initialize,
         )
         .await
         {
-            Ok(result) => {
+            Ok(outcome) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
+                let mut result = CallToolResult::success(vec![ContentBlock::text(outcome.text)]);
+                result.structured_content = Some(json!({
+                    "initialize_transition": outcome.transition.as_str(),
+                    "initialize_reused": outcome.transition
+                        == crate::tools::initialize::InitializeTransition::AttachedExisting,
+                    "initialize_response_mode": if outcome.compact_response {
+                        "compact"
+                    } else {
+                        "full"
+                    },
+                    "context_bytes": outcome.context_bytes,
+                    "guidelines_bytes": outcome.guidelines_bytes,
+                    "initial_files_count": outcome.initial_files_count,
+                    "instructions_unchanged": outcome.compact_response,
+                    "code_writer_policy_strength": outcome.code_writer_policy_strength,
+                    "shell_spawners_present": outcome.shell_spawners_present,
+                }));
+                Ok(result)
             }
             Err(error) => outcomes::tool_failure("Initialize", &error, Some(&recovery_args)),
         }
