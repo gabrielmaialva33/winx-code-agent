@@ -133,6 +133,36 @@ fn bash_command_input_schema() -> Arc<serde_json::Map<String, Value>> {
     Arc::new(schema)
 }
 
+/// Optional edit verification is implemented by the MCP adapter so the stable
+/// public Rust edit structs remain source-compatible for library callers.
+fn edit_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, Value>> {
+    let mut schema = (*schema_to_input_schema::<T>()).clone();
+    let properties = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Value::Object(properties) = properties {
+        properties.insert(
+            "verify_command".to_string(),
+            serde_json::json!({
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional finite foreground shell command to run immediately after a successful edit. Compose related fail-fast checks with &&. The edit remains applied if verification exits non-zero. Uses the same mode command policy as BashCommand."
+            }),
+        );
+        properties.insert(
+            "verify_wait_for_seconds".to_string(),
+            serde_json::json!({
+                "type": "number",
+                "minimum": 0,
+                "maximum": 60,
+                "default": 15,
+                "description": "Inline wait for verify_command. If it is still running, the result supplies a BashCommand status_check next action."
+            }),
+        );
+    }
+    Arc::new(schema)
+}
+
 fn with_output_schema<T: schemars::JsonSchema>(mut tool: Tool) -> Tool {
     tool.output_schema = Some(schema_to_input_schema::<T>());
     tool
@@ -223,16 +253,22 @@ fn build_winx_tools() -> Vec<Tool> {
             READ_FILES_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
         )),
-        with_output_schema::<ToolResultEnvelope>(mcp_tool::<FileWriteOrEdit>(
-            "FileWriteOrEdit",
-            FILE_WRITE_OR_EDIT_DESCRIPTION,
-            ToolAnnotations::new().destructive(true).open_world(false),
-        )),
-        with_output_schema::<ToolResultEnvelope>(mcp_tool::<MultiFileEdit>(
-            "MultiFileEdit",
-            MULTI_FILE_EDIT_DESCRIPTION,
-            ToolAnnotations::new().destructive(true).open_world(false),
-        )),
+        with_output_schema::<ToolResultEnvelope>(
+            Tool::new(
+                "FileWriteOrEdit",
+                FILE_WRITE_OR_EDIT_DESCRIPTION,
+                edit_input_schema::<FileWriteOrEdit>(),
+            )
+            .with_annotations(ToolAnnotations::new().destructive(true).open_world(true)),
+        ),
+        with_output_schema::<ToolResultEnvelope>(
+            Tool::new(
+                "MultiFileEdit",
+                MULTI_FILE_EDIT_DESCRIPTION,
+                edit_input_schema::<MultiFileEdit>(),
+            )
+            .with_annotations(ToolAnnotations::new().destructive(true).open_world(true)),
+        ),
         with_output_schema::<ToolResultEnvelope>(mcp_tool::<UndoEdit>(
             "UndoEdit",
             UNDO_EDIT_DESCRIPTION,
