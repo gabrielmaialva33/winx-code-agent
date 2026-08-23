@@ -40,10 +40,7 @@ impl SessionStore {
     /// Session-wide ordering barrier. Shell actions and interrupts hold a read
     /// guard while reset/configure holds a write guard, so an incarnation can
     /// never change between execution-token validation and the PTY operation.
-    pub(crate) fn operation_barrier(
-        &mut self,
-        thread_id: &str,
-    ) -> Arc<tokio::sync::RwLock<()>> {
+    pub(crate) fn operation_barrier(&mut self, thread_id: &str) -> Arc<tokio::sync::RwLock<()>> {
         if let Some(barrier) =
             self.operation_barriers.get(thread_id).and_then(std::sync::Weak::upgrade)
         {
