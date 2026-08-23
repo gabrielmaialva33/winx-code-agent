@@ -83,6 +83,8 @@ an OpenAI-hosted MCP endpoint.
   can be resumed with the same `thread_id`.
 - **Identity-aware isolation:** one token per principal; thread IDs and MCP Task IDs are scoped internally and translated
   back before the response leaves the server. Workspace affinity absorbs unstable model-generated thread IDs.
+- **Right-sized tool catalogs:** `full`, `coding`, `read-only`, and `terminal` profiles—or an exact per-principal
+  allowlist—reduce discovery/schema payloads and reject calls outside the advertised catalog.
 - **Fail-closed network defaults:** loopback-only binding, 32-byte minimum tokens, chmod-600 token files, DNS-rebinding
   host checks, body/time/concurrency limits, per-IP rate limiting, and delayed invalid-auth responses.
 - **Agent-native terminal semantics:** foreground and background commands, status polling, interactive input, stable TUI
@@ -630,10 +632,12 @@ caller owns stable IDs and explicit cleanup.
 [[principals]]
 name = "chatgpt"
 token_file = "/home/alice/.config/winx-chatgpt-token"
+tool_profile = "coding"
 
 [[principals]]
 name = "automation"
 token_env = "WINX_AUTOMATION_TOKEN"
+allowed_tools = ["Initialize", "BashCommand", "ReadFiles"]
 ```
 
 ```bash
@@ -644,7 +648,8 @@ winx-code-agent serve --http \
 
 Each authenticated principal receives its own internal namespace. The same external `thread_id` can therefore be reused
 by different clients without sharing a workspace, shell, guardian, or MCP Task. Internal prefixes are translated back out
-of normal results and errors before the response reaches the client.
+of normal results and errors before the response reaches the client. `tool_profile` defaults to `full`; an
+`allowed_tools` array replaces the selected profile. The policy applies to discovery and execution, not only display.
 
 ### ChatGPT and OpenAI products
 
