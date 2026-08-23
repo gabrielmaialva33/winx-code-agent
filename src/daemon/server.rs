@@ -1450,6 +1450,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelled_tombstones_apply_backpressure_until_consumed() {
+        let session = DaemonSession::new();
+        for index in 0..MAX_SESSION_CACHE_ENTRIES {
+            let flag = launch_cancellation_flag(&session, &format!("cancelled-{index}"))
+                .await
+                .expect("cancel tombstone");
+            flag.store(true, Ordering::Release);
+        }
+
+        let error = launch_cancellation_flag(&session, "overflow")
+            .await
+            .expect_err("cancel tombstones must not be evicted for capacity");
+        assert!(matches!(error, WinxError::ResourceAllocationError { .. }));
+
+        let consumed = session
+            .launch_reservations
+            .lock()
+            .await
+            .get("cancelled-0")
+            .expect("preserved tombstone")
+            .value
+            .clone();
+        consume_launch_cancellation_flag(&session, "cancelled-0", &consumed).await;
+        launch_cancellation_flag(&session, "replacement")
+            .await
+            .expect("consumed tombstone releases capacity");
+    }
+
+    #[tokio::test]
+    async fn cancel_before_action_survives_capacity_churn_and_prevents_launch() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let marker = temp.path().join("cancelled-before-action.marker");
+        let mut state = BashState::new();
+        state.cwd = temp.path().to_path_buf();
+        state.workspace_root = temp.path().to_path_buf();
+        state.current_thread_id = "cancel_tombstone_churn".to_string();
+        let session = Arc::new(DaemonSession::new());
+        let sessions = Arc::new(Mutex::new(HashMap::from([(
+            state.current_thread_id.clone(),
+            Arc::clone(&session),
+        )])));
+
+        let cancelled = launch_cancellation_flag(&session, "cancel-before-action")
+            .await
+            .expect("cancel reservation");
+        cancelled.store(true, Ordering::Release);
+        drop(cancelled);
+        for index in 0..(MAX_SESSION_CACHE_ENTRIES * 2) {
+            drop(
+                launch_cancellation_flag(&session, &format!("churn-{index}"))
+                    .await
+                    .expect("inactive churn reservation"),
+            );
+        }
+        assert!(
+            session
+                .launch_reservations
+                .lock()
+                .await
+                .get("cancel-before-action")
+                .is_some_and(|entry| entry.value.load(Ordering::Acquire)),
+            "capacity churn evicted the cancellation tombstone"
+        );
+
+        let mut params = action_params(
+            &state,
+            &format!("printf forbidden > {}", marker.display()),
+            "cancelled-action-request",
+        );
+        params.options.cancellation_key = Some("cancel-before-action".to_string());
+        let result = run_action(&sessions, params, "guardian-a")
+            .await
+            .expect("cancelled action result");
+        assert!(matches!(
+            result.error,
+            Some(WireShellError::CommandExecution(ref message))
+                if message.contains("cancelled before command launch")
+        ));
+        assert!(!marker.exists(), "cancelled action reached the PTY");
+        assert!(
+            !session.launch_reservations.lock().await.contains_key("cancel-before-action"),
+            "the action did not consume its cancellation tombstone"
+        );
+    }
+
+    #[tokio::test]
     async fn automatic_pty_reset_advances_guardian_incarnation() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let mut state = BashState::new();
