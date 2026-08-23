@@ -496,7 +496,7 @@ impl WinxService {
         Ok(outcomes::edit_verification_result(
             tool,
             Some(recovery_args),
-            edit_result,
+            &edit_result,
             execution.result,
         ))
     }
