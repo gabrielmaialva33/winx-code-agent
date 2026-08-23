@@ -365,6 +365,76 @@ fn is_source_code_file(file_path: &str) -> bool {
         )
 }
 
+async fn execute_read_requests(
+    requests: &[FileReadRequest],
+    cwd: &Path,
+    workspace_root: &Path,
+    show_line_numbers: bool,
+) -> ReadBatchState {
+    let mut state = ReadBatchState::default();
+
+    // Files are independent, so perform blocking filesystem/tokenizer work in a
+    // bounded pool. Results are still consumed in request order, preserving the
+    // stable response and the rule that a truncated file stops the visible batch.
+    'batches: for batch in requests.chunks(read_parallelism()) {
+        let mut tasks = Vec::with_capacity(batch.len());
+        for request in batch.iter().cloned() {
+            let worker_path = request.clean_path.clone();
+            let worker_cwd = cwd.to_path_buf();
+            let worker_root = workspace_root.to_path_buf();
+            let start_line_num = request.start_line_num;
+            let end_line_num = request.end_line_num;
+            let task = tokio::task::spawn_blocking(move || {
+                read_file(
+                    &worker_path,
+                    Some(select_max_tokens(&worker_path)),
+                    &worker_cwd,
+                    &worker_root,
+                    show_line_numbers,
+                    start_line_num,
+                    end_line_num,
+                )
+            });
+            tasks.push((request, task));
+        }
+
+        let mut tasks = tasks.into_iter();
+        while let Some((request, task)) = tasks.next() {
+            let result = task.await.unwrap_or_else(|error| {
+                Err(WinxError::CommandExecutionError(format!(
+                    "ReadFiles worker failed for {}: {error}",
+                    request.clean_path
+                )))
+            });
+            if state.record_result(&request, result, requests.len()) {
+                // Running blocking jobs cannot be cancelled, but abort prevents
+                // queued work from starting. Only returned content is guarded.
+                for (_, pending) in tasks {
+                    pending.abort();
+                }
+                break 'batches;
+            }
+        }
+    }
+    state
+}
+
+async fn persist_read_stats(workspace_root: &Path, stats_paths: Vec<PathBuf>) {
+    if stats_paths.is_empty() {
+        return;
+    }
+    let stats_root = workspace_root.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        crate::utils::workspace_stats::record_reads(&stats_root, &stats_paths)
+    })
+    .await;
+    match result {
+        Ok(Err(error)) => debug!("failed to record read stats: {error}"),
+        Err(error) => debug!("read stats worker failed: {error}"),
+        Ok(Ok(())) => {}
+    }
+}
+
 pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     read_files: ReadFiles,
