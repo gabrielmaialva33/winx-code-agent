@@ -24,6 +24,7 @@ pub fn bash_parser(input: &[u8]) {
     if let Ok(input) = std::str::from_utf8(input) {
         let _ = crate::utils::bash_parser::assert_single_statement(input, false);
         let _ = crate::utils::bash_parser::extract_command_texts(input);
+        let _ = crate::utils::bash_parser::extract_static_write_paths(input);
     }
 }
 
