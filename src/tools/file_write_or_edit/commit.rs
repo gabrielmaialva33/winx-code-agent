@@ -225,7 +225,7 @@ fn refresh_whitelist_and_stats(
     let hash = hash_content(new_content);
     let total_lines = new_content.lines().count();
     bash_state.set_whitelist_entry(
-        file_path_str,
+        &file_path_str,
         FileWhitelistData::new(hash, vec![(1, total_lines)], total_lines),
     );
 

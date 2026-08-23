@@ -440,7 +440,7 @@ pub async fn handle_tool_call_detailed(
     let mut bash_state_guard = bash_state_arc.lock().await;
     if let Some(bash_state) = bash_state_guard.as_mut() {
         for (path, (ranges, file_hash, total_lines)) in file_ranges_dict {
-            bash_state.record_read_coverage(path, ranges, file_hash, total_lines);
+            bash_state.record_read_coverage(&path, ranges, file_hash, total_lines);
         }
     }
 

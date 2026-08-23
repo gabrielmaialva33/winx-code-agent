@@ -78,7 +78,7 @@ pub async fn handle_tool_call(
     write_no_follow(&path, checkpoint.prior_content.as_bytes())?;
     match checkpoint.prior_whitelist {
         Some(whitelist) => {
-            bash_state.set_whitelist_entry(file_path_str.clone(), whitelist);
+            bash_state.set_whitelist_entry(&file_path_str, whitelist);
         }
         None => {
             bash_state.remove_whitelist_entry(&file_path_str);

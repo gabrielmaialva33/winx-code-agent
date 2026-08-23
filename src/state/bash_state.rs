@@ -243,7 +243,7 @@ impl BashState {
     /// reads across two versions look like one complete read.
     pub fn record_read_coverage(
         &mut self,
-        path: String,
+        path: &str,
         ranges: impl IntoIterator<Item = (usize, usize)>,
         file_hash: String,
         total_lines: usize,
@@ -260,17 +260,17 @@ impl BashState {
             }
             None => {
                 self.whitelist_for_overwrite
-                    .insert(path.clone(), FileWhitelistData::new(file_hash, ranges, total_lines));
+                    .insert(path.to_string(), FileWhitelistData::new(file_hash, ranges, total_lines));
             }
         }
-        self.touch_whitelist(&path);
+        self.touch_whitelist(path);
         self.enforce_whitelist_cap();
     }
 
     /// Replace a whitelist entry after a successful edit or undo.
-    pub fn set_whitelist_entry(&mut self, path: String, entry: FileWhitelistData) {
-        self.whitelist_for_overwrite.insert(path.clone(), entry);
-        self.touch_whitelist(&path);
+    pub fn set_whitelist_entry(&mut self, path: &str, entry: FileWhitelistData) {
+        self.whitelist_for_overwrite.insert(path.to_string(), entry);
+        self.touch_whitelist(path);
         self.enforce_whitelist_cap();
     }
 
