@@ -249,7 +249,7 @@ impl BashState {
         total_lines: usize,
     ) {
         let ranges = ranges.into_iter().collect::<Vec<_>>();
-        match self.whitelist_for_overwrite.get_mut(&path) {
+        match self.whitelist_for_overwrite.get_mut(path) {
             Some(existing)
                 if existing.file_hash == file_hash && existing.total_lines == total_lines =>
             {
