@@ -1206,6 +1206,7 @@ async fn multi_file_edit_preserves_search_conflict_recovery() -> anyhow::Result<
 #[tokio::test(flavor = "multi_thread")]
 async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> {
     const COMMAND_MARKER: &str = "winx-command-content-must-not-be-logged";
+    const READ_MARKER: &str = "winx-file-content-must-not-be-logged";
 
     let workspace = tempfile::tempdir()?;
     let logs = tempfile::tempdir()?;
@@ -1218,6 +1219,7 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
             .env("WINX_USAGE_LOG", &usage_log_for_server)
             .env("WINX_USAGE_LOG_ROTATION", "never")
             .env("WINX_USAGE_LOG_KEEP_DAYS", "0")
+            .env("WINX_READ_PARALLELISM", "3")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1245,12 +1247,33 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
     .await?;
     assert!(command.contains(COMMAND_MARKER), "{command}");
 
+    let first = workspace.path().join("telemetry-first.txt");
+    let second = workspace.path().join("telemetry-second.txt");
+    std::fs::write(&first, format!("{READ_MARKER} first\n"))?;
+    std::fs::write(&second, format!("{READ_MARKER} second\n"))?;
+    let read_call = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "usage-read",
+        "method": "tools/call",
+        "params": {
+            "name": "ReadFiles",
+            "arguments": {
+                "file_paths": [first, second],
+                "thread_id": thread_id
+            }
+        }
+    });
+    let read_response =
+        post_json(address, "2026-07-28", "tools/call", &read_call.to_string()).await?;
+    assert!(read_response.contains(READ_MARKER), "{read_response}");
+
     let deadline = Instant::now() + Duration::from_secs(3);
     let contents = loop {
         let contents = std::fs::read_to_string(&usage_log).unwrap_or_default();
         let has_tool = contents.lines().any(|line| line.contains("\"event\":\"tool_call\""));
         let has_http = contents.lines().any(|line| line.contains("\"event\":\"http_request\""));
-        if has_tool && has_http {
+        let has_read = contents.lines().any(|line| line.contains("\"tool\":\"ReadFiles\""));
+        if has_tool && has_http && has_read {
             break contents;
         }
         if Instant::now() >= deadline {
@@ -1259,6 +1282,7 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
         tokio::time::sleep(Duration::from_millis(25)).await;
     };
     assert!(!contents.contains(COMMAND_MARKER), "command leaked into usage log: {contents}");
+    assert!(!contents.contains(READ_MARKER), "file content leaked into usage log: {contents}");
     assert!(!contents.contains(TEST_TOKEN), "HTTP token leaked into usage log: {contents}");
     #[cfg(unix)]
     {
@@ -1285,6 +1309,13 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
         .ok_or_else(|| anyhow::anyhow!("missing request correlation: {tool_call}"))?;
     assert!(tool_call["fields"]["result_status"].as_str().is_some());
     assert!(tool_call["fields"]["response_bytes"].as_u64().is_some());
+    let read_call = entries
+        .iter()
+        .find(|entry| entry["fields"]["tool"] == "ReadFiles")
+        .ok_or_else(|| anyhow::anyhow!("missing ReadFiles usage event: {contents}"))?;
+    assert_eq!(read_call["fields"]["batch_items"], 2);
+    assert_eq!(read_call["fields"]["worker_limit"], 3);
+    assert!(read_call["fields"]["duration_ms"].as_u64().is_some());
     assert!(
         entries.iter().any(|entry| {
             entry["fields"]["event"] == "http_request"
