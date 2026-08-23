@@ -93,6 +93,11 @@ pub struct ShellActionOptions {
     /// represented by the serializable preconditions above.
     #[serde(skip)]
     pub launch_cancelled: Option<Arc<AtomicBool>>,
+    /// Deterministic coverage for the automatic PTY-reset path. Never exists
+    /// in production builds or on the daemon wire.
+    #[cfg(test)]
+    #[serde(skip)]
+    pub(crate) force_clear_to_run_failure: bool,
 }
 
 impl ShellActionOptions {
@@ -103,6 +108,7 @@ impl ShellActionOptions {
             && self.expected_guardian_epoch.is_none()
             && !self.require_generation_binding
             && self.cancellation_key.is_none()
+            && self.test_clear_to_run_is_unforced()
     }
 
     pub(crate) fn is_launch_cancelled(&self) -> bool {
@@ -118,6 +124,20 @@ impl PartialEq for ShellActionOptions {
             && self.expected_guardian_epoch == other.expected_guardian_epoch
             && self.require_generation_binding == other.require_generation_binding
             && self.cancellation_key == other.cancellation_key
+            && self.test_clear_to_run_is_unforced() == other.test_clear_to_run_is_unforced()
+    }
+}
+
+impl ShellActionOptions {
+    const fn test_clear_to_run_is_unforced(&self) -> bool {
+        #[cfg(test)]
+        {
+            !self.force_clear_to_run_failure
+        }
+        #[cfg(not(test))]
+        {
+            true
+        }
     }
 }
 
@@ -346,13 +366,16 @@ async fn interrupt_embedded_guarded(
     expected_generation: Option<u64>,
     expected_execution: Option<&ShellExecutionToken>,
 ) -> Result<bool> {
-    let (thread_id, shell) = {
+    // Match configure_session's BashState -> operation barrier lock order and
+    // retain the read side from incarnation capture through interruption.
+    let (shell, _operation) = {
         let state = bash_state.lock().await;
         let Some(state) = state.as_ref() else { return Ok(false) };
-        (state.current_thread_id.clone(), state.pty_shell.clone())
+        let operation_barrier =
+            lock_session_store().operation_barrier(&state.current_thread_id);
+        let operation = operation_barrier.read_owned().await;
+        (state.pty_shell.clone(), operation)
     };
-    let operation_barrier = lock_session_store().operation_barrier(&thread_id);
-    let _operation = operation_barrier.read().await;
     {
         let mut guard = shell.lock().await;
         if let Some(pty) = guard.as_mut() {

@@ -139,7 +139,10 @@ pub(super) async fn execute_command(
     }
 
     let needs_reset = if shell.lock().await.is_some() {
-        if clear_to_run_async(&shell, DEFAULT_TIMEOUT).await {
+        let cleared = clear_to_run_async(&shell, DEFAULT_TIMEOUT).await;
+        #[cfg(test)]
+        let cleared = cleared && !options.force_clear_to_run_failure;
+        if cleared {
             false
         } else {
             warn!("clear_to_run: shell still busy after Ctrl-C, resetting it");

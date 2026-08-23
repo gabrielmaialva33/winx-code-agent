@@ -284,8 +284,18 @@ async fn handle_embedded_tool_call_inner(
         }
     }
 
-    let operation_barrier = lock_session_store().operation_barrier(&thread_id);
-    let operation_guard = operation_barrier.read().await;
+    // BashState -> session barrier is the same order used by
+    // configure_session. Keep BashState locked until the owned read guard is
+    // acquired so reset cannot replace the incarnation after capture but
+    // before token validation/action execution.
+    let (captured_state, operation_guard) = {
+        let guard = bash_state.lock().await;
+        let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+        let operation_barrier = lock_session_store().operation_barrier(&thread_id);
+        let operation_guard = operation_barrier.read_owned().await;
+        (state.clone(), operation_guard)
+    };
+    local_state = captured_state;
 
     if let Some(expected) = options.expected_execution.as_ref() {
         if expected.guardian_epoch == "embedded" {
