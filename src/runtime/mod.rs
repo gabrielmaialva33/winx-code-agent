@@ -5,8 +5,10 @@ mod session_store;
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
 use crate::errors::Result;
@@ -28,6 +30,92 @@ pub use session_store::{SessionStore, ShellTarget};
 pub type ShellRuntimeFuture<'a> =
     Pin<Box<dyn Future<Output = Result<BashCommandResult>> + Send + 'a>>;
 pub type ShellRuntimeUnitFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+pub type ShellRuntimeBoolFuture<'a> = Pin<Box<dyn Future<Output = Result<bool>> + Send + 'a>>;
+pub type ShellRuntimeDetailedFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<BashCommandRuntimeResult>> + Send + 'a>>;
+
+/// Internal orchestration details layered around the stable public
+/// `BashCommandResult`. Adding a separate type avoids adding required fields to
+/// the existing public result struct.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct BashCommandRuntimeResult {
+    pub result: BashCommandResult,
+    pub compact_output: Option<String>,
+    pub command_generation: Option<u64>,
+    pub execution_token: Option<ShellExecutionToken>,
+    pub generation_bound_actions: bool,
+    /// Authoritative runtime truncation state. It is never inferred from
+    /// terminal text, which is controlled by the child process.
+    pub output_truncated: bool,
+}
+
+impl BashCommandRuntimeResult {
+    pub fn legacy(result: BashCommandResult) -> Self {
+        Self {
+            result,
+            compact_output: None,
+            command_generation: None,
+            execution_token: None,
+            generation_bound_actions: false,
+            output_truncated: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ShellExecutionToken {
+    pub guardian_epoch: String,
+    pub session_epoch: String,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ShellActionOptions {
+    pub compact_output: bool,
+    pub expected_generation: Option<u64>,
+    /// Full execution identity used by protocol 1.5 peers. The legacy numeric
+    /// generation remains for source and protocol-1.4 compatibility only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_execution: Option<ShellExecutionToken>,
+    /// Adapter-to-control precondition. A control process must compare this
+    /// with the effective guardian immediately before relaying an action.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_guardian_epoch: Option<String>,
+    /// Internal safety contract for an execution that is already represented
+    /// by an MCP Task and therefore cannot fall back to an unbound process.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub require_generation_binding: bool,
+    /// In-process launch gate. Skipped on the wire; control/guardian safety is
+    /// represented by the serializable preconditions above.
+    #[serde(skip)]
+    pub launch_cancelled: Option<Arc<AtomicBool>>,
+}
+
+impl ShellActionOptions {
+    pub(crate) fn is_default(&self) -> bool {
+        !self.compact_output
+            && self.expected_generation.is_none()
+            && self.expected_execution.is_none()
+            && self.expected_guardian_epoch.is_none()
+            && !self.require_generation_binding
+    }
+
+    pub(crate) fn is_launch_cancelled(&self) -> bool {
+        self.launch_cancelled.as_ref().is_some_and(|flag| flag.load(Ordering::SeqCst))
+    }
+}
+
+impl PartialEq for ShellActionOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.compact_output == other.compact_output
+            && self.expected_generation == other.expected_generation
+            && self.expected_execution == other.expected_execution
+            && self.expected_guardian_epoch == other.expected_guardian_epoch
+            && self.require_generation_binding == other.require_generation_binding
+    }
+}
+
+impl Eq for ShellActionOptions {}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct ShellSessionConfiguration {
@@ -61,10 +149,63 @@ pub trait ShellRuntime: Send + Sync {
         command: BashCommand,
     ) -> ShellRuntimeFuture<'a>;
 
+    /// Rich adapter path used by MCP orchestration. External runtime
+    /// implementations remain source-compatible through this default.
+    fn run_action_detailed<'a>(
+        &'a self,
+        bash_state: &'a Arc<Mutex<Option<BashState>>>,
+        command: BashCommand,
+        _options: ShellActionOptions,
+    ) -> ShellRuntimeDetailedFuture<'a> {
+        Box::pin(async move {
+            self.run_action(bash_state, command).await.map(BashCommandRuntimeResult::legacy)
+        })
+    }
+
+    fn supports_generation_bound_actions(&self) -> ShellRuntimeBoolFuture<'_> {
+        Box::pin(async { Ok(false) })
+    }
+
+    /// Session-aware capability probe. Daemon-backed runtimes override this so
+    /// the answer comes from the guardian that owns this shell, not merely from
+    /// the stable control process in front of it.
+    fn supports_generation_bound_actions_for<'a>(
+        &'a self,
+        _bash_state: &'a Arc<Mutex<Option<BashState>>>,
+    ) -> ShellRuntimeBoolFuture<'a> {
+        self.supports_generation_bound_actions()
+    }
+
     fn interrupt<'a>(
         &'a self,
         bash_state: &'a Arc<Mutex<Option<BashState>>>,
     ) -> ShellRuntimeUnitFuture<'a>;
+
+    /// Interrupt only the exact command generation owned by a Task. The
+    /// conservative default refuses generation-bound interruption.
+    fn interrupt_generation<'a>(
+        &'a self,
+        bash_state: &'a Arc<Mutex<Option<BashState>>>,
+        expected_generation: Option<u64>,
+    ) -> ShellRuntimeBoolFuture<'a> {
+        Box::pin(async move {
+            if expected_generation.is_some() {
+                return Ok(false);
+            }
+            self.interrupt(bash_state).await?;
+            Ok(true)
+        })
+    }
+
+    /// Interrupt only the complete execution identity. External runtimes keep
+    /// working through the generation-only conservative default.
+    fn interrupt_execution<'a>(
+        &'a self,
+        bash_state: &'a Arc<Mutex<Option<BashState>>>,
+        expected: Option<ShellExecutionToken>,
+    ) -> ShellRuntimeBoolFuture<'a> {
+        self.interrupt_generation(bash_state, expected.map(|token| token.generation))
+    }
 
     /// Release the runtime-owned resources for one logical session.
     fn terminate_session<'a>(&'a self, thread_id: &'a str) -> ShellRuntimeUnitFuture<'a>;
@@ -82,6 +223,9 @@ impl ShellRuntime for EmbeddedShellRuntime {
         transition: ShellSessionTransition,
     ) -> ShellRuntimeConfigureFuture<'a> {
         Box::pin(async move {
+            let operation_barrier =
+                lock_session_store().operation_barrier(&bash_state.current_thread_id);
+            let _operation = operation_barrier.write().await;
             if matches!(
                 transition,
                 ShellSessionTransition::FirstCall | ShellSessionTransition::Reset
@@ -105,6 +249,21 @@ impl ShellRuntime for EmbeddedShellRuntime {
         Box::pin(crate::tools::bash_command::handle_embedded_tool_call(bash_state, command))
     }
 
+    fn run_action_detailed<'a>(
+        &'a self,
+        bash_state: &'a Arc<Mutex<Option<BashState>>>,
+        command: BashCommand,
+        options: ShellActionOptions,
+    ) -> ShellRuntimeDetailedFuture<'a> {
+        Box::pin(crate::tools::bash_command::handle_embedded_tool_call_detailed(
+            bash_state, command, options,
+        ))
+    }
+
+    fn supports_generation_bound_actions(&self) -> ShellRuntimeBoolFuture<'_> {
+        Box::pin(async { Ok(true) })
+    }
+
     fn interrupt<'a>(
         &'a self,
         bash_state: &'a Arc<Mutex<Option<BashState>>>,
@@ -112,20 +271,85 @@ impl ShellRuntime for EmbeddedShellRuntime {
         Box::pin(interrupt_embedded(bash_state))
     }
 
-    fn terminate_session<'a>(&'a self, _thread_id: &'a str) -> ShellRuntimeUnitFuture<'a> {
-        Box::pin(async { Ok(()) })
+    fn interrupt_generation<'a>(
+        &'a self,
+        bash_state: &'a Arc<Mutex<Option<BashState>>>,
+        expected_generation: Option<u64>,
+    ) -> ShellRuntimeBoolFuture<'a> {
+        Box::pin(interrupt_embedded_generation(bash_state, expected_generation))
+    }
+
+    fn interrupt_execution<'a>(
+        &'a self,
+        bash_state: &'a Arc<Mutex<Option<BashState>>>,
+        expected: Option<ShellExecutionToken>,
+    ) -> ShellRuntimeBoolFuture<'a> {
+        Box::pin(interrupt_embedded_execution(bash_state, expected))
+    }
+
+    fn terminate_session<'a>(&'a self, thread_id: &'a str) -> ShellRuntimeUnitFuture<'a> {
+        Box::pin(async move {
+            let operation_barrier = lock_session_store().operation_barrier(thread_id);
+            let _operation = operation_barrier.write().await;
+            let shell = lock_session_store().resolve(thread_id, &ShellTarget::Main);
+            if let Some(shell) = shell {
+                *shell.lock().await = None;
+            }
+            Ok(())
+        })
     }
 }
 
 async fn interrupt_embedded(bash_state: &Arc<Mutex<Option<BashState>>>) -> Result<()> {
-    let shell = {
+    let _ = interrupt_embedded_generation(bash_state, None).await?;
+    Ok(())
+}
+
+async fn interrupt_embedded_generation(
+    bash_state: &Arc<Mutex<Option<BashState>>>,
+    expected_generation: Option<u64>,
+) -> Result<bool> {
+    interrupt_embedded_guarded(bash_state, expected_generation, None).await
+}
+
+async fn interrupt_embedded_execution(
+    bash_state: &Arc<Mutex<Option<BashState>>>,
+    expected: Option<ShellExecutionToken>,
+) -> Result<bool> {
+    interrupt_embedded_guarded(
+        bash_state,
+        expected.as_ref().map(|token| token.generation),
+        expected.as_ref(),
+    )
+    .await
+}
+
+async fn interrupt_embedded_guarded(
+    bash_state: &Arc<Mutex<Option<BashState>>>,
+    expected_generation: Option<u64>,
+    expected_execution: Option<&ShellExecutionToken>,
+) -> Result<bool> {
+    let (thread_id, shell) = {
         let state = bash_state.lock().await;
-        state.as_ref().map(|state| state.pty_shell.clone())
+        let Some(state) = state.as_ref() else { return Ok(false) };
+        (state.current_thread_id.clone(), state.pty_shell.clone())
     };
-    let Some(shell) = shell else { return Ok(()) };
+    let operation_barrier = lock_session_store().operation_barrier(&thread_id);
+    let _operation = operation_barrier.read().await;
     {
         let mut guard = shell.lock().await;
         if let Some(pty) = guard.as_mut() {
+            if expected_execution.is_some_and(|expected| {
+                expected.guardian_epoch != "embedded"
+                    || expected.session_epoch != format!("{:016x}", pty.incarnation())
+            }) {
+                return Ok(false);
+            }
+            if expected_generation.is_some_and(|expected| {
+                pty.command_generation() != expected || !pty.command_running
+            }) {
+                return Ok(false);
+            }
             pty.send_interrupt().map_err(|error| {
                 crate::errors::WinxError::CommandExecutionError(format!(
                     "failed to interrupt shell: {error}"
@@ -144,7 +368,7 @@ async fn interrupt_embedded(bash_state: &Arc<Mutex<Option<BashState>>>) -> Resul
             }
         };
         if recovered {
-            return Ok(());
+            return Ok(true);
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }

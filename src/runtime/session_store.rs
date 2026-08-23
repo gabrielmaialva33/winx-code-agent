@@ -22,6 +22,7 @@ pub enum ShellTarget {
 #[derive(Debug, Default)]
 pub struct SessionStore {
     mains: HashMap<String, Weak<tokio::sync::Mutex<Option<PtyShell>>>>,
+    operation_barriers: HashMap<String, Weak<tokio::sync::RwLock<()>>>,
     backgrounds: BackgroundShellManager,
 }
 
@@ -32,7 +33,25 @@ impl SessionStore {
 
     pub fn bind_main(&mut self, thread_id: &str, shell: &SharedPtyShell) {
         self.mains.retain(|_, shell| shell.strong_count() > 0);
+        self.operation_barriers.retain(|_, barrier| barrier.strong_count() > 0);
         self.mains.insert(thread_id.to_string(), Arc::downgrade(shell));
+    }
+
+    /// Session-wide ordering barrier. Shell actions and interrupts hold a read
+    /// guard while reset/configure holds a write guard, so an incarnation can
+    /// never change between execution-token validation and the PTY operation.
+    pub(crate) fn operation_barrier(
+        &mut self,
+        thread_id: &str,
+    ) -> Arc<tokio::sync::RwLock<()>> {
+        if let Some(barrier) =
+            self.operation_barriers.get(thread_id).and_then(std::sync::Weak::upgrade)
+        {
+            return barrier;
+        }
+        let barrier = Arc::new(tokio::sync::RwLock::new(()));
+        self.operation_barriers.insert(thread_id.to_string(), Arc::downgrade(&barrier));
+        barrier
     }
 
     pub fn resolve(&self, thread_id: &str, target: &ShellTarget) -> Option<SharedPtyShell> {

@@ -207,6 +207,9 @@ pub struct PtyShell {
     /// Monotonic command generation used by daemon journals to distinguish two
     /// consecutive commands whose terminal bytes happen to be identical.
     command_generation: u64,
+    /// Random identity of this PTY instance. Unlike the numeric generation it
+    /// changes when a shell is reset and generations start again at zero.
+    incarnation: u64,
     /// Exit code of the last completed foreground command, parsed from the prompt
     /// marker (`──➤<nonce>:<code>`). `None` until a command finishes, and reset
     /// to `None` while one is running.
@@ -461,6 +464,7 @@ impl PtyShell {
             current_cwd: initial_dir.to_path_buf(),
             command_started_at: None,
             command_generation: 0,
+            incarnation: rand::random::<u64>().max(1),
             last_exit_code: None,
             max_output_size: MAX_OUTPUT_SIZE,
             output_truncated: false,
@@ -589,6 +593,10 @@ impl PtyShell {
 
     pub fn command_generation(&self) -> u64 {
         self.command_generation
+    }
+
+    pub fn incarnation(&self) -> u64 {
+        self.incarnation
     }
 
     /// Elapsed runtime since the current command was submitted.

@@ -21,6 +21,8 @@ const GUARDIAN_LIFECYCLE_CAPABILITY: &str = "guardian_activity_clock";
 #[cfg(unix)]
 const PLANNED_CONTROL_RESTART_CAPABILITY: &str = "planned_control_restart";
 #[cfg(unix)]
+const SESSION_NEGOTIATE_CAPABILITY: &str = "session.negotiate";
+#[cfg(unix)]
 const DAEMON_TRANSITION_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,6 +115,13 @@ fn has_capability(hello: &HelloResult, name: &str) -> bool {
     hello.capabilities.iter().any(|capability| capability == name)
 }
 
+#[cfg(unix)]
+fn control_is_current(hello: &HelloResult) -> bool {
+    [GUARDIAN_LIFECYCLE_CAPABILITY, TYPED_ACTION_RESULT_CAPABILITY, SESSION_NEGOTIATE_CAPABILITY]
+        .into_iter()
+        .all(|capability| has_capability(hello, capability))
+}
+
 /// Ensure the current control-plane feature set is reachable. An older `winxd`
 /// that advertises safe planned restarts is replaced in place; per-session
 /// guardians keep owning their PTYs throughout the control-plane transition.
@@ -121,9 +130,7 @@ pub async fn ensure_control_daemon_at(socket: &Path, daemon_binary: &Path) -> Re
     ensure_daemon_at(socket, daemon_binary).await?;
     let client = DaemonClient::new(socket);
     let hello = client.hello().await?;
-    if has_capability(&hello, GUARDIAN_LIFECYCLE_CAPABILITY)
-        && has_capability(&hello, TYPED_ACTION_RESULT_CAPABILITY)
-    {
+    if control_is_current(&hello) {
         return Ok(());
     }
     if !has_capability(&hello, PLANNED_CONTROL_RESTART_CAPABILITY) {
@@ -139,7 +146,11 @@ pub async fn ensure_control_daemon_at(socket: &Path, daemon_binary: &Path) -> Re
         "restarting older winxd control plane while preserving session guardians"
     );
     let restarted = restart_control_daemon_from_hello(socket, daemon_binary, hello).await?;
-    for capability in [GUARDIAN_LIFECYCLE_CAPABILITY, TYPED_ACTION_RESULT_CAPABILITY] {
+    for capability in [
+        GUARDIAN_LIFECYCLE_CAPABILITY,
+        TYPED_ACTION_RESULT_CAPABILITY,
+        SESSION_NEGOTIATE_CAPABILITY,
+    ] {
         if !has_capability(&restarted, capability) {
             return Err(WinxError::ConfigurationError(format!(
                 "restarted winxd at {} still lacks required capability {capability}",
@@ -269,5 +280,24 @@ mod tests {
             Ok(RuntimeMode::Embedded)
         ));
         assert!(select_runtime_mode_for_platform(false, None, Some("daemon"), None).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn protocol_1_4_control_without_session_negotiate_requires_upgrade() {
+        let hello = crate::daemon::HelloResult {
+            protocol_major: 1,
+            protocol_minor: 4,
+            capabilities: vec![
+                super::GUARDIAN_LIFECYCLE_CAPABILITY.to_string(),
+                super::TYPED_ACTION_RESULT_CAPABILITY.to_string(),
+                super::PLANNED_CONTROL_RESTART_CAPABILITY.to_string(),
+            ],
+            max_frame_bytes: 1024,
+            daemon_epoch: "control-14".to_string(),
+            daemon_pid: 14,
+        };
+        assert!(!super::control_is_current(&hello));
+        assert!(super::has_capability(&hello, super::PLANNED_CONTROL_RESTART_CAPABILITY));
     }
 }
