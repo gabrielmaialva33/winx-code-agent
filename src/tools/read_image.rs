@@ -187,8 +187,16 @@ pub async fn handle_tool_call(
         workspace_root = bash_state.workspace_root.clone();
     }
 
-    // Read the image file
-    read_image_from_path(&read_image.file_path, &cwd, &workspace_root)
+    // Filesystem reads and base64 encoding are blocking/CPU-heavy for large
+    // images, so keep them off Tokio's request workers.
+    let file_path = read_image.file_path;
+    tokio::task::spawn_blocking(move || {
+        read_image_from_path(&file_path, &cwd, &workspace_root)
+    })
+    .await
+    .map_err(|error| {
+        WinxError::CommandExecutionError(format!("ReadImage worker failed: {error}"))
+    })?
 }
 
 #[cfg(test)]
