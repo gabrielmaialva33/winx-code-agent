@@ -607,6 +607,12 @@ removed and initialized again; Winx never reconstructs machine state from its te
 Streamable HTTP is Winx's primary interface for ChatGPT, hosted agents, remote automation, and any MCP client that cannot
 launch a local stdio process. The endpoint is always `/mcp`; the default listener is `127.0.0.1:8000`.
 
+`Initialize` returns a canonical `thread_id`/`workspace_root` pair. Every later remote stateful tool call must copy both
+values unchanged. Winx validates the pair before selecting a PTY or touching a file, so a thread borrowed from another
+chat/project fails closed. `workspace_root` is a session identity guard, not a containment boundary: with
+`WINX_ALLOW_PATHS=/`, tools may still intentionally operate anywhere allowed by the active mode. A different project gets
+its own pair through `Initialize(first_call)`; remote sessions are never silently repointed in place.
+
 Remote first calls default to `--session-affinity workspace`: the internal key is `(principal, canonical workspace)`, so
 reconnections and harmless variations such as `release_02333` versus `release_0_2_333` resolve to one guardian. Parallel
 conversations from the same principal in the same repository therefore share one shell. Use `--session-affinity

@@ -96,6 +96,29 @@ Clientes na nuvem necessitam de uma URL HTTPS pública. Mantenha o Winx em loopb
 
 O uso de `--token-file` é preferível a `--token`, pois segredos passados por linha de comando podem ser expostos na lista de processos do sistema (`ps`), histórico do shell e logs de automação. A variável de ambiente `WINX_HTTP_TOKEN` permanece disponível como fallback para modo single-principal.
 
+## Coerência da Sessão com o Workspace
+
+O `Initialize` remoto retorna dois valores que formam um único vínculo de sessão:
+
+```text
+thread_id + workspace_root
+```
+
+Copie os dois valores sem alterações em todas as chamadas stateful seguintes. Antes de selecionar um PTY ou executar
+qualquer operação, o Winx valida se a afinidade da thread, a raiz canônica informada e a sessão inicializada combinam.
+Vínculos ausentes ou misturados retornam um resultado estruturado `needs_initialize`/`conflict` e não chegam ao shell nem
+ao filesystem.
+
+Essa validação **não** restringe os alvos das ferramentas ao `workspace_root`. A raiz identifica o contexto de projeto
+que possui terminal, cwd, histórico de leitura e estado de edição. A autoridade de caminhos continua sendo uma política
+separada: por exemplo, `WINX_ALLOW_PATHS=/` ainda permite que uma sessão coerente opere em arquivos de apoio fora do
+projeto quando o modo ativo autoriza. Assim, trabalhos reais entre diretórios continuam possíveis sem um chat herdar
+silenciosamente o terminal de outro projeto.
+
+Para outro projeto, chame `Initialize` com `type="first_call"` e o novo caminho, e passe a usar o novo par retornado.
+Chamadas remotas `user_asked_change_workspace` falham de forma segura para que uma chave durável nunca seja redirecionada
+para outro projeto no mesmo lugar.
+
 ## Afinidade de Sessão
 
 ### Afinidade por Workspace (Padrão)

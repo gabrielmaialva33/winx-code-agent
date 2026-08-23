@@ -104,6 +104,26 @@ reverse proxy in front. Winx does not terminate TLS itself.
 `--token-file` is preferred over `--token`: command-line secrets may appear in process listings, shell history, and
 automation logs. `WINX_HTTP_TOKEN` remains available as a single-principal environment fallback.
 
+## Workspace session coherence
+
+Remote `Initialize` returns two values that form one session binding:
+
+```text
+thread_id + workspace_root
+```
+
+Copy both values unchanged into every later stateful Winx call. Before selecting a PTY or performing any tool operation,
+Winx verifies that the thread affinity, supplied canonical root, and initialized session agree. Missing or mixed bindings
+return a structured `needs_initialize`/`conflict` tool result and do not reach the shell or filesystem.
+
+This check does **not** confine tool targets to `workspace_root`. It identifies which project context owns the terminal,
+cwd, read history, and edit state. Path authority remains a separate policy: for example, `WINX_ALLOW_PATHS=/` still lets
+a coherent session read or edit supporting paths outside the project when its active mode permits. This separation keeps
+real monorepo/cross-directory work possible without allowing a chat to silently inherit another project's terminal.
+
+For a different project, call `Initialize` with `type="first_call"` and the new path, then use the returned pair. Remote
+`user_asked_change_workspace` calls fail closed so a durable key is never repointed to a different project in place.
+
 ## Session affinity
 
 ### Workspace affinity (default)
@@ -201,8 +221,8 @@ Protocol `1.3` guardians implement attach-or-create for `FirstCall`:
 3. the adapter updates its local state from that snapshot;
 4. the guardian keeps its original PTY process, cwd, mode, journal, cursors, and running commands.
 
-A deliberate replacement still uses the explicit reset or workspace/mode-change transitions. Repeating `FirstCall` is no
-longer an implicit reset.
+A deliberate shell replacement still uses reset, and mode changes remain explicit. A remote project change uses a new
+`FirstCall` binding instead of mutating the old workspace identity. Repeating `FirstCall` is no longer an implicit reset.
 
 The same adapter also refreshes an existing guardian through a non-destructive mode transition. This keeps local and
 embedded runtimes from resetting a session on duplicate first calls.
