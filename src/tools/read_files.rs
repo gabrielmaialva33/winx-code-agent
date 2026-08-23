@@ -90,11 +90,7 @@ impl ReadBatchState {
                 truncated
             }
             Err(error) => {
-                let _ = write!(
-                    self.message,
-                    "\nError reading {}: {error}",
-                    request.requested_path
-                );
+                let _ = write!(self.message, "\nError reading {}: {error}", request.requested_path);
                 self.errors.push(error);
                 false
             }
@@ -458,12 +454,6 @@ pub async fn handle_tool_call_detailed(
         (bash_state.cwd.clone(), bash_state.workspace_root.clone())
     };
 
-    let mut message = String::new();
-    let mut file_ranges_dict: HashMap<String, ReadCoverage> = HashMap::new();
-    let mut stats_paths = Vec::new();
-    let mut successful_files = 0usize;
-    let mut errors = Vec::new();
-
     let requests = read_files
         .file_paths
         .iter()
@@ -476,105 +466,15 @@ pub async fn handle_tool_call_detailed(
             end_line_num: read_files.end_line_nums.get(index).copied().flatten(),
         })
         .collect::<Vec<_>>();
-    let show_line_numbers = read_files.show_line_numbers();
-
-    // Files are independent, so perform blocking filesystem/tokenizer work in a
-    // bounded pool. Results are still consumed in request order, preserving the
-    // stable response and the rule that a truncated file stops the visible batch.
-    'batches: for batch in requests.chunks(read_parallelism()) {
-        let mut tasks = Vec::with_capacity(batch.len());
-        for request in batch.iter().cloned() {
-            let worker_path = request.clean_path.clone();
-            let worker_cwd = cwd.clone();
-            let worker_root = workspace_root.clone();
-            let start_line_num = request.start_line_num;
-            let end_line_num = request.end_line_num;
-            let task = tokio::task::spawn_blocking(move || {
-                read_file(
-                    &worker_path,
-                    Some(select_max_tokens(&worker_path)),
-                    &worker_cwd,
-                    &worker_root,
-                    show_line_numbers,
-                    start_line_num,
-                    end_line_num,
-                )
-            });
-            tasks.push((request, task));
-        }
-
-        let mut tasks = tasks.into_iter();
-        while let Some((request, task)) = tasks.next() {
-            let result = task.await.unwrap_or_else(|error| {
-                Err(WinxError::CommandExecutionError(format!(
-                    "ReadFiles worker failed for {}: {error}",
-                    request.clean_path
-                )))
-            });
-            match result {
-                Ok((content, truncated, _, canon_path, line_range, file_hash, total_lines)) => {
-                    successful_files = successful_files.saturating_add(1);
-                    let entry = file_ranges_dict
-                        .entry(canon_path.clone())
-                        .or_insert_with(|| (Vec::new(), file_hash.clone(), total_lines));
-                    if entry.1 != file_hash || entry.2 != total_lines {
-                        // The same path can be requested more than once in one
-                        // batch. If it changed between reads, keep coverage only
-                        // for the version whose hash will guard the next edit.
-                        *entry = (Vec::new(), file_hash.clone(), total_lines);
-                    }
-                    entry.0.push(line_range);
-                    let _ = write!(
-                        message,
-                        "\n{}{}\n```\n{content}\n```",
-                        request.clean_path,
-                        range_format(request.start_line_num, request.end_line_num)
-                    );
-                    stats_paths.push(PathBuf::from(&canon_path));
-
-                    if truncated {
-                        let remaining =
-                            read_files.file_paths.len().saturating_sub(request.index + 1);
-                        if remaining > 0 {
-                            let _ = write!(
-                                message,
-                                "\n\n(Not reading the remaining {remaining} file(s) due to the \
-                                 token limit. Call ReadFiles again for them.)"
-                            );
-                        }
-                        // `spawn_blocking` jobs already running cannot be cancelled,
-                        // but abort prevents queued work from starting. No result is
-                        // recorded or whitelisted unless it was returned to the caller.
-                        for (_, pending) in tasks {
-                            pending.abort();
-                        }
-                        break 'batches;
-                    }
-                }
-                Err(error) => {
-                    let _ = write!(message, "\nError reading {}: {error}", request.requested_path);
-                    errors.push(error);
-                }
-            }
-        }
-    }
-
-    if !stats_paths.is_empty() {
-        let stats_root = workspace_root.clone();
-        let stats_result = tokio::task::spawn_blocking(move || {
-            crate::utils::workspace_stats::record_reads(&stats_root, &stats_paths)
-        })
-        .await;
-        match stats_result {
-            Ok(Err(error)) => debug!("failed to record read stats: {error}"),
-            Err(error) => debug!("read stats worker failed: {error}"),
-            Ok(Ok(())) => {}
-        }
-    }
+    let batch =
+        execute_read_requests(&requests, &cwd, &workspace_root, read_files.show_line_numbers())
+            .await;
+    let ReadBatchState { message, file_ranges, stats_paths, successful_files, errors } = batch;
+    persist_read_stats(&workspace_root, stats_paths).await;
 
     let mut bash_state_guard = bash_state_arc.lock().await;
     if let Some(bash_state) = bash_state_guard.as_mut() {
-        for (path, (ranges, file_hash, total_lines)) in file_ranges_dict {
+        for (path, (ranges, file_hash, total_lines)) in file_ranges {
             bash_state.record_read_coverage(&path, ranges, file_hash, total_lines);
         }
     }

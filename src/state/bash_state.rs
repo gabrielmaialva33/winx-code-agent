@@ -259,8 +259,10 @@ impl BashState {
                 *existing = FileWhitelistData::new(file_hash, ranges, total_lines);
             }
             None => {
-                self.whitelist_for_overwrite
-                    .insert(path.to_string(), FileWhitelistData::new(file_hash, ranges, total_lines));
+                self.whitelist_for_overwrite.insert(
+                    path.to_string(),
+                    FileWhitelistData::new(file_hash, ranges, total_lines),
+                );
             }
         }
         self.touch_whitelist(path);
@@ -462,18 +464,8 @@ mod whitelist_range_tests {
     #[test]
     fn coverage_from_different_file_versions_is_not_combined() {
         let mut state = BashState::new();
-        state.record_read_coverage(
-            "/workspace/file.rs",
-            [(1, 50)],
-            "old-hash".to_string(),
-            100,
-        );
-        state.record_read_coverage(
-            "/workspace/file.rs",
-            [(51, 100)],
-            "new-hash".to_string(),
-            100,
-        );
+        state.record_read_coverage("/workspace/file.rs", [(1, 50)], "old-hash".to_string(), 100);
+        state.record_read_coverage("/workspace/file.rs", [(51, 100)], "new-hash".to_string(), 100);
 
         let coverage = &state.whitelist_for_overwrite["/workspace/file.rs"];
         assert_eq!(coverage.file_hash, "new-hash");
@@ -486,28 +478,13 @@ mod whitelist_range_tests {
         let mut state = BashState::new();
         for index in 0..MAX_WHITELIST_FILES {
             let path = format!("/workspace/file-{index:04}.rs");
-            state.record_read_coverage(
-                &path,
-                [(1, 1)],
-                format!("hash-{index}"),
-                1,
-            );
+            state.record_read_coverage(&path, [(1, 1)], format!("hash-{index}"), 1);
         }
 
         // Refresh the oldest entry, then force one eviction. The next-oldest
         // entry must be discarded while the refreshed one stays guarded.
-        state.record_read_coverage(
-            "/workspace/file-0000.rs",
-            [(1, 1)],
-            "hash-0".to_string(),
-            1,
-        );
-        state.record_read_coverage(
-            "/workspace/newest.rs",
-            [(1, 1)],
-            "newest-hash".to_string(),
-            1,
-        );
+        state.record_read_coverage("/workspace/file-0000.rs", [(1, 1)], "hash-0".to_string(), 1);
+        state.record_read_coverage("/workspace/newest.rs", [(1, 1)], "newest-hash".to_string(), 1);
 
         assert_eq!(state.whitelist_for_overwrite.len(), MAX_WHITELIST_FILES);
         assert!(state.whitelist_for_overwrite.contains_key("/workspace/file-0000.rs"));
