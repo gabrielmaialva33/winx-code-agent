@@ -476,6 +476,21 @@ async fn modern_stateless_tools_list_exposes_bash_command() -> anyhow::Result<()
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("tools/list response has no tools array: {response}"))?;
     assert_eq!(tools.iter().filter(|tool| tool["name"] == "BashCommand").count(), 1, "{response}");
+    for tool in tools {
+        assert_eq!(
+            tool.pointer("/outputSchema/properties/data/type").and_then(serde_json::Value::as_str),
+            Some("object"),
+            "{} has a client-incompatible data schema: {tool}",
+            tool["name"]
+        );
+        assert_eq!(
+            tool.pointer("/outputSchema/$defs/ToolNextAction/properties/arguments/type")
+                .and_then(serde_json::Value::as_str),
+            Some("object"),
+            "{} has client-incompatible next-action arguments: {tool}",
+            tool["name"]
+        );
+    }
     Ok(())
 }
 
