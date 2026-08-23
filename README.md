@@ -26,6 +26,10 @@
     <a href="docs/streamable-http.md">🌐 <b>HTTP Guide</b></a> &nbsp;•&nbsp;
     <a href="SECURITY.md">🛡️ <b>Security</b></a>
   </p>
+
+  <p align="center">
+    <b>English</b> • <a href="README.pt.md">Português</a> • <a href="README.zh.md">中文</a>
+  </p>
 </div>
 
 Winx is a **remote-first MCP runtime** for agents that need a real shell, guarded file-editing primitives, repository-aware
