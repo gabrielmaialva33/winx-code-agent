@@ -162,7 +162,230 @@ mod session_registry_tests {
 }
 
 mod task_lifecycle_tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct PromotionContractRuntime {
+        interrupted: Arc<std::sync::Mutex<Vec<u64>>>,
+        terminated: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl ShellRuntime for PromotionContractRuntime {
+        fn configure_session<'a>(
+            &'a self,
+            _bash_state: &'a mut BashState,
+            _transition: crate::runtime::ShellSessionTransition,
+        ) -> crate::runtime::ShellRuntimeConfigureFuture<'a> {
+            Box::pin(async { Ok(crate::runtime::ShellSessionConfiguration::default()) })
+        }
+
+        fn run_action<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+            _command: BashCommand,
+        ) -> crate::runtime::ShellRuntimeFuture<'a> {
+            Box::pin(async {
+                Err(WinxError::CommandExecutionError(
+                    "promotion test does not execute commands".to_string(),
+                ))
+            })
+        }
+
+        fn interrupt<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+        ) -> crate::runtime::ShellRuntimeUnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn interrupt_generation<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+            expected_generation: Option<u64>,
+        ) -> crate::runtime::ShellRuntimeBoolFuture<'a> {
+            let interrupted = self.interrupted.clone();
+            Box::pin(async move {
+                if let Some(generation) = expected_generation {
+                    interrupted
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(generation);
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
+            })
+        }
+
+        fn terminate_session<'a>(
+            &'a self,
+            thread_id: &'a str,
+        ) -> crate::runtime::ShellRuntimeUnitFuture<'a> {
+            let terminated = self.terminated.clone();
+            let thread_id = thread_id.to_string();
+            Box::pin(async move {
+                terminated
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(thread_id);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_promotion_interrupts_started_generation_and_releases_reservation() {
+        let runtime = PromotionContractRuntime::default();
+        let interrupted = runtime.interrupted.clone();
+        let service = WinxService::with_runtime(SessionIsolation::Lenient, Arc::new(runtime));
+        let (slot, guard) = service.session_for("promotion-contract").await;
+        *slot.lock().await = Some(BashState::new());
+        drop(guard);
+        let request = rmcp::model::CallToolRequestParams::new("BashCommand").with_arguments(
+            serde_json::json!({
+                "action_json": {
+                    "type": "command",
+                    "command": "sleep 30",
+                    "is_background": false
+                },
+                "thread_id": "promotion-contract"
+            })
+            .as_object()
+            .expect("request object")
+            .clone(),
+        );
+        let reservation = service
+            .reserve_bash_task(&request, &crate::server::principal::RequestScope::default())
+            .await
+            .expect("reservation");
+        let task_id = reservation.task_id.clone();
+        let mut result =
+            rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("running")]);
+        result.structured_content = Some(serde_json::json!({"status": "running"}));
+        let initial = crate::server::tool_dispatch::ToolCallExecution {
+            result,
+            command_generation: Some(41),
+            execution_token: Some(crate::runtime::ShellExecutionToken {
+                guardian_epoch: "embedded".to_string(),
+                session_epoch: "test-session".to_string(),
+                generation: 41,
+            }),
+            generation_bound_actions: false,
+        };
+
+        let error = service
+            .start_reserved_bash_task(
+                reservation,
+                request,
+                crate::server::principal::RequestScope::default(),
+                Some(initial),
+                false,
+            )
+            .await
+            .expect_err("promotion must reject a changed runtime capability");
+        assert!(error.message.contains("safely promote"), "{error:?}");
+        assert!(service.tasks.lock().await.get(&task_id).is_none());
+        assert_eq!(
+            *interrupted.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![41]
+        );
+    }
+
+    #[tokio::test]
+    async fn immediate_task_launch_error_terminates_session_and_releases_reservation() {
+        let runtime = PromotionContractRuntime::default();
+        let terminated = runtime.terminated.clone();
+        let service = WinxService::with_runtime(SessionIsolation::Lenient, Arc::new(runtime));
+        let (slot, guard) = service.session_for("immediate-launch-error").await;
+        *slot.lock().await = Some(BashState::new());
+        drop(guard);
+        let request = rmcp::model::CallToolRequestParams::new("BashCommand").with_arguments(
+            serde_json::json!({
+                "action_json": {
+                    "type": "command",
+                    "command": "sleep 30",
+                    "is_background": false
+                },
+                "thread_id": "immediate-launch-error"
+            })
+            .as_object()
+            .expect("request object")
+            .clone(),
+        );
+        let reservation = service
+            .reserve_bash_task(&request, &crate::server::principal::RequestScope::default())
+            .await
+            .expect("reservation");
+        let task_id = reservation.task_id.clone();
+        service
+            .start_reserved_bash_task(
+                reservation,
+                request,
+                crate::server::principal::RequestScope::default(),
+                None,
+                false,
+            )
+            .await
+            .expect("Task response is created before worker launch");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while service.tasks.lock().await.get(&task_id).is_some()
+            && std::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(service.tasks.lock().await.get(&task_id).is_none());
+        let terminated = terminated.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(terminated.len(), 1);
+        assert!(terminated[0].starts_with("immediatelauncherror_"), "{terminated:?}");
+    }
+
+    #[tokio::test]
+    async fn running_without_execution_binding_terminates_and_releases_reservation() {
+        let runtime = PromotionContractRuntime::default();
+        let terminated = runtime.terminated.clone();
+        let service = WinxService::with_runtime(SessionIsolation::Lenient, Arc::new(runtime));
+        let request = rmcp::model::CallToolRequestParams::new("BashCommand").with_arguments(
+            serde_json::json!({
+                "command": "sleep 30",
+                "thread_id": "unbound-running"
+            })
+            .as_object()
+            .expect("request object")
+            .clone(),
+        );
+        let reservation = service
+            .reserve_bash_task(&request, &crate::server::principal::RequestScope::default())
+            .await
+            .expect("reservation");
+        let task_id = reservation.task_id.clone();
+        let mut result =
+            rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("running")]);
+        result.structured_content = Some(serde_json::json!({"status": "running"}));
+        let initial = crate::server::tool_dispatch::ToolCallExecution {
+            result,
+            command_generation: None,
+            execution_token: None,
+            generation_bound_actions: true,
+        };
+
+        service
+            .start_reserved_bash_task(
+                reservation,
+                request,
+                crate::server::principal::RequestScope::default(),
+                Some(initial),
+                false,
+            )
+            .await
+            .expect_err("unbound running promotion must fail");
+        assert!(service.tasks.lock().await.get(&task_id).is_none());
+        let terminated = terminated.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(terminated.len(), 1);
+        assert!(terminated[0].starts_with("unboundrunning_"), "{terminated:?}");
+    }
 
     #[tokio::test]
     async fn interrupt_waits_until_main_shell_is_reusable() {
@@ -193,8 +416,15 @@ mod task_lifecycle_tests {
             })
         };
         tokio::time::sleep(Duration::from_millis(300)).await;
+        let generation = {
+            let slot = service.sessions.lock().await.slots.get("task_cancel_regression").cloned();
+            let slot = slot.expect("initialized session");
+            let state = slot.lock().await;
+            let shell = state.as_ref().expect("initialized state").pty_shell.lock().await;
+            shell.as_ref().map(crate::state::pty::PtyShell::command_generation)
+        };
         worker.abort();
-        service.interrupt_task_thread("task_cancel_regression").await;
+        service.interrupt_task_generation("task_cancel_regression", generation).await;
         let interrupted = tokio::time::timeout(Duration::from_secs(5), worker).await;
         let settled = match interrupted {
             Ok(Ok(_)) => true,
@@ -281,10 +511,26 @@ mod schema_tests {
     }
 
     #[test]
+    fn bash_schema_advertises_generic_wait_policies() {
+        let bash = winx_tools()
+            .into_iter()
+            .find(|tool| tool.name == "BashCommand")
+            .expect("BashCommand catalog entry");
+        let blob = serde_json::to_string(&*bash.input_schema).unwrap_or_default();
+        assert!(blob.contains("wait_policy"), "wait_policy missing: {blob}");
+        for policy in ["adaptive", "return_early", "until_complete"] {
+            assert!(blob.contains(policy), "{policy} missing: {blob}");
+        }
+    }
+
+    #[test]
     fn advertises_latest_protocol_and_tasks_extension() {
         let info = ServerHandler::get_info(&super::WinxService::new());
         assert_eq!(info.protocol_version, ProtocolVersion::V_2026_07_28);
         assert!(info.capabilities.supports_tasks());
+        assert!(info.capabilities.extensions.as_ref().is_some_and(|extensions| {
+            extensions.contains_key(super::handler::COMPACT_BASH_OUTPUT_EXTENSION)
+        }));
     }
 
     #[test]

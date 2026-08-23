@@ -22,6 +22,37 @@ use super::principal::{
     session_affinity_from_context, task_belongs_to_principal, RequestScope,
 };
 use super::WinxService;
+use crate::runtime::ShellActionOptions;
+use crate::types::{BashCommand, BashWaitPolicy};
+
+pub(crate) const COMPACT_BASH_OUTPUT_EXTENSION: &str = "io.winx/compact-bash-output";
+const ADAPTIVE_TASK_INLINE_SECONDS: f32 = 2.0;
+const RETURN_EARLY_DEFAULT_SECONDS: f32 = 0.25;
+const RETURN_EARLY_MAX_SECONDS: f32 = 5.0;
+const SYNCHRONOUS_MAX_SECONDS: f32 = 60.0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BashTaskRoute {
+    Synchronous,
+    Adaptive,
+    Immediate,
+}
+
+fn bash_task_route(
+    client_tasks: bool,
+    generation_bound_runtime: bool,
+    eligible: bool,
+    policy: BashWaitPolicy,
+) -> BashTaskRoute {
+    if !client_tasks || !generation_bound_runtime || !eligible {
+        return BashTaskRoute::Synchronous;
+    }
+    match policy {
+        BashWaitPolicy::Adaptive => BashTaskRoute::Adaptive,
+        BashWaitPolicy::UntilComplete => BashTaskRoute::Immediate,
+        BashWaitPolicy::ReturnEarly => BashTaskRoute::Synchronous,
+    }
+}
 
 /// One structured `winx::usage` event per tool call. Only metadata is logged —
 /// never tool arguments, command text, or file contents (secrets/PII).
@@ -149,6 +180,53 @@ fn cache_hints_for_protocol(
     }
 }
 
+fn supports_compact_bash_output(context: &RequestContext<RoleServer>) -> bool {
+    context.client_capabilities().is_some_and(|capabilities| {
+        capabilities
+            .extensions
+            .as_ref()
+            .is_some_and(|extensions| extensions.contains_key(COMPACT_BASH_OUTPUT_EXTENSION))
+    })
+}
+
+fn normalized_wait_request(
+    mut request: CallToolRequestParams,
+    policy: BashWaitPolicy,
+    task_inline: bool,
+) -> Result<CallToolRequestParams, McpError> {
+    let mut arguments = request
+        .arguments
+        .clone()
+        .ok_or_else(|| McpError::invalid_request("Missing BashCommand arguments", None))?;
+    let requested = arguments
+        .get("wait_for_seconds")
+        .cloned()
+        .map(serde_json::from_value::<f32>)
+        .transpose()
+        .map_err(|error| {
+            McpError::invalid_request(format!("Invalid wait_for_seconds: {error}"), None)
+        })?;
+    let (default, maximum) = match (policy, task_inline) {
+        (BashWaitPolicy::Adaptive, true) => {
+            (ADAPTIVE_TASK_INLINE_SECONDS, ADAPTIVE_TASK_INLINE_SECONDS)
+        }
+        (BashWaitPolicy::ReturnEarly, _) => {
+            (RETURN_EARLY_DEFAULT_SECONDS, RETURN_EARLY_MAX_SECONDS)
+        }
+        (BashWaitPolicy::Adaptive, false) => (15.0, SYNCHRONOUS_MAX_SECONDS),
+        (BashWaitPolicy::UntilComplete, false) => {
+            (SYNCHRONOUS_MAX_SECONDS, SYNCHRONOUS_MAX_SECONDS)
+        }
+        (BashWaitPolicy::UntilComplete, true) => unreachable!("until_complete starts a Task"),
+    };
+    arguments.insert(
+        "wait_for_seconds".to_string(),
+        serde_json::Value::from(requested.unwrap_or(default).clamp(0.0, maximum)),
+    );
+    request.arguments = Some(arguments);
+    Ok(request)
+}
+
 /// Classify a `BashCommand` call by action kind (`command`, `status_check`,
 /// `send_text`, ...) without touching the command text itself. Mirrors the
 /// lenient forms accepted by the `BashCommand` deserializer: a typed
@@ -193,23 +271,26 @@ fn bash_action(arguments: Option<&rmcp::model::JsonObject>) -> String {
 #[allow(clippy::unused_async_trait_impl)] // rmcp's trait requires these async signatures
 impl ServerHandler for WinxService {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
-            ServerCapabilities::builder()
-                .enable_tools()
-                .enable_resources()
-                .enable_prompts()
-                .enable_tasks()
-                .build(),
-        )
-        .with_server_info(
-            Implementation::new("winx-mcp-server", self.version.clone())
-                .with_title("Winx High-Performance MCP")
-                .with_icons(vec![Icon::new(server_icon_data_uri())
-                    .with_mime_type("image/png")
-                    .with_sizes(vec!["96x96".to_string()])]),
-        )
-        .with_protocol_version(ProtocolVersion::V_2026_07_28)
-        .with_instructions(crate::utils::orchestration::server_instructions())
+        let mut capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_prompts()
+            .enable_tasks()
+            .build();
+        capabilities
+            .extensions
+            .get_or_insert_default()
+            .insert(COMPACT_BASH_OUTPUT_EXTENSION.to_string(), rmcp::model::JsonObject::new());
+        ServerInfo::new(capabilities)
+            .with_server_info(
+                Implementation::new("winx-mcp-server", self.version.clone())
+                    .with_title("Winx High-Performance MCP")
+                    .with_icons(vec![Icon::new(server_icon_data_uri())
+                        .with_mime_type("image/png")
+                        .with_sizes(vec!["96x96".to_string()])]),
+            )
+            .with_protocol_version(ProtocolVersion::V_2026_07_28)
+            .with_instructions(crate::utils::orchestration::server_instructions())
     }
 
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
@@ -276,7 +357,7 @@ impl ServerHandler for WinxService {
                 None,
             ));
         }
-        let (abort_handle, thread_id) = {
+        let (abort_handle, thread_id, mut execution_token, execution_control) = {
             let mut tasks = self.tasks.lock().await;
             let entry = tasks.get_mut(&request.task_id).ok_or_else(|| {
                 McpError::invalid_request(
@@ -292,15 +373,30 @@ impl ServerHandler for WinxService {
                     None,
                 ));
             }
-            let abort_handle = entry.abort_handle.take();
+            entry.request_cancel();
             let thread_id = entry.thread_id.clone();
+            let execution_token = entry.execution_token();
+            let execution_control = entry.execution_control();
+            // Before a generation exists the worker must stay alive long
+            // enough to publish it and interrupt that exact process. Once it
+            // exists, aborting the polling worker is safe.
+            let abort_handle = execution_token.as_ref().and(entry.abort_handle.take());
             entry.finish(TaskStatus::Cancelled, Some("Cancelled by client".to_string()), None);
-            (abort_handle, thread_id)
+            (abort_handle, thread_id, execution_token, execution_control)
         };
         if let Some(abort_handle) = abort_handle {
             abort_handle.abort();
         }
-        self.interrupt_task_thread(&thread_id).await;
+        if execution_token.is_none() {
+            execution_token = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                execution_control.wait_for_execution(),
+            )
+            .await
+            .ok()
+            .flatten();
+        }
+        self.interrupt_task_execution(&thread_id, execution_token).await;
         Ok(())
     }
 
@@ -400,6 +496,7 @@ impl ServerHandler for WinxService {
         Ok(result.into())
     }
 
+    #[allow(clippy::too_many_lines)] // request scoping, negotiated routing, execution, and telemetry
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
@@ -414,28 +511,165 @@ impl ServerHandler for WinxService {
                     McpError::invalid_request(format!("Cannot scope remote request: {error}"), None)
                 })?;
         let usage = UsageEvent::start(&request, &scope, &context);
-        if context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks())
-            && Self::bash_task_is_eligible(&request)
-        {
-            return match self.enqueue_bash_task(request, scope).await {
-                Ok(task) => {
-                    usage.emit("task", "working", 0);
-                    Ok(CallToolResponse::Task(task))
-                }
-                Err(error) => {
-                    usage.emit("protocol_error", "failed", 0);
-                    Err(error)
-                }
-            };
+        let compact_bash_output = supports_compact_bash_output(&context);
+        let supports_tasks =
+            context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks());
+        let wait_policy = if request.name == "BashCommand" {
+            Some(Self::bash_wait_policy(&request)?)
+        } else {
+            None
+        };
+        if wait_policy == Some(BashWaitPolicy::UntilComplete) {
+            let is_foreground_command = request
+                .arguments
+                .clone()
+                .and_then(|arguments| {
+                    serde_json::from_value::<BashCommand>(serde_json::Value::Object(arguments)).ok()
+                })
+                .is_some_and(|bash| {
+                    matches!(
+                        bash.action_json,
+                        crate::types::BashCommandAction::Command { is_background: false, .. }
+                    )
+                });
+            if !is_foreground_command {
+                return Err(McpError::invalid_request(
+                    "wait_policy=until_complete is valid only for a foreground Command action",
+                    None,
+                ));
+            }
         }
 
-        match self.execute_tool_call(request).await {
-            Ok(mut result) => {
-                scope.unscope_result(&mut result);
-                let status = outcomes::result_status(&result);
+        let eligible = Self::bash_task_is_eligible(&request);
+        let generation_bound_runtime = if supports_tasks && eligible {
+            let thread_id = request
+                .arguments
+                .as_ref()
+                .and_then(|arguments| arguments.get("thread_id"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let (slot, session_guard) = self.session_for(thread_id).await;
+            let supported = self
+                .shell_runtime
+                .supports_generation_bound_actions_for(&slot)
+                .await
+                .unwrap_or(false);
+            drop(session_guard);
+            supported
+        } else {
+            false
+        };
+        let route = wait_policy.map_or(BashTaskRoute::Synchronous, |policy| {
+            bash_task_route(supports_tasks, generation_bound_runtime, eligible, policy)
+        });
+
+        match route {
+            BashTaskRoute::Immediate => {
+                let reservation = self.reserve_bash_task(&request, &scope).await?;
+                return match self
+                    .start_reserved_bash_task(
+                        reservation,
+                        request,
+                        scope,
+                        None,
+                        compact_bash_output,
+                    )
+                    .await
+                {
+                    Ok(task) => {
+                        usage.emit("task", "working", 0);
+                        Ok(CallToolResponse::Task(task))
+                    }
+                    Err(error) => {
+                        usage.emit("protocol_error", "failed", 0);
+                        Err(error)
+                    }
+                };
+            }
+            BashTaskRoute::Adaptive => {
+                let reservation = self.reserve_bash_task(&request, &scope).await?;
+                let task_request = request.clone();
+                let inline_request =
+                    normalized_wait_request(request, BashWaitPolicy::Adaptive, true)?;
+                match self
+                    .execute_tool_call(
+                        inline_request,
+                        ShellActionOptions {
+                            compact_output: compact_bash_output,
+                            ..ShellActionOptions::default()
+                        },
+                    )
+                    .await
+                {
+                    Ok(execution) if outcomes::result_status(&execution.result) == "running" => {
+                        return match self
+                            .start_reserved_bash_task(
+                                reservation,
+                                task_request,
+                                scope,
+                                Some(execution),
+                                compact_bash_output,
+                            )
+                            .await
+                        {
+                            Ok(task) => {
+                                usage.emit("task", "working", 0);
+                                Ok(CallToolResponse::Task(task))
+                            }
+                            Err(error) => {
+                                usage.emit("protocol_error", "failed", 0);
+                                Err(error)
+                            }
+                        };
+                    }
+                    Ok(mut execution) => {
+                        self.release_bash_task(&reservation).await;
+                        scope.unscope_result(&mut execution.result);
+                        let status = outcomes::result_status(&execution.result);
+                        let outcome = if execution.result.is_error == Some(true) {
+                            "tool_error"
+                        } else {
+                            "ok"
+                        };
+                        usage.emit(
+                            outcome,
+                            &status,
+                            outcomes::result_size_bytes(&execution.result),
+                        );
+                        return Ok(execution.result.into());
+                    }
+                    Err(mut error) => {
+                        self.release_bash_task(&reservation).await;
+                        scope.unscope_error(&mut error);
+                        usage.emit("protocol_error", "failed", 0);
+                        return Err(error);
+                    }
+                }
+            }
+            BashTaskRoute::Synchronous => {}
+        }
+
+        let request = match wait_policy {
+            Some(policy) => normalized_wait_request(request, policy, false)?,
+            None => request,
+        };
+        match self
+            .execute_tool_call(
+                request,
+                ShellActionOptions {
+                    compact_output: compact_bash_output,
+                    ..ShellActionOptions::default()
+                },
+            )
+            .await
+        {
+            Ok(mut execution) => {
+                let result = &mut execution.result;
+                scope.unscope_result(result);
+                let status = outcomes::result_status(result);
                 let outcome = if result.is_error == Some(true) { "tool_error" } else { "ok" };
-                usage.emit(outcome, &status, outcomes::result_size_bytes(&result));
-                Ok(result.into())
+                usage.emit(outcome, &status, outcomes::result_size_bytes(result));
+                Ok(execution.result.into())
             }
             Err(mut error) => {
                 scope.unscope_error(&mut error);
@@ -465,5 +699,67 @@ mod tests {
             (None, None)
         );
         assert_eq!(cache_hints_for_protocol(None, CacheScope::Private), (None, None));
+    }
+
+    #[test]
+    fn guardian_1_4_uses_synchronous_policy_fallback_even_for_task_clients() {
+        assert_eq!(
+            bash_task_route(true, false, true, BashWaitPolicy::Adaptive),
+            BashTaskRoute::Synchronous
+        );
+        assert_eq!(
+            bash_task_route(true, false, true, BashWaitPolicy::UntilComplete),
+            BashTaskRoute::Synchronous
+        );
+    }
+
+    #[test]
+    fn task_routing_requires_client_runtime_and_foreground_eligibility() {
+        assert_eq!(
+            bash_task_route(true, true, true, BashWaitPolicy::Adaptive),
+            BashTaskRoute::Adaptive
+        );
+        assert_eq!(
+            bash_task_route(true, true, true, BashWaitPolicy::UntilComplete),
+            BashTaskRoute::Immediate
+        );
+        assert_eq!(
+            bash_task_route(true, true, true, BashWaitPolicy::ReturnEarly),
+            BashTaskRoute::Synchronous
+        );
+        assert_eq!(
+            bash_task_route(false, true, true, BashWaitPolicy::UntilComplete),
+            BashTaskRoute::Synchronous
+        );
+        assert_eq!(
+            bash_task_route(true, true, false, BashWaitPolicy::UntilComplete),
+            BashTaskRoute::Synchronous
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::float_cmp)]
+    fn synchronous_wait_policies_have_explicit_upper_bounds() {
+        let request = |wait_for_seconds: Option<f32>| {
+            let mut arguments = serde_json::Map::new();
+            arguments.insert("command".to_string(), serde_json::Value::String("pwd".to_string()));
+            if let Some(wait) = wait_for_seconds {
+                arguments.insert("wait_for_seconds".to_string(), serde_json::json!(wait));
+            }
+            CallToolRequestParams::new("BashCommand").with_arguments(arguments)
+        };
+        let normalized = |policy, wait| {
+            normalized_wait_request(request(wait), policy, false)
+                .expect("valid wait request")
+                .arguments
+                .and_then(|arguments| arguments.get("wait_for_seconds").cloned())
+                .and_then(|value| value.as_f64())
+                .expect("normalized wait")
+        };
+
+        assert_eq!(normalized(BashWaitPolicy::Adaptive, Some(500.0)), 60.0);
+        assert_eq!(normalized(BashWaitPolicy::UntilComplete, None), 60.0);
+        assert_eq!(normalized(BashWaitPolicy::ReturnEarly, Some(500.0)), 5.0);
+        assert_eq!(normalized(BashWaitPolicy::ReturnEarly, None), 0.25);
     }
 }

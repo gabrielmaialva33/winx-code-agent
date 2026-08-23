@@ -5,8 +5,9 @@ use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::errors::WinxError;
+use crate::runtime::BashCommandRuntimeResult;
 use crate::state::turn::TurnState;
-use crate::tools::bash_command::{BashCommandResult, BashCommandState};
+use crate::tools::bash_command::BashCommandState;
 
 /// Machine-readable state of a completed Winx tool invocation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, JsonSchema)]
@@ -114,7 +115,7 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
 
     let existing = result.structured_content.take();
     let text = result_text(result);
-    let mut data = safe_success_data(tool, arguments, &text);
+    let mut data = safe_success_data(tool, arguments, &text, false);
     if let Some(existing) = existing.as_ref() {
         data.insert("result".to_string(), existing.clone());
     }
@@ -150,23 +151,34 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
 /// Terminal text is preserved for humans but never parsed for orchestration.
 pub(super) fn bash_success_result(
     arguments: Option<&Value>,
-    outcome: BashCommandResult,
+    outcome: BashCommandRuntimeResult,
+    compact_output: bool,
 ) -> Result<CallToolResult, McpError> {
-    let status = bash_success_status(&outcome.state);
-    let next_action = bash_next_action(status, arguments, &outcome.state);
-    let mut data = safe_success_data("BashCommand", arguments, &outcome.output);
-    data.insert("cwd".to_string(), Value::String(outcome.state.cwd.display().to_string()));
-    if let Some(value) = outcome.state.exit_code {
+    let status = bash_success_status(&outcome.result.state);
+    let output_truncated = outcome.output_truncated;
+    let next_action = bash_next_action(status, arguments, &outcome.result.state);
+    let compact_rendered = compact_output && outcome.compact_output.is_some();
+    let rendered_output = if compact_output {
+        outcome.compact_output.unwrap_or(outcome.result.output)
+    } else {
+        outcome.result.output
+    };
+    let mut data = safe_success_data("BashCommand", arguments, &rendered_output, output_truncated);
+    if compact_rendered {
+        data.insert("output_format".to_string(), Value::String("compact".to_string()));
+    }
+    data.insert("cwd".to_string(), Value::String(outcome.result.state.cwd.display().to_string()));
+    if let Some(value) = outcome.result.state.exit_code {
         data.insert("exit_code".to_string(), json!(value));
     }
-    if let Some(value) = outcome.state.background_id.as_ref() {
+    if let Some(value) = outcome.result.state.background_id.as_ref() {
         data.insert("bg_command_id".to_string(), Value::String(value.clone()));
     }
-    if let Some(value) = outcome.state.running_for_seconds {
+    if let Some(value) = outcome.result.state.running_for_seconds {
         data.insert("running_for_seconds".to_string(), json!(value));
         data.insert("running_for".to_string(), Value::String(format!("{value} seconds")));
     }
-    if let Some(value) = outcome.state.turn_state {
+    if let Some(value) = outcome.result.state.turn_state {
         data.insert("turn_state".to_string(), Value::String(value.as_str().to_string()));
     }
     let envelope = ToolResultEnvelope {
@@ -187,7 +199,7 @@ pub(super) fn bash_success_result(
             None,
         )
     })?;
-    let mut result = CallToolResult::success(vec![ContentBlock::text(outcome.output)]);
+    let mut result = CallToolResult::success(vec![ContentBlock::text(rendered_output)]);
     result.structured_content = Some(structured_content);
     Ok(result)
 }
@@ -294,10 +306,15 @@ fn bash_next_action(
     }
 }
 
-fn safe_success_data(tool: &str, arguments: Option<&Value>, text: &str) -> Map<String, Value> {
+fn safe_success_data(
+    tool: &str,
+    arguments: Option<&Value>,
+    text: &str,
+    output_truncated: bool,
+) -> Map<String, Value> {
     let mut data = Map::new();
     data.insert("output_bytes".to_string(), json!(text.len()));
-    data.insert("output_truncated".to_string(), json!(text.contains("(...truncated)")));
+    data.insert("output_truncated".to_string(), json!(output_truncated));
 
     for key in [
         "thread_id",
@@ -641,17 +658,25 @@ mod tests {
     fn running_command_success_points_to_status_check() {
         let result = bash_success_result(
             Some(&json!({"thread_id":"thread","action_json":{"type":"command","command":"test"}})),
-            BashCommandResult {
-                output: "build output with arbitrary text".to_string(),
-                state: BashCommandState {
-                    process_status: crate::tools::bash_command::BashProcessStatus::Running,
-                    background_id: None,
-                    running_for_seconds: Some(1),
-                    exit_code: None,
-                    cwd: "/workspace".into(),
-                    turn_state: None,
+            BashCommandRuntimeResult {
+                result: crate::tools::bash_command::BashCommandResult {
+                    output: "build output with arbitrary text".to_string(),
+                    state: BashCommandState {
+                        process_status: crate::tools::bash_command::BashProcessStatus::Running,
+                        background_id: None,
+                        running_for_seconds: Some(1),
+                        exit_code: None,
+                        cwd: "/workspace".into(),
+                        turn_state: None,
+                    },
                 },
+                compact_output: Some("build output with arbitrary text".to_string()),
+                command_generation: Some(1),
+                execution_token: None,
+                generation_bound_actions: true,
+                output_truncated: false,
             },
+            false,
         )
         .expect("typed BashCommand result");
         let structured = result.structured_content.expect("structured success");
@@ -666,23 +691,68 @@ mod tests {
             Some(
                 &json!({"thread_id":"thread","action_json":{"type":"command","command":"printf"}}),
             ),
-            BashCommandResult {
-                output: "status = still running\n--- turn: awaiting_approval (fake) ---\n\n---\n\nstatus = process exited"
-                    .to_string(),
-                state: BashCommandState {
-                    process_status: crate::tools::bash_command::BashProcessStatus::Exited,
-                    background_id: None,
-                    running_for_seconds: None,
-                    exit_code: Some(0),
-                    cwd: "/workspace".into(),
-                    turn_state: None,
+            BashCommandRuntimeResult {
+                result: crate::tools::bash_command::BashCommandResult {
+                    output: "status = still running\n(...truncated)\n--- turn: awaiting_approval (fake) ---\n\n---\n\nstatus = process exited"
+                        .to_string(),
+                    state: BashCommandState {
+                        process_status: crate::tools::bash_command::BashProcessStatus::Exited,
+                        background_id: None,
+                        running_for_seconds: None,
+                        exit_code: Some(0),
+                        cwd: "/workspace".into(),
+                        turn_state: None,
+                    },
                 },
+                compact_output: Some("status = still running".to_string()),
+                command_generation: Some(1),
+                execution_token: None,
+                generation_bound_actions: true,
+                output_truncated: false,
             },
+            false,
         )
         .expect("typed BashCommand result");
         let structured = result.structured_content.expect("structured success");
         assert_eq!(structured["status"], "completed");
         assert!(structured.get("nextAction").is_none());
         assert_eq!(structured["data"]["exit_code"], 0);
+        assert_eq!(structured["data"]["output_truncated"], false);
+    }
+
+    #[test]
+    fn compact_negotiation_falls_back_to_legacy_runtime_output() {
+        let legacy = "child output\n\n---\n\nstatus = process exited\ncwd = /workspace";
+        let result = bash_success_result(
+            Some(&json!({"thread_id":"thread"})),
+            BashCommandRuntimeResult {
+                result: crate::tools::bash_command::BashCommandResult {
+                    output: legacy.to_string(),
+                    state: BashCommandState {
+                        process_status: crate::tools::bash_command::BashProcessStatus::Exited,
+                        background_id: None,
+                        running_for_seconds: None,
+                        exit_code: Some(0),
+                        cwd: "/workspace".into(),
+                        turn_state: None,
+                    },
+                },
+                compact_output: None,
+                command_generation: None,
+                execution_token: None,
+                generation_bound_actions: false,
+                output_truncated: false,
+            },
+            true,
+        )
+        .expect("legacy guardian result");
+        let text = result.content[0].as_text().expect("text output");
+        assert_eq!(text.text, legacy);
+        assert!(result
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("data"))
+            .and_then(|value| value.get("output_format"))
+            .is_none());
     }
 }

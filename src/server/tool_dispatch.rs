@@ -8,17 +8,44 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use super::{outcomes, SharedBashState, WinxService};
+use crate::runtime::{ShellActionOptions, ShellExecutionToken};
 use crate::state::bash_state::generate_thread_id;
 use crate::types::{
     normalize_thread_id, BashCommand, CodeMap, ContextSave, FileWriteOrEdit, Initialize,
     MultiFileEdit, ReadFiles, ReadImage, UndoEdit,
 };
 
+pub(super) struct ToolCallExecution {
+    pub result: CallToolResult,
+    pub command_generation: Option<u64>,
+    pub execution_token: Option<ShellExecutionToken>,
+    pub generation_bound_actions: bool,
+}
+
+impl ToolCallExecution {
+    fn legacy(result: CallToolResult) -> Self {
+        Self {
+            result,
+            command_generation: None,
+            execution_token: None,
+            generation_bound_actions: false,
+        }
+    }
+}
+
+pub(super) struct BashCallExecution {
+    result: CallToolResult,
+    command_generation: Option<u64>,
+    execution_token: Option<ShellExecutionToken>,
+    generation_bound_actions: bool,
+}
+
 impl WinxService {
     pub(super) async fn execute_tool_call(
         &self,
         param: CallToolRequestParams,
-    ) -> Result<CallToolResult, McpError> {
+        bash_options: ShellActionOptions,
+    ) -> Result<ToolCallExecution, McpError> {
         let tool = param.name.to_string();
         let args_value = param.arguments.map(Value::Object);
         let orchestration_args = args_value.clone();
@@ -26,17 +53,29 @@ impl WinxService {
             crate::utils::redact::redact(&audit_summary(&tool, args_value.as_ref())).into_owned();
         let started = std::time::Instant::now();
 
-        let result = match tool.as_str() {
-            "Initialize" => self.handle_initialize(args_value).await,
-            "BashCommand" => self.handle_bash_command(args_value).await,
-            "ReadFiles" => self.handle_read_files(args_value).await,
-            "FileWriteOrEdit" => self.handle_file_write_or_edit(args_value).await,
-            "MultiFileEdit" => self.handle_multi_file_edit(args_value).await,
-            "UndoEdit" => self.handle_undo_edit(args_value).await,
-            "ContextSave" => self.handle_context_save(args_value).await,
-            "ReadImage" => self.handle_read_image(args_value).await,
-            "CodeMap" => self.handle_code_map(args_value).await,
-            _ => Err(McpError::invalid_request(format!("Unknown tool: {tool}"), None)),
+        let (result, bash_runtime) = match tool.as_str() {
+            "Initialize" => (self.handle_initialize(args_value).await, None),
+            "BashCommand" => {
+                match self.handle_bash_command_with_output(args_value, bash_options).await {
+                    Ok(execution) => (
+                        Ok(execution.result),
+                        Some((
+                            execution.command_generation,
+                            execution.execution_token,
+                            execution.generation_bound_actions,
+                        )),
+                    ),
+                    Err(error) => (Err(error), None),
+                }
+            }
+            "ReadFiles" => (self.handle_read_files(args_value).await, None),
+            "FileWriteOrEdit" => (self.handle_file_write_or_edit(args_value).await, None),
+            "MultiFileEdit" => (self.handle_multi_file_edit(args_value).await, None),
+            "UndoEdit" => (self.handle_undo_edit(args_value).await, None),
+            "ContextSave" => (self.handle_context_save(args_value).await, None),
+            "ReadImage" => (self.handle_read_image(args_value).await, None),
+            "CodeMap" => (self.handle_code_map(args_value).await, None),
+            _ => (Err(McpError::invalid_request(format!("Unknown tool: {tool}"), None)), None),
         };
 
         let result = match result {
@@ -74,7 +113,19 @@ impl WinxService {
                 error.message
             ),
         }
-        result
+        result.map(|result| {
+            let Some((command_generation, execution_token, generation_bound_actions)) =
+                bash_runtime
+            else {
+                return ToolCallExecution::legacy(result);
+            };
+            ToolCallExecution {
+                result,
+                command_generation,
+                execution_token,
+                generation_bound_actions,
+            }
+        })
     }
 
     pub(super) async fn knowledge_transfer_prompt_text(
@@ -251,10 +302,19 @@ impl WinxService {
         }
     }
 
+    #[cfg(test)]
     pub(super) async fn handle_bash_command(
         &self,
         args: Option<Value>,
     ) -> Result<CallToolResult, McpError> {
+        Ok(self.handle_bash_command_with_output(args, ShellActionOptions::default()).await?.result)
+    }
+
+    pub(super) async fn handle_bash_command_with_output(
+        &self,
+        args: Option<Value>,
+        options: ShellActionOptions,
+    ) -> Result<BashCallExecution, McpError> {
         let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
         let recovery_args = args.clone();
         let mut bash_command: BashCommand = serde_json::from_value(args).map_err(|error| {
@@ -275,18 +335,30 @@ impl WinxService {
                 bash_command.thread_id = thread_id;
             }
         }
-        match crate::tools::bash_command::handle_tool_call_with_runtime_detailed(
-            self.shell_runtime.as_ref(),
-            &slot,
-            bash_command,
-        )
-        .await
-        {
+        match self.shell_runtime.run_action_detailed(&slot, bash_command, options.clone()).await {
             Ok(outcome) => {
                 self.persist_state(&slot).await;
-                outcomes::bash_success_result(Some(&recovery_args), outcome)
+                let command_generation = outcome.command_generation;
+                let execution_token = outcome.execution_token.clone();
+                let generation_bound_actions = outcome.generation_bound_actions;
+                let result = outcomes::bash_success_result(
+                    Some(&recovery_args),
+                    outcome,
+                    options.compact_output,
+                )?;
+                Ok(BashCallExecution {
+                    result,
+                    command_generation,
+                    execution_token,
+                    generation_bound_actions,
+                })
             }
-            Err(error) => outcomes::tool_failure("BashCommand", &error, Some(&recovery_args)),
+            Err(error) => Ok(BashCallExecution {
+                result: outcomes::tool_failure("BashCommand", &error, Some(&recovery_args))?,
+                command_generation: None,
+                execution_token: None,
+                generation_bound_actions: false,
+            }),
         }
     }
 

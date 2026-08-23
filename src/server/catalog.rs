@@ -101,6 +101,37 @@ fn mcp_tool<T: schemars::JsonSchema>(
     Tool::new(name, description, schema_to_input_schema::<T>()).with_annotations(annotations)
 }
 
+/// `wait_policy` belongs to the MCP adapter rather than the stable public
+/// `BashCommand` Rust struct. Inject it only into the advertised wire schema so
+/// existing library callers do not acquire a new required struct field.
+fn bash_command_input_schema() -> Arc<serde_json::Map<String, Value>> {
+    let mut schema = (*schema_to_input_schema::<BashCommand>()).clone();
+    let properties = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Value::Object(properties) = properties {
+        if let Some(Value::Object(wait)) = properties.get_mut("wait_for_seconds") {
+            wait.insert(
+                "description".to_string(),
+                Value::String(
+                    "Requested inline wait in seconds. Adaptive defaults to 15 seconds without Tasks and uses a short promotion window with Tasks; return_early is capped at 5 seconds; the synchronous until_complete fallback uses 60 seconds. The selected wait_policy always supplies the final cap."
+                        .to_string(),
+                ),
+            );
+        }
+        properties.insert(
+            "wait_policy".to_string(),
+            serde_json::json!({
+                "type": "string",
+                "enum": ["adaptive", "return_early", "until_complete"],
+                "default": "adaptive",
+                "description": "Execution delivery policy. Adaptive is bounded inline and may promote a foreground Command to an MCP Task; return_early never creates a Task; until_complete is valid only for a foreground Command, creates a Task when safely supported, and otherwise waits synchronously for at most 60 seconds."
+            }),
+        );
+    }
+    Arc::new(schema)
+}
+
 fn with_output_schema<T: schemars::JsonSchema>(mut tool: Tool) -> Tool {
     tool.output_schema = Some(schema_to_input_schema::<T>());
     tool
@@ -119,7 +150,7 @@ const INITIALIZE_DESCRIPTION: &str =
      - Use type=\"user_asked_change_workspace\" if in a conversation user asked to change workspace";
 
 const BASH_COMMAND_DESCRIPTION: &str =
-    "Use this for stateful shell and process work after Initialize. Prefer a single foreground command with wait_for_seconds=30-60 when a build/test may take time. Treat structuredContent.status as authoritative: when it is `running`, wait retry_after_ms and execute next_action (`status_check`); never submit the original command again. Only use status_check for a command that Winx reported as running. Run long-lived or interactive programs with is_background=true, then use wait_for_turn/screen and send_text/send_specials. Never use shell redirection, echo, or cat for file edits/reads; use the file tools. MCP Tasks are supported for foreground commands when the client advertises them; do not combine Tasks with is_background=true.";
+    "Use this for stateful shell and process work after Initialize. `wait_policy=adaptive` (default) keeps short commands inline and, when MCP Tasks and generation-bound runtime actions are negotiated, promotes only a foreground command the runtime already reported as running. Without safe Task support it waits synchronously for at most 60 seconds. Use `until_complete` only for a finite foreground Command: capable clients receive a Task immediately and other clients get a synchronous wait capped at 60 seconds. Use `return_early` when the caller needs prompt control; it never creates a Task and waits at most 5 seconds. `wait_for_seconds` is a request within those policy caps, not an override. Treat structuredContent.status as authoritative: when it is `running`, execute next_action (`status_check`) and never submit the original command again. Run long-lived or interactive programs with is_background=true, then use wait_for_turn/screen and send_text/send_specials. Never use shell redirection, echo, or cat for file edits/reads; use the file tools.";
 
 const READ_FILES_DESCRIPTION: &str =
     "- Read full file content of one or more files. \
@@ -173,11 +204,10 @@ fn build_winx_tools() -> Vec<Tool> {
             INITIALIZE_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
         )),
-        with_output_schema::<ToolResultEnvelope>(mcp_tool::<BashCommand>(
-            "BashCommand",
-            BASH_COMMAND_DESCRIPTION,
-            ToolAnnotations::new().destructive(true).open_world(true),
-        )),
+        with_output_schema::<ToolResultEnvelope>(
+            Tool::new("BashCommand", BASH_COMMAND_DESCRIPTION, bash_command_input_schema())
+                .with_annotations(ToolAnnotations::new().destructive(true).open_world(true)),
+        ),
         with_output_schema::<ToolResultEnvelope>(mcp_tool::<ReadFiles>(
             "ReadFiles",
             READ_FILES_DESCRIPTION,
