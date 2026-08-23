@@ -462,6 +462,59 @@ impl WinxService {
         }
     }
 
+    async fn validate_edit_verification(
+        slot: &SharedBashState,
+        verification: &EditVerification,
+    ) -> crate::errors::Result<()> {
+        let state = slot.lock().await;
+        let state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+        if !state.is_command_allowed(&verification.command) {
+            return Err(WinxError::CommandNotAllowed(
+                "verify_command is not allowed in the current mode".to_string(),
+            ));
+        }
+        let allow_shell_probe = matches!(state.mode, crate::types::Modes::Wcgw);
+        crate::utils::bash_parser::assert_single_statement(
+            &verification.command,
+            allow_shell_probe,
+        )
+    }
+
+    async fn finish_edit_verification(
+        &self,
+        tool: &str,
+        recovery_args: &Value,
+        thread_id: &str,
+        edit_result: String,
+        verification: Option<EditVerification>,
+        bash_options: ShellActionOptions,
+    ) -> Result<CallToolResult, McpError> {
+        let Some(verification) = verification else {
+            return Ok(CallToolResult::success(vec![ContentBlock::text(edit_result)]));
+        };
+        let mut arguments = json!({
+            "action_json": {
+                "type": "command",
+                "command": verification.command,
+                "is_background": false,
+                "allow_multi": false
+            },
+            "thread_id": thread_id
+        });
+        if let Some(wait) = verification.wait_for_seconds {
+            arguments["wait_for_seconds"] = json!(wait);
+        }
+        let execution = self
+            .handle_bash_command_with_output(Some(arguments), bash_options)
+            .await?;
+        Ok(outcomes::edit_verification_result(
+            tool,
+            Some(recovery_args),
+            edit_result,
+            execution.result,
+        ))
+    }
+
     async fn handle_file_write_or_edit(
         &self,
         args: Option<Value>,
