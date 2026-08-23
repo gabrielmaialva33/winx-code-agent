@@ -747,6 +747,24 @@ mod schema_tests {
     }
 
     #[test]
+    fn edit_schemas_advertise_bounded_inline_verification() {
+        for name in ["FileWriteOrEdit", "MultiFileEdit"] {
+            let tool = winx_tools()
+                .into_iter()
+                .find(|tool| tool.name == name)
+                .expect("edit catalog entry");
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("edit input properties");
+            assert_eq!(properties["verify_command"]["minLength"], 1, "{name}");
+            assert_eq!(properties["verify_wait_for_seconds"]["minimum"], 0, "{name}");
+            assert_eq!(properties["verify_wait_for_seconds"]["maximum"], 60, "{name}");
+        }
+    }
+
+    #[test]
     fn advertises_latest_protocol_and_tasks_extension() {
         let info = ServerHandler::get_info(&super::WinxService::new());
         assert_eq!(info.protocol_version, ProtocolVersion::V_2026_07_28);
