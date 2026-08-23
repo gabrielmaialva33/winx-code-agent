@@ -731,3 +731,50 @@ fn append_command_section<const N: usize>(
     }
     let _ = writeln!(output, "\n# {title}\n{}", content.trim_end());
 }
+
+#[cfg(test)]
+mod verification_tests {
+    #![allow(clippy::expect_used)]
+
+    use super::{audit_summary, take_edit_verification};
+    use serde_json::json;
+
+    #[test]
+    fn edit_verification_fields_are_removed_before_stable_struct_deserialization() {
+        let mut arguments = json!({
+            "file_path": "/workspace/lib.rs",
+            "percentage_to_change": 100,
+            "text_or_search_replace_blocks": "fn main() {}",
+            "thread_id": "thread",
+            "verify_command": " cargo check ",
+            "verify_wait_for_seconds": 12.5
+        });
+        let verification =
+            take_edit_verification(&mut arguments).expect("valid verification").expect("present");
+        assert_eq!(verification.command, "cargo check");
+        assert_eq!(verification.wait_for_seconds, Some(12.5));
+        assert!(arguments.get("verify_command").is_none());
+        assert!(arguments.get("verify_wait_for_seconds").is_none());
+    }
+
+    #[test]
+    fn malformed_verification_is_rejected_before_an_edit_can_run() {
+        assert!(take_edit_verification(&mut json!({"verify_command":""})).is_err());
+        assert!(take_edit_verification(&mut json!({"verify_wait_for_seconds":1})).is_err());
+        assert!(take_edit_verification(
+            &mut json!({"verify_command":"true","verify_wait_for_seconds":61})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn edit_audit_records_verification_without_command_content() {
+        let arguments = json!({
+            "file_path": "/workspace/lib.rs",
+            "verify_command": "secret command content"
+        });
+        let summary = audit_summary("FileWriteOrEdit", Some(&arguments));
+        assert!(summary.contains("verify=true"));
+        assert!(!summary.contains("secret command content"));
+    }
+}
