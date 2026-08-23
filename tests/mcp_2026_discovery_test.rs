@@ -1218,6 +1218,7 @@ async fn exercise_usage_read(
         "id": "usage-read",
         "method": "tools/call",
         "params": {
+            "_meta": modern_request_meta("usage-log-client", false),
             "name": "ReadFiles",
             "arguments": {
                 "file_paths": [first, second],
