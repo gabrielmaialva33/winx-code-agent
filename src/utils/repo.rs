@@ -112,8 +112,8 @@ fn find_git_root(path: &Path) -> Option<PathBuf> {
 ///
 /// gitignore filtering is only applied inside a git repo (`require_git`), matching
 /// wcgw which passes `repo=None` — and thus never ignores anything — for plain
-/// folders. Hidden files are kept (wcgw shows dotfiles unless gitignored); only
-/// the `.git` directory itself is always pruned.
+/// folders. Hidden files are kept (wcgw shows dotfiles unless gitignored), but
+/// `.git` and Winx's reserved `.winx` artifact directory are always pruned.
 fn get_all_files_max_depth(root: &Path, is_git_repo: bool) -> Vec<String> {
     let walker = WalkBuilder::new(root)
         .max_depth(Some(MAX_WALK_DEPTH))
@@ -124,7 +124,7 @@ fn get_all_files_max_depth(root: &Path, is_git_repo: bool) -> Vec<String> {
         .git_global(is_git_repo)
         .git_exclude(is_git_repo)
         .require_git(true)
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(|entry| !matches!(entry.file_name().to_str(), Some(".git" | ".winx")))
         .build();
 
     let mut files = Vec::new();
@@ -142,7 +142,8 @@ fn get_all_files_max_depth(root: &Path, is_git_repo: bool) -> Vec<String> {
 }
 
 /// Walk `root` for files, gitignore-aware (only inside a git repo), keeping
-/// dotfiles but always pruning the `.git` directory, capped at
+/// dotfiles but always pruning `.git` and Winx's reserved `.winx` artifact
+/// directory, capped at
 /// `MAX_ENTRIES_CHECK` entries and `MAX_WALK_DEPTH` deep. Returns absolute paths.
 /// Shared by the read-only code-navigation paths (`CodeMap` outline/references).
 pub fn walk_workspace_files(root: &Path) -> Vec<PathBuf> {
@@ -156,7 +157,7 @@ pub fn walk_workspace_files(root: &Path) -> Vec<PathBuf> {
         .git_global(is_git_repo)
         .git_exclude(is_git_repo)
         .require_git(true)
-        .filter_entry(|entry| entry.file_name() != ".git")
+        .filter_entry(|entry| !matches!(entry.file_name().to_str(), Some(".git" | ".winx")))
         .build();
 
     let mut files = Vec::new();
@@ -308,6 +309,26 @@ mod tests {
         let files = get_all_files_max_depth(root, true);
         assert!(files.iter().any(|file| file == "kept.rs"));
         assert!(!files.iter().any(|file| file == "ignored.txt"), "gitignore must hide ignored.txt");
+        Ok(())
+    }
+
+    #[test]
+    fn reserved_winx_directory_never_enters_context_or_code_navigation() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let root = temp_dir.path();
+        std::fs::create_dir_all(root.join(".winx/tmp"))?;
+        std::fs::write(root.join(".winx/tmp/carrier.rs"), "fn encoded_source() {}\n")?;
+        std::fs::write(root.join("kept.rs"), "fn real_source() {}\n")?;
+
+        let context_files = get_all_files_max_depth(root, false);
+        assert!(context_files.iter().any(|file| file == "kept.rs"));
+        assert!(!context_files.iter().any(|file| file.contains(".winx")));
+
+        let navigation_files = walk_workspace_files(root);
+        assert!(navigation_files.iter().any(|file| file.ends_with("kept.rs")));
+        assert!(!navigation_files
+            .iter()
+            .any(|file| file.components().any(|part| part.as_os_str() == ".winx")));
         Ok(())
     }
 
