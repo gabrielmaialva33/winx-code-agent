@@ -350,7 +350,9 @@ repeated control hello round trips; generation-bound actions perform a final gua
 A `ReadFiles` batch containing one or more failed paths returns `isError: true`; content from successful paths remains in the
 same response, with `successful_files` and `failed_files` counts. `MultiFileEdit` preserves planning failure semantics:
 unread and stale files return `needs_read`, while missing or ambiguous SEARCH blocks return `conflict`, all without writing
-any file and with a concrete `ReadFiles` recovery action. MCP Task results retain the same envelope.
+any file and with a concrete `ReadFiles` recovery action. Batched reads run filesystem and tokenization work in a bounded
+parallel pool (`WINX_READ_PARALLELISM`, default `4`, maximum `32`) but publish results and read coverage in request order.
+MCP Task results retain the same envelope.
 
 ## Guardian lifecycle
 

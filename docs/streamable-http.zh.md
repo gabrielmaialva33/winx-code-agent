@@ -240,6 +240,8 @@ winx-code-agent serve --http --token-file ~/.config/winx-http-token \
 
 MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、用 `&&` 合并相关的快速失败检查，并且绝不原样重复已被拒绝的调用。两个编辑工具都可通过 `verify_command` 在同一次调用中执行有限的编辑后检查，从而节省一次网络和模型往返。
 
+`ReadFiles` 批次中的文件会在受限并行池中处理（`WINX_READ_PARALLELISM`，默认 `4`，最大 `32`），但响应内容和读取保护范围始终严格按请求顺序发布。
+
 每个工具均声明了 `outputSchema` 并返回统一的 `structuredContent` 封装：
 
 ```json

@@ -249,6 +249,8 @@ modo Winx inicializado e do usuário do sistema operacional.
 
 O handshake inicial do MCP estabelece um contrato de orquestração sequencial determinístico: inicializar uma vez, manter o `thread_id` retornado, utilizar `CodeMap` antes de leituras extensas, agrupar leituras com `ReadFiles`, ler arquivos antes de editá-los, compor verificações relacionadas e fail-fast com `&&` e nunca repetir chamadas rejeitadas sem alterações. Uma verificação finita pós-edição pode ser enviada como `verify_command` em qualquer uma das ferramentas de edição, economizando uma ida e volta entre rede e modelo.
 
+Os arquivos de um lote `ReadFiles` são processados em um pool paralelo limitado (`WINX_READ_PARALLELISM`, padrão `4`, máximo `32`). A resposta e a cobertura do guard rail continuam seguindo exatamente a ordem solicitada.
+
 Cada ferramenta define um `outputSchema` e retorna um envelope `structuredContent`:
 
 ```json
