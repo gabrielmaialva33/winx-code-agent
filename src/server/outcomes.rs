@@ -1,6 +1,6 @@
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::ErrorData as McpError;
-use schemars::JsonSchema;
+use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::Serialize;
 use serde_json::{json, Map, Value};
 
@@ -32,6 +32,7 @@ pub(super) enum ToolResultStatus {
 pub(super) struct ToolNextAction {
     pub tool: String,
     pub instruction: String,
+    #[schemars(schema_with = "open_object_schema")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arguments: Option<Value>,
 }
@@ -64,8 +65,16 @@ pub(super) struct ToolResultEnvelope {
     pub next_action: Option<ToolNextAction>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required_reads: Vec<RequiredRead>,
+    #[schemars(schema_with = "open_object_schema")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+}
+
+/// Winx only emits object payloads in these extensible result fields. Avoid
+/// schemars' boolean `true` schema for `serde_json::Value`: it is valid JSON
+/// Schema, but some MCP clients reject boolean schemas while compiling tools.
+fn open_object_schema(_: &mut SchemaGenerator) -> Schema {
+    schemars::json_schema!({ "type": "object" })
 }
 
 /// `CodeMap` keeps its established top-level fields while adding the shared

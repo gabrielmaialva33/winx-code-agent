@@ -790,6 +790,23 @@ mod schema_tests {
                 "{} has no retrySameCall: {output:?}",
                 tool.name
             );
+            assert_eq!(
+                properties.get("data").and_then(|schema| schema.get("type")),
+                Some(&serde_json::json!("object")),
+                "{} advertises a client-incompatible data schema: {output:?}",
+                tool.name
+            );
+            assert_eq!(
+                output
+                    .get("$defs")
+                    .and_then(|defs| defs.get("ToolNextAction"))
+                    .and_then(|action| action.get("properties"))
+                    .and_then(|properties| properties.get("arguments"))
+                    .and_then(|schema| schema.get("type")),
+                Some(&serde_json::json!("object")),
+                "{} advertises client-incompatible next-action arguments: {output:?}",
+                tool.name
+            );
             let blob = serde_json::to_string(output).unwrap_or_default();
             assert!(!blob.contains("\"format\":\"uint\""), "unsupported uint format: {blob}");
         }
