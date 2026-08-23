@@ -9,7 +9,7 @@ use tempfile::TempDir;
 use tokio::sync::Mutex;
 
 use winx_code_agent::daemon::{DaemonClient, DaemonShellRuntime, SessionInfo};
-use winx_code_agent::runtime::restart_control_daemon_at;
+use winx_code_agent::runtime::{restart_control_daemon_at, ShellActionOptions, ShellRuntime};
 use winx_code_agent::state::bash_state::BashState;
 use winx_code_agent::tools;
 use winx_code_agent::types::{
@@ -124,6 +124,38 @@ async fn wait_for_daemon(client: &DaemonClient) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     anyhow::bail!("timed out waiting for winxd")
+}
+
+async fn wait_for_guardian_socket(runtime_dir: &Path) -> anyhow::Result<std::path::PathBuf> {
+    let guardian_dir = runtime_dir.join("guardians");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if let Ok(mut entries) = tokio::fs::read_dir(&guardian_dir).await {
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.extension().is_some_and(|extension| extension == "sock") {
+                    return Ok(path);
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("timed out waiting for a guardian socket")
+}
+
+async fn wait_for_process_exit(pid: u32) -> anyhow::Result<()> {
+    let pid = i32::try_from(pid)?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        // SAFETY: signal 0 only checks existence and the pid came from the
+        // authenticated same-UID guardian handshake.
+        let result = unsafe { libc::kill(pid, 0) };
+        if result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    anyhow::bail!("guardian process {pid} did not exit")
 }
 
 fn terminate_daemon_pid(pid: u32) -> anyhow::Result<()> {
@@ -296,6 +328,78 @@ async fn planned_control_restart_preserves_guardian_shell() -> anyhow::Result<()
     assert!(before_output.contains("before-restart"), "{before_output}");
     assert!(after_output.contains("after-restart"), "{after_output}");
     assert_eq!(before.shell_pid, after.shell_pid, "guardian PTY owner changed");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stable_control_rejects_stale_action_after_external_guardian_recreate() -> anyhow::Result<()>
+{
+    let workspace = TempDir::new()?;
+    let runtime_dir = TempDir::new()?;
+    let socket = runtime_dir.path().join("winxd.sock");
+    let mut daemon = spawn_daemon(&socket)?;
+    let client = DaemonClient::new(&socket);
+    wait_for_daemon(&client).await?;
+
+    let thread_id = "external_guardian_recreate";
+    let state = initialize_daemon_session(&socket, workspace.path(), thread_id).await?;
+    let runtime = DaemonShellRuntime::new(&socket);
+    let before = runtime
+        .run_action_detailed(
+            &state,
+            command(thread_id, "printf before-recreate".to_string(), 2.0),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    assert!(before.result.output.contains("before-recreate"), "{before:?}");
+
+    let guardian_socket = wait_for_guardian_socket(runtime_dir.path()).await?;
+    let old_guardian = DaemonClient::new(&guardian_socket).hello().await?;
+    terminate_daemon_pid(old_guardian.daemon_pid)?;
+    wait_for_process_exit(old_guardian.daemon_pid).await?;
+
+    let mut replacement = Command::new(env!("CARGO_BIN_EXE_winx-guardian"))
+        .arg("--socket")
+        .arg(&guardian_socket)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    let replacement_client = DaemonClient::new(&guardian_socket);
+    wait_for_daemon(&replacement_client).await?;
+    let new_guardian = replacement_client.hello().await?;
+    assert_ne!(old_guardian.daemon_epoch, new_guardian.daemon_epoch);
+
+    let marker = workspace.path().join("stale-action.marker");
+    let stale_result = runtime
+        .run_action_detailed(
+            &state,
+            command(thread_id, format!("touch {}", marker.display()), 2.0),
+            ShellActionOptions {
+                require_generation_binding: true,
+                ..ShellActionOptions::default()
+            },
+        )
+        .await;
+    let Err(stale_error) = stale_result else {
+        anyhow::bail!("the cached guardian epoch reached the replacement guardian")
+    };
+    assert!(stale_error.to_string().contains("guardian epoch changed"), "{stale_error}");
+    assert!(!marker.exists(), "a stale action reached the replacement guardian");
+
+    let recovered = runtime
+        .run_action_detailed(
+            &state,
+            command(thread_id, "printf recovered-recreate".to_string(), 2.0),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    assert!(recovered.result.output.contains("recovered-recreate"), "{recovered:?}");
+
+    replacement.kill()?;
+    let _ = replacement.wait()?;
+    daemon.kill()?;
+    let _ = daemon.wait()?;
     Ok(())
 }
 
