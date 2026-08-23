@@ -8,6 +8,7 @@ use serde_json::{json, Value};
 use tracing::{info, warn};
 
 use super::{outcomes, SharedBashState, WinxService};
+use crate::errors::WinxError;
 use crate::runtime::{ShellActionOptions, ShellExecutionToken};
 use crate::state::bash_state::generate_thread_id;
 use crate::types::{
@@ -464,18 +465,38 @@ impl WinxService {
     async fn handle_file_write_or_edit(
         &self,
         args: Option<Value>,
+        bash_options: ShellActionOptions,
     ) -> Result<CallToolResult, McpError> {
-        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let mut args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
         let recovery_args = args.clone();
+        let verification = take_edit_verification(&mut args)?;
         let edit: FileWriteOrEdit = Self::lenient_from_value(args).map_err(|error| {
             McpError::invalid_request(format!("Invalid FileWriteOrEdit parameters: {error}"), None)
         })?;
 
-        let (slot, _session_guard) = self.session_for(&normalize_thread_id(&edit.thread_id)).await;
+        let thread_id = normalize_thread_id(&edit.thread_id);
+        let (slot, _session_guard) = self.session_for(&thread_id).await;
+        if let Some(verification) = verification.as_ref() {
+            if let Err(error) = Self::validate_edit_verification(&slot, verification).await {
+                return outcomes::tool_failure(
+                    "FileWriteOrEdit",
+                    &error,
+                    Some(&recovery_args),
+                );
+            }
+        }
         match crate::tools::file_write_or_edit::handle_tool_call(&slot, edit).await {
             Ok(result) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
+                self.finish_edit_verification(
+                    "FileWriteOrEdit",
+                    &recovery_args,
+                    &thread_id,
+                    result,
+                    verification,
+                    bash_options,
+                )
+                .await
             }
             Err(error) => outcomes::tool_failure("FileWriteOrEdit", &error, Some(&recovery_args)),
         }
@@ -484,18 +505,34 @@ impl WinxService {
     async fn handle_multi_file_edit(
         &self,
         args: Option<Value>,
+        bash_options: ShellActionOptions,
     ) -> Result<CallToolResult, McpError> {
-        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let mut args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
         let recovery_args = args.clone();
+        let verification = take_edit_verification(&mut args)?;
         let multi: MultiFileEdit = Self::lenient_from_value(args).map_err(|error| {
             McpError::invalid_request(format!("Invalid MultiFileEdit parameters: {error}"), None)
         })?;
 
-        let (slot, _session_guard) = self.session_for(&normalize_thread_id(&multi.thread_id)).await;
+        let thread_id = normalize_thread_id(&multi.thread_id);
+        let (slot, _session_guard) = self.session_for(&thread_id).await;
+        if let Some(verification) = verification.as_ref() {
+            if let Err(error) = Self::validate_edit_verification(&slot, verification).await {
+                return outcomes::tool_failure("MultiFileEdit", &error, Some(&recovery_args));
+            }
+        }
         match crate::tools::multi_file_edit::handle_tool_call(&slot, multi).await {
             Ok(result) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![ContentBlock::text(result)]))
+                self.finish_edit_verification(
+                    "MultiFileEdit",
+                    &recovery_args,
+                    &thread_id,
+                    result,
+                    verification,
+                    bash_options,
+                )
+                .await
             }
             Err(error) => outcomes::tool_failure("MultiFileEdit", &error, Some(&recovery_args)),
         }
