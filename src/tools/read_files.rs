@@ -37,6 +37,71 @@ struct FileReadRequest {
     end_line_num: Option<usize>,
 }
 
+#[derive(Default)]
+struct ReadBatchState {
+    message: String,
+    file_ranges: HashMap<String, ReadCoverage>,
+    stats_paths: Vec<PathBuf>,
+    successful_files: usize,
+    errors: Vec<WinxError>,
+}
+
+impl ReadBatchState {
+    /// Add one worker result to the ordered response. Returns `true` when the
+    /// visible batch must stop because this file exhausted its token budget.
+    fn record_result(
+        &mut self,
+        request: &FileReadRequest,
+        result: Result<FileReadResult>,
+        total_files: usize,
+    ) -> bool {
+        match result {
+            Ok((content, truncated, _, canon_path, line_range, file_hash, total_lines)) => {
+                self.successful_files = self.successful_files.saturating_add(1);
+                let entry = self
+                    .file_ranges
+                    .entry(canon_path.clone())
+                    .or_insert_with(|| (Vec::new(), file_hash.clone(), total_lines));
+                if entry.1 != file_hash || entry.2 != total_lines {
+                    // The same path can be requested more than once in one
+                    // batch. If it changed between reads, keep coverage only
+                    // for the version whose hash will guard the next edit.
+                    *entry = (Vec::new(), file_hash, total_lines);
+                }
+                entry.0.push(line_range);
+                let _ = write!(
+                    self.message,
+                    "\n{}{}\n```\n{content}\n```",
+                    request.clean_path,
+                    range_format(request.start_line_num, request.end_line_num)
+                );
+                self.stats_paths.push(PathBuf::from(canon_path));
+
+                if truncated {
+                    let remaining = total_files.saturating_sub(request.index + 1);
+                    if remaining > 0 {
+                        let _ = write!(
+                            self.message,
+                            "\n\n(Not reading the remaining {remaining} file(s) due to the \
+                             token limit. Call ReadFiles again for them.)"
+                        );
+                    }
+                }
+                truncated
+            }
+            Err(error) => {
+                let _ = write!(
+                    self.message,
+                    "\nError reading {}: {error}",
+                    request.requested_path
+                );
+                self.errors.push(error);
+                false
+            }
+        }
+    }
+}
+
 /// Complete result of one batched read. The MCP adapter uses the per-file
 /// errors to return an honest `isError: true` result while retaining any
 /// successfully read content in the same response.
