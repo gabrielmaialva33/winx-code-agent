@@ -424,6 +424,40 @@ fn initialized_thread_id(response: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("Initialize response has no thread_id instruction: {text}"))
 }
 
+fn assert_compact_initialize_response(
+    response: &str,
+    expected_thread_id: &str,
+) -> anyhow::Result<()> {
+    let parsed = response_json(response)?;
+    assert_eq!(
+        parsed["result"]["structuredContent"]["data"]["initialize_transition"], "attached_existing",
+        "{response}"
+    );
+    assert_eq!(
+        parsed["result"]["structuredContent"]["data"]["initialize_response_mode"], "compact",
+        "{response}"
+    );
+    assert_eq!(initialized_thread_id(response)?, expected_thread_id);
+    Ok(())
+}
+
+fn assert_initialize_usage(entries: &[serde_json::Value]) {
+    let initialize_calls =
+        entries.iter().filter(|entry| entry["fields"]["tool"] == "Initialize").collect::<Vec<_>>();
+    assert!(initialize_calls.iter().any(|entry| {
+        entry["fields"]["initialize_transition"] == "created"
+            && entry["fields"]["initialize_response_mode"] == "full"
+            && entry["fields"]["initialize_reused"] == false
+    }));
+    assert!(initialize_calls.iter().any(|entry| {
+        entry["fields"]["initialize_transition"] == "attached_existing"
+            && entry["fields"]["initialize_response_mode"] == "compact"
+            && entry["fields"]["initialize_reused"] == true
+            && entry["fields"]["context_bytes"] == 0
+            && entry["fields"]["guidelines_bytes"] == 0
+    }));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn oauth_well_known_probes_return_404_without_bearer_auth() -> anyhow::Result<()> {
     let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
@@ -1248,6 +1282,43 @@ async fn exercise_usage_read(
     Ok(())
 }
 
+fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
+    let entries = contents
+        .lines()
+        .map(serde_json::from_str::<serde_json::Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    assert!(!entries.is_empty());
+    assert!(entries.iter().all(|entry| entry["target"] == "winx::usage"));
+    let tool_call = entries
+        .iter()
+        .find(|entry| entry["fields"]["event"] == "tool_call")
+        .ok_or_else(|| anyhow::anyhow!("missing tool_call event: {contents}"))?;
+    assert_eq!(tool_call["fields"]["client_name"], "usage-log-client");
+    assert_eq!(tool_call["fields"]["protocol"], "2026-07-28");
+    let request_id = tool_call["fields"]["request_id"]
+        .as_str()
+        .filter(|id| id.starts_with("r_"))
+        .ok_or_else(|| anyhow::anyhow!("missing request correlation: {tool_call}"))?;
+    assert!(tool_call["fields"]["result_status"].as_str().is_some());
+    assert!(tool_call["fields"]["response_bytes"].as_u64().is_some());
+    assert_initialize_usage(&entries);
+    let read_call = entries
+        .iter()
+        .find(|entry| entry["fields"]["tool"] == "ReadFiles")
+        .ok_or_else(|| anyhow::anyhow!("missing ReadFiles usage event: {contents}"))?;
+    assert_eq!(read_call["fields"]["batch_items"], 2);
+    assert_eq!(read_call["fields"]["worker_limit"], 3);
+    assert!(read_call["fields"]["duration_ms"].as_u64().is_some());
+    assert!(
+        entries.iter().any(|entry| {
+            entry["fields"]["event"] == "http_request"
+                && entry["fields"]["request_id"] == request_id
+        }),
+        "tool and HTTP events were not correlated: {contents}"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> {
     const COMMAND_MARKER: &str = "winx-command-content-must-not-be-logged";
@@ -1281,6 +1352,15 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
     )
     .await?;
     let thread_id = initialized_thread_id(&initialize)?;
+    let repeated_initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "usage-log-test-repeated",
+        "usage-log-client",
+    )
+    .await?;
+    assert_compact_initialize_response(&repeated_initialize, &thread_id)?;
     let command = bash_as(
         address,
         TEST_TOKEN,
@@ -1320,39 +1400,7 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
         assert_eq!(mode, 0o600, "usage log must be private: {}", usage_log.display());
     }
 
-    let entries = contents
-        .lines()
-        .map(serde_json::from_str::<serde_json::Value>)
-        .collect::<Result<Vec<_>, _>>()?;
-    assert!(!entries.is_empty());
-    assert!(entries.iter().all(|entry| entry["target"] == "winx::usage"));
-    let tool_call = entries
-        .iter()
-        .find(|entry| entry["fields"]["event"] == "tool_call")
-        .ok_or_else(|| anyhow::anyhow!("missing tool_call event: {contents}"))?;
-    assert_eq!(tool_call["fields"]["client_name"], "usage-log-client");
-    assert_eq!(tool_call["fields"]["protocol"], "2026-07-28");
-    let request_id = tool_call["fields"]["request_id"]
-        .as_str()
-        .filter(|id| id.starts_with("r_"))
-        .ok_or_else(|| anyhow::anyhow!("missing request correlation: {tool_call}"))?;
-    assert!(tool_call["fields"]["result_status"].as_str().is_some());
-    assert!(tool_call["fields"]["response_bytes"].as_u64().is_some());
-    let read_call = entries
-        .iter()
-        .find(|entry| entry["fields"]["tool"] == "ReadFiles")
-        .ok_or_else(|| anyhow::anyhow!("missing ReadFiles usage event: {contents}"))?;
-    assert_eq!(read_call["fields"]["batch_items"], 2);
-    assert_eq!(read_call["fields"]["worker_limit"], 3);
-    assert!(read_call["fields"]["duration_ms"].as_u64().is_some());
-    assert!(
-        entries.iter().any(|entry| {
-            entry["fields"]["event"] == "http_request"
-                && entry["fields"]["request_id"] == request_id
-        }),
-        "tool and HTTP events were not correlated: {contents}"
-    );
-    Ok(())
+    assert_usage_entries(&contents)
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1840,7 +1888,7 @@ async fn http_workspace_affinity_reuses_one_session_for_unstable_thread_ids() ->
     .await?;
     let second_thread = initialized_thread_id(&second)?;
     assert_eq!(first_thread, second_thread);
-    assert!(second.contains("Attached to the existing durable session"), "{second}");
+    assert_compact_initialize_response(&second, &second_thread)?;
 
     let pwd = pwd_as(address, TEST_TOKEN, &second_thread, "workspace-affinity-pwd").await?;
     assert!(pwd.contains(&nested.display().to_string()), "{pwd}");
@@ -1906,7 +1954,7 @@ async fn http_conversation_affinity_separates_parallel_sessions() -> anyhow::Res
     .await?;
     let resumed_thread = initialized_thread_id(&resumed)?;
     assert_eq!(first_thread, resumed_thread);
-    assert!(resumed.contains("Attached to the existing durable session"), "{resumed}");
+    assert_compact_initialize_response(&resumed, &resumed_thread)?;
     let resumed_pwd = pwd_as(address, TEST_TOKEN, &resumed_thread, "conversation-a-pwd").await?;
     assert!(resumed_pwd.contains(&nested.display().to_string()), "{resumed_pwd}");
     Ok(())

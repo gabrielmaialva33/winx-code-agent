@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use axum::http::request::Parts;
 use rmcp::{
     model::{
-        CacheScope, CallToolRequestParams, CallToolResponse, CancelTaskParams,
+        CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams,
         GetPromptRequestParams, GetPromptResponse, GetPromptResult, GetTaskParams, GetTaskResult,
         Icon, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
         PaginatedRequestParams, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
@@ -167,7 +167,82 @@ impl UsageEvent {
         }
     }
 
-    fn emit(&self, outcome: &str, result_status: &str, response_bytes: usize) {
+    fn emit(
+        &self,
+        outcome: &str,
+        result_status: &str,
+        response_bytes: usize,
+        result: Option<&CallToolResult>,
+    ) {
+        if self.tool == "Initialize" {
+            let data = result
+                .and_then(|result| result.structured_content.as_ref())
+                .and_then(|structured| structured.get("data"));
+            let initialize_transition = data
+                .and_then(|data| data.get("initialize_transition"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let initialize_reused = data
+                .and_then(|data| data.get("initialize_reused"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let initialize_response_mode = data
+                .and_then(|data| data.get("initialize_response_mode"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let context_bytes = data
+                .and_then(|data| data.get("context_bytes"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let guidelines_bytes = data
+                .and_then(|data| data.get("guidelines_bytes"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let initial_files_count = data
+                .and_then(|data| data.get("initial_files_count"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            let code_writer_policy_strength = data
+                .and_then(|data| data.get("code_writer_policy_strength"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let shell_spawners_present = data
+                .and_then(|data| data.get("shell_spawners_present"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            tracing::info!(
+                target: "winx::usage",
+                event = "tool_call",
+                tool = %self.tool,
+                action = %self.action,
+                ws = %self.ws,
+                principal = %self.principal,
+                thread_id = %self.thread_id,
+                request_id = %self.request_id,
+                client_name = %self.client_name,
+                client_version = %self.client_version,
+                protocol = %self.protocol,
+                client_session = %self.client_session,
+                batch_items = self.batch_items,
+                worker_limit = self.worker_limit,
+                initialize_transition,
+                initialize_reused,
+                initialize_response_mode,
+                context_bytes,
+                guidelines_bytes,
+                initial_files_count,
+                code_writer_policy_strength,
+                shell_spawners_present,
+                result_status,
+                response_bytes,
+                duration_ms =
+                    u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+                outcome,
+                "tool call"
+            );
+            return;
+        }
+
         tracing::info!(
             target: "winx::usage",
             event = "tool_call",
@@ -652,11 +727,11 @@ impl ServerHandler for WinxService {
                     .await
                 {
                     Ok(task) => {
-                        usage.emit("task", "working", 0);
+                        usage.emit("task", "working", 0, None);
                         Ok(CallToolResponse::Task(task))
                     }
                     Err(error) => {
-                        usage.emit("protocol_error", "failed", 0);
+                        usage.emit("protocol_error", "failed", 0, None);
                         Err(error)
                     }
                 };
@@ -682,11 +757,11 @@ impl ServerHandler for WinxService {
                             .await
                         {
                             Ok(task) => {
-                                usage.emit("task", "working", 0);
+                                usage.emit("task", "working", 0, None);
                                 Ok(CallToolResponse::Task(task))
                             }
                             Err(error) => {
-                                usage.emit("protocol_error", "failed", 0);
+                                usage.emit("protocol_error", "failed", 0, None);
                                 Err(error)
                             }
                         };
@@ -704,13 +779,14 @@ impl ServerHandler for WinxService {
                             outcome,
                             &status,
                             outcomes::result_size_bytes(&execution.result),
+                            Some(&execution.result),
                         );
                         return Ok(execution.result.into());
                     }
                     Err(mut error) => {
                         self.release_bash_task(&reservation).await;
                         scope.unscope_error(&mut error);
-                        usage.emit("protocol_error", "failed", 0);
+                        usage.emit("protocol_error", "failed", 0, None);
                         return Err(error);
                     }
                 }
@@ -737,12 +813,12 @@ impl ServerHandler for WinxService {
                 scope.unscope_result(result);
                 let status = outcomes::result_status(result);
                 let outcome = if result.is_error == Some(true) { "tool_error" } else { "ok" };
-                usage.emit(outcome, &status, outcomes::result_size_bytes(result));
+                usage.emit(outcome, &status, outcomes::result_size_bytes(result), Some(result));
                 Ok(execution.result.into())
             }
             Err(mut error) => {
                 scope.unscope_error(&mut error);
-                usage.emit("protocol_error", "failed", 0);
+                usage.emit("protocol_error", "failed", 0, None);
                 Err(error)
             }
         }
