@@ -293,7 +293,9 @@ initialized Winx mode and operating-system user.
 ## LLM orchestration contract
 
 The MCP handshake leads with a deterministic sequencing contract: initialize once, preserve the returned `thread_id`, use
-`CodeMap` before broad reads, batch `ReadFiles`, read before editing, and never repeat a rejected call unchanged. Extra
+`CodeMap` before broad reads, batch `ReadFiles`, read before editing, compose related fail-fast checks with `&&`, and never
+repeat a rejected call unchanged. A finite post-edit check can be supplied as `verify_command` on either edit tool, saving
+one network/model round trip. Extra
 `WINX_SERVER_INSTRUCTIONS` are appended after those stable rules and are also included in the `Initialize` response for
 clients that do not expose handshake instructions to the model.
 
@@ -333,6 +335,14 @@ an already-running foreground command only when Tasks and generation-bound runti
 uses a 60-second bounded synchronous fallback; `return_early` always stays inline and caps `wait_for_seconds` at 5 seconds. `wait_for_seconds` is bounded by the chosen policy. Task routing never depends on client
 identity. A client that advertises the `io.winx/compact-bash-output` extension receives the runtime's trailer-free payload;
 without that explicit capability, the historical text output is unchanged.
+
+`FileWriteOrEdit` and `MultiFileEdit` accept optional `verify_command` and `verify_wait_for_seconds` (default `15`, maximum
+`60`). Verification runs only after a successful commit, as a foreground command under the same mode allowlist as
+`BashCommand`. Exit code zero completes the combined result. A non-zero exit returns `isError: true` with
+`errorCode: verification_failed` and `data.edit_applied: true`; Winx never claims the edit was rolled back. A check still
+running at the bounded wait returns the normal `BashCommand` `status_check` next action. A principal must permit both the
+edit tool and `BashCommand` to use this option.
+
 Generation-bound routing is negotiated with the effective per-session guardian, not inferred from the control daemon's
 version. The adapter keeps that guardian negotiation on an epoch-bound session channel, so ordinary daemon calls add no
 repeated control hello round trips; generation-bound actions perform a final guardian check before relay. A closed channel forces renegotiation before another Task-bound launch.
