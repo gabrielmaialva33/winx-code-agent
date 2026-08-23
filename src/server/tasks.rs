@@ -546,6 +546,8 @@ fn task_action_options(
         require_generation_binding: true,
         cancellation_key: Some(cancellation_key.to_string()),
         launch_cancelled: Some(launch_cancelled),
+        #[cfg(test)]
+        force_clear_to_run_failure: false,
     }
 }
 

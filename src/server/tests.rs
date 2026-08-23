@@ -258,9 +258,7 @@ mod task_lifecycle_tests {
             _command: BashCommand,
         ) -> crate::runtime::ShellRuntimeFuture<'a> {
             Box::pin(async {
-                Err(WinxError::CommandExecutionError(
-                    "use detailed task runtime".to_string(),
-                ))
+                Err(WinxError::CommandExecutionError("use detailed task runtime".to_string()))
             })
         }
 
@@ -288,8 +286,7 @@ mod task_lifecycle_tests {
                     crate::tools::bash_command::BashCommandResult {
                         output: "generation-one-running".to_string(),
                         state: crate::tools::bash_command::BashCommandState {
-                            process_status:
-                                crate::tools::bash_command::BashProcessStatus::Running,
+                            process_status: crate::tools::bash_command::BashProcessStatus::Running,
                             background_id: None,
                             running_for_seconds: Some(0),
                             exit_code: None,
@@ -334,8 +331,8 @@ mod task_lifecycle_tests {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(expected.clone());
-                let matches = current.load(std::sync::atomic::Ordering::SeqCst)
-                    == expected.generation;
+                let matches =
+                    current.load(std::sync::atomic::Ordering::SeqCst) == expected.generation;
                 if matches && expected.generation == 2 {
                     next_interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
                 }
@@ -555,10 +552,10 @@ mod task_lifecycle_tests {
                     .expect("working registry reservation"),
             );
         }
-        let error = service
-            .reserve_bash_task(&request, &scope)
-            .await
-            .expect_err("full working registry must reject before runtime execution");
+        let error = match service.reserve_bash_task(&request, &scope).await {
+            Ok(_) => panic!("full working registry accepted another reservation"),
+            Err(error) => error,
+        };
         assert!(error.message.contains("task limit reached"), "{error:?}");
         assert_eq!(reservations.len(), crate::state::task_state::MAX_TASKS);
     }
