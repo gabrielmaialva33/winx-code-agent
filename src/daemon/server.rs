@@ -1539,6 +1539,7 @@ mod tests {
     async fn automatic_pty_reset_rotates_before_stale_operations_reach_the_new_pty() {
         let temp = tempfile::tempdir().expect("temporary directory");
         let marker = temp.path().join("new-incarnation-running.marker");
+        let completed_marker = temp.path().join("new-incarnation-completed.marker");
         let mut state = BashState::new();
         state.cwd = temp.path().to_path_buf();
         state.workspace_root = temp.path().to_path_buf();
@@ -1558,7 +1559,11 @@ mod tests {
 
         let mut forced = action_params(
             &state,
-            &format!("sh -c 'touch {}; sleep 0.4; printf reset-incarnation'", marker.display()),
+            &format!(
+                "sh -c 'touch {}; sleep 0.4; printf completed > {}'",
+                marker.display(),
+                completed_marker.display()
+            ),
             "forced-auto-reset",
         );
         forced.options.force_clear_to_run_failure = true;
@@ -1607,8 +1612,9 @@ mod tests {
         let current = reset.execution_token.clone().expect("reset execution token");
         assert_eq!(prior_token.generation, current.generation);
         assert_ne!(prior_token.session_epoch, current.session_epoch);
-        assert!(
-            reset.output.as_deref().unwrap_or_default().contains("reset-incarnation"),
+        assert_eq!(
+            std::fs::read_to_string(completed_marker).expect("replacement completion marker"),
+            "completed",
             "a stale operation disturbed the replacement command: {reset:?}"
         );
     }
