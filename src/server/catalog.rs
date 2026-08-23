@@ -102,6 +102,55 @@ fn mcp_tool<T: schemars::JsonSchema>(
     Tool::new(name, description, schema_to_input_schema::<T>()).with_annotations(annotations)
 }
 
+const WORKSPACE_ROOT_DESCRIPTION: &str =
+    "Exact canonical workspace_root returned by the same Initialize call as thread_id. Copy this pair unchanged on every later call. It identifies the project session and is not a filesystem sandbox: target paths may be outside it when WINX_ALLOW_PATHS and the active mode permit. Never infer it from a target file path.";
+
+fn with_workspace_binding(
+    schema: Arc<serde_json::Map<String, Value>>,
+) -> Arc<serde_json::Map<String, Value>> {
+    let mut schema = (*schema).clone();
+    let properties = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Value::Object(properties) = properties {
+        properties.insert(
+            "workspace_root".to_string(),
+            serde_json::json!({
+                "type": "string",
+                "minLength": 1,
+                "description": WORKSPACE_ROOT_DESCRIPTION,
+            }),
+        );
+        if let Some(Value::Object(thread_id)) = properties.get_mut("thread_id") {
+            thread_id.insert(
+                "description".to_string(),
+                Value::String(
+                    "Exact thread_id returned by the same Initialize call as workspace_root. Never borrow a thread_id from another chat or project."
+                        .to_string(),
+                ),
+            );
+        }
+    }
+    let required = schema.entry("required".to_string()).or_insert_with(|| Value::Array(Vec::new()));
+    if let Value::Array(required) = required {
+        for field in ["thread_id", "workspace_root"] {
+            if !required.iter().any(|item| item.as_str() == Some(field)) {
+                required.push(Value::String(field.to_string()));
+            }
+        }
+    }
+    Arc::new(schema)
+}
+
+fn mcp_session_tool<T: schemars::JsonSchema>(
+    name: &'static str,
+    description: &'static str,
+    annotations: ToolAnnotations,
+) -> Tool {
+    Tool::new(name, description, with_workspace_binding(schema_to_input_schema::<T>()))
+        .with_annotations(annotations)
+}
+
 /// `wait_policy` belongs to the MCP adapter rather than the stable public
 /// `BashCommand` Rust struct. Inject it only into the advertised wire schema so
 /// existing library callers do not acquire a new required struct field.
@@ -130,7 +179,7 @@ fn bash_command_input_schema() -> Arc<serde_json::Map<String, Value>> {
             }),
         );
     }
-    Arc::new(schema)
+    with_workspace_binding(Arc::new(schema))
 }
 
 /// Optional edit verification is implemented by the MCP adapter so the stable
@@ -160,7 +209,7 @@ fn edit_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, V
             }),
         );
     }
-    Arc::new(schema)
+    with_workspace_binding(Arc::new(schema))
 }
 
 fn with_output_schema<T: schemars::JsonSchema>(mut tool: Tool) -> Tool {
@@ -171,6 +220,7 @@ fn with_output_schema<T: schemars::JsonSchema>(mut tool: Tool) -> Tool {
 const INITIALIZE_DESCRIPTION: &str =
     "- Call this at the start of the conversation before using shell tools, unless a local MCP client supplied Roots and Winx initialized that workspace automatically. \
      - Do not call Initialize again while this conversation already has a valid Winx thread_id. A repeated first_call only reattaches the durable session and returns compact unchanged-context metadata; use ReadFiles, CodeMap, BashCommand, or edit tools directly. \
+     - The result returns an inseparable thread_id/workspace_root pair. Copy both exactly into every later Winx call; never borrow a pair from another chat or project. workspace_root identifies the session and does not limit target paths. \
      - Use `any_workspace_path` to initialize the shell in the appropriate project directory. \
      - If the user has mentioned a workspace or project root or any other file or folder use it to set `any_workspace_path`. \
      - If user has mentioned any files use `initial_files_to_read` to read, use absolute paths only (~ allowed) \
@@ -179,7 +229,7 @@ const INITIALIZE_DESCRIPTION: &str =
      - Use type=\"first_call\" if it's the first call to this tool. \
      - Use type=\"user_asked_mode_change\" if in a conversation user has asked to change mode. \
      - Use type=\"reset_shell\" if in a conversation shell is not working after multiple tries. \
-     - Use type=\"user_asked_change_workspace\" if in a conversation user asked to change workspace";
+     - For a different project in a remote/stateless client, use type=\"first_call\" with that project path so it receives a distinct coherent binding. In-place remote workspace changes are rejected before execution.";
 
 const BASH_COMMAND_DESCRIPTION: &str =
     "Use this for stateful shell and process work after Initialize. Compose related finite fail-fast checks in one foreground command with `&&` to avoid unnecessary round trips; keep unrelated or risky operations separate. `wait_policy=adaptive` (default) keeps short commands inline and, when MCP Tasks and generation-bound runtime actions are negotiated, promotes only a foreground command the runtime already reported as running. Without safe Task support it waits synchronously for at most 60 seconds. Use `until_complete` only for a finite foreground Command: capable clients receive a Task immediately and other clients get a synchronous wait capped at 60 seconds. Use `return_early` when the caller needs prompt control; it never creates a Task and waits at most 5 seconds. `wait_for_seconds` is a request within those policy caps, not an override. Treat structuredContent.status as authoritative: when it is `running`, execute next_action (`status_check`) and never submit the original command again. Run long-lived or interactive programs with is_background=true, then use wait_for_turn/screen and send_text/send_specials. Never use shell redirection, echo, or cat for file edits/reads; use the file tools.";
@@ -250,7 +300,7 @@ fn build_winx_tools() -> Vec<Tool> {
             Tool::new("BashCommand", BASH_COMMAND_DESCRIPTION, bash_command_input_schema())
                 .with_annotations(ToolAnnotations::new().destructive(true).open_world(true)),
         ),
-        with_output_schema::<ToolResultEnvelope>(mcp_tool::<ReadFiles>(
+        with_output_schema::<ToolResultEnvelope>(mcp_session_tool::<ReadFiles>(
             "ReadFiles",
             READ_FILES_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
@@ -271,22 +321,22 @@ fn build_winx_tools() -> Vec<Tool> {
             )
             .with_annotations(ToolAnnotations::new().destructive(true).open_world(true)),
         ),
-        with_output_schema::<ToolResultEnvelope>(mcp_tool::<UndoEdit>(
+        with_output_schema::<ToolResultEnvelope>(mcp_session_tool::<UndoEdit>(
             "UndoEdit",
             UNDO_EDIT_DESCRIPTION,
             ToolAnnotations::new().destructive(true).open_world(false),
         )),
-        with_output_schema::<ToolResultEnvelope>(mcp_tool::<ContextSave>(
+        with_output_schema::<ToolResultEnvelope>(mcp_session_tool::<ContextSave>(
             "ContextSave",
             CONTEXT_SAVE_DESCRIPTION,
             ToolAnnotations::new().destructive(false).open_world(false),
         )),
-        with_output_schema::<ToolResultEnvelope>(mcp_tool::<ReadImage>(
+        with_output_schema::<ToolResultEnvelope>(mcp_session_tool::<ReadImage>(
             "ReadImage",
             "Read an image from the workspace. The structured result reports the resolved tool state while the image remains in MCP content.",
             ToolAnnotations::new().read_only(true).open_world(false),
         )),
-        with_output_schema::<CodeMapToolResultEnvelope>(mcp_tool::<CodeMap>(
+        with_output_schema::<CodeMapToolResultEnvelope>(mcp_session_tool::<CodeMap>(
             "CodeMap",
             CODE_MAP_DESCRIPTION,
             ToolAnnotations::new().read_only(true).open_world(false),
