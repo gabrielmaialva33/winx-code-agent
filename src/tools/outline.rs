@@ -131,7 +131,8 @@ fn outline_one(
     // them all into a misleading "no definitions" (no silent fallback).
     if !symbols::supports(&ext) {
         return empty_file_outline(format!(
-            "No symbols in {rel}: unsupported language (extension `.{ext}`)."
+            "No symbols in {rel}: unsupported language (extension `.{ext}`). Use ReadFiles for \
+             exact source text; do not create or encode a carrier file for CodeMap."
         ));
     }
     let text = match read_file_to_string(file, MAX_OUTLINE_FILE_SIZE) {
@@ -317,6 +318,18 @@ mod tests {
         let st = state_in(&dir);
         let (out, structured) = handle_tool_call(&st, args("data.json")).await.unwrap();
         assert!(out.to_lowercase().contains("no symbols"));
+        assert_eq!(structured["files_shown"], 0);
+    }
+
+    #[tokio::test]
+    async fn unsupported_language_directs_the_agent_to_read_files_without_a_carrier() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("module.ex"), "defmodule Demo do\nend\n").unwrap();
+        let st = state_in(&dir);
+        let (out, structured) = handle_tool_call(&st, args("module.ex")).await.unwrap();
+        assert!(out.contains("unsupported language"));
+        assert!(out.contains("ReadFiles"));
+        assert!(out.contains("do not create or encode a carrier file"));
         assert_eq!(structured["files_shown"], 0);
     }
 
