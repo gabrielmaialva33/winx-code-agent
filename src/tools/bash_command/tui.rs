@@ -2,8 +2,9 @@ use std::fmt::Write as FmtWrite;
 use std::time::{Duration, Instant};
 
 use super::output::{render_status, status_state, truncate_to_token_budget, MAX_OUTPUT_TOKENS};
-use super::{main_shell, BashCommandResult, SharedPtyShell, ShellDeliveryCursor};
+use super::{main_shell, runtime_rendered, SharedPtyShell, ShellDeliveryCursor};
 use crate::errors::Result;
+use crate::runtime::BashCommandRuntimeResult;
 use crate::state::bash_state::BashState;
 use crate::state::live_terminal::ScreenUpdate;
 use crate::state::pty::PtyShell;
@@ -11,6 +12,7 @@ use crate::state::pty::PtyShell;
 const SCREEN_DIFF_THRESHOLD: usize = 10;
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)] // mirrors the MCP screen action without an allocation wrapper
 pub(super) async fn execute_screen(
     bash_state: &BashState,
     background_shell: Option<SharedPtyShell>,
@@ -19,7 +21,8 @@ pub(super) async fn execute_screen(
     lines: Option<usize>,
     diff: bool,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<BashCommandResult> {
+    compact_output: bool,
+) -> Result<BashCommandRuntimeResult> {
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
     let max_lines = lines.unwrap_or(0);
 
@@ -71,12 +74,16 @@ pub(super) async fn execute_screen(
             }
             ScreenUpdate::Full(snapshot) => render_snapshot(&snapshot),
         };
-        return Ok(BashCommandResult {
-            output: format!(
-                "--- live screen{alt} [cursor row={cursor_row} col={cursor_column}] (diff) ---\n{body}{status}"
+        return Ok(runtime_rendered(
+            format!(
+                "--- live screen{alt} [cursor row={cursor_row} col={cursor_column}] (diff) ---\n{body}"
             ),
+            &status,
             state,
-        });
+            compact_output,
+            None,
+            false,
+        ));
     }
 
     let (snapshot, running, in_alt, cursor, running_for, exit_code, cwd) = {
@@ -111,12 +118,14 @@ pub(super) async fn execute_screen(
         None,
     );
     let status = render_status(bash_state, &state);
-    Ok(BashCommandResult {
-        output: format!(
-            "--- live screen{alt} [cursor row={cursor_row} col={cursor_column}] ---\n{body}{status}"
-        ),
+    Ok(runtime_rendered(
+        format!("--- live screen{alt} [cursor row={cursor_row} col={cursor_column}] ---\n{body}"),
+        &status,
         state,
-    })
+        compact_output,
+        None,
+        false,
+    ))
 }
 
 fn render_snapshot(snapshot: &[String]) -> String {
@@ -165,6 +174,7 @@ fn wait_turn_outcome(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub(super) async fn execute_wait_for_turn(
     bash_state: &BashState,
     background_shell: Option<SharedPtyShell>,
@@ -175,7 +185,8 @@ pub(super) async fn execute_wait_for_turn(
     timeout_seconds: Option<f32>,
     lines: Option<usize>,
     wait_through_busy: bool,
-) -> Result<BashCommandResult> {
+    compact_output: bool,
+) -> Result<BashCommandRuntimeResult> {
     use crate::state::turn::{recognizer_for, TurnState};
 
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
@@ -269,10 +280,14 @@ pub(super) async fn execute_wait_for_turn(
                 Some(state),
             );
             let status = render_status(bash_state, &result_state);
-            return Ok(BashCommandResult {
-                output: format!("{header}\n{body}{status}"),
-                state: result_state,
-            });
+            return Ok(runtime_rendered(
+                format!("{header}\n{body}"),
+                &status,
+                result_state,
+                compact_output,
+                None,
+                false,
+            ));
         }
 
         tokio::time::sleep(poll).await;

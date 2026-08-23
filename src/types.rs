@@ -734,15 +734,31 @@ pub enum BashCommandAction {
 }
 
 /// Parameters for the `BashCommand` tool
+#[derive(Debug, Clone, Copy, Default, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BashWaitPolicy {
+    /// Wait for a bounded inline window. Task-capable clients keep short calls
+    /// inline and promote a command only after the runtime reports it running.
+    #[default]
+    Adaptive,
+    /// Always return the runtime state after a short bounded wait. This policy
+    /// never creates an MCP Task.
+    ReturnEarly,
+    /// Prefer one result after the command exits. Task-capable clients receive
+    /// an MCP Task immediately; other clients receive a bounded synchronous wait.
+    UntilComplete,
+}
+
+/// Parameters for the `BashCommand` tool
 #[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct BashCommand {
     /// The action to perform (command, status check, etc.)
     pub action_json: BashCommandAction,
 
-    /// Seconds to block waiting for command completion or new output before
-    /// returning (default 15). Prefer 30-60 for commands you expect to run
-    /// long (builds, tests, installs): one larger wait resolves in a single
-    /// call instead of several `status_check` round-trips.
+    /// Requested inline wait in seconds. With the default adaptive policy this
+    /// defaults to 15 without Tasks and is capped to the short promotion window
+    /// with Tasks; `return_early` caps it at 5; the synchronous `until_complete`
+    /// fallback uses 60. Runtime waits never exceed the selected policy's cap.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_for_seconds: Option<f32>,
@@ -766,6 +782,13 @@ impl<'de> Deserialize<'de> for BashCommand {
         let wait_for_seconds = map
             .remove("wait_for_seconds")
             .map(serde_json::from_value)
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        // `wait_policy` is an MCP adapter concern rather than stored command
+        // state. Validate it here for direct deserializers, then keep the public
+        // `BashCommand` shape source-compatible for library callers.
+        map.remove("wait_policy")
+            .map(serde_json::from_value::<BashWaitPolicy>)
             .transpose()
             .map_err(serde::de::Error::custom)?;
         let thread_id = map

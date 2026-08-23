@@ -7,11 +7,11 @@ use tokio::time::sleep;
 use tracing::{debug, warn};
 
 use super::{
-    main_shell, BashCommandResult, BashCommandState, BashProcessStatus, SharedPtyShell,
+    main_shell, runtime_rendered, BashCommandState, BashProcessStatus, SharedPtyShell,
     ShellDeliveryCursor,
 };
 use crate::errors::{Result, WinxError};
-use crate::runtime::lock_session_store;
+use crate::runtime::{lock_session_store, BashCommandRuntimeResult, ShellActionOptions};
 use crate::state::bash_state::BashState;
 use crate::state::pty::PtyShell;
 use crate::state::terminal::{render_terminal_output, strip_ansi_codes};
@@ -114,16 +114,20 @@ pub(super) fn render_status(bash_state: &BashState, state: &BashCommandState) ->
 /// note is appended instead; the authoritative `state` remains untouched.
 pub(super) fn insert_note_before_status(
     bash_state: &BashState,
-    result: &mut BashCommandResult,
+    result: &mut BashCommandRuntimeResult,
     note: &str,
 ) {
-    let status = render_status(bash_state, &result.state);
-    if result.output.ends_with(&status) {
-        result.output.truncate(result.output.len() - status.len());
-        result.output.push_str(note);
-        result.output.push_str(&status);
+    if let Some(output) = result.compact_output.as_mut() {
+        output.push_str(note);
+        return;
+    }
+    let status = render_status(bash_state, &result.result.state);
+    if result.result.output.ends_with(&status) {
+        result.result.output.truncate(result.result.output.len() - status.len());
+        result.result.output.push_str(note);
+        result.result.output.push_str(&status);
     } else {
-        result.output.push_str(note);
+        result.result.output.push_str(note);
     }
 }
 
@@ -209,9 +213,37 @@ async fn poll_shell(shell: &SharedPtyShell) -> bool {
     }
 }
 
-async fn snapshot_shell(shell: &SharedPtyShell) -> String {
+async fn poll_shell_generation(
+    shell: &SharedPtyShell,
+    expected_generation: Option<u64>,
+) -> Result<bool> {
     let mut guard = shell.lock().await;
-    guard.as_mut().map_or_else(String::new, |shell| shell.output_snapshot())
+    match guard.as_mut() {
+        Some(shell) => {
+            ensure_expected_generation(shell.command_generation(), expected_generation)?;
+            Ok(shell.poll_output_nonblocking())
+        }
+        None => Ok(true),
+    }
+}
+
+async fn snapshot_shell_generation(
+    shell: &SharedPtyShell,
+    expected_generation: Option<u64>,
+) -> Result<String> {
+    let mut guard = shell.lock().await;
+    let Some(shell) = guard.as_mut() else { return Ok(String::new()) };
+    ensure_expected_generation(shell.command_generation(), expected_generation)?;
+    Ok(shell.output_snapshot())
+}
+
+fn ensure_expected_generation(generation: u64, expected_generation: Option<u64>) -> Result<()> {
+    if let Some(expected) = expected_generation.filter(|expected| *expected != generation) {
+        return Err(WinxError::InvalidInput(format!(
+            "Foreground command generation {generation} no longer matches Task generation {expected}. The Task will not read or control a newer command."
+        )));
+    }
+    Ok(())
 }
 
 async fn drain_until_prompt(shell: &SharedPtyShell, budget_secs: f64) -> bool {
@@ -243,6 +275,7 @@ pub(super) async fn clear_to_run_async(shell: &SharedPtyShell, max_wait_secs: f6
 }
 
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)] // shell/rendering controls are intentionally kept explicit
 pub(super) async fn wait_for_output(
     bash_state: &mut BashState,
     shell: &SharedPtyShell,
@@ -251,13 +284,19 @@ pub(super) async fn wait_for_output(
     background_id: Option<&str>,
     is_status_check: bool,
     mut delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<BashCommandResult> {
+    compact_output: bool,
+    expected_generation: Option<u64>,
+) -> Result<BashCommandRuntimeResult> {
     let start = Instant::now();
     let (generation, legacy_delivered) = {
         let guard = shell.lock().await;
-        guard.as_ref().map_or((0, String::new()), |shell| {
-            (shell.command_generation(), shell.delivered_output())
-        })
+        match guard.as_ref() {
+            Some(shell) => {
+                ensure_expected_generation(shell.command_generation(), expected_generation)?;
+                (shell.command_generation(), shell.delivered_output())
+            }
+            None => (0, String::new()),
+        }
     };
     let mut previously_delivered = match delivery_cursor.as_deref_mut() {
         Some(cursor) => {
@@ -272,7 +311,7 @@ pub(super) async fn wait_for_output(
         if start.elapsed().as_secs_f64() >= timeout_secs {
             break;
         }
-        complete = poll_shell(shell).await;
+        complete = poll_shell_generation(shell, expected_generation).await?;
         if complete {
             break;
         }
@@ -280,14 +319,16 @@ pub(super) async fn wait_for_output(
     }
     if complete {
         sleep(Duration::from_millis(POST_PROMPT_DRAIN_MS)).await;
-        poll_shell(shell).await;
+        poll_shell_generation(shell, expected_generation).await?;
     }
-    let mut output = snapshot_shell(shell).await;
+    let mut output = snapshot_shell_generation(shell, expected_generation).await?;
 
     if let Some(cursor) = delivery_cursor.as_deref_mut() {
         let generation = {
             let guard = shell.lock().await;
-            guard.as_ref().map_or(0, PtyShell::command_generation)
+            let generation = guard.as_ref().map_or(0, PtyShell::command_generation);
+            ensure_expected_generation(generation, expected_generation)?;
+            generation
         };
         if cursor.generation != Some(generation) {
             cursor.sync_generation(generation);
@@ -308,8 +349,8 @@ pub(super) async fn wait_for_output(
                 break;
             }
             sleep(Duration::from_secs_f64(0.5_f64.min(remaining))).await;
-            let done = poll_shell(shell).await;
-            let new_output = snapshot_shell(shell).await;
+            let done = poll_shell_generation(shell, expected_generation).await?;
+            let new_output = snapshot_shell_generation(shell, expected_generation).await?;
             if done {
                 complete = true;
                 output = new_output;
@@ -339,6 +380,7 @@ pub(super) async fn wait_for_output(
     } else {
         let mut guard = shell.lock().await;
         if let Some(shell) = guard.as_mut() {
+            ensure_expected_generation(shell.command_generation(), expected_generation)?;
             shell.mark_output_delivered(&output);
         }
     }
@@ -358,26 +400,36 @@ pub(super) async fn wait_for_output(
         }
     };
     let rendered = truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS).into_owned();
-    let (running_for, exit_code, shell_cwd, scratch) = read_status_extras(shell, complete).await;
+    let (running_for, exit_code, shell_cwd, scratch, output_truncated) =
+        read_status_extras(shell, complete, expected_generation).await?;
     let cwd = shell_cwd.as_deref().unwrap_or(&bash_state.cwd);
     let state = status_state(background_id, !complete, running_for, exit_code, cwd, None);
     let status = render_status(bash_state, &state);
-    Ok(BashCommandResult { output: format!("{rendered}{scratch}{status}"), state })
+    Ok(runtime_rendered(
+        format!("{rendered}{scratch}"),
+        &status,
+        state,
+        compact_output,
+        Some(generation),
+        output_truncated,
+    ))
 }
 
 async fn read_status_extras(
     shell: &SharedPtyShell,
     complete: bool,
-) -> (Option<Duration>, Option<i32>, Option<PathBuf>, String) {
+    expected_generation: Option<u64>,
+) -> Result<(Option<Duration>, Option<i32>, Option<PathBuf>, String, bool)> {
     let guard = shell.lock().await;
     let Some(shell) = guard.as_ref() else {
-        return (None, None, None, String::new());
+        return Ok((None, None, None, String::new(), false));
     };
+    ensure_expected_generation(shell.command_generation(), expected_generation)?;
     let running_for = if complete { None } else { shell.command_elapsed() };
     let exit_code = if complete { shell.last_exit_code } else { None };
     let cwd = Some(shell.current_cwd().to_path_buf());
     let pointer = scratch_pointer(shell.output_truncated, shell.scratch_path());
-    (running_for, exit_code, cwd, pointer)
+    Ok((running_for, exit_code, cwd, pointer, shell.output_truncated))
 }
 
 fn scratch_pointer(output_truncated: bool, scratch_path: Option<&Path>) -> String {
@@ -396,7 +448,8 @@ pub(super) fn finalize_tombstone(
     id: &str,
     tombstone: ExitedShellInfo,
     action: &BashCommandAction,
-) -> Result<BashCommandResult> {
+    compact_output: bool,
+) -> Result<BashCommandRuntimeResult> {
     let ExitedShellInfo {
         last_command,
         final_output,
@@ -415,7 +468,14 @@ pub(super) fn finalize_tombstone(
             let state = status_state(Some(id), false, None, exit_code, &cwd, None);
             let pointer = scratch_pointer(output_truncated, scratch_path.as_deref());
             let status = render_status(bash_state, &state);
-            Ok(BashCommandResult { output: format!("{rendered}{pointer}{status}"), state })
+            Ok(runtime_rendered(
+                format!("{rendered}{pointer}"),
+                &status,
+                state,
+                compact_output,
+                None,
+                output_truncated,
+            ))
         }
         BashCommandAction::SendText { .. }
         | BashCommandAction::SendSpecials { .. }
@@ -428,7 +488,7 @@ pub(super) fn finalize_tombstone(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) async fn execute_status_check(
     bash_state: &mut BashState,
     background_shell: Option<SharedPtyShell>,
@@ -438,15 +498,30 @@ pub(super) async fn execute_status_check(
     scrollback_lines: Option<usize>,
     verbose: bool,
     mut delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<BashCommandResult> {
+    options: ShellActionOptions,
+) -> Result<BashCommandRuntimeResult> {
     debug!("Processing StatusCheck action (verbose={verbose}, scrollback={scrollback_lines:?})");
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
-    let is_running = {
+    let _generation_gate = if options.expected_generation.is_some() && !is_background {
+        Some(bash_state.foreground_command_gate.clone().lock_owned().await)
+    } else {
+        None
+    };
+    let (is_running, generation) = {
         let guard = shell.lock().await;
-        guard.as_ref().is_some_and(|shell| shell.command_running)
+        guard
+            .as_ref()
+            .map_or((false, 0), |shell| (shell.command_running, shell.command_generation()))
     };
 
-    if !is_running && !is_background {
+    if options.expected_generation.is_some_and(|expected| expected != generation) {
+        return Err(WinxError::InvalidInput(format!(
+            "Foreground command generation {generation} no longer matches Task generation {}. The Task will not read or control a newer command.",
+            options.expected_generation.unwrap_or_default()
+        )));
+    }
+
+    if !is_running && !is_background && options.expected_generation.is_none() {
         let mut manager = lock_session_store();
         let error = format!(
             "No command is currently running, so there's nothing to check. The previous \
@@ -465,6 +540,8 @@ pub(super) async fn execute_status_check(
         background_id,
         true,
         delivery_cursor.as_deref_mut(),
+        options.compact_output,
+        options.expected_generation,
     )
     .await?;
 
@@ -491,10 +568,14 @@ pub(super) async fn execute_status_check(
         if previous_hash == Some(fingerprint) {
             let state = status_state(background_id, running, running_for, exit_code, &cwd, None);
             let status = render_status(bash_state, &state);
-            return Ok(BashCommandResult {
-                output: format!("no new output since last check{status}"),
+            return Ok(runtime_rendered(
+                "no new output since last check".to_string(),
+                &status,
                 state,
-            });
+                options.compact_output,
+                Some(generation),
+                false,
+            ));
         }
     } else if !verbose {
         let fingerprint = {
@@ -522,10 +603,16 @@ pub(super) async fn execute_status_check(
             if !scrollback.is_empty() {
                 let count = scrollback.lines().count();
                 let mut response = response;
-                response.output = format!(
-                    "--- scrollback ({count} lines) ---\n{scrollback}\n--- latest ---\n{}",
-                    response.output
-                );
+                if let Some(output) = response.compact_output.as_mut() {
+                    *output = format!(
+                        "--- scrollback ({count} lines) ---\n{scrollback}\n--- latest ---\n{output}"
+                    );
+                } else {
+                    response.result.output = format!(
+                        "--- scrollback ({count} lines) ---\n{scrollback}\n--- latest ---\n{}",
+                        response.result.output
+                    );
+                }
                 return Ok(response);
             }
         }

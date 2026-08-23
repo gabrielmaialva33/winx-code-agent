@@ -17,7 +17,10 @@ use tracing::{error, info};
 
 pub use super::background_shell::{BackgroundShellManager, ExitedShellInfo};
 use crate::errors::{Result, WinxError};
-use crate::runtime::{lock_session_store, EmbeddedShellRuntime, ShellRuntime, ShellTarget};
+use crate::runtime::{
+    lock_session_store, BashCommandRuntimeResult, EmbeddedShellRuntime, ShellActionOptions,
+    ShellExecutionToken, ShellRuntime, ShellTarget,
+};
 use crate::state::bash_state::BashState;
 use crate::state::live_terminal::ScreenUpdate;
 use crate::state::pty::PtyShell;
@@ -67,6 +70,30 @@ impl BashCommandState {
 pub struct BashCommandResult {
     pub output: String,
     pub state: BashCommandState,
+}
+
+pub(crate) fn runtime_rendered(
+    mut body: String,
+    legacy_status: &str,
+    state: BashCommandState,
+    compact_requested: bool,
+    command_generation: Option<u64>,
+    output_truncated: bool,
+) -> BashCommandRuntimeResult {
+    let compact_output = if compact_requested {
+        Some(std::mem::take(&mut body))
+    } else {
+        body.push_str(legacy_status);
+        None
+    };
+    BashCommandRuntimeResult {
+        result: BashCommandResult { output: body, state },
+        compact_output,
+        command_generation,
+        execution_token: None,
+        generation_bound_actions: true,
+        output_truncated,
+    }
 }
 
 /// Per-adapter delivery state used by daemon guardians. Embedded callers keep
@@ -129,7 +156,6 @@ fn main_shell(bash_state: &BashState) -> SharedPtyShell {
 // window resolves most commands in a single call while staying far below the
 // 120 s HTTP request timeout.
 const DEFAULT_TIMEOUT: f64 = 15.0;
-
 fn effective_wait_for_seconds(wait_for_seconds: Option<f32>) -> f64 {
     wait_for_seconds.map_or(DEFAULT_TIMEOUT, |seconds| f64::from(seconds).max(0.0))
 }
@@ -183,16 +209,27 @@ pub(crate) async fn handle_embedded_tool_call(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
 ) -> Result<BashCommandResult> {
-    handle_embedded_tool_call_inner(bash_state, command, None).await
+    Ok(handle_embedded_tool_call_inner(bash_state, command, None, ShellActionOptions::default())
+        .await?
+        .result)
 }
 
-pub(crate) async fn handle_embedded_tool_call_with_cursor(
+pub(crate) async fn handle_embedded_tool_call_detailed(
+    bash_state: &Arc<Mutex<Option<BashState>>>,
+    command: BashCommand,
+    options: ShellActionOptions,
+) -> Result<BashCommandRuntimeResult> {
+    handle_embedded_tool_call_inner(bash_state, command, None, options).await
+}
+
+pub(crate) async fn handle_embedded_tool_call_with_cursor_detailed(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
     delivery_cursor: &Arc<Mutex<ShellDeliveryCursor>>,
-) -> Result<BashCommandResult> {
+    options: ShellActionOptions,
+) -> Result<BashCommandRuntimeResult> {
     let mut delivery_cursor = delivery_cursor.lock().await;
-    handle_embedded_tool_call_inner(bash_state, command, Some(&mut delivery_cursor)).await
+    handle_embedded_tool_call_inner(bash_state, command, Some(&mut delivery_cursor), options).await
 }
 
 #[tracing::instrument(level = "info", skip(bash_state, command, delivery_cursor))]
@@ -200,7 +237,8 @@ async fn handle_embedded_tool_call_inner(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<BashCommandResult> {
+    options: ShellActionOptions,
+) -> Result<BashCommandRuntimeResult> {
     let action_kind = match &command.action_json {
         BashCommandAction::Command { .. } => "command",
         BashCommandAction::StatusCheck { .. } => "status_check",
@@ -246,11 +284,35 @@ async fn handle_embedded_tool_call_inner(
         }
     }
 
+    let operation_barrier = lock_session_store().operation_barrier(&thread_id);
+    let _operation = operation_barrier.read().await;
+
+    if let Some(expected) = options.expected_execution.as_ref() {
+        if expected.guardian_epoch == "embedded" {
+            let current_epoch = local_state
+                .pty_shell
+                .lock()
+                .await
+                .as_ref()
+                .map(|shell| format!("{:016x}", shell.incarnation()));
+            if Some(expected.session_epoch.as_str()) != current_epoch.as_deref() {
+                return Err(WinxError::InvalidInput(
+                    "execution token belongs to a previous embedded shell incarnation".to_string(),
+                ));
+            }
+        }
+    }
+
     lock_session_store().bind_main(&local_state.current_thread_id, &local_state.pty_shell);
     let timeout_secs = effective_wait_for_seconds(command.wait_for_seconds);
-    let result =
-        execute_bash_action(&mut local_state, &command.action_json, timeout_secs, delivery_cursor)
-            .await;
+    let result = execute_bash_action(
+        &mut local_state,
+        &command.action_json,
+        timeout_secs,
+        delivery_cursor,
+        options,
+    )
+    .await;
 
     if let Some(state) = bash_state.lock().await.as_mut() {
         state.cwd.clone_from(&local_state.cwd);
@@ -258,10 +320,25 @@ async fn handle_embedded_tool_call_inner(
 
     match result {
         Ok(mut outcome) => {
+            if let Some(generation) = outcome.command_generation {
+                outcome.execution_token = Some(ShellExecutionToken {
+                    guardian_epoch: "embedded".to_string(),
+                    session_epoch: local_state.pty_shell.lock().await.as_ref().map_or_else(
+                        || "uninitialized".to_string(),
+                        |shell| format!("{:016x}", shell.incarnation()),
+                    ),
+                    generation,
+                });
+            }
             if let BashCommandAction::Command { ref command, .. } = command.action_json {
                 let command = command.trim();
-                if outcome.output.starts_with(command) {
-                    outcome.output = outcome.output[command.len()..].to_string();
+                if outcome.result.output.starts_with(command) {
+                    outcome.result.output = outcome.result.output[command.len()..].to_string();
+                }
+                if outcome.compact_output.as_ref().is_some_and(|output| output.starts_with(command))
+                {
+                    let output = outcome.compact_output.take().unwrap_or_default();
+                    outcome.compact_output = Some(output[command.len()..].to_string());
                 }
             }
             Ok(outcome)
@@ -276,7 +353,8 @@ async fn execute_bash_action(
     action: &BashCommandAction,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<BashCommandResult> {
+    options: ShellActionOptions,
+) -> Result<BashCommandRuntimeResult> {
     let mut is_background = false;
     let mut background_id: Option<String> = None;
 
@@ -299,7 +377,13 @@ async fn execute_bash_action(
                     manager.peek_tombstone(&bash_state.current_thread_id, id)
                 {
                     drop(manager);
-                    return finalize_tombstone(bash_state, id, tombstone, action);
+                    return finalize_tombstone(
+                        bash_state,
+                        id,
+                        tombstone,
+                        action,
+                        options.compact_output,
+                    );
                 } else {
                     let error = format!(
                         "No shell found running with command id {}.\n{}",
@@ -323,6 +407,7 @@ async fn execute_bash_action(
                 *allow_multi,
                 timeout_secs,
                 delivery_cursor,
+                &options,
             )
             .await
         }
@@ -336,6 +421,7 @@ async fn execute_bash_action(
                 *scrollback_lines,
                 *verbose,
                 delivery_cursor,
+                options,
             )
             .await
         }
@@ -349,6 +435,7 @@ async fn execute_bash_action(
                 background_id.as_deref(),
                 timeout_secs,
                 delivery_cursor,
+                options.compact_output,
             )
             .await
         }
@@ -362,6 +449,7 @@ async fn execute_bash_action(
                 background_id.as_deref(),
                 timeout_secs,
                 delivery_cursor,
+                options.compact_output,
             )
             .await
         }
@@ -375,6 +463,7 @@ async fn execute_bash_action(
                 background_id.as_deref(),
                 timeout_secs,
                 delivery_cursor,
+                options.compact_output,
             )
             .await
         }
@@ -387,6 +476,7 @@ async fn execute_bash_action(
                 *lines,
                 *diff,
                 delivery_cursor,
+                options.compact_output,
             )
             .await
         }
@@ -408,6 +498,7 @@ async fn execute_bash_action(
                 *timeout_seconds,
                 *lines,
                 *wait_through_busy,
+                options.compact_output,
             )
             .await
         }
@@ -416,7 +507,48 @@ async fn execute_bash_action(
 
 #[cfg(test)]
 mod tests {
-    use super::effective_wait_for_seconds;
+    use super::{
+        effective_wait_for_seconds, runtime_rendered, BashCommandState, BashProcessStatus,
+    };
+
+    fn exited_state() -> BashCommandState {
+        BashCommandState {
+            process_status: BashProcessStatus::Exited,
+            background_id: None,
+            running_for_seconds: None,
+            exit_code: Some(0),
+            cwd: "/workspace".into(),
+            turn_state: None,
+        }
+    }
+
+    #[test]
+    fn legacy_rendering_does_not_build_a_compact_payload_without_negotiation() {
+        let result = runtime_rendered(
+            "child output".to_string(),
+            "\nstatus = process exited",
+            exited_state(),
+            false,
+            Some(1),
+            false,
+        );
+        assert_eq!(result.result.output, "child output\nstatus = process exited");
+        assert_eq!(result.compact_output, None);
+    }
+
+    #[test]
+    fn compact_rendering_is_built_directly_from_runtime_body() {
+        let result = runtime_rendered(
+            "child output".to_string(),
+            "\nstatus = process exited",
+            exited_state(),
+            true,
+            Some(1),
+            false,
+        );
+        assert_eq!(result.compact_output.as_deref(), Some("child output"));
+        assert!(result.result.output.is_empty());
+    }
 
     #[test]
     fn requested_wait_is_not_silently_capped() {

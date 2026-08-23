@@ -5,10 +5,10 @@ use tracing::{debug, error, warn};
 
 use super::output::{clear_to_run_async, render_status, status_state, wait_for_output};
 use super::{
-    main_shell, send_utf8_in_byte_chunks, BashCommandResult, ShellDeliveryCursor, DEFAULT_TIMEOUT,
+    main_shell, runtime_rendered, send_utf8_in_byte_chunks, ShellDeliveryCursor, DEFAULT_TIMEOUT,
 };
 use crate::errors::{Result, WinxError};
-use crate::runtime::lock_session_store;
+use crate::runtime::{lock_session_store, BashCommandRuntimeResult, ShellActionOptions};
 use crate::state::bash_state::BashState;
 use crate::state::pty::PtyShell;
 
@@ -70,6 +70,7 @@ fn keep_tail_pipe() -> bool {
     crate::config::env_flag("WINX_KEEP_TAIL_PIPE")
 }
 
+#[allow(clippy::too_many_lines)]
 pub(super) async fn execute_command(
     bash_state: &mut BashState,
     command: &str,
@@ -77,7 +78,8 @@ pub(super) async fn execute_command(
     allow_multi: bool,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<BashCommandResult> {
+    options: &ShellActionOptions,
+) -> Result<BashCommandRuntimeResult> {
     let stripped_command = strip_tail_pipe(command);
     let command = stripped_command.as_str();
     debug!(bytes = command.len(), allow_multi, "Processing Command action");
@@ -94,12 +96,29 @@ pub(super) async fn execute_command(
         let allow_shell_probe = matches!(bash_state.mode, crate::types::Modes::Wcgw);
         crate::utils::bash_parser::assert_single_statement(command, allow_shell_probe)?;
     }
+    if options.is_launch_cancelled() {
+        return Err(WinxError::CommandExecutionError(
+            "task was cancelled before command launch".to_string(),
+        ));
+    }
     if is_background {
-        return execute_in_background(bash_state, command, timeout_secs, delivery_cursor).await;
+        return execute_in_background(
+            bash_state,
+            command,
+            timeout_secs,
+            delivery_cursor,
+            options.compact_output,
+        )
+        .await;
     }
 
     let foreground_gate = bash_state.foreground_command_gate.clone();
     let _foreground_guard = foreground_gate.lock_owned().await;
+    if options.is_launch_cancelled() {
+        return Err(WinxError::CommandExecutionError(
+            "task was cancelled before command launch".to_string(),
+        ));
+    }
     let shell = main_shell(bash_state);
     {
         let guard = shell.lock().await;
@@ -155,7 +174,18 @@ pub(super) async fn execute_command(
         shell.mark_command_started();
     }
 
-    wait_for_output(bash_state, &shell, timeout_secs, false, None, false, delivery_cursor).await
+    wait_for_output(
+        bash_state,
+        &shell,
+        timeout_secs,
+        false,
+        None,
+        false,
+        delivery_cursor,
+        options.compact_output,
+        None,
+    )
+    .await
 }
 
 async fn execute_in_background(
@@ -163,7 +193,8 @@ async fn execute_in_background(
     command: &str,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<BashCommandResult> {
+    compact_output: bool,
+) -> Result<BashCommandRuntimeResult> {
     debug!(bytes = command.len(), "Executing command in background");
     let restricted_mode =
         matches!(bash_state.bash_command_mode.bash_mode, crate::types::BashMode::RestrictedMode);
@@ -212,10 +243,13 @@ async fn execute_in_background(
     spawn_background_reaper(bash_state.current_thread_id.clone(), background_id.clone());
 
     let _ = (timeout_secs, delivery_cursor);
-    let _ = shell;
+    let generation = {
+        let guard = shell.lock().await;
+        guard.as_ref().map(PtyShell::command_generation)
+    };
     let state = status_state(Some(&background_id), true, None, None, &bash_state.cwd, None);
     let output = render_status(bash_state, &state);
-    Ok(BashCommandResult { output, state })
+    Ok(runtime_rendered(String::new(), &output, state, compact_output, generation, false))
 }
 
 #[cfg(test)]

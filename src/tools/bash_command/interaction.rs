@@ -3,10 +3,9 @@ use std::time::Duration;
 use tracing::debug;
 
 use super::output::{insert_note_before_status, wait_for_output};
-use super::{
-    main_shell, send_utf8_in_byte_chunks, BashCommandResult, SharedPtyShell, ShellDeliveryCursor,
-};
+use super::{main_shell, send_utf8_in_byte_chunks, SharedPtyShell, ShellDeliveryCursor};
 use crate::errors::{Result, WinxError};
+use crate::runtime::BashCommandRuntimeResult;
 use crate::state::bash_state::BashState;
 use crate::state::pty::PtyShell;
 use crate::types::SpecialKey;
@@ -47,7 +46,8 @@ pub(super) async fn execute_send_text(
     background_id: Option<&str>,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<BashCommandResult> {
+    compact_output: bool,
+) -> Result<BashCommandRuntimeResult> {
     debug!(bytes = text.len(), submit, "Processing SendText action");
     if text.is_empty() {
         return Err(WinxError::InvalidInput(
@@ -76,6 +76,8 @@ pub(super) async fn execute_send_text(
         background_id,
         false,
         delivery_cursor,
+        compact_output,
+        None,
     )
     .await
 }
@@ -90,7 +92,8 @@ pub(super) async fn execute_send_specials(
     background_id: Option<&str>,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<BashCommandResult> {
+    compact_output: bool,
+) -> Result<BashCommandRuntimeResult> {
     debug!("Processing SendSpecials action: {keys:?} (submit={submit})");
     if keys.is_empty() {
         return Err(WinxError::InvalidInput("send_specials cannot be empty".to_string()));
@@ -157,9 +160,11 @@ pub(super) async fn execute_send_specials(
         background_id,
         false,
         delivery_cursor,
+        compact_output,
+        None,
     )
     .await?;
-    if is_interrupt && result.state.is_running() {
+    if is_interrupt && result.result.state.is_running() {
         let note = "\n---\n----\nFailure interrupting.\nYou may want to try Ctrl-c again or program specific exit interactive commands.\n";
         insert_note_before_status(bash_state, &mut result, note);
     }
@@ -176,7 +181,8 @@ pub(super) async fn execute_send_ascii(
     background_id: Option<&str>,
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
-) -> Result<BashCommandResult> {
+    compact_output: bool,
+) -> Result<BashCommandRuntimeResult> {
     debug!(bytes = ascii_codes.len(), submit, "Processing SendAscii action");
     if ascii_codes.is_empty() {
         return Err(WinxError::InvalidInput("send_ascii cannot be empty".to_string()));
@@ -209,9 +215,11 @@ pub(super) async fn execute_send_ascii(
         background_id,
         false,
         delivery_cursor,
+        compact_output,
+        None,
     )
     .await?;
-    if is_interrupt && result.state.is_running() {
+    if is_interrupt && result.result.state.is_running() {
         let note = "\n---\n----\nFailure interrupting.\nYou may want to try Ctrl-c again or program specific exit interactive commands.\n";
         insert_note_before_status(bash_state, &mut result, note);
     }
