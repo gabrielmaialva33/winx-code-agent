@@ -133,7 +133,8 @@ ID such as `ws_project_<hash>` and expects later tool calls to use that returned
 Consequences:
 
 - stateless reconnects attach to the existing session instead of creating another guardian;
-- repeated first calls preserve the PTY, cwd, output journal, and running command;
+- repeated first calls preserve the PTY, cwd, output journal, and running command, and return a compact response instead
+  of regenerating unchanged guidelines, repository context, and orchestration instructions;
 - two different principals still receive different namespaces;
 - parallel conversations from the **same principal in the same workspace share one shell** and its foreground-command
   lock;
@@ -456,7 +457,9 @@ On Unix, every initial and rotated file is created/opened with `O_NOFOLLOW` and 
 reduced to `0600`, and newly created log directories use `0700`. Each tool event contains the tool/action, principal, scoped
 thread, hashed request and MCP-session correlation, client name and version, negotiated protocol, outcome, result status,
 duration, response size, batch item count, and the configured worker limit (`0` for non-batched tools). HTTP events contain
-peer, method, status, and duration. Command text, file contents, tool
+peer, method, status, and duration. Initialize events additionally record the transition (`created`, `attached_existing`,
+or an explicit change), whether it reused a session, compact/full response mode, generated context/guideline sizes,
+initial-file count, and effective code-writer policy strength. Command text, file contents, tool
 output, bearer tokens, and raw conversation identities are never written to this sink. Ordinary warnings and diagnostics
 continue to stderr according to `RUST_LOG` and `WINX_LOG_FORMAT`.
 
