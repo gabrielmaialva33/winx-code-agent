@@ -190,13 +190,11 @@ pub async fn handle_tool_call(
     // Filesystem reads and base64 encoding are blocking/CPU-heavy for large
     // images, so keep them off Tokio's request workers.
     let file_path = read_image.file_path;
-    tokio::task::spawn_blocking(move || {
-        read_image_from_path(&file_path, &cwd, &workspace_root)
-    })
-    .await
-    .map_err(|error| {
-        WinxError::CommandExecutionError(format!("ReadImage worker failed: {error}"))
-    })?
+    tokio::task::spawn_blocking(move || read_image_from_path(&file_path, &cwd, &workspace_root))
+        .await
+        .map_err(|error| {
+            WinxError::CommandExecutionError(format!("ReadImage worker failed: {error}"))
+        })?
 }
 
 #[cfg(test)]

@@ -394,10 +394,8 @@ pub async fn handle_tool_call_detailed(
                     stats_paths.push(PathBuf::from(&canon_path));
 
                     if truncated {
-                        let remaining = read_files
-                            .file_paths
-                            .len()
-                            .saturating_sub(request.index + 1);
+                        let remaining =
+                            read_files.file_paths.len().saturating_sub(request.index + 1);
                         if remaining > 0 {
                             let _ = write!(
                                 message,
@@ -415,8 +413,7 @@ pub async fn handle_tool_call_detailed(
                     }
                 }
                 Err(error) => {
-                    let _ =
-                        write!(message, "\nError reading {}: {error}", request.requested_path);
+                    let _ = write!(message, "\nError reading {}: {error}", request.requested_path);
                     errors.push(error);
                 }
             }
