@@ -106,7 +106,7 @@ automation logs. `WINX_HTTP_TOKEN` remains available as a single-principal envir
 
 ## Session affinity
 
-### Workspace affinity — default
+### Workspace affinity (default)
 
 The default is:
 
@@ -143,7 +143,7 @@ Consequences:
 Workspace affinity is the recommended mode for ChatGPT and other clients whose generated IDs are not guaranteed to be
 stable.
 
-### Conversation affinity — parallel web conversations
+### Conversation affinity (parallel web conversations)
 
 Use:
 
@@ -172,7 +172,7 @@ ID changes; another conversation identity gets a distinct guardian, cwd, command
 The gateway header is a trust input. Only inject it at an authenticated edge, strip untrusted client copies, and keep its
 value stable for the lifetime of the conversation.
 
-### Thread affinity — explicit opt-out
+### Thread affinity (explicit opt-out)
 
 Use:
 

@@ -106,7 +106,7 @@ Secure MCP Tunnel / VPN / 认证 HTTPS 反向代理
 
 ## 核心功能特性
 
-- 每个线程独立的有状态 Bash 会话与真实 PTY 语义 — 支持前台/后台运行、状态检查、文本输入、Enter/Ctrl-C/Ctrl-D 及原始 ASCII。支持多行脚本；NUL 字节在到达 Shell 前会被拦截。
+- 每个线程独立的有状态 Bash 会话与真实 PTY 语义：支持前台/后台运行、状态检查、文本输入、Enter/Ctrl-C/Ctrl-D 及原始 ASCII。支持多行脚本；NUL 字节在到达 Shell 前会被拦截。
 - 三种工作区安全模式：`wcgw`（完全权限）、`architect`（只读模式）、`code_writer`（白名单命令与写入通配符）。命令白名单通过 Tree-sitter 进行 AST 深度解析，检查命令行中的**每一个**指令（管道、`&&`/`||`/`;`、`$(...)`、子 Shell），防止通过 `ls && curl … | sh` 等手法绕过。
 - 高弹性 PTY：如果 Shell 无法返回提示符（即使在 Ctrl-C 之后），系统会在相同的工作目录和模式下自动重置，并在清理时回收子进程。可通过 `WINX_SHELL=zsh` 启用 zsh。
 - 行号范围读取（如 `file.rs:10-40`、`file.rs:10-`、`file.rs:-40`）。智能跟踪活跃文件并在上下文之中进行优先级排序。
