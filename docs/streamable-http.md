@@ -1,5 +1,9 @@
 # Streamable HTTP deployment
 
+<p align="right">
+  <b>English</b> • <a href="streamable-http.pt.md">Português</a> • <a href="streamable-http.zh.md">中文</a>
+</p>
+
 Winx exposes its full MCP toolset through an authenticated **Streamable HTTP** endpoint for ChatGPT, hosted agents,
 remote automation, and clients that cannot launch a local stdio process. The endpoint is `/mcp`; the default listener is
 `127.0.0.1:8000`.
