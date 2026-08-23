@@ -108,7 +108,7 @@ const WORKSPACE_ROOT_DESCRIPTION: &str =
 fn with_workspace_binding(
     schema: Arc<serde_json::Map<String, Value>>,
 ) -> Arc<serde_json::Map<String, Value>> {
-    let mut schema = (*schema).clone();
+    let mut schema = Arc::unwrap_or_clone(schema);
     let properties = schema
         .entry("properties".to_string())
         .or_insert_with(|| Value::Object(serde_json::Map::new()));
