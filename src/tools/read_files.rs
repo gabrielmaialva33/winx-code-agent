@@ -126,6 +126,7 @@ async fn read_file(
     }
 
     let mut truncated = false;
+    let mut last_shown = effective_end;
     let max_tokens = max_tokens.unwrap_or_else(|| select_max_tokens(file_path));
     // Byte-level BPE emits at most one token per input byte. Small payloads are
     // therefore proven to fit without initializing the tokenizer; larger ones
@@ -145,7 +146,7 @@ async fn read_file(
         truncate_to_token_budget(&mut result_content, max_tokens, token_ids);
         // Tell the agent exactly where to resume so the tail isn't silently lost.
         let kept_lines = result_content.lines().count();
-        let last_shown = (start_idx + kept_lines).min(total_lines);
+        last_shown = (start_idx + kept_lines).min(total_lines);
         let resume_from = last_shown + 1;
         let _ = write!(
             result_content,
@@ -157,13 +158,14 @@ async fn read_file(
     }
 
     let canon_path = path.to_string_lossy().to_string();
+    let effective_end_line = if truncated { last_shown } else { effective_end };
 
     Ok((
         result_content,
         truncated,
         tokens_count,
         canon_path,
-        (effective_start, effective_end.min(total_lines.max(1))),
+        (effective_start, effective_end_line.min(total_lines.max(1))),
         file_hash,
         total_lines,
     ))
@@ -184,6 +186,7 @@ fn truncate_to_token_budget(content: &mut String, max_tokens: usize, ids: Option
         // No tokenizer available: fall back to a char-count cut.
         let byte_idx = byte_index_for_char_count(content, max_tokens);
         content.truncate(byte_idx);
+        trim_to_last_line_boundary(content);
         return;
     };
 
@@ -196,6 +199,13 @@ fn truncate_to_token_budget(content: &mut String, max_tokens: usize, ids: Option
     } else {
         let byte_idx = byte_index_for_char_count(content, max_tokens);
         content.truncate(byte_idx);
+    }
+    trim_to_last_line_boundary(content);
+}
+
+fn trim_to_last_line_boundary(content: &mut String) {
+    if let Some(last_nl) = content.rfind('\n') {
+        content.truncate(last_nl + 1);
     }
 }
 
