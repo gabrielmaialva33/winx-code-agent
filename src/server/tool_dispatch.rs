@@ -12,8 +12,8 @@ use crate::errors::WinxError;
 use crate::runtime::{ShellActionOptions, ShellExecutionToken};
 use crate::state::bash_state::generate_thread_id;
 use crate::types::{
-    normalize_thread_id, BashCommand, BashCommandAction, CodeMap, ContextSave, FileWriteOrEdit,
-    Initialize, MultiFileEdit, ReadFiles, ReadImage, UndoEdit,
+    normalize_thread_id, BashCommand, CodeMap, ContextSave, FileWriteOrEdit, Initialize,
+    MultiFileEdit, ReadFiles, ReadImage, UndoEdit,
 };
 
 const MAX_VERIFY_WAIT_SECONDS: f32 = 60.0;
