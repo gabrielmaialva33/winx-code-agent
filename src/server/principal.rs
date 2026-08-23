@@ -14,6 +14,7 @@ use crate::state::bash_state::generate_thread_id;
 use crate::types::{normalize_thread_id, MAX_NORMALIZED_THREAD_ID_BYTES};
 
 const SCOPED_HASH_SUFFIX_BYTES: usize = 9;
+const AFFINITY_ID_VERSION: &str = "workspace-binding-v2";
 
 /// Per-request principal and the internal identifiers that must be translated
 /// back before a response is returned to the remote client.
@@ -173,8 +174,10 @@ fn affinity_thread_id(
     };
 
     let (prefix, identity) = match conversation_identity {
-        Some(conversation) => ("cv", format!("conversation:{conversation}:{identity}")),
-        None => ("ws", identity),
+        Some(conversation) => {
+            ("cv", format!("{AFFINITY_ID_VERSION}:conversation:{conversation}:{identity}"))
+        }
+        None => ("ws", format!("{AFFINITY_ID_VERSION}:{identity}")),
     };
     let digest = Sha256::digest(identity.as_bytes());
     let mut suffix = String::with_capacity(16);
@@ -184,7 +187,28 @@ fn affinity_thread_id(
     normalize_thread_id(&format!("{prefix}_{label}_{suffix}"))
 }
 
-fn canonical_workspace_identity(workspace: &str) -> PathBuf {
+/// Derive the external thread ID that a workspace-bound request must carry.
+/// Caller-owned thread affinity intentionally has no derivable ID.
+pub(super) fn expected_affinity_thread_id(
+    workspace: &Path,
+    affinity: HttpSessionAffinity,
+    conversation_identity: Option<&str>,
+) -> Option<String> {
+    let mut arguments = serde_json::Map::new();
+    arguments.insert(
+        "any_workspace_path".to_string(),
+        Value::String(workspace.to_string_lossy().into_owned()),
+    );
+    match affinity {
+        HttpSessionAffinity::Workspace => Some(affinity_thread_id(&arguments, None)),
+        HttpSessionAffinity::Conversation => {
+            conversation_identity.map(|identity| affinity_thread_id(&arguments, Some(identity)))
+        }
+        HttpSessionAffinity::Thread => None,
+    }
+}
+
+pub(super) fn canonical_workspace_identity(workspace: &str) -> PathBuf {
     let expanded = crate::utils::path::expand_user(workspace);
     let mut path = PathBuf::from(expanded);
     if !path.is_absolute() {

@@ -60,6 +60,38 @@ pub enum WinxError {
     #[error("Thread ID mismatch: {0}")]
     ThreadIdMismatch(String),
 
+    /// A remote stateful call omitted the explicit workspace half of its
+    /// session binding.
+    #[error(
+        "Remote session binding is incomplete for thread_id `{thread_id}`: pass the exact workspace_root returned by Initialize. No operation was executed. workspace_root identifies the project session; it does not restrict target paths."
+    )]
+    WorkspaceBindingRequired { thread_id: String },
+
+    /// The supplied workspace and thread cannot belong to the same affinity
+    /// key, so executing the request could select another project's shell.
+    #[error(
+        "Session coherence check failed: thread_id `{thread_id}` does not belong to workspace_root `{workspace_root}`. No operation was executed. Initialize that workspace and preserve the returned thread_id/workspace_root pair."
+    )]
+    WorkspaceThreadMismatch { thread_id: String, workspace_root: PathBuf },
+
+    /// The requested binding disagrees with the workspace stored in the
+    /// selected durable session.
+    #[error(
+        "Session coherence check failed: thread_id `{thread_id}` is bound to `{bound_workspace}`, not `{requested_workspace}`. No operation was executed. Initialize the intended workspace and use its returned pair."
+    )]
+    WorkspaceBindingMismatch {
+        thread_id: String,
+        requested_workspace: PathBuf,
+        bound_workspace: PathBuf,
+    },
+
+    /// Remote sessions never change project identity in place. A new first
+    /// call gives the target workspace its own coherent session binding.
+    #[error(
+        "Remote workspace changes require a new session binding. No operation was executed. Call Initialize with type=\"first_call\" for `{workspace_root}` and use the new thread_id/workspace_root pair."
+    )]
+    WorkspaceChangeRequiresNewSession { workspace_root: PathBuf },
+
     /// Error when deserializing data
     #[error("Deserialization error: {0}")]
     DeserializationError(String),
@@ -241,6 +273,25 @@ impl Clone for WinxError {
             }
             Self::CommandNotAllowed(msg) => Self::CommandNotAllowed(msg.clone()),
             Self::ThreadIdMismatch(msg) => Self::ThreadIdMismatch(msg.clone()),
+            Self::WorkspaceBindingRequired { thread_id } => {
+                Self::WorkspaceBindingRequired { thread_id: thread_id.clone() }
+            }
+            Self::WorkspaceThreadMismatch { thread_id, workspace_root } => {
+                Self::WorkspaceThreadMismatch {
+                    thread_id: thread_id.clone(),
+                    workspace_root: workspace_root.clone(),
+                }
+            }
+            Self::WorkspaceBindingMismatch { thread_id, requested_workspace, bound_workspace } => {
+                Self::WorkspaceBindingMismatch {
+                    thread_id: thread_id.clone(),
+                    requested_workspace: requested_workspace.clone(),
+                    bound_workspace: bound_workspace.clone(),
+                }
+            }
+            Self::WorkspaceChangeRequiresNewSession { workspace_root } => {
+                Self::WorkspaceChangeRequiresNewSession { workspace_root: workspace_root.clone() }
+            }
             Self::ArgumentParseError(msg) => Self::ArgumentParseError(msg.clone()),
             Self::FileAccessError { path, message } => {
                 Self::FileAccessError { path: path.clone(), message: message.clone() }

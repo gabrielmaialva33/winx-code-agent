@@ -196,6 +196,22 @@ impl WinxService {
         registry.last_active.as_ref().and_then(|key| registry.slots.get(key).cloned())
     }
 
+    /// Read the immutable project identity of an already initialized adapter
+    /// session without creating a slot or changing LRU state. Remote coherence
+    /// checks use this before any tool can touch the shell or filesystem.
+    pub(super) async fn bound_workspace(&self, thread_id: &str) -> Option<std::path::PathBuf> {
+        let thread_id = crate::types::normalize_thread_id(thread_id);
+        if thread_id.is_empty() {
+            return None;
+        }
+        let slot = {
+            let registry = self.sessions.lock().await;
+            registry.slots.get(&thread_id).cloned()
+        }?;
+        let state = slot.lock().await;
+        state.as_ref().filter(|state| state.initialized).map(|state| state.workspace_root.clone())
+    }
+
     pub(super) async fn has_initialized_session(&self) -> bool {
         let slots = {
             let registry = self.sessions.lock().await;
