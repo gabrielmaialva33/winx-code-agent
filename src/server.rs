@@ -4,6 +4,7 @@
 //! adapters live in focused submodules under `server/`.
 
 mod catalog;
+mod coherence;
 mod handler;
 mod outcomes;
 mod principal;
