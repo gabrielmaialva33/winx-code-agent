@@ -479,6 +479,21 @@ impl WinxService {
                 }
             };
 
+            // Once a Task publishes an execution identity, every abnormal
+            // worker exit owns cleanup of that exact identity. Generation-
+            // bound interruption is conservative: if the command completed
+            // before the first poll it leaves the guardian tombstone intact,
+            // and it can never target a later generation.
+            if status == TaskStatus::Failed {
+                let execution = service
+                    .tasks
+                    .lock()
+                    .await
+                    .get(&worker_task_id)
+                    .and_then(TaskEntry::execution_token);
+                service.interrupt_task_execution(&thread_id, execution).await;
+            }
+
             let mut tasks = service.tasks.lock().await;
             if let Some(entry) = tasks.get_mut(&worker_task_id) {
                 if entry.task.status == TaskStatus::Working {

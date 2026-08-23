@@ -597,6 +597,12 @@ impl ServerHandler for WinxService {
                         inline_request,
                         ShellActionOptions {
                             compact_output: compact_bash_output,
+                            // Adaptive promotion is already backed by a Task
+                            // reservation. Require the effective guardian
+                            // epoch to be checked live before this first action
+                            // so a recreated guardian cannot launch an
+                            // untracked process under a stale adapter cache.
+                            require_generation_binding: true,
                             ..ShellActionOptions::default()
                         },
                     )
