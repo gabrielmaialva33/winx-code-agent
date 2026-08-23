@@ -113,7 +113,7 @@ impl WinxService {
             return Ok(WorkspaceCoherence::FirstCall);
         }
 
-        let requested_workspace = canonical_binding_root(&workspace)?;
+        let requested_workspace = canonical_initialize_workspace(&workspace)?;
         if let Some(bound_workspace) = self.bound_workspace(internal_thread_id).await {
             let bound_workspace = canonical_workspace_identity(&bound_workspace.to_string_lossy());
             if requested_workspace != bound_workspace {
@@ -136,20 +136,7 @@ impl WinxService {
 }
 
 fn canonical_binding_root(workspace: &str) -> Result<PathBuf> {
-    if workspace.trim().is_empty() {
-        return Err(WinxError::ParameterValidationError {
-            field: "workspace_root".to_string(),
-            message: "must be the non-empty canonical root returned by Initialize".to_string(),
-        });
-    }
-    let expanded = crate::utils::path::expand_user(workspace);
-    let supplied = PathBuf::from(&expanded);
-    if !supplied.is_absolute() {
-        return Err(WinxError::ParameterValidationError {
-            field: "workspace_root".to_string(),
-            message: "must be the absolute canonical path returned by Initialize".to_string(),
-        });
-    }
+    let supplied = absolute_workspace_path(workspace, "workspace_root")?;
     if supplied.is_file() {
         return Err(WinxError::ParameterValidationError {
             field: "workspace_root".to_string(),
@@ -159,6 +146,31 @@ fn canonical_binding_root(workspace: &str) -> Result<PathBuf> {
     }
     let path = canonical_workspace_identity(workspace);
     Ok(path)
+}
+
+fn canonical_initialize_workspace(workspace: &str) -> Result<PathBuf> {
+    let _ = absolute_workspace_path(workspace, "any_workspace_path")?;
+    // Initialize intentionally accepts either a directory or a file hint; a
+    // file resolves to its parent exactly as the tool implementation does.
+    Ok(canonical_workspace_identity(workspace))
+}
+
+fn absolute_workspace_path(workspace: &str, field: &str) -> Result<PathBuf> {
+    if workspace.trim().is_empty() {
+        return Err(WinxError::ParameterValidationError {
+            field: field.to_string(),
+            message: "must be a non-empty absolute workspace path".to_string(),
+        });
+    }
+    let expanded = crate::utils::path::expand_user(workspace);
+    let supplied = PathBuf::from(expanded);
+    if !supplied.is_absolute() {
+        return Err(WinxError::ParameterValidationError {
+            field: field.to_string(),
+            message: "must be an absolute path for a remote session".to_string(),
+        });
+    }
+    Ok(supplied)
 }
 
 fn string_argument(arguments: Option<&rmcp::model::JsonObject>, key: &str) -> Option<String> {
@@ -269,5 +281,32 @@ mod tests {
             .await
             .expect_err("missing binding must fail closed");
         assert!(matches!(error, WinxError::WorkspaceBindingRequired { .. }));
+    }
+
+    #[tokio::test]
+    async fn strict_remote_initialize_accepts_a_file_as_the_workspace_hint() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let file = workspace.path().join("request.md");
+        std::fs::write(&file, "request").expect("workspace file");
+        let service = WinxService::with_isolation(SessionIsolation::Strict);
+        let request = request(
+            "Initialize",
+            &serde_json::json!({
+                "type": "first_call",
+                "any_workspace_path": file,
+                "mode_name": "wcgw",
+                "thread_id": "thread"
+            }),
+        );
+
+        let result = service
+            .validate_workspace_coherence(
+                &request,
+                &RequestScope::default(),
+                HttpSessionAffinity::Thread,
+                None,
+            )
+            .await;
+        assert_eq!(result.expect("file hint"), WorkspaceCoherence::FirstCall);
     }
 }

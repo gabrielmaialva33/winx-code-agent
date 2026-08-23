@@ -297,7 +297,8 @@ pub struct Initialize {
 
     /// Path to the workspace directory or file
     ///
-    /// This can be an absolute path or a path relative to the current directory.
+    /// Local transports accept an absolute path or one relative to the current directory.
+    /// Remote HTTP sessions require an absolute path so the project identity is unambiguous.
     /// If it's a file, the parent directory will be used as the workspace.
     /// If it doesn't exist and is an absolute path, it will be created.
     /// If it's a relative path and doesn't exist, an error will be returned.
