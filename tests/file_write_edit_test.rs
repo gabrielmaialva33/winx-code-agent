@@ -1030,3 +1030,81 @@ async fn test_thread_id_mismatch() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_truncated_read_does_not_permit_full_overwrite() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let bash_state_arc = create_initialized_state(&temp_dir, TEST_THREAD_ID).await?;
+
+    let file_path = temp_dir.path().join("large_file.txt");
+    // Create a 200-line file
+    let content: String = (1..=200)
+        .map(|i| format!("Line {i}: some text content here for testing truncation\n"))
+        .collect();
+    std::fs::write(&file_path, &content)?;
+
+    // Temporarily set a very small token budget for noncoding files
+    unsafe {
+        std::env::set_var("WINX_NONCODING_TOKEN_BUDGET", "50");
+    }
+
+    // Read the file without specifying line range - it will be truncated
+    let read_files = ReadFiles {
+        file_paths: vec![file_path.to_string_lossy().to_string()],
+        thread_id: TEST_THREAD_ID.to_string(),
+        start_line_nums: vec![None],
+        end_line_nums: vec![None],
+    };
+    let read_output =
+        winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read_files).await?;
+    assert!(read_output.contains("truncated"), "Expected read output to be truncated");
+
+    // Attempting a full overwrite must fail because the file was only partially read
+    let file_write = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 100,
+        text_or_search_replace_blocks: "Completely new overwritten content\n".to_string(),
+        thread_id: TEST_THREAD_ID.to_string(),
+    };
+
+    let result =
+        winx_code_agent::tools::file_write_or_edit::handle_tool_call(&bash_state_arc, file_write)
+            .await;
+    assert!(result.is_err(), "Expected full overwrite to fail after truncated read");
+    let err_str = result.unwrap_err().to_string();
+    assert!(
+        err_str.contains("Read more of the file before overwriting")
+            || err_str.contains("Unread line ranges"),
+        "Expected unread line ranges error, got: {err_str}"
+    );
+
+    // Reset token budget to large default
+    unsafe {
+        std::env::remove_var("WINX_NONCODING_TOKEN_BUDGET");
+    }
+
+    // Read the complete file now
+    let read_full = ReadFiles {
+        file_paths: vec![file_path.to_string_lossy().to_string()],
+        thread_id: TEST_THREAD_ID.to_string(),
+        start_line_nums: vec![Some(1)],
+        end_line_nums: vec![Some(200)],
+    };
+    winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read_full).await?;
+
+    // Now full overwrite should succeed
+    let file_write_retry = FileWriteOrEdit {
+        file_path: file_path.to_string_lossy().to_string(),
+        percentage_to_change: 100,
+        text_or_search_replace_blocks: "Completely new overwritten content\n".to_string(),
+        thread_id: TEST_THREAD_ID.to_string(),
+    };
+    let success = winx_code_agent::tools::file_write_or_edit::handle_tool_call(
+        &bash_state_arc,
+        file_write_retry,
+    )
+    .await?;
+    assert!(success.contains("Successfully") || success.contains("wrote"));
+
+    Ok(())
+}
