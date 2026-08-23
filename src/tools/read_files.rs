@@ -382,9 +382,13 @@ pub async fn handle_tool_call_detailed(
                     let entry = file_ranges_dict
                         .entry(canon_path.clone())
                         .or_insert_with(|| (Vec::new(), file_hash.clone(), total_lines));
+                    if entry.1 != file_hash || entry.2 != total_lines {
+                        // The same path can be requested more than once in one
+                        // batch. If it changed between reads, keep coverage only
+                        // for the version whose hash will guard the next edit.
+                        *entry = (Vec::new(), file_hash.clone(), total_lines);
+                    }
                     entry.0.push(line_range);
-                    entry.1 = file_hash;
-                    entry.2 = total_lines;
                     let _ = write!(
                         message,
                         "\n{}{}\n```\n{content}\n```",
