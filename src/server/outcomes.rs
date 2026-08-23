@@ -815,7 +815,8 @@ mod tests {
             "initialize_transition": "attached_existing",
             "initialize_reused": true,
             "initialize_response_mode": "compact",
-            "context_bytes": 0
+            "context_bytes": 0,
+            "workspace_root": "/workspace"
         }));
         decorate_success(
             "Initialize",
@@ -828,6 +829,7 @@ mod tests {
         assert_eq!(structured["data"]["initialize_transition"], "attached_existing");
         assert_eq!(structured["data"]["initialize_reused"], true);
         assert_eq!(structured["data"]["initialize_response_mode"], "compact");
+        assert_eq!(structured["data"]["workspace_root"], "/workspace");
         assert!(structured["data"].get("result").is_none());
     }
 
@@ -841,7 +843,11 @@ mod tests {
         let result = tool_failure(
             "FileWriteOrEdit",
             &error,
-            Some(&json!({"thread_id":"thread","file_path":"/workspace/README.md"})),
+            Some(&json!({
+                "thread_id":"thread",
+                "workspace_root":"/workspace",
+                "file_path":"/workspace/README.md"
+            })),
         )
         .expect("tool-level error");
         assert_eq!(result.is_error, Some(true));
@@ -852,12 +858,17 @@ mod tests {
             structured["nextAction"]["arguments"]["file_paths"],
             json!(["/workspace/README.md:20-40", "/workspace/README.md:90-"])
         );
+        assert_eq!(structured["nextAction"]["arguments"]["workspace_root"], "/workspace");
     }
 
     #[test]
     fn running_command_success_points_to_status_check() {
         let result = bash_success_result(
-            Some(&json!({"thread_id":"thread","action_json":{"type":"command","command":"test"}})),
+            Some(&json!({
+                "thread_id":"thread",
+                "workspace_root":"/workspace",
+                "action_json":{"type":"command","command":"test"}
+            })),
             BashCommandRuntimeResult {
                 result: crate::tools::bash_command::BashCommandResult {
                     output: "build output with arbitrary text".to_string(),
@@ -883,6 +894,34 @@ mod tests {
         assert_eq!(structured["status"], "running");
         assert_eq!(structured["nextAction"]["tool"], "BashCommand");
         assert_eq!(structured["nextAction"]["arguments"]["action_json"]["type"], "status_check");
+        assert_eq!(structured["nextAction"]["arguments"]["workspace_root"], "/workspace");
+    }
+
+    #[test]
+    fn workspace_mismatch_has_a_safe_structured_recovery() {
+        let error = WinxError::WorkspaceBindingMismatch {
+            thread_id: "wrong-thread".to_string(),
+            requested_workspace: "/intended".into(),
+            bound_workspace: "/other".into(),
+        };
+        let result = tool_failure(
+            "BashCommand",
+            &error,
+            Some(&json!({
+                "thread_id": "wrong-thread",
+                "workspace_root": "/intended"
+            })),
+        )
+        .expect("tool-level coherence error");
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured coherence error");
+        assert_eq!(structured["status"], "conflict");
+        assert_eq!(structured["errorCode"], "workspace_binding_mismatch");
+        assert_eq!(structured["retrySameCall"], false);
+        assert_eq!(structured["data"]["bound_workspace"], "/other");
+        assert_eq!(structured["nextAction"]["tool"], "Initialize");
+        assert_eq!(structured["nextAction"]["arguments"]["any_workspace_path"], "/intended");
     }
 
     #[test]

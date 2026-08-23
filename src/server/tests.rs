@@ -747,6 +747,39 @@ mod schema_tests {
     }
 
     #[test]
+    fn stateful_tool_schemas_require_the_exact_workspace_binding() {
+        for tool in winx_tools().into_iter().filter(|tool| tool.name != "Initialize") {
+            let properties = tool
+                .input_schema
+                .get("properties")
+                .and_then(serde_json::Value::as_object)
+                .expect("stateful input properties");
+            let workspace =
+                properties.get("workspace_root").expect("workspace_root binding property");
+            assert_eq!(workspace["type"], "string", "{}", tool.name);
+            assert!(
+                workspace["description"]
+                    .as_str()
+                    .is_some_and(|description| description.contains("not a filesystem sandbox")),
+                "{} does not distinguish identity from path authority: {workspace}",
+                tool.name
+            );
+            let required = tool
+                .input_schema
+                .get("required")
+                .and_then(serde_json::Value::as_array)
+                .expect("stateful required fields");
+            for field in ["thread_id", "workspace_root"] {
+                assert!(
+                    required.iter().any(|value| value.as_str() == Some(field)),
+                    "{} does not require {field}: {required:?}",
+                    tool.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn edit_schemas_advertise_bounded_inline_verification() {
         for name in ["FileWriteOrEdit", "MultiFileEdit"] {
             let tool = winx_tools()
