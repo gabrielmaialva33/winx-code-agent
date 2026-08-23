@@ -4,7 +4,7 @@
   <a href="streamable-http.md">English</a> • <b>Português</b> • <a href="streamable-http.zh.md">中文</a>
 </p>
 
-O Winx expõe todo o seu conjunto de ferramentas MCP através de um endpoint autenticado **Streamable HTTP** para ChatGPT, agentes hospedados na nuvem, automação remota e clientes que não podem iniciar um processo stdio local. O endpoint é `/mcp`; o listener padrão é `127.0.0.1:8000`.
+O Winx expõe um conjunto configurável de ferramentas MCP através de um endpoint autenticado **Streamable HTTP** para ChatGPT, agentes hospedados na nuvem, automação remota e clientes que não podem iniciar um processo stdio local. O endpoint é `/mcp`; o listener padrão é `127.0.0.1:8000` e o perfil de ferramentas padrão continua sendo `full`.
 
 Como esse endpoint concede recursos reais de shell e acesso ao sistema de arquivos, o Winx adota a postura de segurança **fail-closed**: exige credenciais fortes, recusa conexões fora do loopback a menos que explicitamente autorizado, impõe limites de custo de requisição e isola rigorosamente cada principal autenticado.
 
@@ -186,14 +186,17 @@ Crie o arquivo TOML de configuração:
 [[principals]]
 name = "chatgpt"
 token_file = "/home/alice/.config/winx-chatgpt-token"
+tool_profile = "coding"
 
 [[principals]]
 name = "automacao"
 token_file = "/home/alice/.config/winx-automation-token"
+tool_profile = "terminal"
 
 [[principals]]
 name = "ci"
 token_env = "WINX_CI_MCP_TOKEN"
+allowed_tools = ["Initialize", "BashCommand", "ReadFiles"]
 ```
 
 Inicie o servidor:
@@ -209,7 +212,38 @@ Regras dos principals:
 - Cada entrada deve definir exatamente `token_file` ou `token_env`;
 - Nomes, IDs derivados e tokens devem ser exclusivos;
 - Arquivos de token devem ser arquivos regulares (sem links simbólicos) com permissão restrita (`0600`);
-- Tokens devem ter no mínimo 32 bytes de comprimento.
+- Tokens devem ter no mínimo 32 bytes de comprimento;
+- `tool_profile` usa `full` por padrão; `allowed_tools`, quando presente, substitui o perfil e não pode ser vazio;
+- Os nomes na allowlist diferenciam maiúsculas de minúsculas, e uma ferramenta desconhecida impede a inicialização.
+
+### Perfis do catálogo de ferramentas
+
+Os perfis reduzem o payload de schemas de `tools/list` para clientes que não precisam de todas as capacidades. A mesma
+política é validada antes do dispatch, portanto não é possível chamar pelo nome uma ferramenta que ficou oculta.
+
+| Perfil | Ferramentas anunciadas |
+| :--- | :--- |
+| `full` | Todas as nove ferramentas (padrão retrocompatível) |
+| `coding` | `Initialize`, `BashCommand`, `ReadFiles`, as duas ferramentas de edição, `UndoEdit` e `CodeMap` |
+| `read-only` | `Initialize`, `ReadFiles`, `ReadImage` e `CodeMap` |
+| `terminal` | `Initialize` e `BashCommand` |
+
+Para um servidor de principal único, selecione o perfil na linha de comando:
+
+```bash
+winx-code-agent serve --http --token-file ~/.config/winx-http-token \
+  --tool-profile coding
+```
+
+Ou monte um catálogo exato repetindo `--allow-tool`; os nomes explícitos substituem `--tool-profile`:
+
+```bash
+winx-code-agent serve --http --token-file ~/.config/winx-http-token \
+  --allow-tool Initialize --allow-tool BashCommand --allow-tool ReadFiles
+```
+
+A política do catálogo não é um sandbox de shell. Qualquer perfil com `BashCommand` mantém os poderes de comando do
+modo Winx inicializado e do usuário do sistema operacional.
 
 ## Contrato de Orquestração com LLM
 
@@ -336,6 +370,8 @@ winx-code-agent serve --http \
 | `--token-file <PATH>` | Caminho para o arquivo contendo o Bearer Token |
 | `--principal-config <PATH>` | Caminho para o arquivo TOML com múltiplos principals |
 | `--token <VAL>` | Token direto via CLI (visível em `ps`) |
+| `--tool-profile <PROFILE>` | Catálogo do principal único: `full`, `coding`, `read-only` ou `terminal` |
+| `--allow-tool <NAME>` | Monta um catálogo exato do principal único; opção repetível |
 | `--session-affinity <MODE>` | Modo de afinidade: `workspace`, `conversation` ou `thread` |
 | `--allow-weak-token` | Permite tokens com menos de 32 bytes (apenas testes) |
 | `--allow-non-loopback` | Permite bind em interfaces não-loopback |
