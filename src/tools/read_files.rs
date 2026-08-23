@@ -206,6 +206,11 @@ fn truncate_to_token_budget(content: &mut String, max_tokens: usize, ids: Option
 fn trim_to_last_line_boundary(content: &mut String) {
     if let Some(last_nl) = content.rfind('\n') {
         content.truncate(last_nl + 1);
+    } else {
+        // A partial first line is not safe to record as read: the continuation
+        // would skip its unseen suffix. Keep no content/range and resume from
+        // the same line instead.
+        content.clear();
     }
 }
 
@@ -377,4 +382,79 @@ pub async fn handle_tool_call_detailed(
     }
 
     Ok(ReadFilesOutcome { text: message, successful_files, errors })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{read_file, trim_to_last_line_boundary};
+    use crate::state::bash_state::FileWhitelistData;
+
+    #[test]
+    fn token_cut_never_exposes_a_partial_line() {
+        let mut content = "complete line\npartial line suffix".to_string();
+        content.truncate("complete line\npartial".len());
+        trim_to_last_line_boundary(&mut content);
+        assert_eq!(content, "complete line\n");
+
+        let mut first_line_only = "partial first line".to_string();
+        first_line_only.truncate(7);
+        trim_to_last_line_boundary(&mut first_line_only);
+        assert!(first_line_only.is_empty());
+    }
+
+    #[tokio::test]
+    async fn token_truncation_whitelists_only_complete_visible_lines() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let path = temp.path().join("large.txt");
+        let source = (1..=200)
+            .map(|line| format!("line {line}: enough repeated content to consume tokens quickly\n"))
+            .collect::<String>();
+        std::fs::write(&path, source).expect("write fixture");
+
+        let (content, truncated, _, _, range, hash, total_lines) = read_file(
+            path.to_str().expect("UTF-8 path"),
+            Some(50),
+            temp.path(),
+            temp.path(),
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("truncated read");
+
+        assert!(truncated);
+        let visible = content.split("\n(...truncated)").next().expect("visible prefix");
+        let visible_lines = visible.lines().count();
+        assert_eq!(range, (1, visible_lines));
+        let coverage = FileWhitelistData::new(hash, vec![range], total_lines);
+        assert!(!coverage.is_read_enough());
+        assert_eq!(coverage.get_unread_ranges(), vec![(visible_lines + 1, total_lines)]);
+    }
+
+    #[tokio::test]
+    async fn oversized_first_line_records_no_read_coverage() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let path = temp.path().join("single-line.txt");
+        std::fs::write(&path, "x".repeat(10_000)).expect("write fixture");
+
+        let (content, truncated, _, _, range, hash, total_lines) = read_file(
+            path.to_str().expect("UTF-8 path"),
+            Some(10),
+            temp.path(),
+            temp.path(),
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("truncated read");
+
+        assert!(truncated);
+        assert!(content.starts_with("\n(...truncated) Showing up to line 0"));
+        assert_eq!(range, (1, 0));
+        let coverage = FileWhitelistData::new(hash, vec![range], total_lines);
+        assert!(coverage.line_ranges_read.is_empty());
+        assert_eq!(coverage.get_unread_ranges(), vec![(1, 1)]);
+    }
 }
