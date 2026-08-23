@@ -59,7 +59,7 @@ fn references_with_paths(
         return Err(WinxError::ArgumentParseError("Symbol name must not be empty.".to_string()));
     }
 
-    let root = resolve_in_workspace(&args.path, &cwd, &workspace_root).map_err(|e| {
+    let root = resolve_in_workspace(&args.path, cwd, &workspace_root).map_err(|e| {
         WinxError::PathSecurityError { path: PathBuf::from(&args.path), message: e.to_string() }
     })?;
     let max = if args.max_results == 0 { DEFAULT_MAX_HITS } else { args.max_results };

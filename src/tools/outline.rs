@@ -60,7 +60,7 @@ fn outline_with_paths(
     workspace_root: PathBuf,
 ) -> Result<(String, serde_json::Value)> {
     let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
-    let root = resolve_in_workspace(&args.path, &cwd, &workspace_root).map_err(|e| {
+    let root = resolve_in_workspace(&args.path, cwd, &workspace_root).map_err(|e| {
         WinxError::PathSecurityError { path: PathBuf::from(&args.path), message: e.to_string() }
     })?;
 
