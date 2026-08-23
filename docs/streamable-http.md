@@ -455,9 +455,30 @@ Rotation accepts `daily` (default), `hourly`, or `never`; retention applies to d
 On Unix, every initial and rotated file is created/opened with `O_NOFOLLOW` and mode `0600`; an existing broader mode is
 reduced to `0600`, and newly created log directories use `0700`. Each tool event contains the tool/action, principal, scoped
 thread, hashed request and MCP-session correlation, client name and version, negotiated protocol, outcome, result status,
-duration, and response size. HTTP events contain peer, method, status, and duration. Command text, file contents, tool
+duration, response size, batch item count, and the configured worker limit (`0` for non-batched tools). HTTP events contain
+peer, method, status, and duration. Command text, file contents, tool
 output, bearer tokens, and raw conversation identities are never written to this sink. Ordinary warnings and diagnostics
 continue to stderr according to `RUST_LOG` and `WINX_LOG_FORMAT`.
+
+For a quick per-tool latency view across the active and rotated files:
+
+```bash
+jq -s '
+  def pct($p): sort | .[((length - 1) * $p | floor)];
+  [.[] | select(.fields.event == "tool_call") | .fields]
+  | group_by(.tool)
+  | map(. as $calls | {
+      tool: $calls[0].tool,
+      calls: ($calls | length),
+      p50_ms: ([$calls[].duration_ms] | pct(0.50)),
+      p95_ms: ([$calls[].duration_ms] | pct(0.95)),
+      avg_response_bytes: (([$calls[].response_bytes] | add) / ($calls | length))
+    })
+' ~/.local/state/winx/usage.jsonl*
+```
+
+Use `request_id` to correlate a `tool_call` with its `http_request`; the difference between their durations approximates
+transport/adapter overhead without exposing payloads.
 
 Landlock is applied before the non-blocking logging worker is created, so the writer inherits the same domain as Tokio and
 PTY children. With `WINX_SANDBOX=1`, the usage-log path must therefore be under the startup workspace, `/tmp`, or an

@@ -332,7 +332,23 @@ WINX_USAGE_LOG_KEEP_DAYS=7 \
 winx-code-agent serve --http --token-file ~/.config/winx-http-token
 ```
 
-Nenhum comando, conteúdo de arquivo, saída de ferramenta ou credencial é gravado nesse log de telemetria; gravam-se apenas durações, status de resultado, tamanhos de resposta e metadados de protocolo.
+Nenhum comando, conteúdo de arquivo, saída de ferramenta ou credencial é gravado nesse log de telemetria; gravam-se apenas durações, status de resultado, tamanhos de resposta, quantidade de itens do lote, limite de workers e metadados de protocolo. O `request_id` correlaciona os eventos `tool_call` e `http_request`, permitindo separar tempo da ferramenta de overhead do transporte sem expor o payload.
+
+Uma visão rápida de latência por ferramenta pode ser gerada com:
+
+```bash
+jq -s '
+  def pct($p): sort | .[((length - 1) * $p | floor)];
+  [.[] | select(.fields.event == "tool_call") | .fields]
+  | group_by(.tool)
+  | map(. as $calls | {
+      tool: $calls[0].tool,
+      calls: ($calls | length),
+      p50_ms: ([$calls[].duration_ms] | pct(0.50)),
+      p95_ms: ([$calls[].duration_ms] | pct(0.95))
+    })
+' ~/.local/state/winx/usage.jsonl*
+```
 
 ## Exposição de Rede
 

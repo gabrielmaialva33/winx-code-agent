@@ -320,7 +320,23 @@ WINX_USAGE_LOG_KEEP_DAYS=7 \
 winx-code-agent serve --http --token-file ~/.config/winx-http-token
 ```
 
-日志文件权限严格限定为 `0600`。命令文本、文件内容、Token 及原始对话标识绝不会写入遥测日志中。
+日志文件权限严格限定为 `0600`。命令文本、文件内容、Token 及原始对话标识绝不会写入遥测日志中；日志仅记录时延、结果状态、响应大小、批次项数、worker 上限和协议元数据。可通过 `request_id` 关联 `tool_call` 与 `http_request`，从而在不暴露负载的情况下区分工具耗时和传输开销。
+
+可使用以下命令快速查看各工具的延迟分布：
+
+```bash
+jq -s '
+  def pct($p): sort | .[((length - 1) * $p | floor)];
+  [.[] | select(.fields.event == "tool_call") | .fields]
+  | group_by(.tool)
+  | map(. as $calls | {
+      tool: $calls[0].tool,
+      calls: ($calls | length),
+      p50_ms: ([$calls[].duration_ms] | pct(0.50)),
+      p95_ms: ([$calls[].duration_ms] | pct(0.95))
+    })
+' ~/.local/state/winx/usage.jsonl*
+```
 
 ## 网络暴露建议
 
