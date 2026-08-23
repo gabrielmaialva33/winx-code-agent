@@ -26,7 +26,7 @@ use crate::state::live_terminal::ScreenUpdate;
 use crate::state::pty::PtyShell;
 use crate::types::{normalize_thread_id, BashCommand, BashCommandAction};
 
-use execution::execute_command;
+use execution::{execute_command, CommandExecutionContext};
 use interaction::{execute_send_ascii, execute_send_specials, execute_send_text};
 use output::{execute_status_check, finalize_tombstone};
 use tui::{execute_screen, execute_wait_for_turn};
@@ -485,8 +485,10 @@ async fn execute_bash_action(
                 *allow_multi,
                 timeout_secs,
                 delivery_cursor,
-                &options,
-                reset_transition.as_mut(),
+                CommandExecutionContext {
+                    options: &options,
+                    reset_transition: reset_transition.as_mut(),
+                },
             )
             .await
         }
