@@ -492,6 +492,8 @@ async fn single_principal_cli_allowlist_replaces_the_full_catalog() -> anyhow::R
     assert_eq!(names, vec!["Initialize", "ReadFiles", "FileWriteOrEdit"], "{response}");
     assert_eq!(response["result"]["cacheScope"], "private", "{response}");
 
+    let forbidden_directory = tempfile::tempdir()?;
+    let forbidden_path = forbidden_directory.path().join("must-not-exist.txt");
     let forbidden = serde_json::json!({
         "jsonrpc": "2.0",
         "id": "verification-without-bash",
@@ -500,7 +502,7 @@ async fn single_principal_cli_allowlist_replaces_the_full_catalog() -> anyhow::R
             "_meta": modern_request_meta("allowlist-client", false),
             "name": "FileWriteOrEdit",
             "arguments": {
-                "file_path": "/tmp/not-written-by-policy-test",
+                "file_path": forbidden_path,
                 "percentage_to_change": 100,
                 "text_or_search_replace_blocks": "content",
                 "verify_command": "true",
@@ -523,6 +525,7 @@ async fn single_principal_cli_allowlist_replaces_the_full_catalog() -> anyhow::R
             .is_some_and(|message| message.contains("requires BashCommand")),
         "{forbidden}"
     );
+    assert!(!forbidden_path.exists());
     Ok(())
 }
 
