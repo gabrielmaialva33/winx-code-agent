@@ -5,8 +5,7 @@ use tracing::{debug, error, warn};
 
 use super::output::{clear_to_run_async, render_status, status_state, wait_for_output};
 use super::{
-    main_shell, runtime_rendered, send_utf8_in_byte_chunks, ShellDeliveryCursor,
-    ShellResetTransition, DEFAULT_TIMEOUT,
+    main_shell, runtime_rendered, send_utf8_in_byte_chunks, ShellDeliveryCursor, DEFAULT_TIMEOUT,
 };
 use crate::errors::{Result, WinxError};
 use crate::runtime::{lock_session_store, BashCommandRuntimeResult, ShellActionOptions};
@@ -17,7 +16,7 @@ const COMMAND_CHUNK_SIZE: usize = 64;
 
 pub(super) struct CommandExecutionContext<'a> {
     pub(super) options: &'a ShellActionOptions,
-    pub(super) reset_transition: Option<&'a mut ShellResetTransition>,
+    pub(super) foreground_preflight_complete: bool,
 }
 
 fn spawn_background_reaper(owner_thread_id: String, background_id: String) {
@@ -86,7 +85,7 @@ pub(super) async fn execute_command(
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
     context: CommandExecutionContext<'_>,
 ) -> Result<BashCommandRuntimeResult> {
-    let CommandExecutionContext { options, reset_transition } = context;
+    let CommandExecutionContext { options, foreground_preflight_complete } = context;
     let stripped_command = strip_tail_pipe(command);
     let command = stripped_command.as_str();
     debug!(bytes = command.len(), allow_multi, "Processing Command action");
@@ -145,7 +144,9 @@ pub(super) async fn execute_command(
         })?;
     }
 
-    let needs_reset = if shell.lock().await.is_some() {
+    let needs_reset = if foreground_preflight_complete {
+        false
+    } else if shell.lock().await.is_some() {
         let cleared = clear_to_run_async(&shell, DEFAULT_TIMEOUT).await;
         #[cfg(test)]
         let cleared = cleared && !options.force_clear_to_run_failure;
@@ -159,11 +160,7 @@ pub(super) async fn execute_command(
         false
     };
     if needs_reset {
-        let reset = match reset_transition {
-            Some(transition) => transition.reset_shell(bash_state).await,
-            None => bash_state.init_pty_shell().await,
-        };
-        if let Err(error) = reset {
+        if let Err(error) = bash_state.init_pty_shell().await {
             warn!("Failed to reset shell after clear_to_run: {error}");
         }
     }

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Mutex, OwnedRwLockReadGuard, RwLock};
+use tokio::sync::Mutex;
 use tracing::{error, info};
 
 pub use super::background_shell::{BackgroundShellManager, ExitedShellInfo};
@@ -32,36 +32,6 @@ use output::{execute_status_check, finalize_tombstone};
 use tui::{execute_screen, execute_wait_for_turn};
 
 type SharedPtyShell = Arc<Mutex<Option<PtyShell>>>;
-
-/// Guardian-only ownership of one session operation. Automatic PTY recovery
-/// promotes the reader to a writer, rotates the execution incarnation before
-/// replacing the shell, and then downgrades back to a reader.
-pub(crate) struct ShellResetTransition {
-    barrier: Arc<RwLock<()>>,
-    operation: Option<OwnedRwLockReadGuard<()>>,
-    session_epoch: Arc<Mutex<String>>,
-    next_epoch: String,
-}
-
-impl ShellResetTransition {
-    pub(crate) fn new(
-        barrier: Arc<RwLock<()>>,
-        operation: OwnedRwLockReadGuard<()>,
-        session_epoch: Arc<Mutex<String>>,
-        next_epoch: String,
-    ) -> Self {
-        Self { barrier, operation: Some(operation), session_epoch, next_epoch }
-    }
-
-    async fn reset_shell(&mut self, state: &mut BashState) -> anyhow::Result<()> {
-        drop(self.operation.take());
-        let operation = Arc::clone(&self.barrier).write_owned().await;
-        *self.session_epoch.lock().await = self.next_epoch.clone();
-        let result = state.init_pty_shell().await;
-        self.operation = Some(operation.downgrade());
-        result
-    }
-}
 
 /// Authoritative process state produced by the shell runtime. It is transported
 /// separately from human-readable terminal output, so command text cannot spoof
@@ -190,6 +160,31 @@ fn effective_wait_for_seconds(wait_for_seconds: Option<f32>) -> f64 {
     wait_for_seconds.map_or(DEFAULT_TIMEOUT, |seconds| f64::from(seconds).max(0.0))
 }
 
+/// Guardian foreground preflight. The caller owns the session operation
+/// writer, so this never races token validation and runs before delivery cursor
+/// or foreground-command gates are acquired.
+pub(crate) async fn guardian_foreground_shell_needs_reset(
+    bash_state: &mut BashState,
+    _options: &ShellActionOptions,
+) -> anyhow::Result<bool> {
+    let shell = main_shell(bash_state);
+    let (missing, running) = {
+        let guard = shell.lock().await;
+        (guard.is_none(), guard.as_ref().is_some_and(|shell| shell.command_running))
+    };
+    if running {
+        return Ok(false);
+    }
+    if missing {
+        bash_state.init_pty_shell().await?;
+        return Ok(false);
+    }
+    let cleared = output::clear_to_run_async(&shell, DEFAULT_TIMEOUT).await;
+    #[cfg(test)]
+    let cleared = cleared && !_options.force_clear_to_run_failure;
+    Ok(!cleared)
+}
+
 fn send_utf8_in_byte_chunks(shell: &mut PtyShell, text: &str, chunk_size: usize) -> Result<()> {
     let mut start = 0;
     while start < text.len() {
@@ -244,7 +239,7 @@ pub(crate) async fn handle_embedded_tool_call(
         command,
         None,
         ShellActionOptions::default(),
-        None,
+        false,
     )
     .await?
     .result)
@@ -255,7 +250,7 @@ pub(crate) async fn handle_embedded_tool_call_detailed(
     command: BashCommand,
     options: ShellActionOptions,
 ) -> Result<BashCommandRuntimeResult> {
-    handle_embedded_tool_call_inner(bash_state, command, None, options, None).await
+    handle_embedded_tool_call_inner(bash_state, command, None, options, false).await
 }
 
 pub(crate) async fn handle_embedded_tool_call_with_cursor_detailed(
@@ -263,7 +258,7 @@ pub(crate) async fn handle_embedded_tool_call_with_cursor_detailed(
     command: BashCommand,
     delivery_cursor: &Arc<Mutex<ShellDeliveryCursor>>,
     options: ShellActionOptions,
-    reset_transition: Option<ShellResetTransition>,
+    foreground_preflight_complete: bool,
 ) -> Result<BashCommandRuntimeResult> {
     let mut delivery_cursor = delivery_cursor.lock().await;
     handle_embedded_tool_call_inner(
@@ -271,7 +266,7 @@ pub(crate) async fn handle_embedded_tool_call_with_cursor_detailed(
         command,
         Some(&mut delivery_cursor),
         options,
-        reset_transition,
+        foreground_preflight_complete,
     )
     .await
 }
@@ -287,13 +282,13 @@ async fn capture_embedded_state(
     Ok((state.clone(), operation_guard))
 }
 
-#[tracing::instrument(level = "info", skip(bash_state, command, delivery_cursor, reset_transition))]
+#[tracing::instrument(level = "info", skip(bash_state, command, delivery_cursor))]
 async fn handle_embedded_tool_call_inner(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
     options: ShellActionOptions,
-    reset_transition: Option<ShellResetTransition>,
+    foreground_preflight_complete: bool,
 ) -> Result<BashCommandRuntimeResult> {
     let action_kind = match &command.action_json {
         BashCommandAction::Command { .. } => "command",
@@ -371,7 +366,7 @@ async fn handle_embedded_tool_call_inner(
         timeout_secs,
         delivery_cursor,
         options,
-        reset_transition,
+        foreground_preflight_complete,
     )
     .await;
 
@@ -431,7 +426,7 @@ async fn execute_bash_action(
     timeout_secs: f64,
     delivery_cursor: Option<&mut ShellDeliveryCursor>,
     options: ShellActionOptions,
-    mut reset_transition: Option<ShellResetTransition>,
+    foreground_preflight_complete: bool,
 ) -> Result<BashCommandRuntimeResult> {
     let mut is_background = false;
     let mut background_id: Option<String> = None;
@@ -485,10 +480,7 @@ async fn execute_bash_action(
                 *allow_multi,
                 timeout_secs,
                 delivery_cursor,
-                CommandExecutionContext {
-                    options: &options,
-                    reset_transition: reset_transition.as_mut(),
-                },
+                CommandExecutionContext { options: &options, foreground_preflight_complete },
             )
             .await
         }
