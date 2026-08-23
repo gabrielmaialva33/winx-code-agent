@@ -225,6 +225,146 @@ pub fn extract_command_texts(command: &str) -> Result<Vec<String>> {
     Ok(texts)
 }
 
+/// Return statically visible filesystem destinations written by a shell command.
+///
+/// This is deliberately conservative: dynamic expansions are ignored instead of
+/// guessed, while output redirects and common file-producing commands expose
+/// their literal destinations. Callers use the result for narrow path-policy
+/// checks, never as a general shell sandbox.
+pub fn extract_static_write_paths(command: &str) -> Vec<String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() || trimmed.contains('\0') {
+        return Vec::new();
+    }
+
+    let parse_src = neutralize_supplementary(trimmed);
+    let mut parser = Parser::new();
+    let language: tree_sitter::Language = tree_sitter_bash::LANGUAGE.into();
+    if parser.set_language(&language).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(parse_src.as_ref(), None) else { return Vec::new() };
+
+    let mut paths = Vec::new();
+    collect_static_write_paths(tree.root_node(), parse_src.as_ref().as_bytes(), &mut paths);
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn collect_static_write_paths(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    match node.kind() {
+        "file_redirect" => collect_redirect_destination(node, src, out),
+        "command" => collect_command_destinations(node, src, out),
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_static_write_paths(child, src, out);
+    }
+}
+
+fn collect_redirect_destination(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    let Some(destination) = node.child_by_field_name("destination") else { return };
+    let prefix_end = destination.start_byte().saturating_sub(node.start_byte());
+    let Ok(redirect) = node.utf8_text(src) else { return };
+    let prefix = redirect.get(..prefix_end).unwrap_or(redirect);
+    if !prefix.contains('>') {
+        return;
+    }
+    if let Ok(text) = destination.utf8_text(src) {
+        push_static_shell_word(text, out);
+    }
+}
+
+fn collect_command_destinations(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
+    let Some(name) = node.child_by_field_name("name") else { return };
+    let Ok(name) = name.utf8_text(src) else { return };
+    let Some(name) = static_shell_word(name) else { return };
+    let name = std::path::Path::new(&name)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or(name.as_str());
+
+    let mut cursor = node.walk();
+    let arguments = node
+        .children_by_field_name("argument", &mut cursor)
+        .filter_map(|argument| argument.utf8_text(src).ok())
+        .filter_map(static_shell_word)
+        .collect::<Vec<_>>();
+    let positional =
+        arguments.iter().filter(|argument| !argument.starts_with('-')).cloned().collect::<Vec<_>>();
+
+    match name {
+        "tee" | "touch" | "truncate" | "mkdir" | "mkfifo" => {
+            out.extend(positional);
+        }
+        "cp" | "mv" | "install" | "ln" => {
+            if let Some(destination) = positional.last() {
+                out.push(destination.clone());
+            }
+            for argument in &arguments {
+                if let Some(destination) = argument.strip_prefix("--target-directory=") {
+                    out.push(destination.to_string());
+                }
+            }
+        }
+        "dd" => {
+            for argument in &arguments {
+                if let Some(destination) = argument.strip_prefix("of=") {
+                    out.push(destination.to_string());
+                }
+            }
+        }
+        "sed" | "perl"
+            if arguments.iter().any(|argument| {
+                argument == "-i"
+                    || argument.starts_with("-i")
+                    || argument == "-pi"
+                    || argument.starts_with("-pi")
+            }) =>
+        {
+            out.extend(positional);
+        }
+        _ => {}
+    }
+}
+
+fn push_static_shell_word(text: &str, out: &mut Vec<String>) {
+    if let Some(word) = static_shell_word(text) {
+        out.push(word);
+    }
+}
+
+fn static_shell_word(text: &str) -> Option<String> {
+    let text = text.trim();
+    if text.is_empty()
+        || text.contains('$')
+        || text.contains('`')
+        || text.contains('*')
+        || text.contains('?')
+    {
+        return None;
+    }
+
+    let bytes = text.as_bytes();
+    let unquoted = if bytes.len() >= 2
+        && matches!(
+            (bytes.first(), bytes.last()),
+            (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"'))
+        ) {
+        &text[1..text.len() - 1]
+    } else {
+        text
+    };
+    if unquoted.is_empty() {
+        None
+    } else {
+        Some(unquoted.replace("\\ ", " ").replace("\\\"", "\"").replace("\\'", "'"))
+    }
+}
+
 fn collect_command_texts(node: Node<'_>, src: &[u8], out: &mut Vec<String>) {
     if node.kind() == "command" {
         if let Ok(text) = node.utf8_text(src) {
@@ -399,6 +539,7 @@ mod tests {
     use super::assert_single_statement;
     use super::detect_allowlist_bypass;
     use super::extract_command_texts;
+    use super::extract_static_write_paths;
     use super::is_architect_command_allowed;
     use proptest::prelude::*;
 
@@ -415,6 +556,11 @@ mod tests {
         #[test]
         fn extract_command_texts_never_panics(cmd in "[\\s\\S]{0,80}") {
             let _ = extract_command_texts(&cmd);
+        }
+
+        #[test]
+        fn extract_static_write_paths_never_panics(cmd in "[\\s\\S]{0,80}") {
+            let _ = extract_static_write_paths(&cmd);
         }
     }
 
@@ -483,6 +629,32 @@ mod tests {
 
         let subst = extract_command_texts("ls $(rm -rf x)").unwrap_or_default();
         assert!(subst.iter().any(|c| c.starts_with("rm")));
+    }
+
+    #[test]
+    fn extracts_literal_shell_write_destinations() {
+        let command = "cat <<'EOF' > '.winx-review-carrier.js'\ncontent\nEOF\n\
+                       printf x | tee .winx/tmp/direct.ts\n\
+                       cp source.ts .winx/tmp/copied.ts\n\
+                       dd if=source of=.winx/tmp/image.bin";
+        let paths = extract_static_write_paths(command);
+
+        for expected in [
+            ".winx-review-carrier.js",
+            ".winx/tmp/direct.ts",
+            ".winx/tmp/copied.ts",
+            ".winx/tmp/image.bin",
+        ] {
+            assert!(paths.iter().any(|path| path == expected), "missing {expected}: {paths:?}");
+        }
+    }
+
+    #[test]
+    fn ignores_reads_and_dynamic_session_destinations() {
+        let command = "cat .winx-review-carrier.js\n\
+                       rg needle .winx/tmp/direct.ts\n\
+                       printf x > \"$WINX_TEMP_DIR/helper.ts\"";
+        assert!(extract_static_write_paths(command).is_empty());
     }
 
     #[test]

@@ -605,14 +605,17 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
     };
     let temporary_artifact_instruction = if compact_response {
         format!(
-            "Use temporary_artifact_dir={} for session-local derived helpers.",
+            "Use temporary_artifact_dir={} for session-local derived helpers; BashCommand exports \
+             the same path as WINX_TEMP_DIR.",
             temporary_artifact.directory.display()
         )
     } else {
         format!(
             "Use temporary_artifact_dir={} for session-local derived helpers only; keep names \
              short, preserve source-path/line provenance, and treat helpers as non-canonical. The \
-             directory is created on demand and expired after {} seconds of inactivity.",
+             directory is created on demand and expired after {} seconds of inactivity. Every \
+             BashCommand PTY exports the same path as WINX_TEMP_DIR; shell-generated helpers must \
+             stay beneath it.",
             temporary_artifact.directory.display(),
             temporary_artifact.ttl_seconds,
         )

@@ -134,6 +134,128 @@ pub fn validate_edit_target(
     Ok(())
 }
 
+/// Reject statically visible shell writes that bypass the managed session area.
+///
+/// Bash remains a general-purpose operator-controlled capability, so this is not
+/// presented as a filesystem sandbox. It covers the high-confidence cases an
+/// agent can correct immediately: literal output redirects, common destination
+/// arguments, and embedded language file-writer calls that name a Winx helper.
+pub fn validate_bash_command(
+    workspace_root: &Path,
+    cwd: &Path,
+    thread_id: &str,
+    command: &str,
+) -> Result<()> {
+    let info = session_info(workspace_root, thread_id);
+    let mut paths = crate::utils::bash_parser::extract_static_write_paths(command);
+    paths.extend(embedded_writer_paths(command));
+    paths.sort();
+    paths.dedup();
+
+    for path in paths {
+        validate_bash_write_target(workspace_root, cwd, &path, &info)?;
+    }
+    Ok(())
+}
+
+fn validate_bash_write_target(
+    workspace_root: &Path,
+    cwd: &Path,
+    path: &str,
+    info: &AgentTempInfo,
+) -> Result<()> {
+    let expanded = crate::utils::path::expand_user(path);
+    let requested = if Path::new(&expanded).is_absolute() {
+        PathBuf::from(&expanded)
+    } else {
+        cwd.join(&expanded)
+    };
+    let resolved = crate::utils::path::resolve_in_workspace(path, cwd, workspace_root)
+        .unwrap_or_else(|_| requested.clone());
+    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
+
+    let requested_relative = workspace_relative(&requested, workspace_root, &workspace);
+    let resolved_relative = workspace_relative(&resolved, workspace_root, &workspace);
+    for relative in
+        [requested_relative.as_deref(), resolved_relative.as_deref()].into_iter().flatten()
+    {
+        let Some(Component::Normal(first)) = relative.components().next() else { continue };
+        let first = first.to_string_lossy();
+        if first == ".winx_tmp" || first.starts_with(".winx-") {
+            return Err(policy_error(
+                &requested,
+                info,
+                format!(
+                    "shell writes to Winx helper artifacts at the workspace root are not \
+                     allowed; use WINX_TEMP_DIR={} instead",
+                    info.directory.display()
+                ),
+            ));
+        }
+        if is_temp_relative(relative) {
+            reject_symlinked_temp_root(&workspace, &requested, info)?;
+            validate_session_relative_path(&workspace.join(relative), info)?;
+        }
+    }
+    Ok(())
+}
+
+fn embedded_writer_paths(command: &str) -> Vec<String> {
+    let lower = command.to_ascii_lowercase();
+    let explicit_writer = [
+        ".write_text(",
+        ".write_bytes(",
+        "writefilesync(",
+        "appendfilesync(",
+        "writefile(",
+        "appendfile(",
+        "bun.write(",
+        "deno.write",
+        "file.write(",
+        "file.binwrite(",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    let writable_open = lower.contains("open(")
+        && [", 'w", ", \"w", ", 'a", ", \"a", ", 'x", ", \"x", ", 'r+", ", \"r+"]
+            .iter()
+            .any(|mode| lower.contains(mode));
+    if !explicit_writer && !writable_open {
+        return Vec::new();
+    }
+
+    quoted_literals(command).into_iter().filter(|literal| literal.contains(".winx")).collect()
+}
+
+fn quoted_literals(value: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    let mut chars = value.chars();
+    while let Some(character) = chars.next() {
+        if character != '\'' && character != '"' {
+            continue;
+        }
+        let quote = character;
+        let mut literal = String::new();
+        let mut escaped = false;
+        for character in chars.by_ref() {
+            if escaped {
+                literal.push(character);
+                escaped = false;
+            } else if character == '\\' && quote == '"' {
+                escaped = true;
+            } else if character == quote {
+                break;
+            } else {
+                literal.push(character);
+            }
+        }
+        if !literal.is_empty() {
+            literals.push(literal);
+        }
+    }
+    literals
+}
+
 fn workspace_relative(
     path: &Path,
     workspace_root: &Path,
@@ -438,6 +560,41 @@ mod tests {
         let error = validate_edit_target(workspace.path(), "active", &other, &other, None, 128)
             .expect_err("cross-session temp write must fail");
         assert!(error.to_string().contains("session-scoped"), "{error}");
+    }
+
+    #[test]
+    fn bash_writes_accept_only_the_active_session_temp_path() {
+        let workspace = TempDir::new().unwrap();
+        let info = session_info(workspace.path(), "active");
+        let valid = format!("printf x > '{}'", info.directory.join("adapter.ts").display());
+        validate_bash_command(workspace.path(), workspace.path(), "active", &valid)
+            .expect("active session destination must be accepted");
+
+        for command in [
+            "printf x > .winx/tmp/direct.ts",
+            "printf x | tee .winx-review-carrier.js",
+            "python - <<'PY'\nfrom pathlib import Path\nPath('.winx/tmp/direct.py').write_text('x')\nPY",
+        ] {
+            let error = validate_bash_command(workspace.path(), workspace.path(), "active", command)
+                .expect_err("unmanaged shell helper must fail");
+            assert!(
+                error.to_string().to_ascii_lowercase().contains("temporary artifact policy"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn bash_temp_preflight_does_not_block_reads_or_dynamic_active_path() {
+        let workspace = TempDir::new().unwrap();
+        for command in [
+            "rg needle .winx/tmp/direct.ts",
+            "cat .winx-review-carrier.js",
+            "mkdir -p \"$WINX_TEMP_DIR\" && printf x > \"$WINX_TEMP_DIR/helper.ts\"",
+        ] {
+            validate_bash_command(workspace.path(), workspace.path(), "active", command)
+                .expect("read or runtime-provided destination must remain available");
+        }
     }
 
     #[test]

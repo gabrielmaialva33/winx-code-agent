@@ -102,6 +102,12 @@ pub(super) async fn execute_command(
         let allow_shell_probe = matches!(bash_state.mode, crate::types::Modes::Wcgw);
         crate::utils::bash_parser::assert_single_statement(command, allow_shell_probe)?;
     }
+    crate::utils::agent_temp::validate_bash_command(
+        &bash_state.workspace_root,
+        &bash_state.cwd,
+        &bash_state.current_thread_id,
+        command,
+    )?;
     if options.is_launch_cancelled() {
         return Err(WinxError::CommandExecutionError(
             "task was cancelled before command launch".to_string(),
@@ -212,16 +218,25 @@ async fn execute_in_background(
 
     let background_id = {
         let cwd = bash_state.cwd.clone();
-        let shell = tokio::task::spawn_blocking(move || PtyShell::new(&cwd, restricted_mode))
-            .await
-            .map_err(|error| {
-                WinxError::CommandExecutionError(format!("bg shell init task failed: {error}"))
-            })?
-            .map_err(|error| {
-                WinxError::CommandExecutionError(format!(
-                    "Failed to start background shell: {error}"
-                ))
-            })?;
+        let workspace_root = bash_state.workspace_root.clone();
+        let temporary_artifact_dir =
+            crate::utils::agent_temp::session_info(&workspace_root, &bash_state.current_thread_id)
+                .directory;
+        let shell = tokio::task::spawn_blocking(move || {
+            PtyShell::new_with_agent_paths(
+                &cwd,
+                restricted_mode,
+                Some(&workspace_root),
+                Some(&temporary_artifact_dir),
+            )
+        })
+        .await
+        .map_err(|error| {
+            WinxError::CommandExecutionError(format!("bg shell init task failed: {error}"))
+        })?
+        .map_err(|error| {
+            WinxError::CommandExecutionError(format!("Failed to start background shell: {error}"))
+        })?;
         lock_session_store().register_shell(&bash_state.current_thread_id, shell)?
     };
 
