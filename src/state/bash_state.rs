@@ -141,6 +141,11 @@ const EDIT_CHECKPOINT_MAX_CONTENT_BYTES: usize = 1_000_000;
 /// persisted state.
 const MAX_WHITELIST_FILES: usize = 1_024;
 
+/// Recent image fingerprints remembered per live session. The cache contains
+/// no image bytes and is intentionally not persisted; it only prevents an LLM
+/// from resending the same unchanged image in one conversation.
+const IMAGE_DELIVERY_CACHE_CAP: usize = 32;
+
 /// A single file's pre-edit state, captured by `FileWriteOrEdit`/`MultiFileEdit`
 /// after a successful write so `UndoEdit` can restore it. Only existing files get
 /// one (a brand-new file's creation is not undoable - there is no prior content).
@@ -182,6 +187,7 @@ pub struct BashState {
     /// In-memory aggregate guard for syntax maps over non-canonical helpers.
     /// Canonical `CodeMap` calls are intentionally not counted.
     pub derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage,
+    image_deliveries: VecDeque<String>,
 }
 
 impl Default for BashState {
@@ -213,6 +219,31 @@ impl BashState {
             initialized: false,
             edit_checkpoints: VecDeque::new(),
             derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage::default(),
+            image_deliveries: VecDeque::new(),
+        }
+    }
+
+    /// Return whether this image was already delivered, refreshing its LRU
+    /// position on a hit. Fingerprints are content-based, so aliases and copies
+    /// cannot bypass deduplication accidentally.
+    pub(crate) fn image_was_delivered(&mut self, fingerprint: &str) -> bool {
+        let Some(index) = self.image_deliveries.iter().position(|item| item == fingerprint) else {
+            return false;
+        };
+        if let Some(item) = self.image_deliveries.remove(index) {
+            self.image_deliveries.push_back(item);
+        }
+        true
+    }
+
+    /// Record a successful image delivery without retaining its payload.
+    pub(crate) fn record_image_delivery(&mut self, fingerprint: String) {
+        if let Some(index) = self.image_deliveries.iter().position(|item| item == &fingerprint) {
+            self.image_deliveries.remove(index);
+        }
+        self.image_deliveries.push_back(fingerprint);
+        while self.image_deliveries.len() > IMAGE_DELIVERY_CACHE_CAP {
+            self.image_deliveries.pop_front();
         }
     }
 
@@ -383,9 +414,11 @@ impl BashState {
 
     pub fn apply_snapshot(&mut self, snapshot: &BashStateSnapshot) {
         let (cwd, root, mode, bmode, emode, wmode, whitelist, tid) = snapshot.to_state_components();
+        let root = PathBuf::from(root);
+        let image_identity_changed = self.current_thread_id != tid || self.workspace_root != root;
 
         self.cwd = PathBuf::from(cwd);
-        self.workspace_root = PathBuf::from(root);
+        self.workspace_root = root;
         self.mode = mode;
         self.bash_command_mode = bmode;
         self.file_edit_mode = emode;
@@ -393,6 +426,9 @@ impl BashState {
         self.whitelist_for_overwrite = whitelist;
         self.rebuild_whitelist_recency();
         self.current_thread_id = tid;
+        if image_identity_changed {
+            self.image_deliveries.clear();
+        }
         self.initialized = true;
     }
 
@@ -505,5 +541,23 @@ mod whitelist_range_tests {
         assert!(state.whitelist_for_overwrite.contains_key("/workspace/file-0000.rs"));
         assert!(!state.whitelist_for_overwrite.contains_key("/workspace/file-0001.rs"));
         assert!(state.whitelist_for_overwrite.contains_key("/workspace/newest.rs"));
+    }
+
+    #[test]
+    fn image_delivery_cache_survives_same_session_snapshot_sync_only() {
+        let mut state = BashState::new();
+        state.workspace_root = "/workspace/one".into();
+        state.current_thread_id = "one".to_string();
+        state.record_image_delivery("fingerprint".to_string());
+
+        let same_session = state.snapshot();
+        state.apply_snapshot(&same_session);
+        assert!(state.image_was_delivered("fingerprint"));
+
+        let mut other = BashState::new();
+        other.workspace_root = "/workspace/two".into();
+        other.current_thread_id = "two".to_string();
+        state.apply_snapshot(&other.snapshot());
+        assert!(!state.image_was_delivered("fingerprint"));
     }
 }
