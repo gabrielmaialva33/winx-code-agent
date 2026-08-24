@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::TcpListener as StdTcpListener;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -470,6 +470,30 @@ async fn bash_as(
     post_json_as(address, "2026-07-28", "tools/call", &request.to_string(), token).await
 }
 
+async fn code_map_as(
+    address: std::net::SocketAddr,
+    token: &str,
+    thread_id: &str,
+    client_name: &str,
+    path: &Path,
+) -> anyhow::Result<String> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": format!("code-map-{client_name}"),
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta(client_name, false),
+            "name": "CodeMap",
+            "arguments": {
+                "operation": "outline",
+                "path": path,
+                "thread_id": thread_id
+            }
+        }
+    });
+    post_json_as(address, "2026-07-28", "tools/call", &request.to_string(), token).await
+}
+
 async fn write_with_verification(
     address: std::net::SocketAddr,
     thread_id: &str,
@@ -563,6 +587,21 @@ fn assert_compact_initialize_response(
         parsed["result"]["structuredContent"]["data"]["temporary_artifact_env"], "WINX_TEMP_DIR",
         "{response}"
     );
+    assert_eq!(
+        parsed["result"]["structuredContent"]["data"]["temporary_artifact_max_files"],
+        winx_code_agent::utils::agent_temp::MAX_SESSION_FILES,
+        "{response}"
+    );
+    assert_eq!(
+        parsed["result"]["structuredContent"]["data"]["temporary_code_map_max_calls"],
+        winx_code_agent::utils::agent_temp::MAX_DERIVED_CODE_MAP_CALLS,
+        "{response}"
+    );
+    assert_eq!(
+        parsed["result"]["structuredContent"]["data"]["temporary_code_map_max_unique_files"],
+        winx_code_agent::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
+        "{response}"
+    );
     Ok(())
 }
 
@@ -653,6 +692,49 @@ async fn bash_temp_contract_is_env_backed_and_blocks_legacy_destinations() -> an
     assert_eq!(
         std::fs::read_to_string(Path::new(&temporary_artifact_dir).join("helper.txt"))?,
         "accepted"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn code_map_bounds_non_canonical_helpers_without_disabling_them() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialized = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "helper-map-policy",
+        "helper-map-policy-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialized)?;
+    let temporary_dir = PathBuf::from(initialized_temporary_artifact_dir(&initialized)?);
+    std::fs::create_dir_all(&temporary_dir)?;
+    let helper = temporary_dir.join("stable-review.py");
+    std::fs::write(&helper, "def stable_review():\n    pass\n")?;
+
+    let mapped = code_map_as(address, TEST_TOKEN, &thread_id, "helper-map-file", &helper).await?;
+    let mapped = response_json(&mapped)?;
+    assert_eq!(mapped["result"]["isError"], false, "{mapped}");
+    assert_eq!(mapped["result"]["structuredContent"]["source_kind"], "derived_helper", "{mapped}");
+    assert_eq!(
+        mapped["result"]["structuredContent"]["temporary_helper_budget"]["calls_used"], 1,
+        "{mapped}"
+    );
+
+    let directory =
+        code_map_as(address, TEST_TOKEN, &thread_id, "helper-map-directory", &temporary_dir)
+            .await?;
+    let directory = response_json(&directory)?;
+    assert_eq!(directory["result"]["isError"], true, "{directory}");
+    assert_eq!(
+        directory["result"]["structuredContent"]["errorCode"], "temporary_artifact_policy",
+        "{directory}"
+    );
+    assert_eq!(
+        directory["result"]["structuredContent"]["nextAction"]["tool"], "ReadFiles",
+        "{directory}"
     );
     Ok(())
 }
