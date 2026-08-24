@@ -28,6 +28,8 @@ const DEFAULT_MAX_HITS: usize = 200;
 const MAX_FILE_SIZE: u64 = 2_000_000;
 /// Stop after reading+parsing this many files (a scan-budget cap).
 const MAX_FILES_SCANNED: usize = 20_000;
+/// Leave room for the shared `CodeMap` envelope and source-scope metadata.
+const PAYLOAD_FIXED_RESERVE: usize = 1_024;
 
 type Configs = HashMap<String, Option<TagsConfiguration>>;
 
@@ -35,23 +37,39 @@ pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     args: FindReferences,
 ) -> Result<(String, serde_json::Value)> {
+    handle_tool_call_with_budget(
+        bash_state_arc,
+        args,
+        crate::tools::outline::CODE_MAP_PAYLOAD_MAX_BYTES,
+    )
+    .await
+}
+
+pub(crate) async fn handle_tool_call_with_budget(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    args: FindReferences,
+    payload_max_bytes: usize,
+) -> Result<(String, serde_json::Value)> {
     let (cwd, workspace_root) = {
         let guard = bash_state_arc.lock().await;
         let bash_state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
         (bash_state.cwd.clone(), bash_state.workspace_root.clone())
     };
 
-    tokio::task::spawn_blocking(move || references_with_paths(args, &cwd, workspace_root))
-        .await
-        .map_err(|error| {
-            WinxError::CommandExecutionError(format!("CodeMap references worker failed: {error}"))
-        })?
+    tokio::task::spawn_blocking(move || {
+        references_with_paths(&args, &cwd, workspace_root, payload_max_bytes)
+    })
+    .await
+    .map_err(|error| {
+        WinxError::CommandExecutionError(format!("CodeMap references worker failed: {error}"))
+    })?
 }
 
 fn references_with_paths(
-    args: FindReferences,
+    args: &FindReferences,
     cwd: &Path,
     workspace_root: PathBuf,
+    payload_max_bytes: usize,
 ) -> Result<(String, serde_json::Value)> {
     let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
 
@@ -128,14 +146,78 @@ fn references_with_paths(
         |a: &ReferenceHit, b: &ReferenceHit| a.file.cmp(&b.file).then_with(|| a.line.cmp(&b.line));
     defs.sort_by(by_loc);
     refs.sort_by(by_loc);
-    let definitions = defs.len();
-    let references = refs.len();
     let mut hits = defs;
     hits.extend(refs); // definitions first, then references
 
-    let out = render(&args.name, &hits, definitions, references, truncated, &root);
-    let structured = ReferencesOutput { name: args.name, definitions, references, truncated, hits };
-    Ok((out, crate::tools::structured_json(&structured)?))
+    bounded_output(&args.name, &hits, truncated, &root, payload_max_bytes)
+}
+
+fn bounded_output(
+    name: &str,
+    hits: &[ReferenceHit],
+    already_truncated: bool,
+    root: &Path,
+    payload_max_bytes: usize,
+) -> Result<(String, serde_json::Value)> {
+    let budget = payload_max_bytes.saturating_sub(PAYLOAD_FIXED_RESERVE);
+    let mut low = 0usize;
+    let mut high = hits.len();
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        let selected = &hits[..middle];
+        let candidate = reference_output(name, selected, already_truncated || middle < hits.len());
+        let text = render(
+            name,
+            selected,
+            candidate.definitions,
+            candidate.references,
+            candidate.truncated,
+            root,
+            !hits.is_empty(),
+        );
+        let bytes = text.len().saturating_add(
+            serde_json::to_vec(&candidate).map_or(usize::MAX, |serialized| serialized.len()),
+        );
+        if bytes <= budget {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+
+    let selected = &hits[..low];
+    let mut output =
+        reference_output(name, selected, already_truncated || selected.len() < hits.len());
+    let text = render(
+        name,
+        selected,
+        output.definitions,
+        output.references,
+        output.truncated,
+        root,
+        !hits.is_empty(),
+    );
+    for _ in 0..3 {
+        let serialized = serde_json::to_vec(&output)
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+        let measured = text.len().saturating_add(serialized.len());
+        if measured == output.payload_bytes {
+            break;
+        }
+        output.payload_bytes = measured;
+    }
+    Ok((text, crate::tools::structured_json(&output)?))
+}
+
+fn reference_output(name: &str, hits: &[ReferenceHit], truncated: bool) -> ReferencesOutput {
+    ReferencesOutput {
+        name: name.to_string(),
+        definitions: hits.iter().filter(|hit| hit.is_definition).count(),
+        references: hits.iter().filter(|hit| !hit.is_definition).count(),
+        truncated,
+        payload_bytes: 0,
+        hits: hits.to_vec(),
+    }
 }
 
 fn render(
@@ -145,8 +227,16 @@ fn render(
     references: usize,
     truncated: bool,
     root: &Path,
+    had_hits: bool,
 ) -> String {
     if hits.is_empty() {
+        if had_hits {
+            return format!(
+                "Occurrences of `{name}` were found under {}, but the first result exceeds the \
+                 CodeMap response budget. Narrow `path` or use ReadFiles for exact source.",
+                root.display()
+            );
+        }
         return format!("No occurrences of `{name}` found under {}.", root.display());
     }
     let mut out = format!("`{name}` — {definitions} definition(s), {references} reference(s):\n");
@@ -296,6 +386,27 @@ mod tests {
         let st = state_in(&dir);
         let (_, structured) = handle_tool_call(&st, args("run")).await.unwrap();
         assert_eq!(structured["definitions"], 2);
+    }
+
+    #[tokio::test]
+    async fn dense_references_respect_the_combined_payload_budget() {
+        let dir = TempDir::new().unwrap();
+        let mut source = "fn target() {}\nfn caller() {\n".to_string();
+        for _ in 0..800 {
+            source.push_str("    target();\n");
+        }
+        source.push_str("}\n");
+        std::fs::write(dir.path().join("dense.rs"), source).unwrap();
+        let st = state_in(&dir);
+        let mut request = args("target");
+        request.max_results = 1_000;
+
+        let (text, structured) =
+            handle_tool_call_with_budget(&st, request, 8 * 1024).await.unwrap();
+        let bytes = text.len() + serde_json::to_vec(&structured).unwrap().len();
+        assert!(bytes <= 8 * 1024, "payload used {bytes} bytes");
+        assert_eq!(structured["truncated"], true);
+        assert_eq!(structured["hits"][0]["is_definition"], true);
     }
 
     #[tokio::test]

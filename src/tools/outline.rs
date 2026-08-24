@@ -38,7 +38,7 @@ const REPO_MAX_SYMBOLS_PER_FILE: usize = 64;
 const MAX_OUTLINE_FILE_SIZE: u64 = 2_000_000;
 /// Combined text + structured navigation payload. The MCP envelope and JSON
 /// escaping still fit comfortably under a 64 KiB response in ordinary source.
-const CODE_MAP_PAYLOAD_MAX_BYTES: usize = 44 * 1024;
+pub(crate) const CODE_MAP_PAYLOAD_MAX_BYTES: usize = 44 * 1024;
 /// Leave room for cursor, snapshot, counters, and the truncation notice.
 const CODE_MAP_PAYLOAD_FIXED_RESERVE: usize = 1_024;
 /// Stop after reading+parsing this many files in repo mode, so a tree of
@@ -189,6 +189,14 @@ pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     args: Outline,
 ) -> Result<(String, serde_json::Value)> {
+    handle_tool_call_with_budget(bash_state_arc, args, CODE_MAP_PAYLOAD_MAX_BYTES).await
+}
+
+pub(crate) async fn handle_tool_call_with_budget(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    args: Outline,
+    payload_max_bytes: usize,
+) -> Result<(String, serde_json::Value)> {
     let (cwd, workspace_root, thread_id) = {
         let guard = bash_state_arc.lock().await;
         let bash_state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
@@ -199,11 +207,13 @@ pub async fn handle_tool_call(
         )
     };
 
-    tokio::task::spawn_blocking(move || outline_with_paths(&args, &cwd, workspace_root, &thread_id))
-        .await
-        .map_err(|error| {
-            WinxError::CommandExecutionError(format!("CodeMap outline worker failed: {error}"))
-        })?
+    tokio::task::spawn_blocking(move || {
+        outline_with_paths(&args, &cwd, workspace_root, &thread_id, payload_max_bytes)
+    })
+    .await
+    .map_err(|error| {
+        WinxError::CommandExecutionError(format!("CodeMap outline worker failed: {error}"))
+    })?
 }
 
 fn outline_with_paths(
@@ -211,6 +221,7 @@ fn outline_with_paths(
     cwd: &Path,
     workspace_root: PathBuf,
     thread_id: &str,
+    payload_max_bytes: usize,
 ) -> Result<(String, serde_json::Value)> {
     let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
     let root = resolve_in_workspace(&args.path, cwd, &workspace_root).map_err(|e| {
@@ -226,9 +237,17 @@ fn outline_with_paths(
                 "CodeMap cursor is valid only for directory outlines".to_string(),
             ));
         }
-        outline_one(&root, &workspace_root, thread_id, args, &mut context, &mut configs)
+        outline_one(
+            &root,
+            &workspace_root,
+            thread_id,
+            args,
+            &mut context,
+            &mut configs,
+            payload_max_bytes,
+        )
     } else if root.is_dir() {
-        outline_repo(&root, &workspace_root, args, &mut context, &mut configs)
+        outline_repo(&root, &workspace_root, args, &mut context, &mut configs, payload_max_bytes)
     } else {
         // Don't silently degrade a typo'd file path into a whole-workspace scan.
         Err(WinxError::FileAccessError {
@@ -309,6 +328,7 @@ fn outline_one(
     args: &Outline,
     context: &mut TagsContext,
     configs: &mut Configs,
+    payload_max_bytes: usize,
 ) -> Result<(String, serde_json::Value)> {
     let rel = rel_of(file, workspace_root);
     let max = if args.max_results == 0 { DEFAULT_MAX_SYMBOLS } else { args.max_results };
@@ -378,7 +398,7 @@ fn outline_one(
         let candidate_files =
             vec![OutlineFile { file: rel.clone(), symbols: to_output(selected.to_vec()) }];
         if navigation_payload_bytes(&candidate_text, &candidate_files)
-            <= CODE_MAP_PAYLOAD_MAX_BYTES - CODE_MAP_PAYLOAD_FIXED_RESERVE
+            <= payload_max_bytes.saturating_sub(CODE_MAP_PAYLOAD_FIXED_RESERVE)
         {
             low = middle;
         } else {
@@ -496,6 +516,7 @@ fn outline_repo(
     args: &Outline,
     context: &mut TagsContext,
     configs: &mut Configs,
+    payload_max_bytes: usize,
 ) -> Result<(String, serde_json::Value)> {
     let max_files = if args.max_results == 0 { DEFAULT_MAX_FILES } else { args.max_results };
     let active_paths = active_files_for_context(workspace_root);
@@ -503,7 +524,7 @@ fn outline_repo(
     let snapshot_hash = repo_snapshot_hash(root, &ranked, &args.query);
     let start_offset = repo_cursor_offset(&args.cursor, &snapshot_hash, ranked.len())?;
 
-    let item_budget = CODE_MAP_PAYLOAD_MAX_BYTES - CODE_MAP_PAYLOAD_FIXED_RESERVE;
+    let item_budget = payload_max_bytes.saturating_sub(CODE_MAP_PAYLOAD_FIXED_RESERVE);
     let mut out = String::new();
     if start_offset > 0 {
         let _ = writeln!(out, "Code map continuation from ranked offset {start_offset}:");
