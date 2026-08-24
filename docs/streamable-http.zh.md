@@ -254,7 +254,7 @@ winx-code-agent serve --http --token-file ~/.config/winx-http-token \
 
 ## LLM 编排规范 (Orchestration Contract)
 
-MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、用 `&&` 合并相关的快速失败检查，并且绝不原样重复已被拒绝的调用。`Initialize` 还会返回一个受限的 `<workspace_root>/.winx/tmp/session-…/` 目录，供确有独立用途的派生辅助文件使用。这些文件不是权威源，必须保留原始源码路径和行号来源，并复用稳定文件名；不得仅为了调用 `CodeMap` 而把源码或命令输出转换为载体。辅助文件映射只接受一个已存在的文件，单次响应上限为 12 KiB，每个活动会话最多映射 24 个不同文件、调用 64 次；规范源码映射不受此聚合配额限制。临时存储每个会话限制为 64 MiB / 128 个文件，每个工作区限制为 256 MiB，闲置会话会在 24 小时后清理。禁止把内容编码进文件名或目录名，也禁止用 `.winx-*`/`.winx_tmp` 文件污染项目根目录。每个前台或后台 PTY 都会把这个精确目录导出为 `WINX_TEMP_DIR`；若 Shell 写入的静态目标绕过该目录，调用会以 `temporary_artifact_policy` 被拒绝。若 `Initialize` 返回 `initialize_workspace_already_bound` 或 `workspace_change_requires_new_session`，则当前对话不得重试该调用：访问策略允许的绝对路径时继续使用现有绑定，真正切换项目时应开启新的对话。两个编辑工具都可通过 `verify_command` 在同一次调用中执行有限的编辑后检查，从而节省一次网络和模型往返。
+MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、用 `&&` 合并相关的快速失败检查，并且绝不原样重复已被拒绝的调用。`Initialize` 还会返回一个受限的 `<workspace_root>/.winx/tmp/session-…/` 目录，供确有独立用途的派生辅助文件使用。这些文件不是权威源，必须保留原始源码路径和行号来源，并复用稳定文件名；不得仅为了调用 `CodeMap` 而把源码或命令输出转换为载体。辅助文件映射只接受一个已存在的文件，单次响应上限为 12 KiB，每个活动会话最多映射 24 个不同文件、调用 64 次；规范源码映射不受此聚合配额限制。临时存储每个会话限制为 64 MiB / 128 个文件，每个工作区限制为 256 MiB，闲置会话会在 24 小时后清理。禁止把内容编码进文件名或目录名，也禁止用 `.winx-*`/`.winx_tmp` 文件污染项目根目录。每个前台或后台 PTY 都会把这个精确目录导出为 `WINX_TEMP_DIR`；若 Shell 写入的静态目标绕过该目录，调用会以 `temporary_artifact_policy` 被拒绝。Winx 还会在每次 Bash 操作后审计实际用量，包括静态分析无法预测的动态写入；结果会报告字节数和文件数。超出配额后，普通命令将被阻止，直到代理显式检查并删除过时辅助文件。超额本身不会触发自动删除；原有的 24 小时闲置会话清理规则保持不变。若 `Initialize` 返回 `initialize_workspace_already_bound` 或 `workspace_change_requires_new_session`，则当前对话不得重试该调用：访问策略允许的绝对路径时继续使用现有绑定，真正切换项目时应开启新的对话。两个编辑工具都可通过 `verify_command` 在同一次调用中执行有限的编辑后检查，从而节省一次网络和模型往返。
 
 `ReadFiles` 批次中的文件会在受限并行池中处理（`WINX_READ_PARALLELISM`，默认 `4`，最大 `32`），但响应内容和读取保护范围始终严格按请求顺序发布。
 
@@ -283,6 +283,15 @@ MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、�
 ```
 
 可恢复的执行失败在 HTTP/JSON-RPC 层面返回成功，而在 MCP 层面设置 `isError: true`，并附带明确的下一步修复动作（`nextAction`）。
+
+`BashCommand.wait_policy=until_complete` 仅适用于有限的前台命令。若用于后台、状态、输入、屏幕或等待操作，
+Winx 会返回可恢复结果（`errorCode: wait_policy_incompatible_with_action`），并在
+`nextAction.arguments` 中把策略修正为 `return_early`。
+
+`ReadImage` 会根据内容验证 JPEG、PNG、GIF 或 WebP，而不是信任文件扩展名。源文件上限为 50 MiB，并另设
+解码尺寸和内存分配限制；交付内容限制为 2 MiB、长边 2560 px，较大的输入会自动缩放和重新编码。每个会话
+都有受限的内容指纹缓存，未变化的重复读取会返回紧凑的结构化引用；只有确实需要再次传输字节时才使用
+`force=true`。
 
 `FileWriteOrEdit` 和 `MultiFileEdit` 接受可选的 `verify_command` 与 `verify_wait_for_seconds`（默认 `15`，最大
 `60`）。验证仅在提交成功后运行，并以前台命令形式遵循与 `BashCommand` 相同的模式白名单。退出码为零时组合结果成功；非零退出码返回 `isError: true`、`errorCode: verification_failed` 和

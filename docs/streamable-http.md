@@ -322,7 +322,10 @@ file, cap their navigation payload at 12 KiB, and allow 24 unique files / 64 cal
 aggregate budget. Temporary storage is capped at 64 MiB / 128 files per session (and 256 MiB per workspace), with stale
 sessions pruned after 24 hours. Helpers never encode payload in filesystem names or pollute the project root with
 `.winx-*`/`.winx_tmp` artifacts. Every foreground and background PTY exports the exact directory as `WINX_TEMP_DIR`;
-statically visible shell writes that bypass it are rejected with `temporary_artifact_policy`. If `Initialize` returns `initialize_workspace_already_bound` or
+statically visible shell writes that bypass it are rejected with `temporary_artifact_policy`. Winx audits the managed
+directory after every Bash action as well, so dynamic writes are included in the byte/file budget. The result reports
+actual usage; after an overage, ordinary commands are blocked until the agent explicitly inspects and removes obsolete
+helpers. An overage never triggers automatic deletion; the 24-hour stale-session pruning remains unchanged. If `Initialize` returns `initialize_workspace_already_bound` or
 `workspace_change_requires_new_session`, that call is terminal for the current conversation: keep its bound pair for
 allowed absolute targets, or start a new conversation for a genuinely different project. A finite post-edit check can be
 supplied as `verify_command` on either edit tool, saving one network/model round trip. Extra
@@ -362,9 +365,17 @@ time, and optional interactive turn state. The MCP adapter and MCP Tasks consume
 child output, and unescaped-looking command metadata are presentation data and cannot spoof orchestration.
 `BashCommand.wait_policy` selects generic execution behavior: `adaptive` (default) keeps short calls inline and promotes
 an already-running foreground command only when Tasks and generation-bound runtime actions were negotiated; `until_complete` is accepted only for a foreground Command and creates a Task immediately or
-uses a 60-second bounded synchronous fallback; `return_early` always stays inline and caps `wait_for_seconds` at 5 seconds. `wait_for_seconds` is bounded by the chosen policy. Task routing never depends on client
+uses a 60-second bounded synchronous fallback; `return_early` always stays inline and caps `wait_for_seconds` at 5 seconds.
+Using `until_complete` with a background, status, input, screen, or wait action returns a normal recoverable tool result
+(`errorCode: wait_policy_incompatible_with_action`) whose `nextAction.arguments` corrects the policy to `return_early`.
+`wait_for_seconds` is bounded by the chosen policy. Task routing never depends on client
 identity. A client that advertises the `io.winx/compact-bash-output` extension receives the runtime's trailer-free payload;
 without that explicit capability, the historical text output is unchanged.
+
+`ReadImage` validates content as JPEG, PNG, GIF, or WebP instead of trusting the filename. Sources are capped at 50 MiB
+with independent decoded-dimension and allocation limits. Delivery is bounded to 2 MiB and a 2560 px long edge by
+resizing/re-encoding oversized inputs. A bounded per-session content-fingerprint cache replaces unchanged repeats with a
+compact structured reference; `force=true` is the explicit escape hatch when a client genuinely needs the bytes again.
 
 `FileWriteOrEdit` and `MultiFileEdit` accept optional `verify_command` and `verify_wait_for_seconds` (default `15`, maximum
 `60`). Verification runs only after a successful commit, as a foreground command under the same mode allowlist as
