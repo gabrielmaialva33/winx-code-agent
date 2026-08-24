@@ -56,6 +56,18 @@ pub enum WinxError {
     #[error("Temporary artifact policy rejected {path}: {message}")]
     TemporaryArtifactPolicy { path: PathBuf, temporary_artifact_dir: PathBuf, message: String },
 
+    /// Syntax navigation over derived helpers exceeded its bounded session budget.
+    #[error("Derived CodeMap budget rejected {path}: {message}")]
+    DerivedCodeMapBudget {
+        path: PathBuf,
+        temporary_artifact_dir: PathBuf,
+        calls_used: usize,
+        calls_limit: usize,
+        unique_files_used: usize,
+        unique_files_limit: usize,
+        message: String,
+    },
+
     /// Error when a command is not allowed in the current mode
     #[error("Command not allowed: {0}")]
     CommandNotAllowed(String),
@@ -307,6 +319,23 @@ impl Clone for WinxError {
                     message: message.clone(),
                 }
             }
+            Self::DerivedCodeMapBudget {
+                path,
+                temporary_artifact_dir,
+                calls_used,
+                calls_limit,
+                unique_files_used,
+                unique_files_limit,
+                message,
+            } => Self::DerivedCodeMapBudget {
+                path: path.clone(),
+                temporary_artifact_dir: temporary_artifact_dir.clone(),
+                calls_used: *calls_used,
+                calls_limit: *calls_limit,
+                unique_files_used: *unique_files_used,
+                unique_files_limit: *unique_files_limit,
+                message: message.clone(),
+            },
             Self::DeserializationError(msg) => Self::DeserializationError(msg.clone()),
             Self::SerializationError(msg) => Self::SerializationError(msg.clone()),
             Self::SearchReplaceSyntaxError(msg) => Self::SearchReplaceSyntaxError(msg.clone()),

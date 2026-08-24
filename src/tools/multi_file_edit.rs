@@ -135,6 +135,7 @@ fn apply_batch(bash_state: &mut BashState, files: &[FileEditEntry]) -> Result<St
             path: edit.path(),
             previous_bytes: edit.previous_bytes(),
             new_bytes: edit.new_bytes(),
+            is_new: edit.previous_bytes() == 0 && !edit.path().exists(),
         })
         .collect::<Vec<_>>();
     crate::utils::agent_temp::validate_batch_quota(

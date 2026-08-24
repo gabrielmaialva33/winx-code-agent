@@ -179,6 +179,9 @@ pub struct BashState {
     /// back). Deliberately not part of `BashStateSnapshot`: undo is for immediate
     /// mid-session recovery, not across restarts.
     pub edit_checkpoints: VecDeque<EditCheckpoint>,
+    /// In-memory aggregate guard for syntax maps over non-canonical helpers.
+    /// Canonical `CodeMap` calls are intentionally not counted.
+    pub derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage,
 }
 
 impl Default for BashState {
@@ -209,6 +212,7 @@ impl BashState {
             foreground_command_gate: Arc::new(Mutex::new(())),
             initialized: false,
             edit_checkpoints: VecDeque::new(),
+            derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage::default(),
         }
     }
 

@@ -1291,8 +1291,20 @@ pub struct ReferencesOutput {
     pub references: usize,
     /// True if the result was capped (more occurrences exist).
     pub truncated: bool,
+    /// Combined bytes of the human-readable result and structured navigation
+    /// payload before the shared MCP envelope is added.
+    pub payload_bytes: usize,
     /// Occurrences, definitions first then references, each group by file/line.
     pub hits: Vec<ReferenceHit>,
+}
+
+/// Aggregate guard state for a `CodeMap` call over non-canonical session helpers.
+#[derive(Debug, Clone, Copy, Serialize, JsonSchema)]
+pub struct CodeMapTemporaryHelperBudget {
+    pub calls_used: usize,
+    pub calls_limit: usize,
+    pub unique_files_used: usize,
+    pub unique_files_limit: usize,
 }
 
 /// JSON Schema advertised for `CodeMap.structuredContent`.
@@ -1307,6 +1319,9 @@ pub struct CodeMapStructuredOutput {
     pub snapshot_hash: Option<String>,
     pub files_scanned: Option<usize>,
     pub payload_bytes: Option<usize>,
+    pub source_kind: Option<String>,
+    pub canonical: Option<bool>,
+    pub temporary_helper_budget: Option<CodeMapTemporaryHelperBudget>,
     pub mode: Option<String>,
     pub files_shown: Option<usize>,
     pub files: Option<Vec<OutlineFile>>,

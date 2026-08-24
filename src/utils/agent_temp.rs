@@ -6,6 +6,7 @@
 //! dirty its working tree. File tools enforce a small path and storage budget;
 //! Bash remains governed by its own operator-selected command policy.
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -26,8 +27,18 @@ const SESSION_HASH_BYTES: usize = 8;
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Workspace-wide budget shared by all managed temporary sessions.
 pub const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+/// One active conversation cannot consume the whole workspace-wide budget.
+pub const MAX_SESSION_BYTES: u64 = 64 * 1024 * 1024;
 /// One helper should remain small enough to inspect and remove cheaply.
 pub const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
+/// Hundreds of one-shot carriers are almost always an orchestration failure.
+pub const MAX_SESSION_FILES: usize = 128;
+/// Derived syntax maps are intentionally much smaller than canonical maps.
+pub const MAX_DERIVED_CODE_MAP_PAYLOAD_BYTES: usize = 12 * 1024;
+/// A session should reuse a small working set instead of minting new carriers.
+pub const MAX_DERIVED_CODE_MAP_UNIQUE_FILES: usize = 24;
+/// Bound aggregate helper-map churn while leaving canonical `CodeMap` unlimited.
+pub const MAX_DERIVED_CODE_MAP_CALLS: usize = 64;
 /// Depth beneath the session directory, including the target filename.
 pub const MAX_RELATIVE_COMPONENTS: usize = 8;
 /// Prevent payloads from being smuggled into a filename or directory component.
@@ -45,7 +56,29 @@ pub struct AgentTempInfo {
     pub directory: PathBuf,
     pub ttl_seconds: u64,
     pub max_total_bytes: u64,
+    pub max_session_bytes: u64,
     pub max_file_bytes: u64,
+    pub max_session_files: usize,
+}
+
+/// In-memory budget for syntax navigation over non-canonical helpers.
+///
+/// It deliberately resets with the server process. Filesystem quotas remain the
+/// durable backstop across restarts, while this keeps the hot session path free
+/// from another persistence write after every read-only `CodeMap` call.
+#[derive(Clone, Debug, Default)]
+pub struct DerivedCodeMapUsage {
+    mapped_files: BTreeSet<PathBuf>,
+    calls: usize,
+}
+
+/// Counters returned with an accepted derived-helper map.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DerivedCodeMapPermit {
+    pub calls_used: usize,
+    pub calls_limit: usize,
+    pub unique_files_used: usize,
+    pub unique_files_limit: usize,
 }
 
 /// A resolved edit and its size change, used to validate a `MultiFileEdit`
@@ -55,6 +88,7 @@ pub struct TempEdit<'a> {
     pub path: &'a Path,
     pub previous_bytes: u64,
     pub new_bytes: u64,
+    pub is_new: bool,
 }
 
 /// Compute the stable session directory without touching the filesystem.
@@ -64,7 +98,9 @@ pub fn session_info(workspace_root: &Path, thread_id: &str) -> AgentTempInfo {
         directory: workspace.join(TEMP_ROOT).join(session_name(thread_id)),
         ttl_seconds: MAX_AGE.as_secs(),
         max_total_bytes: MAX_TOTAL_BYTES,
+        max_session_bytes: MAX_SESSION_BYTES,
         max_file_bytes: MAX_FILE_BYTES,
+        max_session_files: MAX_SESSION_FILES,
     }
 }
 
@@ -152,9 +188,13 @@ pub fn validate_bash_command(
     paths.sort();
     paths.dedup();
 
+    let mut managed_targets = Vec::new();
     for path in paths {
-        validate_bash_write_target(workspace_root, cwd, &path, &info)?;
+        if let Some(target) = validate_bash_write_target(workspace_root, cwd, &path, &info)? {
+            managed_targets.push(target);
+        }
     }
+    validate_known_bash_targets_quota(workspace_root, &info, &managed_targets)?;
     Ok(())
 }
 
@@ -163,19 +203,28 @@ fn validate_bash_write_target(
     cwd: &Path,
     path: &str,
     info: &AgentTempInfo,
-) -> Result<()> {
-    let expanded = crate::utils::path::expand_user(path);
+) -> Result<Option<PathBuf>> {
+    let managed_env_path = expand_temp_env_path(path, info);
+    let expanded: String = managed_env_path.as_ref().map_or_else(
+        || crate::utils::path::expand_user(path),
+        |path| path.to_string_lossy().into_owned(),
+    );
     let requested = if Path::new(&expanded).is_absolute() {
         PathBuf::from(&expanded)
     } else {
         cwd.join(&expanded)
     };
-    let resolved = crate::utils::path::resolve_in_workspace(path, cwd, workspace_root)
-        .unwrap_or_else(|_| requested.clone());
+    let resolved = if managed_env_path.is_some() {
+        requested.clone()
+    } else {
+        crate::utils::path::resolve_in_workspace(path, cwd, workspace_root)
+            .unwrap_or_else(|_| requested.clone())
+    };
     let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
 
     let requested_relative = workspace_relative(&requested, workspace_root, &workspace);
     let resolved_relative = workspace_relative(&resolved, workspace_root, &workspace);
+    let mut managed_target = None;
     for relative in
         [requested_relative.as_deref(), resolved_relative.as_deref()].into_iter().flatten()
     {
@@ -194,10 +243,36 @@ fn validate_bash_write_target(
         }
         if is_temp_relative(relative) {
             reject_symlinked_temp_root(&workspace, &requested, info)?;
-            validate_session_relative_path(&workspace.join(relative), info)?;
+            let target = workspace.join(relative);
+            if target != info.directory {
+                validate_session_relative_path(&target, info)?;
+                managed_target = Some(target);
+            }
         }
     }
-    Ok(())
+    Ok(managed_target)
+}
+
+/// Expand only Winx's server-owned temporary path variable. Other shell
+/// expansions remain dynamic and are intentionally left to the shell.
+fn expand_temp_env_path(path: &str, info: &AgentTempInfo) -> Option<PathBuf> {
+    let path = path.trim();
+    let path = if path.len() >= 2
+        && matches!(
+            (path.as_bytes().first(), path.as_bytes().last()),
+            (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"'))
+        ) {
+        &path[1..path.len() - 1]
+    } else {
+        path
+    };
+    let suffix =
+        path.strip_prefix("$WINX_TEMP_DIR").or_else(|| path.strip_prefix("${WINX_TEMP_DIR}"))?;
+    if !suffix.is_empty() && !suffix.starts_with('/') {
+        return None;
+    }
+    let suffix = suffix.trim_start_matches('/');
+    Some(if suffix.is_empty() { info.directory.clone() } else { info.directory.join(suffix) })
 }
 
 fn embedded_writer_paths(command: &str) -> Vec<String> {
@@ -224,7 +299,10 @@ fn embedded_writer_paths(command: &str) -> Vec<String> {
         return Vec::new();
     }
 
-    quoted_literals(command).into_iter().filter(|literal| literal.contains(".winx")).collect()
+    quoted_literals(command)
+        .into_iter()
+        .filter(|literal| literal.contains(".winx") || literal.contains("$WINX_TEMP_DIR"))
+        .collect()
 }
 
 fn quoted_literals(value: &str) -> Vec<String> {
@@ -267,6 +345,119 @@ fn workspace_relative(
         .map(Path::to_path_buf)
 }
 
+/// Enforce the session boundary for an explicit `CodeMap` path.
+///
+/// Returns `true` only for a helper in the active session. A request spelling a
+/// temporary path that resolves elsewhere (for example through a symlink) is
+/// rejected instead of being misclassified as canonical source.
+pub fn validate_code_map_target(
+    workspace_root: &Path,
+    thread_id: &str,
+    requested_path: &Path,
+    resolved_path: &Path,
+) -> Result<bool> {
+    let info = session_info(workspace_root, thread_id);
+    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
+    let requested_relative = workspace_relative(requested_path, workspace_root, &workspace);
+    let resolved_relative = workspace_relative(resolved_path, workspace_root, &workspace);
+    let requested_temp = requested_relative.as_deref().is_some_and(is_temp_relative);
+    let resolved_temp = resolved_relative.as_deref().is_some_and(is_temp_relative);
+    if !requested_temp && !resolved_temp {
+        return Ok(false);
+    }
+
+    reject_symlinked_temp_root(&workspace, requested_path, &info)?;
+    if requested_temp != resolved_temp {
+        return Err(policy_error(
+            requested_path,
+            &info,
+            "a temporary helper must not resolve through a symlink outside its managed session"
+                .to_string(),
+        ));
+    }
+
+    let requested_policy = requested_relative
+        .as_deref()
+        .map_or_else(|| requested_path.to_path_buf(), |relative| workspace.join(relative));
+    let resolved_policy = resolved_relative
+        .as_deref()
+        .map_or_else(|| resolved_path.to_path_buf(), |relative| workspace.join(relative));
+    if requested_policy != resolved_policy {
+        return Err(policy_error(
+            requested_path,
+            &info,
+            "temporary helper paths must resolve directly without aliases, parent traversal, or symlinks"
+                .to_string(),
+        ));
+    }
+    if requested_policy != info.directory {
+        validate_session_relative_path(&requested_policy, &info)?;
+    }
+    Ok(true)
+}
+
+/// Reserve one syntax-navigation call over an active non-canonical helper.
+pub fn reserve_derived_code_map(
+    usage: &mut DerivedCodeMapUsage,
+    path: &Path,
+    info: &AgentTempInfo,
+) -> Result<DerivedCodeMapPermit> {
+    let is_new = !usage.mapped_files.contains(path);
+    let unique_files = usage.mapped_files.len();
+    if usage.calls >= MAX_DERIVED_CODE_MAP_CALLS
+        || (is_new && unique_files >= MAX_DERIVED_CODE_MAP_UNIQUE_FILES)
+    {
+        return Err(WinxError::DerivedCodeMapBudget {
+            path: path.to_path_buf(),
+            temporary_artifact_dir: info.directory.clone(),
+            calls_used: usage.calls,
+            calls_limit: MAX_DERIVED_CODE_MAP_CALLS,
+            unique_files_used: unique_files,
+            unique_files_limit: MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
+            message: format!(
+                "this session already used {} derived-helper map calls across {} unique files; \
+                 reuse prior results and inspect canonical source with CodeMap/ReadFiles or rg \
+                 instead of creating another carrier",
+                usage.calls, unique_files
+            ),
+        });
+    }
+
+    usage.calls += 1;
+    usage.mapped_files.insert(path.to_path_buf());
+    Ok(DerivedCodeMapPermit {
+        calls_used: usage.calls,
+        calls_limit: MAX_DERIVED_CODE_MAP_CALLS,
+        unique_files_used: usage.mapped_files.len(),
+        unique_files_limit: MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
+    })
+}
+
+fn validate_known_bash_targets_quota(
+    workspace_root: &Path,
+    info: &AgentTempInfo,
+    targets: &[PathBuf],
+) -> Result<()> {
+    if targets.is_empty() {
+        return Ok(());
+    }
+    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
+    let current =
+        temp_tree_usage(&workspace.join(TEMP_ROOT), &info.directory).ok_or_else(|| {
+            policy_error(
+                &targets[0],
+                info,
+                "temporary storage could not be measured safely; remove malformed or excessive \
+             artifacts before retrying"
+                    .to_string(),
+            )
+        })?;
+    let new_files = targets.iter().filter(|path| !path.exists()).collect::<BTreeSet<_>>().len();
+    let projected =
+        TempTreeUsage { session_files: current.session_files.saturating_add(new_files), ..current };
+    validate_projected_usage(&targets[0], info, current, projected)
+}
+
 /// Validate the aggregate size of a `MultiFileEdit` after every target has been
 /// planned and duplicate paths have been rejected.
 pub fn validate_batch_quota(
@@ -284,19 +475,40 @@ pub fn validate_batch_quota(
 
     let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
     let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut projected = temp_tree_size(&workspace.join(TEMP_ROOT)).ok_or_else(|| {
-        policy_error(
-            representative,
-            &info,
-            "temporary storage could not be measured safely; remove malformed or excessive \
+    let current =
+        temp_tree_usage(&workspace.join(TEMP_ROOT), &info.directory).ok_or_else(|| {
+            policy_error(
+                representative,
+                &info,
+                "temporary storage could not be measured safely; remove malformed or excessive \
              artifacts before retrying"
-                .to_string(),
-        )
-    })?;
+                    .to_string(),
+            )
+        })?;
+    let mut projected_total_bytes = current.total_bytes;
+    let mut projected_session_bytes = current.session_bytes;
+    let mut projected_session_files = current.session_files;
     for edit in managed {
-        projected = projected.saturating_sub(edit.previous_bytes).saturating_add(edit.new_bytes);
+        projected_total_bytes = projected_total_bytes
+            .saturating_sub(edit.previous_bytes)
+            .saturating_add(edit.new_bytes);
+        projected_session_bytes = projected_session_bytes
+            .saturating_sub(edit.previous_bytes)
+            .saturating_add(edit.new_bytes);
+        if edit.is_new {
+            projected_session_files = projected_session_files.saturating_add(1);
+        }
     }
-    validate_projected_size(representative, &info, projected)
+    validate_projected_usage(
+        representative,
+        &info,
+        current,
+        TempTreeUsage {
+            total_bytes: projected_total_bytes,
+            session_bytes: projected_session_bytes,
+            session_files: projected_session_files,
+        },
+    )
 }
 
 fn session_name(thread_id: &str) -> String {
@@ -416,19 +628,49 @@ fn validate_session_relative_path(path: &Path, info: &AgentTempInfo) -> Result<(
     Ok(())
 }
 
-fn validate_projected_size(path: &Path, info: &AgentTempInfo, projected: u64) -> Result<()> {
-    if projected <= MAX_TOTAL_BYTES {
-        return Ok(());
+fn validate_projected_usage(
+    path: &Path,
+    info: &AgentTempInfo,
+    current: TempTreeUsage,
+    projected: TempTreeUsage,
+) -> Result<()> {
+    let violation =
+        if projected.total_bytes > MAX_TOTAL_BYTES && projected.total_bytes > current.total_bytes {
+            Some(format!(
+                "this write would grow managed temporary storage to {} bytes; the workspace-wide \
+             limit is {MAX_TOTAL_BYTES} bytes",
+                projected.total_bytes
+            ))
+        } else if projected.session_bytes > MAX_SESSION_BYTES
+            && projected.session_bytes > current.session_bytes
+        {
+            Some(format!(
+                "this write would grow the active session's temporary storage to {} bytes; the \
+             per-session limit is {MAX_SESSION_BYTES} bytes",
+                projected.session_bytes
+            ))
+        } else if projected.session_files > MAX_SESSION_FILES
+            && projected.session_files > current.session_files
+        {
+            Some(format!(
+            "this write would grow the active session to {} helper files; the per-session limit \
+             is {MAX_SESSION_FILES}. Reuse or overwrite a stable helper and remove obsolete \
+             carriers instead of creating another file",
+            projected.session_files
+        ))
+        } else {
+            None
+        };
+    match violation {
+        Some(message) => Err(policy_error(
+            path,
+            info,
+            format!(
+                "{message}. Shrinking existing helpers remains allowed so the session can recover"
+            ),
+        )),
+        None => Ok(()),
     }
-    Err(policy_error(
-        path,
-        info,
-        format!(
-            "this write would grow managed temporary storage to {projected} bytes; the \
-             workspace-wide limit is {MAX_TOTAL_BYTES} bytes. Remove helpers that are no longer \
-             needed, then retry with corrected content"
-        ),
-    ))
 }
 
 fn policy_error(path: &Path, info: &AgentTempInfo, message: String) -> WinxError {
@@ -439,17 +681,26 @@ fn policy_error(path: &Path, info: &AgentTempInfo, message: String) -> WinxError
     }
 }
 
-fn temp_tree_size(root: &Path) -> Option<u64> {
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TempTreeUsage {
+    total_bytes: u64,
+    session_bytes: u64,
+    session_files: usize,
+}
+
+fn temp_tree_usage(root: &Path, active_session: &Path) -> Option<TempTreeUsage> {
     let metadata = match fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(0),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(TempTreeUsage::default())
+        }
         Err(_) => return None,
     };
     if metadata.file_type().is_symlink() {
         return None;
     }
 
-    let mut total = 0u64;
+    let mut usage = TempTreeUsage::default();
     let mut seen = 0usize;
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((path, depth)) = stack.pop() {
@@ -462,7 +713,11 @@ fn temp_tree_size(root: &Path) -> Option<u64> {
             continue;
         }
         if metadata.is_file() {
-            total = total.saturating_add(metadata.len());
+            usage.total_bytes = usage.total_bytes.saturating_add(metadata.len());
+            if path.starts_with(active_session) {
+                usage.session_bytes = usage.session_bytes.saturating_add(metadata.len());
+                usage.session_files = usage.session_files.saturating_add(1);
+            }
             continue;
         }
         if metadata.is_dir() {
@@ -471,7 +726,7 @@ fn temp_tree_size(root: &Path) -> Option<u64> {
             }
         }
     }
-    Some(total)
+    Some(usage)
 }
 
 fn prune_sessions_unlocked(workspace_root: &Path, active: &Path, max_age: Duration) {
@@ -678,8 +933,34 @@ mod tests {
         let workspace = TempDir::new().unwrap();
         let info = session_info(workspace.path(), "active");
         let path = info.directory.join("large.bin");
-        assert!(validate_projected_size(&path, &info, MAX_TOTAL_BYTES).is_ok());
-        assert!(validate_projected_size(&path, &info, MAX_TOTAL_BYTES + 1).is_err());
+        let current = TempTreeUsage::default();
+        assert!(validate_projected_usage(
+            &path,
+            &info,
+            current,
+            TempTreeUsage { total_bytes: MAX_TOTAL_BYTES, ..current }
+        )
+        .is_ok());
+        assert!(validate_projected_usage(
+            &path,
+            &info,
+            current,
+            TempTreeUsage { total_bytes: MAX_TOTAL_BYTES + 1, ..current }
+        )
+        .is_err());
+
+        let oversized = TempTreeUsage {
+            total_bytes: MAX_TOTAL_BYTES + 10,
+            session_bytes: MAX_SESSION_BYTES + 10,
+            session_files: MAX_SESSION_FILES + 10,
+        };
+        let shrinking = TempTreeUsage {
+            total_bytes: oversized.total_bytes - 1,
+            session_bytes: oversized.session_bytes - 1,
+            session_files: oversized.session_files,
+        };
+        validate_projected_usage(&path, &info, oversized, shrinking)
+            .expect("an over-limit session must be allowed to shrink existing helpers");
     }
 
     #[test]
@@ -691,11 +972,94 @@ mod tests {
             .collect::<Vec<_>>();
         let edits = paths
             .iter()
-            .map(|path| TempEdit { path, previous_bytes: 0, new_bytes: MAX_FILE_BYTES })
+            .map(|path| TempEdit {
+                path,
+                previous_bytes: 0,
+                new_bytes: MAX_FILE_BYTES,
+                is_new: true,
+            })
             .collect::<Vec<_>>();
 
         let error = validate_batch_quota(workspace.path(), "active", &edits)
             .expect_err("aggregate batch must honor the workspace quota");
         assert!(error.to_string().contains("workspace-wide limit"), "{error}");
+    }
+
+    #[test]
+    fn literal_winx_temp_destinations_honor_the_session_file_cap() {
+        let workspace = TempDir::new().unwrap();
+        let info = session_info(workspace.path(), "active");
+        fs::create_dir_all(&info.directory).unwrap();
+        for index in 0..MAX_SESSION_FILES {
+            fs::write(info.directory.join(format!("helper-{index}.txt")), "x").unwrap();
+        }
+
+        validate_bash_command(
+            workspace.path(),
+            workspace.path(),
+            "active",
+            "printf replacement > \"$WINX_TEMP_DIR/helper-0.txt\"",
+        )
+        .expect("overwriting a stable helper must remain possible at the cap");
+        let error = validate_bash_command(
+            workspace.path(),
+            workspace.path(),
+            "active",
+            "printf new > \"$WINX_TEMP_DIR/one-more.txt\"",
+        )
+        .expect_err("a visible new shell helper must honor the cap");
+        assert!(error.to_string().contains("helper files"), "{error}");
+    }
+
+    #[test]
+    fn code_map_accepts_only_the_active_direct_helper_path() {
+        let workspace = TempDir::new().unwrap();
+        let active = session_info(workspace.path(), "active");
+        let helper = active.directory.join("adapter.py");
+        assert!(validate_code_map_target(workspace.path(), "active", &helper, &helper).unwrap());
+
+        let foreign = session_info(workspace.path(), "other").directory.join("adapter.py");
+        let error = validate_code_map_target(workspace.path(), "active", &foreign, &foreign)
+            .expect_err("another session's helper must not be mapped");
+        assert!(error.to_string().contains("session-scoped"), "{error}");
+
+        let canonical = workspace.path().join("src/lib.rs");
+        assert!(
+            !validate_code_map_target(workspace.path(), "active", &canonical, &canonical).unwrap()
+        );
+    }
+
+    #[test]
+    fn derived_code_map_budget_rewards_reuse_and_caps_churn() {
+        let workspace = TempDir::new().unwrap();
+        let info = session_info(workspace.path(), "active");
+        let mut usage = DerivedCodeMapUsage::default();
+        let stable = info.directory.join("stable.py");
+        let first = reserve_derived_code_map(&mut usage, &stable, &info).unwrap();
+        let repeated = reserve_derived_code_map(&mut usage, &stable, &info).unwrap();
+        assert_eq!(first.unique_files_used, 1);
+        assert_eq!(repeated.unique_files_used, 1);
+        assert_eq!(repeated.calls_used, 2);
+
+        for index in 1..MAX_DERIVED_CODE_MAP_UNIQUE_FILES {
+            reserve_derived_code_map(
+                &mut usage,
+                &info.directory.join(format!("helper-{index}.py")),
+                &info,
+            )
+            .unwrap();
+        }
+        let error =
+            reserve_derived_code_map(&mut usage, &info.directory.join("one-too-many.py"), &info)
+                .expect_err("a new carrier past the unique-file budget must fail");
+        assert!(matches!(error, WinxError::DerivedCodeMapBudget { .. }));
+
+        let mut repeated_usage = DerivedCodeMapUsage::default();
+        for _ in 0..MAX_DERIVED_CODE_MAP_CALLS {
+            reserve_derived_code_map(&mut repeated_usage, &stable, &info).unwrap();
+        }
+        let error = reserve_derived_code_map(&mut repeated_usage, &stable, &info)
+            .expect_err("even one stable helper has an aggregate call budget");
+        assert!(matches!(error, WinxError::DerivedCodeMapBudget { .. }));
     }
 }

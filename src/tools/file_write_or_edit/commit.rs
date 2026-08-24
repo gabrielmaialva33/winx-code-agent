@@ -142,6 +142,7 @@ pub(crate) fn plan_edit(
                 path: &path,
                 previous_bytes: previous.as_ref().map_or(0, |content| content.len() as u64),
                 new_bytes: new_content.len() as u64,
+                is_new: previous.is_none(),
             }],
         )?;
     }
