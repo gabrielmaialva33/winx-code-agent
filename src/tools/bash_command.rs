@@ -92,6 +92,7 @@ pub(crate) fn runtime_rendered(
         command_generation,
         execution_token: None,
         generation_bound_actions: true,
+        dropped_output_file: None,
         output_truncated,
     }
 }

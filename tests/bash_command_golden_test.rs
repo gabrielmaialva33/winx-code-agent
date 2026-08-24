@@ -428,6 +428,7 @@ async fn large_output_is_truncated_with_scratch_pointer() -> Result<()> {
     let mut compact_status = String::new();
     let mut completed = false;
     let mut runtime_truncated = false;
+    let mut dropped_output_file = None;
     for _ in 0..10 {
         let outcome = EmbeddedShellRuntime
             .run_action_detailed(
@@ -438,6 +439,7 @@ async fn large_output_is_truncated_with_scratch_pointer() -> Result<()> {
             .await?;
         completed = !outcome.result.state.is_running();
         runtime_truncated = outcome.output_truncated;
+        dropped_output_file = outcome.dropped_output_file.clone();
         assert!(outcome.result.output.is_empty(), "compact wire path built legacy output");
         compact_status = outcome.compact_output.unwrap_or_default();
         if completed {
@@ -451,6 +453,14 @@ async fn large_output_is_truncated_with_scratch_pointer() -> Result<()> {
         )));
     }
     assert!(runtime_truncated, "truncation must come from runtime metadata");
+    let dropped_output_file = dropped_output_file.ok_or_else(|| {
+        WinxError::CommandExecutionError("runtime omitted the spill path".to_string())
+    })?;
+    assert!(dropped_output_file.is_file(), "{dropped_output_file:?}");
+    assert!(
+        dropped_output_file.starts_with(workspace.join(".winx/scratch")),
+        "{dropped_output_file:?}"
+    );
 
     let final_status =
         tools::bash_command::handle_tool_call(&state, status(thread_id, Some(bg_id.clone()), 0.0))

@@ -98,6 +98,8 @@ pub(crate) struct RunActionResult {
     pub command_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_token: Option<crate::runtime::ShellExecutionToken>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dropped_output_file: Option<std::path::PathBuf>,
     #[serde(default)]
     pub output_truncated: bool,
     /// Runtime-owned state added in protocol 1.4. Optional only so a new adapter
@@ -269,6 +271,7 @@ mod tests {
             compact_output: Some("compact output".to_string()),
             command_generation: Some(7),
             execution_token: None,
+            dropped_output_file: Some("/tmp/winx-output".into()),
             output_truncated: false,
             state: None,
             snapshot: crate::state::bash_state::BashState::new().snapshot(),
@@ -279,6 +282,7 @@ mod tests {
         object.remove("compact_output");
         object.remove("command_generation");
         object.remove("execution_token");
+        object.remove("dropped_output_file");
         object.remove("output_truncated");
 
         let decoded: RunActionResult = serde_json::from_value(wire).expect("protocol 1.4 result");
@@ -286,6 +290,7 @@ mod tests {
         assert_eq!(decoded.compact_output, None);
         assert_eq!(decoded.command_generation, None);
         assert_eq!(decoded.execution_token, None);
+        assert_eq!(decoded.dropped_output_file, None);
         assert!(!decoded.output_truncated);
     }
 
@@ -297,6 +302,7 @@ mod tests {
             compact_output: Some(compact.clone()),
             command_generation: Some(9),
             execution_token: None,
+            dropped_output_file: None,
             output_truncated: false,
             state: None,
             snapshot: crate::state::bash_state::BashState::new().snapshot(),

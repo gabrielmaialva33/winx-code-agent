@@ -655,32 +655,7 @@ impl DaemonShellRuntime {
             &result.snapshot,
         )
         .await;
-        match (result.output, result.compact_output, result.state, result.error) {
-            (output, compact_output, Some(state), None)
-                if output.is_some() || compact_output.is_some() => {
-                let (output, compact_output) = match (output, compact_output) {
-                    (Some(output), compact) => (output, compact),
-                    (None, Some(compact)) => (String::new(), Some(compact)),
-                    (None, None) => unreachable!(),
-                };
-                Ok(BashCommandRuntimeResult {
-                    result: BashCommandResult { output, state },
-                    compact_output,
-                    command_generation: result.command_generation,
-                    execution_token: result.execution_token,
-                    generation_bound_actions,
-                    output_truncated: result.output_truncated,
-                })
-            }
-            (_, _, _, Some(error)) => Err(from_wire_error(error)),
-            (Some(_), _, None, None) => Err(WinxError::ConfigurationError(
-                "the session guardian predates typed BashCommand results; terminate this durable session, then initialize it again so the current guardian binary is created. Winx will not reconstruct orchestration state from terminal text."
-                    .to_string(),
-            )),
-            _ => Err(WinxError::ParseError(
-                "winxd action response had neither a typed result nor an error".to_string(),
-            )),
-        }
+        runtime_result_from_wire(result, generation_bound_actions)
     }
 
     async fn configure_remote(
@@ -939,6 +914,45 @@ fn action_options_for_guardian(
     Ok((options, generation_bound_actions))
 }
 
+fn runtime_result_from_wire(
+    result: RunActionResult,
+    generation_bound_actions: bool,
+) -> Result<BashCommandRuntimeResult> {
+    match (
+        result.output,
+        result.compact_output,
+        result.state,
+        result.error,
+        result.dropped_output_file,
+    ) {
+        (output, compact_output, Some(state), None, dropped_output_file)
+            if output.is_some() || compact_output.is_some() => {
+            let (output, compact_output) = match (output, compact_output) {
+                (Some(output), compact) => (output, compact),
+                (None, Some(compact)) => (String::new(), Some(compact)),
+                (None, None) => unreachable!(),
+            };
+            Ok(BashCommandRuntimeResult {
+                result: BashCommandResult { output, state },
+                compact_output,
+                command_generation: result.command_generation,
+                execution_token: result.execution_token,
+                generation_bound_actions,
+                dropped_output_file,
+                output_truncated: result.output_truncated,
+            })
+        }
+        (_, _, _, Some(error), _) => Err(from_wire_error(error)),
+        (Some(_), _, None, None, _) => Err(WinxError::ConfigurationError(
+            "the session guardian predates typed BashCommand results; terminate this durable session, then initialize it again so the current guardian binary is created. Winx will not reconstruct orchestration state from terminal text."
+                .to_string(),
+        )),
+        _ => Err(WinxError::ParseError(
+            "winxd action response had neither a typed result nor an error".to_string(),
+        )),
+    }
+}
+
 fn from_wire_error(error: WireShellError) -> WinxError {
     match error {
         WireShellError::BashStateNotInitialized => WinxError::BashStateNotInitialized,
@@ -1057,6 +1071,7 @@ mod tests {
                             compact_output: None,
                             command_generation: None,
                             execution_token: None,
+                            dropped_output_file: None,
                             output_truncated: false,
                             state: Some(crate::tools::bash_command::BashCommandState {
                                 process_status:

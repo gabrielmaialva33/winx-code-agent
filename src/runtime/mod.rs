@@ -4,6 +4,7 @@ mod selection;
 mod session_store;
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -46,6 +47,10 @@ pub struct BashCommandRuntimeResult {
     pub command_generation: Option<u64>,
     pub execution_token: Option<ShellExecutionToken>,
     pub generation_bound_actions: bool,
+    /// Runtime-owned file containing output dropped from the in-memory head.
+    /// The current result retains the tail; consumers should read this file only
+    /// when they need omitted history.
+    pub dropped_output_file: Option<PathBuf>,
     /// Authoritative runtime truncation state. It is never inferred from
     /// terminal text, which is controlled by the child process.
     pub output_truncated: bool,
@@ -59,8 +64,14 @@ impl BashCommandRuntimeResult {
             command_generation: None,
             execution_token: None,
             generation_bound_actions: false,
+            dropped_output_file: None,
             output_truncated: false,
         }
+    }
+
+    pub(crate) fn with_dropped_output_file(mut self, path: Option<PathBuf>) -> Self {
+        self.dropped_output_file = path;
+        self
     }
 }
 

@@ -329,6 +329,24 @@ pub(super) fn bash_success_result(
     if let Some(value) = outcome.result.state.turn_state {
         data.insert("turn_state".to_string(), Value::String(value.as_str().to_string()));
     }
+    if let Some(value) = outcome.dropped_output_file.as_ref() {
+        data.insert(
+            "dropped_output_file".to_string(),
+            Value::String(value.to_string_lossy().into_owned()),
+        );
+    }
+    if let Some(generation) = outcome.command_generation {
+        data.insert("command_generation".to_string(), json!(generation));
+    }
+    if let Some(token) = outcome.execution_token.as_ref() {
+        data.insert(
+            "execution_id".to_string(),
+            Value::String(format!(
+                "{}:{}:{}",
+                token.guardian_epoch, token.session_epoch, token.generation
+            )),
+        );
+    }
     let envelope = ToolResultEnvelope {
         status,
         tool: "BashCommand".to_string(),
@@ -993,8 +1011,13 @@ mod tests {
                 },
                 compact_output: Some("build output with arbitrary text".to_string()),
                 command_generation: Some(1),
-                execution_token: None,
+                execution_token: Some(crate::runtime::ShellExecutionToken {
+                    guardian_epoch: "guardian".to_string(),
+                    session_epoch: "session".to_string(),
+                    generation: 1,
+                }),
                 generation_bound_actions: true,
+                dropped_output_file: None,
                 output_truncated: false,
             },
             false,
@@ -1005,6 +1028,8 @@ mod tests {
         assert_eq!(structured["nextAction"]["tool"], "BashCommand");
         assert_eq!(structured["nextAction"]["arguments"]["action_json"]["type"], "status_check");
         assert_eq!(structured["nextAction"]["arguments"]["workspace_root"], "/workspace");
+        assert_eq!(structured["data"]["command_generation"], 1);
+        assert_eq!(structured["data"]["execution_id"], "guardian:session:1");
     }
 
     #[test]
@@ -1104,6 +1129,7 @@ mod tests {
                 command_generation: Some(1),
                 execution_token: None,
                 generation_bound_actions: true,
+                dropped_output_file: None,
                 output_truncated: false,
             },
             false,
@@ -1114,6 +1140,42 @@ mod tests {
         assert!(structured.get("nextAction").is_none());
         assert_eq!(structured["data"]["exit_code"], 0);
         assert_eq!(structured["data"]["output_truncated"], false);
+    }
+
+    #[test]
+    fn truncated_bash_output_exposes_the_runtime_owned_spill_file() {
+        let result = bash_success_result(
+            Some(&json!({"thread_id":"thread","action_json":{"type":"command","command":"test"}})),
+            BashCommandRuntimeResult {
+                result: crate::tools::bash_command::BashCommandResult {
+                    output: "recent output".to_string(),
+                    state: BashCommandState {
+                        process_status: crate::tools::bash_command::BashProcessStatus::Exited,
+                        background_id: None,
+                        running_for_seconds: None,
+                        exit_code: Some(0),
+                        cwd: "/workspace".into(),
+                        turn_state: None,
+                    },
+                },
+                compact_output: None,
+                command_generation: Some(7),
+                execution_token: None,
+                generation_bound_actions: true,
+                dropped_output_file: Some("/workspace/.winx/scratch/bash-output.log".into()),
+                output_truncated: true,
+            },
+            false,
+        )
+        .expect("typed BashCommand result");
+
+        let structured = result.structured_content.expect("structured success");
+        assert_eq!(structured["data"]["output_truncated"], true);
+        assert_eq!(
+            structured["data"]["dropped_output_file"],
+            "/workspace/.winx/scratch/bash-output.log"
+        );
+        assert_eq!(structured["data"]["command_generation"], 7);
     }
 
     #[test]
@@ -1140,6 +1202,7 @@ mod tests {
                 command_generation: Some(1),
                 execution_token: None,
                 generation_bound_actions: true,
+                dropped_output_file: None,
                 output_truncated: false,
             },
             false,
@@ -1175,6 +1238,7 @@ mod tests {
                 command_generation: Some(1),
                 execution_token: None,
                 generation_bound_actions: true,
+                dropped_output_file: None,
                 output_truncated: false,
             },
             false,
@@ -1241,6 +1305,7 @@ mod tests {
                 command_generation: None,
                 execution_token: None,
                 generation_bound_actions: false,
+                dropped_output_file: None,
                 output_truncated: false,
             },
             true,

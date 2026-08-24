@@ -408,7 +408,7 @@ pub(super) async fn wait_for_output(
     let (rendered, rendered_token_truncated) =
         truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS);
     let rendered = rendered.into_owned();
-    let (running_for, exit_code, shell_cwd, scratch, shell_output_truncated) =
+    let (running_for, exit_code, shell_cwd, scratch, dropped_output_file, shell_output_truncated) =
         read_status_extras(shell, complete, expected_generation).await?;
     let cwd = shell_cwd.as_deref().unwrap_or(&bash_state.cwd);
     let state = status_state(background_id, !complete, running_for, exit_code, cwd, None);
@@ -420,24 +420,26 @@ pub(super) async fn wait_for_output(
         compact_output,
         Some(generation),
         shell_output_truncated || source_token_truncated || rendered_token_truncated,
-    ))
+    )
+    .with_dropped_output_file(dropped_output_file))
 }
 
 async fn read_status_extras(
     shell: &SharedPtyShell,
     complete: bool,
     expected_generation: Option<u64>,
-) -> Result<(Option<Duration>, Option<i32>, Option<PathBuf>, String, bool)> {
+) -> Result<(Option<Duration>, Option<i32>, Option<PathBuf>, String, Option<PathBuf>, bool)> {
     let guard = shell.lock().await;
     let Some(shell) = guard.as_ref() else {
-        return Ok((None, None, None, String::new(), false));
+        return Ok((None, None, None, String::new(), None, false));
     };
     ensure_expected_generation(shell.command_generation(), expected_generation)?;
     let running_for = if complete { None } else { shell.command_elapsed() };
     let exit_code = if complete { shell.last_exit_code } else { None };
     let cwd = Some(shell.current_cwd().to_path_buf());
-    let pointer = scratch_pointer(shell.output_truncated, shell.scratch_path());
-    Ok((running_for, exit_code, cwd, pointer, shell.output_truncated))
+    let dropped_output_file = shell.scratch_path().map(Path::to_path_buf);
+    let pointer = scratch_pointer(shell.output_truncated, dropped_output_file.as_deref());
+    Ok((running_for, exit_code, cwd, pointer, dropped_output_file, shell.output_truncated))
 }
 
 fn scratch_pointer(output_truncated: bool, scratch_path: Option<&Path>) -> String {
@@ -476,8 +478,8 @@ pub(super) fn finalize_tombstone(
             let (rendered, rendered_token_truncated) =
                 truncate_to_token_budget(&rendered, MAX_OUTPUT_TOKENS);
             let rendered = rendered.into_owned();
-            let state = status_state(Some(id), false, None, exit_code, &cwd, None);
             let pointer = scratch_pointer(output_truncated, scratch_path.as_deref());
+            let state = status_state(Some(id), false, None, exit_code, &cwd, None);
             let status = render_status(bash_state, &state);
             Ok(runtime_rendered(
                 format!("{rendered}{pointer}"),
@@ -486,7 +488,8 @@ pub(super) fn finalize_tombstone(
                 compact_output,
                 None,
                 output_truncated || source_token_truncated || rendered_token_truncated,
-            ))
+            )
+            .with_dropped_output_file(scratch_path))
         }
         BashCommandAction::SendText { .. }
         | BashCommandAction::SendSpecials { .. }
@@ -557,7 +560,15 @@ pub(super) async fn execute_status_check(
     .await?;
 
     if !verbose && scrollback_lines.is_none() {
-        let (fingerprint, running_for, running, exit_code, cwd, output_truncated) = {
+        let (
+            fingerprint,
+            running_for,
+            running,
+            exit_code,
+            cwd,
+            dropped_output_file,
+            output_truncated,
+        ) = {
             let guard = shell.lock().await;
             let Some(shell) = guard.as_ref() else {
                 return Err(WinxError::BashStateNotInitialized);
@@ -568,6 +579,7 @@ pub(super) async fn execute_status_check(
                 shell.command_running,
                 (!shell.command_running).then_some(shell.last_exit_code).flatten(),
                 shell.current_cwd().to_path_buf(),
+                shell.scratch_path().map(Path::to_path_buf),
                 shell.output_truncated,
             )
         };
@@ -587,7 +599,8 @@ pub(super) async fn execute_status_check(
                 options.compact_output,
                 Some(generation),
                 output_truncated,
-            ));
+            )
+            .with_dropped_output_file(dropped_output_file));
         }
     } else if !verbose {
         let fingerprint = {
