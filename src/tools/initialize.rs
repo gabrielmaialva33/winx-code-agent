@@ -612,7 +612,8 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
             "Use temporary_artifact_dir={} for a small stable set of session-local derived \
              helpers; BashCommand exports the same path as WINX_TEMP_DIR. Reuse helpers instead \
              of creating CodeMap carriers; helper maps accept one existing file and are limited \
-             to {} unique files / {} calls.",
+             to {} unique files / {} calls. Winx audits the directory after Bash; if it exceeds \
+             budget, explicitly remove obsolete helpers before running ordinary commands.",
             temporary_artifact.directory.display(),
             crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
             crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_CALLS,
@@ -624,8 +625,11 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
              treat helpers as non-canonical. Never create a carrier solely for CodeMap. The \
              directory is created on demand, limited to {} files / {} bytes for this session, and \
              expired after {} seconds of inactivity. Every BashCommand PTY exports the same path \
-             as WINX_TEMP_DIR; shell-generated helpers must stay beneath it. Helper CodeMap accepts \
-             one existing file and is limited to {} unique files / {} calls in this live session.",
+             as WINX_TEMP_DIR; shell-generated helpers must stay beneath it. Winx audits actual \
+             usage after Bash; an overage never triggers deletion automatically. If exceeded, \
+             explicitly inspect and remove obsolete helpers before ordinary commands can continue. \
+             Helper CodeMap accepts one existing file and is limited to {} unique files / {} calls \
+             in this live session.",
             temporary_artifact.directory.display(),
             temporary_artifact.max_session_files,
             temporary_artifact.max_session_bytes,
