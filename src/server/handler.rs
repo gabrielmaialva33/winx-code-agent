@@ -88,6 +88,78 @@ struct UsageEvent {
     started: std::time::Instant,
 }
 
+#[derive(Default)]
+struct UsageResultMetadata<'a> {
+    error_code: &'a str,
+    source_kind: &'a str,
+    payload_bytes: u64,
+    source_bytes: u64,
+    image_transcoded: bool,
+    image_deduplicated: bool,
+    temporary_session_files: u64,
+    temporary_session_bytes: u64,
+    temporary_over_budget: bool,
+}
+
+fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageResultMetadata<'_> {
+    let structured = result.and_then(|result| result.structured_content.as_ref());
+    let data = structured.and_then(|structured| structured.get("data"));
+    let domain_data = data.and_then(|data| data.get("result")).or(data).or(structured);
+    let temporary = data.and_then(|data| data.get("temporary_artifact_budget")).or_else(|| {
+        domain_data.filter(|data| {
+            data.get("temporary_artifact_cleanup_required")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        })
+    });
+    UsageResultMetadata {
+        error_code: structured
+            .and_then(|structured| structured.get("errorCode"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        source_kind: structured
+            .and_then(|structured| structured.get("sourceKind"))
+            .or_else(|| domain_data.and_then(|data| data.get("source_kind")))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default(),
+        payload_bytes: structured
+            .and_then(|structured| structured.get("payloadBytes"))
+            .or_else(|| domain_data.and_then(|data| data.get("payload_bytes")))
+            .or_else(|| domain_data.and_then(|data| data.get("delivered_bytes")))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        source_bytes: domain_data
+            .and_then(|data| data.get("source_bytes"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        image_transcoded: domain_data
+            .and_then(|data| data.get("transcoded"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        image_deduplicated: domain_data
+            .and_then(|data| data.get("deduplicated"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        temporary_session_files: temporary
+            .and_then(|temporary| temporary.get("session_files"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        temporary_session_bytes: temporary
+            .and_then(|temporary| temporary.get("session_bytes"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        temporary_over_budget: temporary
+            .and_then(|temporary| temporary.get("over_budget"))
+            .and_then(serde_json::Value::as_bool)
+            .or_else(|| {
+                temporary
+                    .and_then(|temporary| temporary.get("temporary_artifact_cleanup_required"))
+                    .and_then(serde_json::Value::as_bool)
+            })
+            .unwrap_or(false),
+    }
+}
+
 impl UsageEvent {
     fn start(
         request: &CallToolRequestParams,
@@ -272,6 +344,17 @@ impl UsageEvent {
             return;
         }
 
+        self.emit_non_initialize(outcome, result_status, response_bytes, result);
+    }
+
+    fn emit_non_initialize(
+        &self,
+        outcome: &str,
+        result_status: &str,
+        response_bytes: usize,
+        result: Option<&CallToolResult>,
+    ) {
+        let metadata = usage_result_metadata(result);
         tracing::info!(
             target: "winx::usage",
             event = "tool_call",
@@ -291,6 +374,15 @@ impl UsageEvent {
             workspace_coherence = %self.workspace_coherence,
             batch_items = self.batch_items,
             worker_limit = self.worker_limit,
+            error_code = metadata.error_code,
+            source_kind = metadata.source_kind,
+            payload_bytes = metadata.payload_bytes,
+            source_bytes = metadata.source_bytes,
+            image_transcoded = metadata.image_transcoded,
+            image_deduplicated = metadata.image_deduplicated,
+            temporary_session_files = metadata.temporary_session_files,
+            temporary_session_bytes = metadata.temporary_session_bytes,
+            temporary_over_budget = metadata.temporary_over_budget,
             result_status,
             response_bytes,
             duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
@@ -749,23 +841,44 @@ impl ServerHandler for WinxService {
             None
         };
         if wait_policy == Some(BashWaitPolicy::UntilComplete) {
-            let is_foreground_command = request
-                .arguments
-                .clone()
-                .and_then(|arguments| {
-                    serde_json::from_value::<BashCommand>(serde_json::Value::Object(arguments)).ok()
-                })
-                .is_some_and(|bash| {
-                    matches!(
-                        bash.action_json,
-                        crate::types::BashCommandAction::Command { is_background: false, .. }
-                    )
-                });
-            if !is_foreground_command {
-                return Err(McpError::invalid_request(
-                    "wait_policy=until_complete is valid only for a foreground Command action",
-                    None,
-                ));
+            let parsed_bash = request.arguments.clone().and_then(|arguments| {
+                serde_json::from_value::<BashCommand>(serde_json::Value::Object(arguments)).ok()
+            });
+            if let Some(bash) = parsed_bash.as_ref() {
+                let is_foreground_command = matches!(
+                    bash.action_json,
+                    crate::types::BashCommandAction::Command { is_background: false, .. }
+                );
+                if !is_foreground_command {
+                    let action = match &bash.action_json {
+                        crate::types::BashCommandAction::Command {
+                            is_background: true, ..
+                        } => "background_command",
+                        crate::types::BashCommandAction::Command { .. } => "foreground_command",
+                        crate::types::BashCommandAction::StatusCheck { .. } => "status_check",
+                        crate::types::BashCommandAction::SendText { .. } => "send_text",
+                        crate::types::BashCommandAction::SendSpecials { .. } => "send_specials",
+                        crate::types::BashCommandAction::SendAscii { .. } => "send_ascii",
+                        crate::types::BashCommandAction::Screen { .. } => "screen",
+                        crate::types::BashCommandAction::WaitForTurn { .. } => "wait_for_turn",
+                    };
+                    let error = crate::errors::WinxError::InvalidWaitPolicyForAction {
+                        wait_policy: "until_complete".to_string(),
+                        action: action.to_string(),
+                    };
+                    let arguments = request.arguments.clone().map(serde_json::Value::Object);
+                    let mut result =
+                        outcomes::tool_failure("BashCommand", &error, arguments.as_ref())?;
+                    scope.unscope_result(&mut result);
+                    let status = outcomes::result_status(&result);
+                    usage.emit(
+                        "tool_error",
+                        &status,
+                        outcomes::result_size_bytes(&result),
+                        Some(&result),
+                    );
+                    return Ok(result.into());
+                }
             }
         }
 
@@ -966,6 +1079,48 @@ mod tests {
         let options = adaptive_action_options(true);
         assert!(options.compact_output);
         assert!(options.require_generation_binding);
+    }
+
+    #[test]
+    fn usage_metadata_reads_image_code_map_and_temp_envelopes() {
+        let result_with = |structured| {
+            let mut result = CallToolResult::success(Vec::new());
+            result.structured_content = Some(structured);
+            result
+        };
+        let image = result_with(serde_json::json!({
+            "data": {"result": {
+                "source_bytes": 17_000_000,
+                "delivered_bytes": 2_000_000,
+                "transcoded": true,
+                "deduplicated": false
+            }}
+        }));
+        let metadata = usage_result_metadata(Some(&image));
+        assert_eq!(metadata.source_bytes, 17_000_000);
+        assert_eq!(metadata.payload_bytes, 2_000_000);
+        assert!(metadata.image_transcoded);
+        assert!(!metadata.image_deduplicated);
+
+        let code_map = result_with(serde_json::json!({
+            "source_kind": "canonical",
+            "payload_bytes": 12_345
+        }));
+        let metadata = usage_result_metadata(Some(&code_map));
+        assert_eq!(metadata.source_kind, "canonical");
+        assert_eq!(metadata.payload_bytes, 12_345);
+
+        let temporary = result_with(serde_json::json!({
+            "data": {
+                "session_files": 129,
+                "session_bytes": 4096,
+                "temporary_artifact_cleanup_required": true
+            }
+        }));
+        let metadata = usage_result_metadata(Some(&temporary));
+        assert_eq!(metadata.temporary_session_files, 129);
+        assert_eq!(metadata.temporary_session_bytes, 4096);
+        assert!(metadata.temporary_over_budget);
     }
 
     #[test]
