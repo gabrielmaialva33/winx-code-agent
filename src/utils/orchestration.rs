@@ -14,9 +14,12 @@ const DEFAULT_INSTRUCTIONS: &str = concat!(
     "that changes permissions, data, or system state. Use ReadFiles for unsupported CodeMap ",
     "languages; never transform source solely to make CodeMap parse it. Put useful derived helpers ",
     "only in the temporary_artifact_dir returned by Initialize (exported as WINX_TEMP_DIR). Keep ",
-    "short descriptive names and source-path/line provenance, treat helpers as non-canonical, and ",
-    "remove them when done. Never encode payload in names or create .winx-* or .winx_tmp artifacts ",
-    "at the project root."
+    "a small stable set: overwrite or reuse the same descriptive helper per purpose, retain ",
+    "source-path/line provenance, remove obsolete files, and treat helpers as non-canonical. Never turn ",
+    "command, lint, test, or search output into a parseable carrier merely to call CodeMap. CodeMap ",
+    "on helpers accepts only an existing single file and has a smaller aggregate session budget; ",
+    "canonical source maps remain available. Never encode payload in names or create .winx-* or ",
+    ".winx_tmp artifacts at the project root."
 );
 
 const DISALLOW_INSTRUCTION: &str = "As soon as you encounter \"The user has chosen to disallow the tool call.\", immediately stop doing everything and ask the user for the reason.";
@@ -62,6 +65,9 @@ mod tests {
         assert!(instructions.contains("temporary_artifact_dir returned by Initialize"));
         assert!(instructions.contains("exported as WINX_TEMP_DIR"));
         assert!(instructions.contains("helpers as non-canonical"));
+        assert!(instructions.contains("overwrite or reuse the same descriptive helper"));
+        assert!(instructions.contains("merely to call CodeMap"));
+        assert!(instructions.contains("existing single file"));
         assert!(instructions.contains("Never encode payload in names"));
         assert!(instructions.contains(".winx-* or .winx_tmp artifacts"));
     }
