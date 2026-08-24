@@ -55,7 +55,11 @@ pub(crate) struct InitializeOutcome {
     pub(crate) temporary_artifact_dir: PathBuf,
     pub(crate) temporary_artifact_ttl_seconds: u64,
     pub(crate) temporary_artifact_max_bytes: u64,
+    pub(crate) temporary_artifact_max_session_bytes: u64,
     pub(crate) temporary_artifact_max_file_bytes: u64,
+    pub(crate) temporary_artifact_max_files: usize,
+    pub(crate) temporary_code_map_max_calls: usize,
+    pub(crate) temporary_code_map_max_unique_files: usize,
 }
 
 /// Create a unique scratch workspace under the system temp dir, used when the
@@ -605,19 +609,29 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
     };
     let temporary_artifact_instruction = if compact_response {
         format!(
-            "Use temporary_artifact_dir={} for session-local derived helpers; BashCommand exports \
-             the same path as WINX_TEMP_DIR.",
-            temporary_artifact.directory.display()
+            "Use temporary_artifact_dir={} for a small stable set of session-local derived \
+             helpers; BashCommand exports the same path as WINX_TEMP_DIR. Reuse helpers instead \
+             of creating CodeMap carriers; helper maps accept one existing file and are limited \
+             to {} unique files / {} calls.",
+            temporary_artifact.directory.display(),
+            crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
+            crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_CALLS,
         )
     } else {
         format!(
             "Use temporary_artifact_dir={} for session-local derived helpers only; keep names \
-             short, preserve source-path/line provenance, and treat helpers as non-canonical. The \
-             directory is created on demand and expired after {} seconds of inactivity. Every \
-             BashCommand PTY exports the same path as WINX_TEMP_DIR; shell-generated helpers must \
-             stay beneath it.",
+             short, reuse one stable file per purpose, preserve source-path/line provenance, and \
+             treat helpers as non-canonical. Never create a carrier solely for CodeMap. The \
+             directory is created on demand, limited to {} files / {} bytes for this session, and \
+             expired after {} seconds of inactivity. Every BashCommand PTY exports the same path \
+             as WINX_TEMP_DIR; shell-generated helpers must stay beneath it. Helper CodeMap accepts \
+             one existing file and is limited to {} unique files / {} calls in this live session.",
             temporary_artifact.directory.display(),
+            temporary_artifact.max_session_files,
+            temporary_artifact.max_session_bytes,
             temporary_artifact.ttl_seconds,
+            crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
+            crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_CALLS,
         )
     };
     let _ = writeln!(
@@ -656,6 +670,11 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
         temporary_artifact_dir: temporary_artifact.directory,
         temporary_artifact_ttl_seconds: temporary_artifact.ttl_seconds,
         temporary_artifact_max_bytes: temporary_artifact.max_total_bytes,
+        temporary_artifact_max_session_bytes: temporary_artifact.max_session_bytes,
         temporary_artifact_max_file_bytes: temporary_artifact.max_file_bytes,
+        temporary_artifact_max_files: temporary_artifact.max_session_files,
+        temporary_code_map_max_calls: crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_CALLS,
+        temporary_code_map_max_unique_files:
+            crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
     })
 }

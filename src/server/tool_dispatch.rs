@@ -398,7 +398,11 @@ impl WinxService {
                     "temporary_artifact_env": "WINX_TEMP_DIR",
                     "temporary_artifact_ttl_seconds": outcome.temporary_artifact_ttl_seconds,
                     "temporary_artifact_max_bytes": outcome.temporary_artifact_max_bytes,
+                    "temporary_artifact_max_session_bytes": outcome.temporary_artifact_max_session_bytes,
                     "temporary_artifact_max_file_bytes": outcome.temporary_artifact_max_file_bytes,
+                    "temporary_artifact_max_files": outcome.temporary_artifact_max_files,
+                    "temporary_code_map_max_calls": outcome.temporary_code_map_max_calls,
+                    "temporary_code_map_max_unique_files": outcome.temporary_code_map_max_unique_files,
                 }));
                 Ok(result)
             }
