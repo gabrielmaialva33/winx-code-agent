@@ -1096,6 +1096,12 @@ pub struct ReadImage {
     /// omitted, the most recently active session is used.
     #[serde(default)]
     pub thread_id: String,
+
+    /// Deliver the image again even when the unchanged bytes were already sent
+    /// in this live session. Leave false for normal agent use so accidental
+    /// repeated calls do not resend a multi-megabyte image.
+    #[serde(default)]
+    pub force: bool,
 }
 
 /// Operation for the `CodeMap` tool.
