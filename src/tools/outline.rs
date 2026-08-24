@@ -10,7 +10,11 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
 use tree_sitter_tags::{TagsConfiguration, TagsContext};
 
@@ -22,20 +26,164 @@ use crate::utils::path::resolve_in_workspace;
 use crate::utils::path_prob::score_paths;
 use crate::utils::repo::walk_workspace_files;
 use crate::utils::symbols::{self, Symbol};
+use crate::utils::workspace_stats::active_files_for_context;
 
 /// Cap on files in repo-map mode when the caller passes 0.
-const DEFAULT_MAX_FILES: usize = 50;
+const DEFAULT_MAX_FILES: usize = 20;
 /// Cap on symbols in single-file mode when the caller passes 0.
-const DEFAULT_MAX_SYMBOLS: usize = 500;
+const DEFAULT_MAX_SYMBOLS: usize = 250;
+/// Preserve breadth in a repo map: dense files can be outlined directly later.
+const REPO_MAX_SYMBOLS_PER_FILE: usize = 64;
 /// Skip files larger than this when outlining (huge generated files are noise).
 const MAX_OUTLINE_FILE_SIZE: u64 = 2_000_000;
-/// Byte proxy (~4 bytes/token) for the rendered repo-map budget.
-const OUTLINE_MAX_BYTES: usize = 24_000 * 4;
+/// Combined text + structured navigation payload. The MCP envelope and JSON
+/// escaping still fit comfortably under a 64 KiB response in ordinary source.
+const CODE_MAP_PAYLOAD_MAX_BYTES: usize = 44 * 1024;
+/// Leave room for cursor, snapshot, counters, and the truncation notice.
+const CODE_MAP_PAYLOAD_FIXED_RESERVE: usize = 1_024;
 /// Stop after reading+parsing this many files in repo mode, so a tree of
 /// definition-less supported files can't be fully scanned (a scan-budget cap).
 const MAX_FILES_SCANNED: usize = 20_000;
+const MAX_CURSOR_BYTES: usize = 1_024;
 
 type Configs = HashMap<String, Option<TagsConfiguration>>;
+
+#[derive(Debug, Deserialize, Serialize)]
+struct RepoCursor {
+    version: u8,
+    offset: usize,
+    snapshot: String,
+}
+
+fn navigation_payload_bytes(text: &str, files: &[OutlineFile]) -> usize {
+    text.len()
+        .saturating_add(serde_json::to_vec(files).map_or(usize::MAX, |serialized| serialized.len()))
+}
+
+fn finalize_output(text: &str, mut output: OutlineOutput) -> Result<serde_json::Value> {
+    // `payload_bytes` describes the payload that contains the field itself. A
+    // few iterations make the decimal digit count converge without estimation.
+    for _ in 0..3 {
+        let serialized = serde_json::to_vec(&output)
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+        let measured = text.len().saturating_add(serialized.len());
+        if measured == output.payload_bytes {
+            break;
+        }
+        output.payload_bytes = measured;
+    }
+    crate::tools::structured_json(&output)
+}
+
+fn query_terms(query: &str) -> Vec<String> {
+    let mut terms = query
+        .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+        .map(str::trim)
+        .filter(|term| term.len() >= 2)
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    terms
+}
+
+fn contextual_path_score(rel: &str, terms: &[String], active_paths: &[String]) -> usize {
+    let lower = rel.to_ascii_lowercase();
+    let file_name = Path::new(&lower).file_name().and_then(|name| name.to_str()).unwrap_or("");
+    let active = active_paths
+        .iter()
+        .position(|path| rel == path || rel.ends_with(path))
+        .map_or(0, |index| 1_000usize.saturating_sub(index * 50));
+    active.saturating_add(terms.iter().fold(0usize, |score, term| {
+        let bonus = if file_name == term || file_name.strip_suffix(".rs") == Some(term) {
+            200
+        } else if file_name.contains(term) {
+            80
+        } else if lower.split('/').any(|component| component == term) {
+            60
+        } else if lower.contains(term) {
+            20
+        } else {
+            0
+        };
+        score.saturating_add(bonus)
+    }))
+}
+
+fn repo_snapshot_hash(root: &Path, files: &[(PathBuf, String)], query: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(root.to_string_lossy().as_bytes());
+    hasher.update([0]);
+    hasher.update(query.as_bytes());
+    for (path, rel) in files {
+        hasher.update([0]);
+        hasher.update(rel.as_bytes());
+        if let Ok(metadata) = path.metadata() {
+            hasher.update(metadata.len().to_le_bytes());
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map_or(0, |duration| duration.as_nanos());
+            hasher.update(modified.to_le_bytes());
+        }
+    }
+    let digest = hasher.finalize();
+    let mut short = String::with_capacity(16);
+    for byte in &digest[..8] {
+        let _ = write!(short, "{byte:02x}");
+    }
+    short
+}
+
+fn encode_cursor(offset: usize, snapshot: &str) -> Result<String> {
+    let bytes =
+        serde_json::to_vec(&RepoCursor { version: 1, offset, snapshot: snapshot.to_string() })
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
+}
+
+fn decode_cursor(value: &str) -> Result<Option<RepoCursor>> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > MAX_CURSOR_BYTES {
+        return Err(WinxError::ArgumentParseError("CodeMap cursor is too large".to_string()));
+    }
+    let bytes = URL_SAFE_NO_PAD.decode(value).map_err(|_| {
+        WinxError::ArgumentParseError(
+            "Invalid CodeMap cursor; restart the outline without cursor".to_string(),
+        )
+    })?;
+    let cursor: RepoCursor = serde_json::from_slice(&bytes).map_err(|_| {
+        WinxError::ArgumentParseError(
+            "Invalid CodeMap cursor; restart the outline without cursor".to_string(),
+        )
+    })?;
+    if cursor.version != 1 {
+        return Err(WinxError::ArgumentParseError(
+            "Unsupported CodeMap cursor version; restart without cursor".to_string(),
+        ));
+    }
+    Ok(Some(cursor))
+}
+
+fn repo_cursor_offset(value: &str, snapshot_hash: &str, ranked_len: usize) -> Result<usize> {
+    let Some(cursor) = decode_cursor(value)? else { return Ok(0) };
+    if cursor.snapshot != snapshot_hash {
+        return Err(WinxError::ArgumentParseError(
+            "CodeMap cursor is stale because the ranked workspace snapshot changed; restart without cursor"
+                .to_string(),
+        ));
+    }
+    if cursor.offset > ranked_len {
+        return Err(WinxError::ArgumentParseError(
+            "CodeMap cursor offset is outside the current workspace snapshot; restart without cursor"
+                .to_string(),
+        ));
+    }
+    Ok(cursor.offset)
+}
 
 pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
@@ -73,6 +221,11 @@ fn outline_with_paths(
     let mut configs: Configs = HashMap::new();
 
     if root.is_file() {
+        if !args.cursor.is_empty() {
+            return Err(WinxError::ArgumentParseError(
+                "CodeMap cursor is valid only for directory outlines".to_string(),
+            ));
+        }
         outline_one(&root, &workspace_root, thread_id, args, &mut context, &mut configs)
     } else if root.is_dir() {
         outline_repo(&root, &workspace_root, args, &mut context, &mut configs)
@@ -97,11 +250,16 @@ fn empty_file_outline(
         files_shown: 0,
         files: Vec::new(),
         truncated: false,
+        next_cursor: None,
+        snapshot_hash: None,
+        files_scanned: 1,
+        payload_bytes: 0,
         file_extension: Some(extension),
         language_supported: Some(language_supported),
         fallback,
     };
-    Ok((message, crate::tools::structured_json(&structured)?))
+    let value = finalize_output(&message, structured)?;
+    Ok((message, value))
 }
 
 /// Lowercase extension of `path` ("" if none).
@@ -123,6 +281,21 @@ fn render_symbols(out: &mut String, syms: &[Symbol]) {
     for s in syms {
         let _ = writeln!(out, "  {:>5}  {:<9} {}", s.line, s.kind, s.name);
     }
+}
+
+fn render_file_outline(rel: &str, total: usize, syms: &[Symbol]) -> String {
+    let mut out = String::new();
+    if syms.len() < total {
+        let _ = writeln!(out, "{rel} ({} of {total} symbols):", syms.len());
+    } else {
+        let noun = if total == 1 { "symbol" } else { "symbols" };
+        let _ = writeln!(out, "{rel} ({total} {noun}):");
+    }
+    render_symbols(&mut out, syms);
+    if syms.len() < total {
+        let _ = write!(out, "(...{} more; narrow path or raise max_results)", total - syms.len());
+    }
+    out
 }
 
 fn to_output(syms: Vec<Symbol>) -> Vec<OutlineSymbol> {
@@ -186,43 +359,69 @@ fn outline_one(
         );
     };
 
-    let mut syms = symbols::extract(context, config, &text);
+    let syms = symbols::extract(context, config, &text);
     let total = syms.len();
-    let truncated = total > max;
-    if truncated {
-        syms.truncate(max);
-    }
-
-    let mut out = String::new();
     if syms.is_empty() {
         return empty_file_outline(format!("No definitions found in {rel}."), ext, true, None);
     }
-    if truncated {
-        let _ = writeln!(out, "{rel} ({} of {total} symbols):", syms.len());
+
+    // Find the largest prefix that respects both max_results and the combined
+    // text + structured response budget. Binary search avoids repeatedly
+    // serializing hundreds of almost-identical prefixes.
+    let upper = total.min(max);
+    let mut low = 0usize;
+    let mut high = upper;
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        let selected = &syms[..middle];
+        let candidate_text = render_file_outline(&rel, total, selected);
+        let candidate_files =
+            vec![OutlineFile { file: rel.clone(), symbols: to_output(selected.to_vec()) }];
+        if navigation_payload_bytes(&candidate_text, &candidate_files)
+            <= CODE_MAP_PAYLOAD_MAX_BYTES - CODE_MAP_PAYLOAD_FIXED_RESERVE
+        {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+
+    let selected = &syms[..low];
+    let truncated = low < total;
+    let out = if selected.is_empty() {
+        format!(
+            "{total} definitions found in {rel}, but the first symbol exceeds the CodeMap response budget. Use ReadFiles for exact source."
+        )
     } else {
-        let noun = if total == 1 { "symbol" } else { "symbols" };
-        let _ = writeln!(out, "{rel} ({total} {noun}):");
-    }
-    render_symbols(&mut out, &syms);
-    if truncated {
-        let _ = write!(out, "(...{} more; raise max_results)", total - syms.len());
-    }
+        render_file_outline(&rel, total, selected)
+    };
 
     let structured = OutlineOutput {
         mode: "file".to_string(),
         files_shown: 1,
-        files: vec![OutlineFile { file: rel, symbols: to_output(syms) }],
+        files: vec![OutlineFile { file: rel, symbols: to_output(selected.to_vec()) }],
         truncated,
+        next_cursor: None,
+        snapshot_hash: None,
+        files_scanned: 1,
+        payload_bytes: 0,
         file_extension: Some(ext),
         language_supported: Some(true),
         fallback: None,
     };
-    Ok((out, crate::tools::structured_json(&structured)?))
+    let value = finalize_output(&out, structured)?;
+    Ok((out, value))
 }
 
-/// Collect supported files under `root`, ranked best-first by the path-prob model
-/// (alphabetical fallback). Returns `(absolute, workspace-relative)` pairs.
-fn ranked_supported_files(root: &Path, workspace_root: &Path) -> Vec<(PathBuf, String)> {
+/// Collect supported files under `root`, ranked by explicit task focus and
+/// workspace activity before the generic path-probability prior. Returns
+/// `(absolute, workspace-relative)` pairs.
+fn ranked_supported_files(
+    root: &Path,
+    workspace_root: &Path,
+    query: &str,
+    active_paths: &[String],
+) -> Vec<(PathBuf, String)> {
     let mut files: Vec<(PathBuf, String)> = walk_workspace_files(root)
         .into_iter()
         .filter(|abs| symbols::supports(&ext_of(abs)))
@@ -238,19 +437,57 @@ fn ranked_supported_files(root: &Path, workspace_root: &Path) -> Vec<(PathBuf, S
     // Score the names borrowed as &str — no per-path String clone (score_paths is
     // generic over AsRef<str>). Scope `rels` so its borrow of `files` ends before
     // we move `files` below.
-    let ranking = {
+    let path_ranking = {
         let rels: Vec<&str> = files.iter().map(|(_, r)| r.as_str()).collect();
         score_paths(&rels)
-    };
-    if let Some(weights) = ranking {
-        // Pair each file with its weight and sort by weight desc, MOVING the files
-        // (no per-entry clone of the old reindex). Stable sort preserves the
-        // alphabetical pre-sort for equal weights.
-        let mut pairs: Vec<(f64, (PathBuf, String))> = weights.into_iter().zip(files).collect();
-        pairs.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        files = pairs.into_iter().map(|(_, f)| f).collect();
     }
-    files
+    .unwrap_or_else(|| vec![0.0; files.len()]);
+    let terms = query_terms(query);
+    let mut ranked = path_ranking
+        .into_iter()
+        .zip(files)
+        .map(|(path_score, file)| {
+            let context_score = contextual_path_score(&file.1, &terms, active_paths);
+            (context_score, path_score, file)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal))
+            .then_with(|| left.2 .1.cmp(&right.2 .1))
+    });
+    ranked.into_iter().map(|(_, _, file)| file).collect()
+}
+
+fn fitting_repo_symbol_prefix(
+    current_text: &str,
+    current_files: &[OutlineFile],
+    rel: &str,
+    symbols: &[Symbol],
+    item_budget: usize,
+) -> usize {
+    let mut low = 0usize;
+    let mut high = symbols.len();
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        let selected = &symbols[..middle];
+        let mut chunk = String::new();
+        let _ = writeln!(chunk, "{rel}");
+        render_symbols(&mut chunk, selected);
+        let mut candidate_text = current_text.to_string();
+        candidate_text.push_str(&chunk);
+        let mut candidate_files = current_files.to_vec();
+        candidate_files
+            .push(OutlineFile { file: rel.to_string(), symbols: to_output(selected.to_vec()) });
+        if navigation_payload_bytes(&candidate_text, &candidate_files) <= item_budget {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    low
 }
 
 fn outline_repo(
@@ -261,25 +498,32 @@ fn outline_repo(
     configs: &mut Configs,
 ) -> Result<(String, serde_json::Value)> {
     let max_files = if args.max_results == 0 { DEFAULT_MAX_FILES } else { args.max_results };
+    let active_paths = active_files_for_context(workspace_root);
+    let ranked = ranked_supported_files(root, workspace_root, &args.query, &active_paths);
+    let snapshot_hash = repo_snapshot_hash(root, &ranked, &args.query);
+    let start_offset = repo_cursor_offset(&args.cursor, &snapshot_hash, ranked.len())?;
 
+    let item_budget = CODE_MAP_PAYLOAD_MAX_BYTES - CODE_MAP_PAYLOAD_FIXED_RESERVE;
     let mut out = String::new();
+    if start_offset > 0 {
+        let _ = writeln!(out, "Code map continuation from ranked offset {start_offset}:");
+    }
     let mut out_files: Vec<OutlineFile> = Vec::new();
-    let mut truncated = false;
-    let mut scanned = 0usize;
+    let mut omitted_symbols = false;
+    let mut files_scanned = 0usize;
+    let mut next_offset = start_offset;
 
-    for (abs, rel) in ranked_supported_files(root, workspace_root) {
-        if out_files.len() >= max_files
-            || out.len() >= OUTLINE_MAX_BYTES
-            || scanned >= MAX_FILES_SCANNED
-        {
-            truncated = true;
+    for (index, (abs, rel)) in ranked.iter().enumerate().skip(start_offset) {
+        if out_files.len() >= max_files || files_scanned >= MAX_FILES_SCANNED {
+            next_offset = index;
             break;
         }
         // read_file_to_string enforces the size cap and rejects non-UTF-8, so a
         // separate metadata stat is redundant — skip on any read error.
-        let Ok(text) = read_file_to_string(&abs, MAX_OUTLINE_FILE_SIZE) else { continue };
-        scanned += 1;
-        let ext = ext_of(&abs);
+        files_scanned += 1;
+        next_offset = index + 1;
+        let Ok(text) = read_file_to_string(abs, MAX_OUTLINE_FILE_SIZE) else { continue };
+        let ext = ext_of(abs);
         let mut syms = match config_for(configs, &ext) {
             Some(config) => symbols::extract(context, config, &text),
             None => continue,
@@ -287,21 +531,57 @@ fn outline_repo(
         if syms.is_empty() {
             continue;
         }
-        // Per-file symbol cap: one definition-dense file (minified/generated)
-        // must not blow the budget or the structured array.
-        if syms.len() > DEFAULT_MAX_SYMBOLS {
-            syms.truncate(DEFAULT_MAX_SYMBOLS);
-            truncated = true;
+        let total_symbols = syms.len();
+        if syms.len() > REPO_MAX_SYMBOLS_PER_FILE {
+            syms.truncate(REPO_MAX_SYMBOLS_PER_FILE);
+            omitted_symbols = true;
         }
+
+        // Fit the largest symbol prefix for this file into the combined text +
+        // structured budget. Checking the candidate before committing avoids
+        // the old one-dense-file overshoot.
+        let low = fitting_repo_symbol_prefix(&out, &out_files, rel, &syms, item_budget);
+
+        if low == 0 {
+            omitted_symbols = true;
+            // If the page already contains useful entries, leave this file for
+            // the next cursor. A single pathological symbol on an empty page is
+            // skipped so pagination can still make progress.
+            if !out_files.is_empty() {
+                next_offset = index;
+                break;
+            }
+            continue;
+        }
+
+        let selected = &syms[..low];
         let _ = writeln!(out, "{rel}");
-        render_symbols(&mut out, &syms);
-        out_files.push(OutlineFile { file: rel, symbols: to_output(syms) });
+        render_symbols(&mut out, selected);
+        out_files.push(OutlineFile { file: rel.clone(), symbols: to_output(selected.to_vec()) });
+        if low < total_symbols {
+            omitted_symbols = true;
+        }
+
+        if low < syms.len() {
+            break;
+        }
     }
 
+    let next_cursor = if next_offset < ranked.len() {
+        Some(encode_cursor(next_offset, &snapshot_hash)?)
+    } else {
+        None
+    };
+    let truncated = omitted_symbols || next_cursor.is_some();
     if out_files.is_empty() {
         out = format!("No code symbols found under {}.", root.display());
     } else if truncated {
-        let _ = write!(out, "(...capped; narrow `path` or raise max_results)");
+        if let Some(cursor) = next_cursor.as_deref() {
+            let _ =
+                write!(out, "(...capped; continue with cursor `{cursor}`, or narrow path/query)");
+        } else {
+            let _ = write!(out, "(...dense files capped; outline a specific file for more)");
+        }
     }
 
     let files_shown = out_files.len();
@@ -310,11 +590,16 @@ fn outline_repo(
         files_shown,
         files: out_files,
         truncated,
+        next_cursor,
+        snapshot_hash: Some(snapshot_hash),
+        files_scanned,
+        payload_bytes: 0,
         file_extension: None,
         language_supported: None,
         fallback: None,
     };
-    Ok((out, crate::tools::structured_json(&structured)?))
+    let value = finalize_output(&out, structured)?;
+    Ok((out, value))
 }
 
 #[cfg(test)]
@@ -332,7 +617,13 @@ mod tests {
     }
 
     fn args(path: &str) -> Outline {
-        Outline { path: path.to_string(), max_results: 0, thread_id: String::new() }
+        Outline {
+            path: path.to_string(),
+            max_results: 0,
+            query: String::new(),
+            cursor: String::new(),
+            thread_id: String::new(),
+        }
     }
 
     #[tokio::test]
@@ -362,6 +653,65 @@ mod tests {
         assert!(out.contains("one"));
         assert!(out.contains("two"));
         assert!(!out.contains("notes.txt"));
+    }
+
+    #[tokio::test]
+    async fn repo_map_query_focuses_the_first_page() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/alpha.rs"), "fn alpha() {}\n").unwrap();
+        std::fs::write(dir.path().join("src/billing.rs"), "fn invoice() {}\n").unwrap();
+        let st = state_in(&dir);
+        let mut focused = args("");
+        focused.max_results = 1;
+        focused.query = "billing invoice".to_string();
+
+        let (_, structured) = handle_tool_call(&st, focused).await.unwrap();
+
+        assert_eq!(structured["files"][0]["file"], "src/billing.rs");
+        assert!(structured["next_cursor"].is_string());
+    }
+
+    #[tokio::test]
+    async fn repo_map_cursor_continues_without_repeating_files() {
+        let dir = TempDir::new().unwrap();
+        for name in ["alpha", "beta", "gamma"] {
+            std::fs::write(dir.path().join(format!("{name}.rs")), format!("fn {name}() {{}}\n"))
+                .unwrap();
+        }
+        let st = state_in(&dir);
+        let mut first_args = args("");
+        first_args.max_results = 1;
+        let (_, first) = handle_tool_call(&st, first_args).await.unwrap();
+        let first_file = first["files"][0]["file"].as_str().unwrap().to_string();
+        let cursor = first["next_cursor"].as_str().unwrap().to_string();
+
+        let mut second_args = args("");
+        second_args.max_results = 1;
+        second_args.cursor = cursor;
+        let (_, second) = handle_tool_call(&st, second_args).await.unwrap();
+
+        assert_ne!(second["files"][0]["file"], first_file);
+        assert_eq!(second["snapshot_hash"], first["snapshot_hash"]);
+    }
+
+    #[tokio::test]
+    async fn repo_map_rejects_a_cursor_after_snapshot_change() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}\n").unwrap();
+        let st = state_in(&dir);
+        let mut first_args = args("");
+        first_args.max_results = 1;
+        let (_, first) = handle_tool_call(&st, first_args).await.unwrap();
+        let cursor = first["next_cursor"].as_str().unwrap().to_string();
+        std::fs::write(dir.path().join("c.rs"), "fn c() {}\n").unwrap();
+
+        let mut stale = args("");
+        stale.cursor = cursor;
+        let error = handle_tool_call(&st, stale).await.unwrap_err();
+
+        assert!(error.to_string().contains("cursor is stale"), "{error}");
     }
 
     #[tokio::test]
@@ -467,7 +817,12 @@ mod tests {
         let st = state_in(&dir);
         let (_, structured) = handle_tool_call(&st, args("")).await.unwrap();
         let syms = structured["files"][0]["symbols"].as_array().unwrap();
-        assert!(syms.len() <= DEFAULT_MAX_SYMBOLS, "got {}", syms.len());
+        assert!(syms.len() <= REPO_MAX_SYMBOLS_PER_FILE, "got {}", syms.len());
         assert_eq!(structured["truncated"], true);
+        assert!(
+            usize::try_from(structured["payload_bytes"].as_u64().unwrap())
+                .is_ok_and(|bytes| bytes <= CODE_MAP_PAYLOAD_MAX_BYTES),
+            "{structured}"
+        );
     }
 }

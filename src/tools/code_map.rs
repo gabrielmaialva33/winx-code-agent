@@ -25,6 +25,8 @@ pub async fn handle_tool_call(
             let outline = Outline {
                 path: code_map.path,
                 max_results: code_map.max_results,
+                query: code_map.query,
+                cursor: code_map.cursor,
                 thread_id: code_map.thread_id,
             };
             crate::tools::outline::handle_tool_call(bash_state_arc, outline).await

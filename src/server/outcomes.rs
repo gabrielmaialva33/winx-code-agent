@@ -86,6 +86,10 @@ pub(super) struct CodeMapToolResultEnvelope {
     #[schemars(flatten)]
     pub result: ToolResultEnvelope,
     pub truncated: Option<bool>,
+    pub next_cursor: Option<String>,
+    pub snapshot_hash: Option<String>,
+    pub files_scanned: Option<usize>,
+    pub payload_bytes: Option<usize>,
     pub mode: Option<String>,
     pub files_shown: Option<usize>,
     pub files: Option<Vec<crate::types::OutlineFile>>,
@@ -166,7 +170,7 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
             } else {
                 data.insert("result".to_string(), existing.clone());
             }
-        } else {
+        } else if tool != "CodeMap" {
             data.insert("result".to_string(), existing.clone());
         }
     }
@@ -904,6 +908,26 @@ fn string_argument(arguments: Option<&Value>, key: &str) -> Option<String> {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn code_map_navigation_payload_is_not_duplicated_inside_data_result() {
+        let navigation = json!({
+            "mode": "repo",
+            "files_shown": 1,
+            "files": [{"file": "src/lib.rs", "symbols": []}],
+            "truncated": false,
+            "files_scanned": 1,
+            "payload_bytes": 128
+        });
+        let mut result = CallToolResult::success(vec![ContentBlock::text("src/lib.rs\n")]);
+        result.structured_content = Some(navigation);
+
+        decorate_success("CodeMap", None, &mut result);
+
+        let structured = result.structured_content.expect("structured CodeMap result");
+        assert_eq!(structured["files"][0]["file"], "src/lib.rs");
+        assert!(structured["data"].get("result").is_none(), "{structured}");
+    }
 
     #[test]
     fn initialize_metadata_is_flattened_into_the_shared_data_envelope() {

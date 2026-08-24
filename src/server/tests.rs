@@ -864,8 +864,20 @@ mod schema_tests {
             .and_then(serde_json::Value::as_object)
             .expect("CodeMap outputSchema properties");
         assert!(properties.contains_key("truncated"));
+        assert!(properties.contains_key("next_cursor"));
+        assert!(properties.contains_key("snapshot_hash"));
+        assert!(properties.contains_key("files_scanned"));
+        assert!(properties.contains_key("payload_bytes"));
         assert!(properties.contains_key("language_supported"));
         assert!(properties.contains_key("fallback"));
+
+        let input = code_map.input_schema.as_ref();
+        let input_properties = input
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("CodeMap inputSchema properties");
+        assert!(input_properties.contains_key("query"));
+        assert!(input_properties.contains_key("cursor"));
     }
 
     #[test]

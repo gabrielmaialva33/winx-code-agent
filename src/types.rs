@@ -1133,6 +1133,17 @@ pub struct CodeMap {
     #[serde(default)]
     pub max_results: usize,
 
+    /// Optional task focus used to rank directory maps. Short symbol names,
+    /// paths, or a concise topic work best. Ignored by single-file outlines and
+    /// reference searches.
+    #[serde(default)]
+    pub query: String,
+
+    /// Opaque continuation returned by a truncated directory outline. Reuse it
+    /// with the same path, query, and workspace snapshot; omit it to restart.
+    #[serde(default)]
+    pub cursor: String,
+
     /// Optional thread ID identifying the shell session to operate on. When
     /// omitted, the most recently active session is used.
     #[serde(default)]
@@ -1153,6 +1164,14 @@ pub struct Outline {
     /// map. 0 means the default.
     #[serde(default)]
     pub max_results: usize,
+
+    /// Optional task focus used to rank directory maps.
+    #[serde(default)]
+    pub query: String,
+
+    /// Opaque continuation for a directory map.
+    #[serde(default)]
+    pub cursor: String,
 
     /// Optional thread ID identifying the shell session to operate on. When
     /// omitted, the most recently active session is used.
@@ -1205,6 +1224,17 @@ pub struct OutlineOutput {
     pub files: Vec<OutlineFile>,
     /// True if the symbol map was capped (more files or symbols exist).
     pub truncated: bool,
+    /// Opaque continuation for the next ranked directory-map page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+    /// Stable fingerprint of the ranked directory snapshot behind the cursor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub snapshot_hash: Option<String>,
+    /// Number of candidate files inspected while producing this page.
+    pub files_scanned: usize,
+    /// Combined bytes of the human-readable map and its structured navigation
+    /// payload, before the small shared MCP result envelope is added.
+    pub payload_bytes: usize,
     /// Lowercase source extension in single-file mode.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file_extension: Option<String>,
@@ -1273,6 +1303,10 @@ pub struct ReferencesOutput {
 #[derive(Debug, Clone, JsonSchema)]
 pub struct CodeMapStructuredOutput {
     pub truncated: bool,
+    pub next_cursor: Option<String>,
+    pub snapshot_hash: Option<String>,
+    pub files_scanned: Option<usize>,
+    pub payload_bytes: Option<usize>,
     pub mode: Option<String>,
     pub files_shown: Option<usize>,
     pub files: Option<Vec<OutlineFile>>,
