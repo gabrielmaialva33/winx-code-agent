@@ -218,64 +218,28 @@ fn with_output_schema<T: schemars::JsonSchema>(mut tool: Tool) -> Tool {
 }
 
 const INITIALIZE_DESCRIPTION: &str =
-    "- Call this at the start of the conversation before using shell tools, unless a local MCP client supplied Roots and Winx initialized that workspace automatically. \
-     - Do not call Initialize again while this conversation already has a valid Winx thread_id. A repeated first_call only reattaches the durable session and returns compact unchanged-context metadata; use ReadFiles, CodeMap, BashCommand, or edit tools directly. \
-     - The result returns an inseparable thread_id/workspace_root pair. Copy both exactly into every later Winx call; never borrow a pair from another chat or project. workspace_root identifies the session and does not limit target paths. \
-     - The result also returns temporary_artifact_dir, a bounded session-local area for genuinely useful derived helpers. It is created on demand; keep names short, preserve source provenance, and treat its contents as non-canonical. \
-     - Use `any_workspace_path` to initialize the shell in the appropriate project directory. \
-     - If the user has mentioned a workspace or project root or any other file or folder use it to set `any_workspace_path`. \
-     - If user has mentioned any files use `initial_files_to_read` to read, use absolute paths only (~ allowed) \
-     - By default use mode \"wcgw\" \
-     - In \"code-writer\" mode, set the commands and globs which user asked to set, otherwise use 'all'. \
-     - Use type=\"first_call\" if it's the first call to this tool. \
-     - Use type=\"user_asked_mode_change\" if in a conversation user has asked to change mode. \
-     - Use type=\"reset_shell\" if in a conversation shell is not working after multiple tries. \
-     - A conversation with a valid binding must not Initialize another project. An allowed absolute target outside workspace_root does not require rebinding: keep the current pair and pass the target path to the appropriate tool. If the user truly wants a different project identity, start a new conversation/client session. initialize_workspace_already_bound and workspace_change_requires_new_session are terminal for the current conversation.";
+    "Open one project workspace before stateful tools, unless MCP Roots already did so. Set any_workspace_path from the user's project or file and normally use first_call + wcgw. Preserve the returned thread_id/workspace_root pair in this conversation; workspace_root is identity, not a path sandbox. Do not call Initialize again with a valid pair: use user_asked_mode_change only for an explicit mode change and reset_shell only after repeated shell failure. A different project identity requires a new conversation. temporary_artifact_dir is the only location for non-canonical derived helpers.";
 
 const BASH_COMMAND_DESCRIPTION: &str =
-    "Use this for stateful shell and process work after Initialize. Compose related finite fail-fast checks in one foreground command with `&&` to avoid unnecessary round trips; keep unrelated or risky operations separate. `wait_policy=adaptive` (default) keeps short commands inline and, when MCP Tasks and generation-bound runtime actions are negotiated, promotes only a foreground command the runtime already reported as running. Without safe Task support it waits synchronously for at most 60 seconds. Use `until_complete` only for a finite foreground Command: capable clients receive a Task immediately and other clients get a synchronous wait capped at 60 seconds. Use `return_early` when the caller needs prompt control; it never creates a Task and waits at most 5 seconds. `wait_for_seconds` is a request within those policy caps, not an override. Treat structuredContent.status as authoritative: when it is `running`, execute next_action (`status_check`) and never submit the original command again. Run long-lived or interactive programs with is_background=true, then use wait_for_turn/screen and send_text/send_specials. Never use shell redirection, echo, or cat for canonical file edits/reads; use the file tools. Every foreground and background PTY exports the session's exact temporary_artifact_dir as `$WINX_TEMP_DIR`. If a shell-only transformation must produce a derived helper, create it only beneath that directory; direct `.winx/tmp` children, cross-session helpers, and root `.winx-*` artifacts are rejected when their write destination is statically visible.";
+    "Run stateful shell, tests, builds, servers, and TUIs after Initialize. Combine related finite fail-fast checks with &&. adaptive is the default wait policy; use until_complete for a finite foreground command and return_early for prompt control. When status is running, wait retry_after_ms and execute next_action/status_check; never resubmit the command. If output_truncated is true, read dropped_output_file only when the omitted history is needed. Use is_background plus screen/wait_for_turn and send_text/send_specials for interactive or long-lived work. Canonical reads/edits belong to file tools. Shell-derived helpers must stay beneath $WINX_TEMP_DIR.";
 
 const READ_FILES_DESCRIPTION: &str =
-    "- Read full file content of one or more files. \
-     - Prefer this over reading files with BashCommand (cat/head/tail): the output is token-budgeted and the read is recorded so FileWriteOrEdit can edit the file afterward. \
-     - Use this for exact canonical source text and languages CodeMap does not support. \
-     - Do NOT use this for binary files or images — use ReadImage for images. \
-     - Provide absolute paths only (~ allowed) \
-     - Only if the task requires line numbers understanding: \
-     - You may extract a range of lines. E.g., `/path/to/file:1-10` for lines 1-10. You can drop start or end like `/path/to/file:1-` or `/path/to/file:-10`";
+    "Read exact canonical text from one or more absolute paths and record visible coverage required by edit tools. Prefer this over cat/head/tail. Use :start-end suffixes for targeted ranges; omitted bounds are allowed. Token truncation never records unseen lines. Use ReadImage for images and do not read binary files.";
 
 const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
-    "Use this to edit one file; use MultiFileEdit when a change spans files. Read the target with ReadFiles first. If structuredContent.status is `needs_read`, perform every required_read or the supplied next_action before retrying; never repeat a failed edit unchanged. For percentage_to_change <= 50, provide concise exact SEARCH/REPLACE blocks with only enough context for uniqueness. For percentage_to_change > 50, provide the complete file and ensure the whole file was read. Preserve whitespace exactly. Use `<<<<<<< SEARCH @42` or `@42-50` to disambiguate repeated snippets. A stale file, missing block, or ambiguous block requires a fresh read before a corrected retry. For a temporary helper, use the exact temporary_artifact_dir returned by Initialize; the file tools reject legacy root artifacts, cross-session temp paths, payload-sized names, excessive depth, and quota overflow. For a quick finite check, set verify_command so editing and verification share one MCP round trip; compose related fail-fast checks with &&. The edit remains applied when verification fails.";
+    "Edit one previously read file; use MultiFileEdit across files. For <=50% change, send exact concise SEARCH/REPLACE blocks and optional @line anchors; for larger changes, read and provide the complete file. On needs_read, stale, missing, or ambiguous results, perform required_reads/next_action before a corrected retry. Temporary helpers must use temporary_artifact_dir. verify_command runs one bounded post-edit check; a failed check does not roll back the edit.";
 
 const MULTI_FILE_EDIT_DESCRIPTION: &str =
-    "- Edits SEVERAL files together, all-or-nothing. Use this over multiple FileWriteOrEdit calls when a change spans files and a partial apply would be bad (e.g. rename a symbol across files). \
-     - Every file's edit is validated and computed in memory FIRST; only if ALL succeed is anything written, so a SEARCH that fails to match in the last file leaves the earlier files untouched. \
-     - Each entry has the same fields as FileWriteOrEdit: file_path (absolute, ~ allowed), percentage_to_change, and text_or_search_replace_blocks. Each file must have been read with ReadFiles first. \
-     - Provide 2+ files; for a single file use FileWriteOrEdit. Do not list the same file twice. \
-     - If a write fails mid-batch (rare: disk/permissions), it stops and reports which files were already written; those are not rolled back. \
-     - For a quick finite check after all commits, set verify_command; compose related fail-fast checks with &&. The edits remain applied when verification fails.";
+    "Validate and edit 2+ previously read files as one batch. Search matching is computed before writing, so validation failure writes nothing; a rare filesystem failure reports any already-written files. Entries use FileWriteOrEdit semantics and paths must be unique. Optional verify_command runs after commit and never rolls edits back.";
 
 const UNDO_EDIT_DESCRIPTION: &str =
-    "- Reverts a file to the content it had before the last FileWriteOrEdit/MultiFileEdit you made to it THIS session. \
-     - Use this to back out a wrong edit instead of re-typing the old content. \
-     - Per-file: call it again on the same file to walk further back through its edits (the last ~10 edits per session are kept, in memory only). \
-     - Refused if the file changed on disk since your edit (so an undo never discards newer changes), and a brand-new file's creation cannot be undone (no prior content) - use BashCommand rm for that. \
-     - Provide file_path (absolute, ~ allowed).";
+    "Restore one file to its previous Winx edit checkpoint in this session. Repeated calls walk backward per file. Undo is refused after an external change and cannot remove a newly created file.";
 
 const CONTEXT_SAVE_DESCRIPTION: &str =
-    "Saves provided description and file contents of all the relevant file paths or globs in a single text file. \
-     - Provide random 3 word unqiue id or whatever user provided. \
-     - Leave project path as empty string if no project path";
+    "Save a concise description and selected file/glob contents as one context artifact. Use the user's id when provided, otherwise a short unique id.";
 
 const CODE_MAP_DESCRIPTION: &str =
-    "- Navigate code structure via tree-sitter - the semantic layer plain grep/rg can't give you. Pick an `operation`: \
-     - operation=\"outline\": map symbols (functions, types, methods, classes, ...). `path` to a FILE returns that file's definitions; `path` to a DIRECTORY (or empty = the whole workspace) returns a relevance-ranked, token-budgeted symbol map across files. Use it instead of reading whole files just to learn their shape. \
-     - operation=\"references\": find where a symbol is defined and referenced (called/used), by name. `name` is required (exact identifier). Counts only real symbol occurrences, never matches inside strings or comments. Output lists definitions first, then references, as `def|ref  file:line  kind  name`. \
-     - Scope either operation with `path` (file or directory; empty = the whole workspace); cap with `max_results`. gitignore-aware, workspace-confined, works in every mode. \
-     - 13 languages (rust, javascript, typescript, python, elixir, go, c, c++, java, ruby, c#, php, lua); other files return no symbols. Note: C/C++ grammars tag definitions only, so references reads 0 for `.c`/`.h`/`.cpp`. \
-     - CodeMap returns symbols, not source text. For unsupported languages or exact code, use the structured fallback to ReadFiles; never transform source solely to make CodeMap parse it. \
-     - A derived representation or adapter is allowed only when independently useful: put it in the temporary_artifact_dir returned by Initialize, use short descriptive names, preserve original source_path/line provenance, and treat it as non-canonical. Never encode payload in filesystem names or create `.winx-*`/`.winx_tmp` artifacts at the project root. Automatic repo maps ignore `.winx`, while an explicit helper file path remains inspectable. \
-     - For plain-text/regex search or file discovery, use rg / grep / fd / find via BashCommand.";
+    "Navigate syntax-aware code structure in 13 languages. outline on a file returns definitions; on a directory it returns a query/activity-ranked, byte-budgeted page. Pass a concise query and continue truncated maps with next_cursor using the same path/query. references requires an exact name and returns definitions before uses. Results are gitignore-aware and contain symbols, not source. For exact text or unsupported languages, use the structured fallback to ReadFiles; never transform source solely to make CodeMap parse it. Independently useful derived helpers belong only in temporary_artifact_dir returned by Initialize; plain-text search belongs to rg via BashCommand.";
 
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
 static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();

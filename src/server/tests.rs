@@ -881,6 +881,20 @@ mod schema_tests {
     }
 
     #[test]
+    fn tool_catalog_prompt_surface_stays_bounded() {
+        let tools = winx_tools();
+        let description_bytes = tools
+            .iter()
+            .filter_map(|tool| tool.description.as_deref())
+            .map(str::len)
+            .sum::<usize>();
+        assert!(description_bytes <= 4_000, "tool descriptions use {description_bytes} bytes");
+
+        let serialized = serde_json::to_vec(&tools).expect("serialize tool catalog");
+        assert!(serialized.len() <= 128 * 1024, "tool catalog uses {} bytes", serialized.len());
+    }
+
+    #[test]
     fn handshake_instructions_lead_with_recovery_contract() {
         let info = ServerHandler::get_info(&super::WinxService::new());
         let instructions = info.instructions.expect("server instructions");
