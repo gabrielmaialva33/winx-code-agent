@@ -377,6 +377,83 @@ pub(super) fn bash_success_result(
     Ok(result)
 }
 
+/// Attach the post-Bash managed-temp audit. A command that already ran remains
+/// a successful command result, but an over-budget session gets an explicit
+/// cleanup-required state and future Command actions are blocked by preflight.
+pub(super) fn attach_temporary_artifact_usage(
+    result: &mut CallToolResult,
+    arguments: Option<&Value>,
+    usage: &crate::utils::agent_temp::TemporaryArtifactUsage,
+) {
+    let Some(Value::Object(envelope)) = result.structured_content.as_mut() else { return };
+    let data = envelope.entry("data").or_insert_with(|| Value::Object(Map::new())).as_object_mut();
+    let Some(data) = data else { return };
+    if let Ok(value) = serde_json::to_value(usage) {
+        data.insert("temporary_artifact_budget".to_string(), value);
+    }
+    if !usage.over_budget {
+        return;
+    }
+
+    data.insert("temporary_artifact_cleanup_required".to_string(), Value::Bool(true));
+    let background_id = data.get("bg_command_id").and_then(Value::as_str).map(str::to_string);
+    let running = envelope.get("status").and_then(Value::as_str) == Some("running");
+    let instruction = if running {
+        "The running process has exceeded the managed temporary-artifact budget. Interrupt it, \
+         then inspect and remove obsolete files beneath $WINX_TEMP_DIR before starting another \
+         command. Winx did not delete files automatically."
+    } else {
+        "Inspect and remove obsolete files beneath $WINX_TEMP_DIR with a cleanup-only BashCommand. \
+         Winx did not delete files automatically; ordinary Command actions remain blocked until \
+         this session is back under budget."
+    };
+    envelope.insert(
+        "message".to_string(),
+        Value::String(if running {
+            "BashCommand is running, but its temporary-artifact budget is exceeded.".to_string()
+        } else {
+            "BashCommand completed, but its temporary-artifact budget is exceeded.".to_string()
+        }),
+    );
+    let next_arguments = running.then(|| {
+        let mut action = json!({
+            "action_json": {
+                "type": "send_specials",
+                "send_specials": ["Ctrl-c"],
+                "submit": false
+            },
+            "wait_policy": "return_early"
+        });
+        copy_session_binding(arguments, &mut action);
+        if let Some(background_id) = background_id {
+            action["action_json"]["bg_command_id"] = Value::String(background_id);
+        }
+        action
+    });
+    let next_action = ToolNextAction {
+        tool: "BashCommand".to_string(),
+        instruction: instruction.to_string(),
+        arguments: next_arguments,
+    };
+    if let Ok(value) = serde_json::to_value(next_action) {
+        envelope.insert("nextAction".to_string(), value);
+    }
+
+    let thread_id = string_argument(arguments, "thread_id").unwrap_or_default();
+    result.content.push(ContentBlock::text(format!(
+        "Winx guard: temporary_artifact_dir={} now contains {} files / {} bytes (limits: {} \
+         files / {} bytes; largest file {} bytes, limit {}). No files were deleted. Inspect and \
+         remove obsolete helpers with a cleanup-only BashCommand using thread_id={thread_id}.",
+        usage.temporary_artifact_dir.display(),
+        usage.session_files,
+        usage.session_bytes,
+        usage.max_session_files,
+        usage.max_session_bytes,
+        usage.largest_file_bytes,
+        usage.max_file_bytes,
+    )));
+}
+
 pub(super) fn result_status(result: &CallToolResult) -> String {
     result
         .structured_content
@@ -659,6 +736,38 @@ fn error_envelope(
                 }
             });
         }
+        WinxError::TemporaryArtifactBudgetExceeded { temporary_artifact_dir, .. } => {
+            status = ToolResultStatus::InvalidInput;
+            error_code = "temporary_artifact_budget_exceeded".to_string();
+            retryable = true;
+            next_action = Some(ToolNextAction {
+                tool: "BashCommand".to_string(),
+                instruction: format!(
+                    "Inspect and remove obsolete files beneath `{}` using only inspection/cleanup \
+                     commands. Ordinary commands remain blocked until the active session is back \
+                     under budget; do not repeat the rejected command unchanged.",
+                    temporary_artifact_dir.display()
+                ),
+                arguments: None,
+            });
+        }
+        WinxError::InvalidWaitPolicyForAction { .. } => {
+            status = ToolResultStatus::InvalidInput;
+            error_code = "wait_policy_incompatible_with_action".to_string();
+            retryable = true;
+            let mut corrected = arguments.cloned();
+            if let Some(Value::Object(arguments)) = corrected.as_mut() {
+                arguments
+                    .insert("wait_policy".to_string(), Value::String("return_early".to_string()));
+            }
+            next_action = Some(ToolNextAction {
+                tool: "BashCommand".to_string(),
+                instruction: "Retry the action with wait_policy=return_early. Reserve \
+                              until_complete for a finite foreground Command action only."
+                    .to_string(),
+                arguments: corrected,
+            });
+        }
         WinxError::DerivedCodeMapBudget { .. } => {
             status = ToolResultStatus::InvalidInput;
             error_code = "derived_code_map_budget_exhausted".to_string();
@@ -769,6 +878,36 @@ fn error_envelope(
             "temporary_artifact_dir".to_string(),
             Value::String(temporary_artifact_dir.to_string_lossy().into_owned()),
         );
+    }
+    if let WinxError::TemporaryArtifactBudgetExceeded {
+        temporary_artifact_dir,
+        total_bytes,
+        max_total_bytes,
+        session_bytes,
+        max_session_bytes,
+        session_files,
+        max_session_files,
+        largest_file_bytes,
+        max_file_bytes,
+    } = error
+    {
+        data.insert(
+            "temporary_artifact_dir".to_string(),
+            Value::String(temporary_artifact_dir.to_string_lossy().into_owned()),
+        );
+        data.insert("total_bytes".to_string(), json!(total_bytes));
+        data.insert("max_total_bytes".to_string(), json!(max_total_bytes));
+        data.insert("session_bytes".to_string(), json!(session_bytes));
+        data.insert("max_session_bytes".to_string(), json!(max_session_bytes));
+        data.insert("session_files".to_string(), json!(session_files));
+        data.insert("max_session_files".to_string(), json!(max_session_files));
+        data.insert("largest_file_bytes".to_string(), json!(largest_file_bytes));
+        data.insert("max_file_bytes".to_string(), json!(max_file_bytes));
+        data.insert("temporary_artifact_cleanup_required".to_string(), Value::Bool(true));
+    }
+    if let WinxError::InvalidWaitPolicyForAction { wait_policy, action } = error {
+        data.insert("wait_policy".to_string(), Value::String(wait_policy.clone()));
+        data.insert("action".to_string(), Value::String(action.clone()));
     }
     if let WinxError::DerivedCodeMapBudget {
         path,
@@ -1061,6 +1200,115 @@ mod tests {
             "/workspace/.winx/tmp/session-deadbeefdeadbeef"
         );
         assert_eq!(structured["nextAction"]["tool"], "FileWriteOrEdit");
+    }
+
+    #[test]
+    fn post_bash_temp_overflow_preserves_execution_and_requires_cleanup() {
+        let mut result = CallToolResult::success(vec![ContentBlock::text("command output")]);
+        result.structured_content = Some(json!({
+            "status": "completed",
+            "tool": "BashCommand",
+            "message": "BashCommand completed.",
+            "retryable": false,
+            "retrySameCall": false,
+            "requiredReads": [],
+            "data": {}
+        }));
+        let usage = crate::utils::agent_temp::TemporaryArtifactUsage {
+            temporary_artifact_dir: "/workspace/.winx/tmp/session-deadbeefdeadbeef".into(),
+            total_bytes: 129,
+            max_total_bytes: 1_024,
+            session_bytes: 129,
+            max_session_bytes: 128,
+            session_files: 129,
+            max_session_files: 128,
+            largest_file_bytes: 2,
+            max_file_bytes: 64,
+            over_budget: true,
+        };
+
+        attach_temporary_artifact_usage(
+            &mut result,
+            Some(&json!({"thread_id":"thread","workspace_root":"/workspace"})),
+            &usage,
+        );
+
+        assert_ne!(result.is_error, Some(true));
+        assert_eq!(result.content.len(), 2);
+        let structured = result.structured_content.expect("structured Bash result");
+        assert_eq!(structured["status"], "completed");
+        assert_eq!(structured["data"]["temporary_artifact_cleanup_required"], true);
+        assert_eq!(structured["data"]["temporary_artifact_budget"]["session_files"], 129);
+        assert_eq!(structured["nextAction"]["tool"], "BashCommand");
+        assert!(structured["nextAction"].get("arguments").is_none());
+    }
+
+    #[test]
+    fn running_temp_overflow_supplies_a_concrete_interrupt_action() {
+        let mut result = CallToolResult::success(vec![ContentBlock::text("still running")]);
+        result.structured_content = Some(json!({
+            "status": "running",
+            "tool": "BashCommand",
+            "message": "BashCommand is still running.",
+            "retryable": false,
+            "retrySameCall": false,
+            "requiredReads": [],
+            "data": {"bg_command_id": "bg-7"}
+        }));
+        let usage = crate::utils::agent_temp::TemporaryArtifactUsage {
+            temporary_artifact_dir: "/workspace/.winx/tmp/session-deadbeefdeadbeef".into(),
+            total_bytes: 129,
+            max_total_bytes: 1_024,
+            session_bytes: 129,
+            max_session_bytes: 128,
+            session_files: 129,
+            max_session_files: 128,
+            largest_file_bytes: 2,
+            max_file_bytes: 64,
+            over_budget: true,
+        };
+
+        attach_temporary_artifact_usage(
+            &mut result,
+            Some(&json!({"thread_id":"thread","workspace_root":"/workspace"})),
+            &usage,
+        );
+
+        let structured = result.structured_content.expect("structured Bash result");
+        let arguments = &structured["nextAction"]["arguments"];
+        assert_eq!(structured["status"], "running");
+        assert_eq!(arguments["action_json"]["type"], "send_specials");
+        assert_eq!(arguments["action_json"]["send_specials"][0], "Ctrl-c");
+        assert_eq!(arguments["action_json"]["bg_command_id"], "bg-7");
+        assert_eq!(arguments["wait_policy"], "return_early");
+        assert_eq!(arguments["thread_id"], "thread");
+        assert_eq!(arguments["workspace_root"], "/workspace");
+    }
+
+    #[test]
+    fn incompatible_wait_policy_returns_corrected_arguments() {
+        let error = WinxError::InvalidWaitPolicyForAction {
+            wait_policy: "until_complete".to_string(),
+            action: "status_check".to_string(),
+        };
+        let result = tool_failure(
+            "BashCommand",
+            &error,
+            Some(&json!({
+                "thread_id":"thread",
+                "workspace_root":"/workspace",
+                "wait_policy":"until_complete",
+                "action_json":{"type":"status_check","status_check":true}
+            })),
+        )
+        .expect("recoverable tool result");
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured wait-policy result");
+        assert_eq!(structured["status"], "invalid_input");
+        assert_eq!(structured["errorCode"], "wait_policy_incompatible_with_action");
+        assert_eq!(structured["nextAction"]["arguments"]["wait_policy"], "return_early");
+        assert_eq!(structured["data"]["action"], "status_check");
     }
 
     #[test]
