@@ -445,15 +445,46 @@ impl WinxService {
         }
         match self.shell_runtime.run_action_detailed(&slot, bash_command, options.clone()).await {
             Ok(outcome) => {
+                let audit_target =
+                    slot.lock().await.as_ref().map(|state| {
+                        (state.workspace_root.clone(), state.current_thread_id.clone())
+                    });
+                let temporary_artifact_usage =
+                    if let Some((workspace_root, thread_id)) = audit_target {
+                        match tokio::task::spawn_blocking(move || {
+                            crate::utils::agent_temp::audit_session(&workspace_root, &thread_id)
+                        })
+                        .await
+                        {
+                            Ok(Ok(usage)) => Some(usage),
+                            Ok(Err(error)) => {
+                                warn!(%error, "post-Bash temporary-artifact audit failed");
+                                None
+                            }
+                            Err(error) => {
+                                warn!(%error, "post-Bash temporary-artifact audit worker failed");
+                                None
+                            }
+                        }
+                    } else {
+                        None
+                    };
                 self.persist_state(&slot).await;
                 let command_generation = outcome.command_generation;
                 let execution_token = outcome.execution_token.clone();
                 let generation_bound_actions = outcome.generation_bound_actions;
-                let result = outcomes::bash_success_result(
+                let mut result = outcomes::bash_success_result(
                     Some(&recovery_args),
                     outcome,
                     options.compact_output,
                 )?;
+                if let Some(usage) = temporary_artifact_usage.as_ref() {
+                    outcomes::attach_temporary_artifact_usage(
+                        &mut result,
+                        Some(&recovery_args),
+                        usage,
+                    );
+                }
                 Ok(BashCallExecution {
                     result,
                     command_generation,
@@ -674,10 +705,28 @@ impl WinxService {
 
         let (slot, _session_guard) =
             self.session_for(&normalize_thread_id(&read_image.thread_id)).await;
-        match crate::tools::read_image::handle_tool_call(&slot, read_image).await {
-            Ok((mime_type, base64_data)) => {
+        match crate::tools::read_image::handle_tool_call_detailed(&slot, read_image).await {
+            Ok(crate::tools::read_image::ReadImageDelivery::Image {
+                mime_type,
+                base64_data,
+                metadata,
+            }) => {
                 self.persist_state(&slot).await;
-                Ok(CallToolResult::success(vec![ContentBlock::image(base64_data, mime_type)]))
+                let mut result =
+                    CallToolResult::success(vec![ContentBlock::image(base64_data, mime_type)]);
+                result.structured_content = serde_json::to_value(metadata).ok();
+                Ok(result)
+            }
+            Ok(crate::tools::read_image::ReadImageDelivery::AlreadyDelivered { metadata }) => {
+                self.persist_state(&slot).await;
+                let mut result = CallToolResult::success(vec![ContentBlock::text(format!(
+                    "ReadImage compacted an unchanged repeat (fingerprint {}). The same image was \
+                     already delivered in this live session; use that prior image. Set force=true \
+                     only when the image must be sent again.",
+                    metadata.content_fingerprint
+                ))]);
+                result.structured_content = serde_json::to_value(metadata).ok();
+                Ok(result)
             }
             Err(error) => outcomes::tool_failure("ReadImage", &error, Some(&recovery_args)),
         }
