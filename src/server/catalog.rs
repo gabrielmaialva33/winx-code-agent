@@ -221,7 +221,7 @@ const INITIALIZE_DESCRIPTION: &str =
     "Open one project workspace before stateful tools, unless MCP Roots already did so. Set any_workspace_path from the user's project or file and normally use first_call + wcgw. Preserve the returned thread_id/workspace_root pair in this conversation; workspace_root is identity, not a path sandbox. Do not call Initialize again with a valid pair: use user_asked_mode_change only for an explicit mode change and reset_shell only after repeated shell failure. A different project identity requires a new conversation. temporary_artifact_dir is the only location for non-canonical derived helpers.";
 
 const BASH_COMMAND_DESCRIPTION: &str =
-    "Run stateful shell, tests, builds, servers, and TUIs after Initialize. Combine related finite fail-fast checks with &&. adaptive is the default wait policy; use until_complete for a finite foreground command and return_early for prompt control. When status is running, wait retry_after_ms and execute next_action/status_check; never resubmit the command. If output_truncated is true, read dropped_output_file only when the omitted history is needed. Use is_background plus screen/wait_for_turn and send_text/send_specials for interactive or long-lived work. Canonical reads/edits belong to file tools. Shell-derived helpers must stay beneath $WINX_TEMP_DIR; reuse one stable helper per purpose and never materialize command output solely for CodeMap.";
+    "Run shell commands, tests, builds, servers, and TUIs after Initialize. Combine related finite checks with &&. adaptive is default; until_complete is only for a finite foreground command, and return_early gives prompt control. Incompatible policies return corrected next_action arguments. For running results, wait retry_after_ms and execute next_action/status_check; never resubmit the command. Read dropped_output_file only when output_truncated history matters. Use background and interactive actions for long-lived work, and file tools for canonical reads/edits. Keep shell-derived helpers under $WINX_TEMP_DIR, reuse stable names, and never create CodeMap-only carriers. Winx audits its budget after Bash; explicitly clean obsolete helpers when directed.";
 
 const READ_FILES_DESCRIPTION: &str =
     "Read exact canonical text from one or more absolute paths and record visible coverage required by edit tools. Prefer this over cat/head/tail. Use :start-end suffixes for targeted ranges; omitted bounds are allowed. Token truncation never records unseen lines. Use ReadImage for images and do not read binary files.";
@@ -301,7 +301,7 @@ fn build_winx_tools() -> Vec<Tool> {
         )),
         with_output_schema::<ToolResultEnvelope>(mcp_session_tool::<ReadImage>(
             "ReadImage",
-            "Read an image from the workspace. The structured result reports the resolved tool state while the image remains in MCP content.",
+            "Read validated JPEG/PNG/GIF/WebP as native MCP image content. Large images are bounded; unchanged session repeats return a compact reference. Set force=true only for an intentional resend.",
             ToolAnnotations::new().read_only(true).open_world(false),
         )),
         with_output_schema::<CodeMapToolResultEnvelope>(mcp_session_tool::<CodeMap>(
