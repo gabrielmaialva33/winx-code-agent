@@ -13,6 +13,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tracing::debug;
 
@@ -59,6 +60,42 @@ pub struct AgentTempInfo {
     pub max_session_bytes: u64,
     pub max_file_bytes: u64,
     pub max_session_files: usize,
+}
+
+/// Bounded filesystem audit attached to Bash results. It contains counts and
+/// sizes only, never helper contents.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct TemporaryArtifactUsage {
+    pub temporary_artifact_dir: PathBuf,
+    pub total_bytes: u64,
+    pub max_total_bytes: u64,
+    pub session_bytes: u64,
+    pub max_session_bytes: u64,
+    pub session_files: usize,
+    pub max_session_files: usize,
+    pub largest_file_bytes: u64,
+    pub max_file_bytes: u64,
+    pub over_budget: bool,
+}
+
+impl TemporaryArtifactUsage {
+    pub fn requires_cleanup(&self) -> bool {
+        self.over_budget
+    }
+
+    fn as_budget_error(&self) -> WinxError {
+        WinxError::TemporaryArtifactBudgetExceeded {
+            temporary_artifact_dir: self.temporary_artifact_dir.clone(),
+            total_bytes: self.total_bytes,
+            max_total_bytes: self.max_total_bytes,
+            session_bytes: self.session_bytes,
+            max_session_bytes: self.max_session_bytes,
+            session_files: self.session_files,
+            max_session_files: self.max_session_files,
+            largest_file_bytes: self.largest_file_bytes,
+            max_file_bytes: self.max_file_bytes,
+        }
+    }
 }
 
 /// In-memory budget for syntax navigation over non-canonical helpers.
@@ -112,6 +149,40 @@ pub fn prepare_session(workspace_root: &Path, thread_id: &str) -> AgentTempInfo 
     let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     prune_sessions_unlocked(workspace_root, &info.directory, MAX_AGE);
     info
+}
+
+/// Measure the active managed session after a Bash action. This closes the gap
+/// left by dynamic loops, scripts, and generated filenames that static command
+/// inspection cannot project before the shell runs.
+pub fn audit_session(workspace_root: &Path, thread_id: &str) -> Result<TemporaryArtifactUsage> {
+    let info = session_info(workspace_root, thread_id);
+    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
+    let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let usage = temp_tree_usage(&workspace.join(TEMP_ROOT), &info.directory).ok_or_else(|| {
+        policy_error(
+            &info.directory,
+            &info,
+            "temporary storage could not be measured safely; remove malformed or excessive \
+             artifacts before retrying"
+                .to_string(),
+        )
+    })?;
+    let over_budget = usage.total_bytes > MAX_TOTAL_BYTES
+        || usage.session_bytes > MAX_SESSION_BYTES
+        || usage.session_files > MAX_SESSION_FILES
+        || usage.largest_file_bytes > MAX_FILE_BYTES;
+    Ok(TemporaryArtifactUsage {
+        temporary_artifact_dir: info.directory,
+        total_bytes: usage.total_bytes,
+        max_total_bytes: MAX_TOTAL_BYTES,
+        session_bytes: usage.session_bytes,
+        max_session_bytes: MAX_SESSION_BYTES,
+        session_files: usage.session_files,
+        max_session_files: MAX_SESSION_FILES,
+        largest_file_bytes: usage.largest_file_bytes,
+        max_file_bytes: MAX_FILE_BYTES,
+        over_budget,
+    })
 }
 
 /// Validate one `FileWriteOrEdit` target. Non-temporary project files keep their
@@ -183,6 +254,18 @@ pub fn validate_bash_command(
     command: &str,
 ) -> Result<()> {
     let info = session_info(workspace_root, thread_id);
+    let recovery_command = is_explicit_temp_recovery(command, &info);
+    let usage = match audit_session(workspace_root, thread_id) {
+        Ok(usage) => usage,
+        // A bounded scan can deliberately fail closed for a malformed or
+        // excessively large tree. Keep the narrow recovery path available or
+        // the agent could never repair the condition that blocked the scan.
+        Err(_) if recovery_command => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if usage.requires_cleanup() && !recovery_command {
+        return Err(usage.as_budget_error());
+    }
     let mut paths = crate::utils::bash_parser::extract_static_write_paths(command);
     paths.extend(embedded_writer_paths(command));
     paths.sort();
@@ -194,8 +277,38 @@ pub fn validate_bash_command(
             managed_targets.push(target);
         }
     }
-    validate_known_bash_targets_quota(workspace_root, &info, &managed_targets)?;
+    validate_known_bash_targets_quota(&info, &managed_targets, TempTreeUsage::from(&usage))?;
     Ok(())
+}
+
+/// Once a dynamic Bash command has exceeded the active-session quota, admit
+/// only narrow inspection/cleanup commands until the directory is back under budget.
+/// This is a recovery gate, not a shell sandbox; the normal mode allowlist still
+/// authorizes the command itself.
+fn is_explicit_temp_recovery(command: &str, info: &AgentTempInfo) -> bool {
+    let directory = info.directory.to_string_lossy();
+    let names_active_dir = command.contains("$WINX_TEMP_DIR")
+        || command.contains("${WINX_TEMP_DIR}")
+        || command.contains(directory.as_ref());
+    if !names_active_dir {
+        return false;
+    }
+    let Ok(commands) = crate::utils::bash_parser::extract_command_texts(command) else {
+        return false;
+    };
+    !commands.is_empty()
+        && commands.iter().all(|statement| {
+            let executable = statement
+                .split_whitespace()
+                .next()
+                .and_then(|word| Path::new(word).file_name())
+                .and_then(OsStr::to_str)
+                .unwrap_or_default();
+            matches!(
+                executable,
+                "rm" | "unlink" | "rmdir" | "du" | "ls" | "stat" | "sort" | "head" | "tail" | "wc"
+            ) || (executable == "find" && !statement.contains("-exec"))
+        })
 }
 
 fn validate_bash_write_target(
@@ -434,24 +547,13 @@ pub fn reserve_derived_code_map(
 }
 
 fn validate_known_bash_targets_quota(
-    workspace_root: &Path,
     info: &AgentTempInfo,
     targets: &[PathBuf],
+    current: TempTreeUsage,
 ) -> Result<()> {
     if targets.is_empty() {
         return Ok(());
     }
-    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
-    let current =
-        temp_tree_usage(&workspace.join(TEMP_ROOT), &info.directory).ok_or_else(|| {
-            policy_error(
-                &targets[0],
-                info,
-                "temporary storage could not be measured safely; remove malformed or excessive \
-             artifacts before retrying"
-                    .to_string(),
-            )
-        })?;
     let new_files = targets.iter().filter(|path| !path.exists()).collect::<BTreeSet<_>>().len();
     let projected =
         TempTreeUsage { session_files: current.session_files.saturating_add(new_files), ..current };
@@ -507,6 +609,7 @@ pub fn validate_batch_quota(
             total_bytes: projected_total_bytes,
             session_bytes: projected_session_bytes,
             session_files: projected_session_files,
+            largest_file_bytes: current.largest_file_bytes,
         },
     )
 }
@@ -686,6 +789,18 @@ struct TempTreeUsage {
     total_bytes: u64,
     session_bytes: u64,
     session_files: usize,
+    largest_file_bytes: u64,
+}
+
+impl From<&TemporaryArtifactUsage> for TempTreeUsage {
+    fn from(usage: &TemporaryArtifactUsage) -> Self {
+        Self {
+            total_bytes: usage.total_bytes,
+            session_bytes: usage.session_bytes,
+            session_files: usage.session_files,
+            largest_file_bytes: usage.largest_file_bytes,
+        }
+    }
 }
 
 fn temp_tree_usage(root: &Path, active_session: &Path) -> Option<TempTreeUsage> {
@@ -708,21 +823,34 @@ fn temp_tree_usage(root: &Path, active_session: &Path) -> Option<TempTreeUsage> 
             return None;
         }
         seen += 1;
-        let metadata = fs::symlink_metadata(&path).ok()?;
-        if metadata.file_type().is_symlink() {
-            continue;
-        }
-        if metadata.is_file() {
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        // Count symlinks and special nodes as artifacts without following
+        // them; otherwise Bash could evade the file-count budget cheaply.
+        if !metadata.is_dir() {
             usage.total_bytes = usage.total_bytes.saturating_add(metadata.len());
             if path.starts_with(active_session) {
                 usage.session_bytes = usage.session_bytes.saturating_add(metadata.len());
                 usage.session_files = usage.session_files.saturating_add(1);
+                usage.largest_file_bytes = usage.largest_file_bytes.max(metadata.len());
             }
             continue;
         }
         if metadata.is_dir() {
-            for entry in fs::read_dir(&path).ok()? {
-                stack.push((entry.ok()?.path(), depth + 1));
+            let entries = match fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return None,
+            };
+            for entry in entries {
+                match entry {
+                    Ok(entry) => stack.push((entry.path(), depth + 1)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return None,
+                }
             }
         }
     }
@@ -953,11 +1081,13 @@ mod tests {
             total_bytes: MAX_TOTAL_BYTES + 10,
             session_bytes: MAX_SESSION_BYTES + 10,
             session_files: MAX_SESSION_FILES + 10,
+            largest_file_bytes: MAX_FILE_BYTES + 10,
         };
         let shrinking = TempTreeUsage {
             total_bytes: oversized.total_bytes - 1,
             session_bytes: oversized.session_bytes - 1,
             session_files: oversized.session_files,
+            largest_file_bytes: oversized.largest_file_bytes,
         };
         validate_projected_usage(&path, &info, oversized, shrinking)
             .expect("an over-limit session must be allowed to shrink existing helpers");
@@ -1009,6 +1139,51 @@ mod tests {
         )
         .expect_err("a visible new shell helper must honor the cap");
         assert!(error.to_string().contains("helper files"), "{error}");
+    }
+
+    #[test]
+    fn dynamic_bash_overflow_blocks_work_until_explicit_cleanup() {
+        let workspace = TempDir::new().unwrap();
+        let info = session_info(workspace.path(), "active");
+        fs::create_dir_all(&info.directory).unwrap();
+        for index in 0..=MAX_SESSION_FILES {
+            fs::write(info.directory.join(format!("dynamic-{index}.txt")), "x").unwrap();
+        }
+
+        let usage = audit_session(workspace.path(), "active").unwrap();
+        assert!(usage.over_budget);
+        assert!(usage.requires_cleanup());
+        let error =
+            validate_bash_command(workspace.path(), workspace.path(), "active", "cargo test --lib")
+                .expect_err(
+                    "ordinary commands must pause while the active temp session is over budget",
+                );
+        assert!(matches!(error, WinxError::TemporaryArtifactBudgetExceeded { .. }));
+
+        validate_bash_command(
+            workspace.path(),
+            workspace.path(),
+            "active",
+            "find \"$WINX_TEMP_DIR\" -type f -delete",
+        )
+        .expect("an explicit cleanup-only command must remain available");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlink_helpers_count_toward_the_session_artifact_budget() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = TempDir::new().unwrap();
+        let info = session_info(workspace.path(), "active");
+        fs::create_dir_all(&info.directory).unwrap();
+        for index in 0..=MAX_SESSION_FILES {
+            symlink("missing-target", info.directory.join(format!("link-{index}"))).unwrap();
+        }
+
+        let usage = audit_session(workspace.path(), "active").unwrap();
+        assert_eq!(usage.session_files, MAX_SESSION_FILES + 1);
+        assert!(usage.requires_cleanup());
     }
 
     #[test]
