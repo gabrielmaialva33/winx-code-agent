@@ -90,6 +90,9 @@ pub(super) struct CodeMapToolResultEnvelope {
     pub snapshot_hash: Option<String>,
     pub files_scanned: Option<usize>,
     pub payload_bytes: Option<usize>,
+    pub source_kind: Option<String>,
+    pub canonical: Option<bool>,
+    pub temporary_helper_budget: Option<crate::types::CodeMapTemporaryHelperBudget>,
     pub mode: Option<String>,
     pub files_shown: Option<usize>,
     pub files: Option<Vec<crate::types::OutlineFile>>,
@@ -635,13 +638,37 @@ fn error_envelope(
             status = ToolResultStatus::InvalidInput;
             error_code = "temporary_artifact_policy".to_string();
             retryable = true;
+            next_action = Some(if tool == "CodeMap" {
+                ToolNextAction {
+                    tool: "ReadFiles".to_string(),
+                    instruction: "Use the canonical source or a targeted range from an existing \
+                                  file. For plain-text search use rg via BashCommand. Do not create \
+                                  or map another carrier."
+                        .to_string(),
+                    arguments: None,
+                }
+            } else {
+                ToolNextAction {
+                    tool: tool.to_string(),
+                    instruction: format!(
+                        "Correct the helper path or content using temporary_artifact_dir `{}`; use \
+                         a short descriptive path and do not repeat the rejected call unchanged.",
+                        temporary_artifact_dir.display()
+                    ),
+                    arguments: None,
+                }
+            });
+        }
+        WinxError::DerivedCodeMapBudget { .. } => {
+            status = ToolResultStatus::InvalidInput;
+            error_code = "derived_code_map_budget_exhausted".to_string();
+            retryable = true;
             next_action = Some(ToolNextAction {
-                tool: tool.to_string(),
-                instruction: format!(
-                    "Correct the helper path or content using temporary_artifact_dir `{}`; use a \
-                     short descriptive path and do not repeat the rejected call unchanged.",
-                    temporary_artifact_dir.display()
-                ),
+                tool: "ReadFiles".to_string(),
+                instruction: "Stop creating or mapping temporary carriers. Reuse prior results, \
+                              run CodeMap on canonical source, or read only the exact canonical \
+                              ranges needed; use rg via BashCommand for plain-text search."
+                    .to_string(),
                 arguments: None,
             });
         }
@@ -742,6 +769,29 @@ fn error_envelope(
             "temporary_artifact_dir".to_string(),
             Value::String(temporary_artifact_dir.to_string_lossy().into_owned()),
         );
+    }
+    if let WinxError::DerivedCodeMapBudget {
+        path,
+        temporary_artifact_dir,
+        calls_used,
+        calls_limit,
+        unique_files_used,
+        unique_files_limit,
+        ..
+    } = error
+    {
+        data.insert(
+            "rejected_path".to_string(),
+            Value::String(path.to_string_lossy().into_owned()),
+        );
+        data.insert(
+            "temporary_artifact_dir".to_string(),
+            Value::String(temporary_artifact_dir.to_string_lossy().into_owned()),
+        );
+        data.insert("calls_used".to_string(), json!(calls_used));
+        data.insert("calls_limit".to_string(), json!(calls_limit));
+        data.insert("unique_files_used".to_string(), json!(unique_files_used));
+        data.insert("unique_files_limit".to_string(), json!(unique_files_limit));
     }
     ToolResultEnvelope {
         status,
@@ -1011,6 +1061,39 @@ mod tests {
             "/workspace/.winx/tmp/session-deadbeefdeadbeef"
         );
         assert_eq!(structured["nextAction"]["tool"], "FileWriteOrEdit");
+    }
+
+    #[test]
+    fn derived_code_map_budget_redirects_to_canonical_source_tools() {
+        let error = WinxError::DerivedCodeMapBudget {
+            path: "/workspace/.winx/tmp/session-deadbeefdeadbeef/carrier.py".into(),
+            temporary_artifact_dir: "/workspace/.winx/tmp/session-deadbeefdeadbeef".into(),
+            calls_used: 64,
+            calls_limit: 64,
+            unique_files_used: 24,
+            unique_files_limit: 24,
+            message: "budget exhausted".to_string(),
+        };
+        let result = tool_failure(
+            "CodeMap",
+            &error,
+            Some(&json!({
+                "operation": "outline",
+                "path": "/workspace/.winx/tmp/session-deadbeefdeadbeef/carrier.py",
+                "thread_id": "thread",
+                "workspace_root": "/workspace"
+            })),
+        )
+        .expect("tool-level budget result");
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured budget error");
+        assert_eq!(structured["status"], "invalid_input");
+        assert_eq!(structured["errorCode"], "derived_code_map_budget_exhausted");
+        assert_eq!(structured["retrySameCall"], false);
+        assert_eq!(structured["nextAction"]["tool"], "ReadFiles");
+        assert_eq!(structured["data"]["calls_used"], 64);
+        assert_eq!(structured["data"]["unique_files_limit"], 24);
     }
 
     #[test]

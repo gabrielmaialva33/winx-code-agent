@@ -868,6 +868,9 @@ mod schema_tests {
         assert!(properties.contains_key("snapshot_hash"));
         assert!(properties.contains_key("files_scanned"));
         assert!(properties.contains_key("payload_bytes"));
+        assert!(properties.contains_key("source_kind"));
+        assert!(properties.contains_key("canonical"));
+        assert!(properties.contains_key("temporary_helper_budget"));
         assert!(properties.contains_key("language_supported"));
         assert!(properties.contains_key("fallback"));
 
