@@ -470,6 +470,31 @@ async fn bash_as(
     post_json_as(address, "2026-07-28", "tools/call", &request.to_string(), token).await
 }
 
+async fn read_image_as(
+    address: std::net::SocketAddr,
+    token: &str,
+    thread_id: &str,
+    client_name: &str,
+    path: &Path,
+    force: bool,
+) -> anyhow::Result<String> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": format!("read-image-{client_name}"),
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta(client_name, false),
+            "name": "ReadImage",
+            "arguments": {
+                "file_path": path,
+                "thread_id": thread_id,
+                "force": force
+            }
+        }
+    });
+    post_json_as(address, "2026-07-28", "tools/call", &request.to_string(), token).await
+}
+
 async fn code_map_as(
     address: std::net::SocketAddr,
     token: &str,
@@ -692,6 +717,171 @@ async fn bash_temp_contract_is_env_backed_and_blocks_legacy_destinations() -> an
     assert_eq!(
         std::fs::read_to_string(Path::new(&temporary_artifact_dir).join("helper.txt"))?,
         "accepted"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn bash_dynamic_temp_overflow_is_reported_and_requires_explicit_cleanup() -> anyhow::Result<()>
+{
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialized = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "dynamic-temp-budget",
+        "dynamic-temp-budget-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialized)?;
+    let temporary_dir = PathBuf::from(initialized_temporary_artifact_dir(&initialized)?);
+    std::fs::create_dir_all(&temporary_dir)?;
+    for index in 0..winx_code_agent::utils::agent_temp::MAX_SESSION_FILES {
+        std::fs::write(temporary_dir.join(format!("seed-{index:03}.txt")), b"x")?;
+    }
+
+    // The target is relative to a `cd` performed by the shell, so static path
+    // projection cannot know its final location. The post-execution audit must.
+    let overflow_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "dynamic-temp-overflow",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("dynamic-temp-budget-client", false),
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "command",
+                    "command": "cd \"$WINX_TEMP_DIR\" && touch dynamic-overflow.txt",
+                    "is_background": false,
+                    "allow_multi": true
+                },
+                "thread_id": thread_id
+            }
+        }
+    });
+    let overflow = post_json_as(
+        address,
+        "2026-07-28",
+        "tools/call",
+        &overflow_request.to_string(),
+        TEST_TOKEN,
+    )
+    .await?;
+    let overflow = response_json(&overflow)?;
+    let structured = &overflow["result"]["structuredContent"];
+    let budget = &structured["data"]["temporary_artifact_budget"];
+    assert_eq!(overflow["result"]["isError"], false, "{overflow}");
+    assert_eq!(
+        budget["session_files"],
+        winx_code_agent::utils::agent_temp::MAX_SESSION_FILES + 1,
+        "{overflow}"
+    );
+    assert_eq!(budget["over_budget"], true, "{overflow}");
+    assert_eq!(structured["data"]["temporary_artifact_cleanup_required"], true, "{overflow}");
+    assert_eq!(structured["nextAction"]["tool"], "BashCommand", "{overflow}");
+    assert!(
+        overflow["result"]["content"].as_array().is_some_and(|content| content.iter().any(
+            |entry| entry["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("No files were deleted"))
+        )),
+        "{overflow}"
+    );
+    assert!(temporary_dir.join("dynamic-overflow.txt").exists());
+
+    let blocked = bash_as(address, TEST_TOKEN, &thread_id, "dynamic-temp-blocked", "pwd").await?;
+    let blocked = response_json(&blocked)?;
+    assert_eq!(blocked["result"]["isError"], true, "{blocked}");
+    assert_eq!(
+        blocked["result"]["structuredContent"]["errorCode"], "temporary_artifact_budget_exceeded",
+        "{blocked}"
+    );
+
+    let cleaned = bash_as(
+        address,
+        TEST_TOKEN,
+        &thread_id,
+        "dynamic-temp-cleanup",
+        "find \"$WINX_TEMP_DIR\" -type f -delete",
+    )
+    .await?;
+    let cleaned = response_json(&cleaned)?;
+    assert_eq!(cleaned["result"]["isError"], false, "{cleaned}");
+    assert_eq!(
+        cleaned["result"]["structuredContent"]["data"]["temporary_artifact_budget"]
+            ["session_files"],
+        0,
+        "{cleaned}"
+    );
+    assert_eq!(
+        cleaned["result"]["structuredContent"]["data"]["temporary_artifact_budget"]["over_budget"],
+        false,
+        "{cleaned}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_read_image_is_compacted_over_http_unless_forced() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let image_path = workspace.path().join("repeat.png");
+    let pixels = image::RgbaImage::from_pixel(2, 2, image::Rgba([20, 80, 180, 255]));
+    image::DynamicImage::ImageRgba8(pixels)
+        .save_with_format(&image_path, image::ImageFormat::Png)?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialized = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "image-dedupe",
+        "image-dedupe-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialized)?;
+
+    let first =
+        read_image_as(address, TEST_TOKEN, &thread_id, "image-dedupe-first", &image_path, false)
+            .await?;
+    let first = response_json(&first)?;
+    assert_eq!(first["result"]["isError"], false, "{first}");
+    assert_eq!(first["result"]["content"][0]["type"], "image", "{first}");
+    assert_eq!(
+        first["result"]["structuredContent"]["data"]["result"]["deduplicated"], false,
+        "{first}"
+    );
+    assert!(
+        first["result"]["structuredContent"]["data"]["result"]["delivered_bytes"]
+            .as_u64()
+            .is_some_and(|bytes| bytes > 0),
+        "{first}"
+    );
+
+    let repeated =
+        read_image_as(address, TEST_TOKEN, &thread_id, "image-dedupe-repeat", &image_path, false)
+            .await?;
+    let repeated = response_json(&repeated)?;
+    assert_eq!(repeated["result"]["isError"], false, "{repeated}");
+    assert_eq!(repeated["result"]["content"][0]["type"], "text", "{repeated}");
+    assert_eq!(
+        repeated["result"]["structuredContent"]["data"]["result"]["deduplicated"], true,
+        "{repeated}"
+    );
+    assert_eq!(
+        repeated["result"]["structuredContent"]["data"]["result"]["delivered_bytes"], 0,
+        "{repeated}"
+    );
+
+    let forced =
+        read_image_as(address, TEST_TOKEN, &thread_id, "image-dedupe-force", &image_path, true)
+            .await?;
+    let forced = response_json(&forced)?;
+    assert_eq!(forced["result"]["isError"], false, "{forced}");
+    assert_eq!(forced["result"]["content"][0]["type"], "image", "{forced}");
+    assert_eq!(
+        forced["result"]["structuredContent"]["data"]["result"]["deduplicated"], false,
+        "{forced}"
     );
     Ok(())
 }
@@ -2139,7 +2329,7 @@ async fn adaptive_task_promotes_running_foreground_without_reexecution() -> anyh
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn until_complete_rejects_background_commands() -> anyhow::Result<()> {
+async fn until_complete_background_mismatch_is_a_recoverable_tool_result() -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
     let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
     let request_meta = modern_request_meta("background-until-test", true);
@@ -2172,12 +2362,18 @@ async fn until_complete_rejects_background_commands() -> anyhow::Result<()> {
     });
     let response = post_json(address, "2026-07-28", "tools/call", &call.to_string()).await?;
     let response = response_json(&response)?;
-    assert!(
-        response["error"]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("foreground Command")),
-        "{response}"
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert_eq!(response["result"]["structuredContent"]["status"], "invalid_input");
+    assert_eq!(
+        response["result"]["structuredContent"]["errorCode"],
+        "wait_policy_incompatible_with_action"
     );
+    assert_eq!(
+        response["result"]["structuredContent"]["nextAction"]["arguments"]["wait_policy"],
+        "return_early"
+    );
+    assert_eq!(response["result"]["structuredContent"]["data"]["action"], "background_command");
     Ok(())
 }
 
