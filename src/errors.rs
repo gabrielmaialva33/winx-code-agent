@@ -56,6 +56,29 @@ pub enum WinxError {
     #[error("Temporary artifact policy rejected {path}: {message}")]
     TemporaryArtifactPolicy { path: PathBuf, temporary_artifact_dir: PathBuf, message: String },
 
+    /// Bash created dynamic helpers that could not be projected safely before
+    /// execution and the active managed session is now over budget.
+    #[error(
+        "Temporary artifact budget exceeded in {temporary_artifact_dir}: workspace {total_bytes}/{max_total_bytes} bytes; session {session_files} files / {session_bytes} bytes (limits: {max_session_files} files / {max_session_bytes} bytes; largest file {largest_file_bytes} bytes, limit {max_file_bytes}). Run an explicit cleanup-only BashCommand against $WINX_TEMP_DIR before continuing."
+    )]
+    TemporaryArtifactBudgetExceeded {
+        temporary_artifact_dir: PathBuf,
+        total_bytes: u64,
+        max_total_bytes: u64,
+        session_bytes: u64,
+        max_session_bytes: u64,
+        session_files: usize,
+        max_session_files: usize,
+        largest_file_bytes: u64,
+        max_file_bytes: u64,
+    },
+
+    /// A valid delivery policy was paired with an action it cannot represent.
+    #[error(
+        "wait_policy={wait_policy} is not valid for BashCommand action {action}; use until_complete only with a finite foreground command"
+    )]
+    InvalidWaitPolicyForAction { wait_policy: String, action: String },
+
     /// Syntax navigation over derived helpers exceeded its bounded session budget.
     #[error("Derived CodeMap budget rejected {path}: {message}")]
     DerivedCodeMapBudget {
@@ -317,6 +340,33 @@ impl Clone for WinxError {
                     path: path.clone(),
                     temporary_artifact_dir: temporary_artifact_dir.clone(),
                     message: message.clone(),
+                }
+            }
+            Self::TemporaryArtifactBudgetExceeded {
+                temporary_artifact_dir,
+                total_bytes,
+                max_total_bytes,
+                session_bytes,
+                max_session_bytes,
+                session_files,
+                max_session_files,
+                largest_file_bytes,
+                max_file_bytes,
+            } => Self::TemporaryArtifactBudgetExceeded {
+                temporary_artifact_dir: temporary_artifact_dir.clone(),
+                total_bytes: *total_bytes,
+                max_total_bytes: *max_total_bytes,
+                session_bytes: *session_bytes,
+                max_session_bytes: *max_session_bytes,
+                session_files: *session_files,
+                max_session_files: *max_session_files,
+                largest_file_bytes: *largest_file_bytes,
+                max_file_bytes: *max_file_bytes,
+            },
+            Self::InvalidWaitPolicyForAction { wait_policy, action } => {
+                Self::InvalidWaitPolicyForAction {
+                    wait_policy: wait_policy.clone(),
+                    action: action.clone(),
                 }
             }
             Self::DerivedCodeMapBudget {
