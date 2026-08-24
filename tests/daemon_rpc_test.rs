@@ -708,7 +708,7 @@ async fn daemon_cancel_uses_a_channel_independent_of_pending_status_output() -> 
         status_runtime
             .run_action_detailed(
                 &status_state,
-                foreground_status("daemon-independent-cancel", 5.0),
+                foreground_status("daemon-independent-cancel", 10.0),
                 ShellActionOptions {
                     expected_generation: Some(status_token.generation),
                     expected_execution: Some(status_token),
@@ -719,8 +719,11 @@ async fn daemon_cancel_uses_a_channel_independent_of_pending_status_output() -> 
     });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
+    // Interrupt waits for the PTY to return to a prompt for up to three
+    // seconds. Keep this deadline above that recovery contract, but well below
+    // the pending status request: sharing its RPC channel would still time out.
     let interrupted = tokio::time::timeout(
-        Duration::from_secs(1),
+        Duration::from_secs(4),
         runtime.interrupt_execution(&state, Some(token)),
     )
     .await
