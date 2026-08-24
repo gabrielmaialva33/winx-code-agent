@@ -158,10 +158,13 @@ Secure MCP Tunnel / VPN / authenticated reverse proxy
 - `.winx/` is the reserved local home for workspace-local agent artifacts and should be ignored by version control.
   `Initialize` returns a bounded `.winx/tmp/session-…/` path for each session without creating it until needed. Derived
   representations, adapters, and helpers may live there when independently useful, but remain non-canonical and must keep
-  source-path/line provenance. Agents use `ReadFiles` for unsupported languages or exact source and never transform source
-  solely for `CodeMap`, encode payload in filesystem names, or create `.winx-*`/`.winx_tmp` artifacts at the project root.
-  File tools cap this area at 256 MiB per workspace and 32 MiB per helper, bound path depth/name length, and prune inactive
-  managed session directories after 24 hours. Every `BashCommand` PTY exports the exact session path as `WINX_TEMP_DIR`;
+  source-path/line provenance. Agents reuse one stable helper per purpose, use `ReadFiles` for unsupported languages or
+  exact source, and never transform source, command output, lint reports, or search results solely for `CodeMap`. Helper
+  `CodeMap` calls accept one existing file, cap their navigation payload at 12 KiB, and are bounded per live session to 24 unique files / 64
+  calls; canonical source maps remain unrestricted by that aggregate budget. File tools cap temporary storage at 256 MiB
+  per workspace, 64 MiB and 128 files per session, and 32 MiB per helper; they also bound path depth/name length and prune
+  inactive managed session directories after 24 hours. Never encode payload in filesystem names or create
+  `.winx-*`/`.winx_tmp` artifacts at the project root. Every `BashCommand` PTY exports the exact session path as `WINX_TEMP_DIR`;
   a preflight rejects statically visible shell writes to direct `.winx/tmp` children, another session, or root `.winx-*`
   artifacts. This targeted guard complements the separately selected command policy; it is not a general shell sandbox.
 - Secret redaction on by default: provider API keys, JWTs, PEM private-key blocks and `user:pass@` URLs
