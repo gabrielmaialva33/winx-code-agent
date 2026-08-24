@@ -339,12 +339,7 @@ fn push_static_shell_word(text: &str, out: &mut Vec<String>) {
 
 fn static_shell_word(text: &str) -> Option<String> {
     let text = text.trim();
-    if text.is_empty()
-        || text.contains('$')
-        || text.contains('`')
-        || text.contains('*')
-        || text.contains('?')
-    {
+    if text.is_empty() {
         return None;
     }
 
@@ -358,7 +353,21 @@ fn static_shell_word(text: &str) -> Option<String> {
     } else {
         text
     };
-    if unquoted.is_empty() {
+    let known_temp_path = unquoted == "$WINX_TEMP_DIR"
+        || unquoted == "${WINX_TEMP_DIR}"
+        || unquoted.starts_with("$WINX_TEMP_DIR/")
+        || unquoted.starts_with("${WINX_TEMP_DIR}/");
+    if unquoted.is_empty()
+        || unquoted.contains('`')
+        || unquoted.contains('*')
+        || unquoted.contains('?')
+        || (unquoted.contains('$') && !known_temp_path)
+        || (known_temp_path
+            && unquoted
+                .trim_start_matches("${WINX_TEMP_DIR}")
+                .trim_start_matches("$WINX_TEMP_DIR")
+                .contains('$'))
+    {
         None
     } else {
         Some(unquoted.replace("\\ ", " ").replace("\\\"", "\"").replace("\\'", "'"))
@@ -650,11 +659,11 @@ mod tests {
     }
 
     #[test]
-    fn ignores_reads_and_dynamic_session_destinations() {
+    fn ignores_reads_but_extracts_the_server_owned_temp_destination() {
         let command = "cat .winx-review-carrier.js\n\
                        rg needle .winx/tmp/direct.ts\n\
                        printf x > \"$WINX_TEMP_DIR/helper.ts\"";
-        assert!(extract_static_write_paths(command).is_empty());
+        assert_eq!(extract_static_write_paths(command), ["$WINX_TEMP_DIR/helper.ts"]);
     }
 
     #[test]
