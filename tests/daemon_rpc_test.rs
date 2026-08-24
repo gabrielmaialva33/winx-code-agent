@@ -692,7 +692,9 @@ async fn daemon_cancel_uses_a_channel_independent_of_pending_status_output() -> 
             &state,
             foreground(
                 "daemon-independent-cancel",
-                "while :; do printf x; sleep 0.01; done",
+                // Swallow the first Ctrl+C deterministically. The interrupt
+                // path must retry while this exact generation remains active.
+                "bash -c 'trap \"trap - INT\" INT; while :; do printf x; sleep 0.01; done'",
                 0.001,
             ),
             ShellActionOptions::default(),

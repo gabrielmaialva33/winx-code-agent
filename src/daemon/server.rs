@@ -1237,37 +1237,12 @@ async fn interrupt_session(
         state.as_ref().map(|state| state.pty_shell.clone())
     };
     let Some(shell) = shell else { return Ok(false) };
-    {
-        let mut guard = shell.lock().await;
-        if let Some(shell) = guard.as_mut() {
-            if params.expected_generation.is_some_and(|expected| {
-                shell.command_generation() != expected || !shell.command_running
-            }) {
-                return Ok(false);
-            }
-            shell.send_interrupt().map_err(|error| {
-                WinxError::CommandExecutionError(format!("failed to interrupt shell: {error}"))
-            })?;
-        }
+    let interrupted =
+        crate::runtime::interrupt_pty_until_recovered(&shell, params.expected_generation).await?;
+    if interrupted {
+        capture_session_outputs_locked(session).await;
     }
-    let deadline = std::time::Instant::now() + Duration::from_secs(3);
-    while std::time::Instant::now() < deadline {
-        let recovered = {
-            let mut guard = shell.lock().await;
-            match guard.as_mut() {
-                Some(shell) => shell.poll_output_nonblocking() || !shell.command_running,
-                None => true,
-            }
-        };
-        if recovered {
-            capture_session_outputs_locked(session).await;
-            return Ok(true);
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    Err(WinxError::CommandExecutionError(
-        "interrupted shell did not return to a prompt within 3 seconds".to_string(),
-    ))
+    Ok(interrupted)
 }
 
 fn unix_ms() -> u64 {

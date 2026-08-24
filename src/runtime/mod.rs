@@ -7,12 +7,14 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::errors::Result;
+use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
+use crate::state::pty::SharedPtyShell;
 use crate::tools::bash_command::BashCommandResult;
 use crate::types::BashCommand;
 
@@ -343,6 +345,69 @@ async fn interrupt_embedded(bash_state: &Arc<Mutex<Option<BashState>>>) -> Resul
     Ok(())
 }
 
+const INTERRUPT_RECOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+const INTERRUPT_RETRY_INTERVAL: Duration = Duration::from_millis(250);
+const INTERRUPT_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MAX_INTERRUPT_ATTEMPTS: u32 = 3;
+
+/// Interrupt one exact foreground generation and wait until its prompt is
+/// visible. PTYs can occasionally deliver Ctrl+C while a short-lived child is
+/// handing terminal control back to its parent, so retry the signal while the
+/// same generation is still running. The caller retains the session operation
+/// barrier, which prevents any retry from reaching a newer command.
+pub(crate) async fn interrupt_pty_until_recovered(
+    shell: &SharedPtyShell,
+    expected_generation: Option<u64>,
+) -> Result<bool> {
+    let deadline = Instant::now() + INTERRUPT_RECOVERY_TIMEOUT;
+    let mut next_interrupt = Instant::now();
+    let mut attempts = 0_u32;
+
+    loop {
+        let now = Instant::now();
+        let recovered = {
+            let mut guard = shell.lock().await;
+            let Some(pty) = guard.as_mut() else { return Ok(false) };
+            if expected_generation.is_some_and(|expected| pty.command_generation() != expected) {
+                return Ok(false);
+            }
+
+            if pty.poll_output_nonblocking() || !pty.command_running {
+                if attempts == 0 {
+                    return Ok(false);
+                }
+                true
+            } else {
+                if attempts < MAX_INTERRUPT_ATTEMPTS && now >= next_interrupt {
+                    pty.send_interrupt().map_err(|error| {
+                        WinxError::CommandExecutionError(format!(
+                            "failed to interrupt shell: {error}"
+                        ))
+                    })?;
+                    attempts += 1;
+                    next_interrupt = Instant::now() + INTERRUPT_RETRY_INTERVAL;
+                    if attempts > 1 {
+                        tracing::debug!(attempts, "retrying Ctrl+C for active PTY generation");
+                    }
+                }
+                false
+            }
+        };
+
+        if recovered {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(INTERRUPT_POLL_INTERVAL).await;
+    }
+
+    Err(WinxError::CommandExecutionError(
+        "interrupted shell did not return to a prompt within 3 seconds".to_string(),
+    ))
+}
+
 async fn interrupt_embedded_generation(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     expected_generation: Option<u64>,
@@ -377,42 +442,15 @@ async fn interrupt_embedded_guarded(
         (state.pty_shell.clone(), operation)
     };
     {
-        let mut guard = shell.lock().await;
-        if let Some(pty) = guard.as_mut() {
+        let guard = shell.lock().await;
+        if let Some(pty) = guard.as_ref() {
             if expected_execution.is_some_and(|expected| {
                 expected.guardian_epoch != "embedded"
                     || expected.session_epoch != format!("{:016x}", pty.incarnation())
             }) {
                 return Ok(false);
             }
-            if expected_generation.is_some_and(|expected| {
-                pty.command_generation() != expected || !pty.command_running
-            }) {
-                return Ok(false);
-            }
-            pty.send_interrupt().map_err(|error| {
-                crate::errors::WinxError::CommandExecutionError(format!(
-                    "failed to interrupt shell: {error}"
-                ))
-            })?;
         }
     }
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-    while std::time::Instant::now() < deadline {
-        let recovered = {
-            let mut guard = shell.lock().await;
-            match guard.as_mut() {
-                Some(pty) => pty.poll_output_nonblocking() || !pty.command_running,
-                None => true,
-            }
-        };
-        if recovered {
-            return Ok(true);
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-    Err(crate::errors::WinxError::CommandExecutionError(
-        "interrupted shell did not return to a prompt within 3 seconds".to_string(),
-    ))
+    interrupt_pty_until_recovered(&shell, expected_generation).await
 }
