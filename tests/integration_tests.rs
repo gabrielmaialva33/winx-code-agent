@@ -1156,29 +1156,12 @@ async fn test_read_image_png() -> Result<()> {
 
     let temp_dir = TempDir::new()?;
 
-    // Create a minimal valid PNG file (1x1 red pixel)
-    // PNG header + IHDR + IDAT + IEND chunks
-    let png_data: Vec<u8> = vec![
-        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
-        0x00, 0x00, 0x00, 0x0D, // IHDR length
-        0x49, 0x48, 0x44, 0x52, // IHDR
-        0x00, 0x00, 0x00, 0x01, // width = 1
-        0x00, 0x00, 0x00, 0x01, // height = 1
-        0x08, 0x02, // bit depth = 8, color type = 2 (RGB)
-        0x00, 0x00, 0x00, // compression, filter, interlace
-        0x90, 0x77, 0x53, 0xDE, // CRC
-        0x00, 0x00, 0x00, 0x0C, // IDAT length
-        0x49, 0x44, 0x41, 0x54, // IDAT
-        0x08, 0xD7, 0x63, 0xF8, 0xCF, 0xC0, 0x00, 0x00, 0x01, 0x01, 0x01,
-        0x00, // compressed data
-        0x18, 0xDD, 0x8D, 0xB5, // CRC
-        0x00, 0x00, 0x00, 0x00, // IEND length
-        0x49, 0x45, 0x4E, 0x44, // IEND
-        0xAE, 0x42, 0x60, 0x82, // CRC
-    ];
-
     let image_path = temp_dir.path().join("test.png");
-    std::fs::write(&image_path, &png_data)?;
+    let pixels = image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]));
+    image::DynamicImage::ImageRgba8(pixels)
+        .save_with_format(&image_path, image::ImageFormat::Png)
+        .map_err(|error| WinxError::InvalidInput(error.to_string()))?;
+    let png_data = std::fs::read(&image_path)?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -1193,8 +1176,11 @@ async fn test_read_image_png() -> Result<()> {
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
-    let read_image =
-        ReadImage { file_path: image_path.to_string_lossy().to_string(), thread_id: String::new() };
+    let read_image = ReadImage {
+        file_path: image_path.to_string_lossy().to_string(),
+        thread_id: String::new(),
+        force: false,
+    };
 
     let (mime_type, base64_data) =
         winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await?;
@@ -1220,22 +1206,11 @@ async fn test_read_image_jpeg() -> Result<()> {
 
     let temp_dir = TempDir::new()?;
 
-    // Create a minimal valid JPEG file
-    // SOI + APP0 + DQT + SOF0 + DHT + SOS + EOI
-    let jpeg_data: Vec<u8> = vec![
-        0xFF, 0xD8, // SOI
-        0xFF, 0xE0, 0x00, 0x10, // APP0 marker + length
-        0x4A, 0x46, 0x49, 0x46, 0x00, // JFIF identifier
-        0x01, 0x01, // version
-        0x00, // aspect ratio units
-        0x00, 0x01, // X density
-        0x00, 0x01, // Y density
-        0x00, 0x00, // thumbnail
-        0xFF, 0xD9, // EOI
-    ];
-
     let image_path = temp_dir.path().join("test.jpg");
-    std::fs::write(&image_path, &jpeg_data)?;
+    let jpeg = image::RgbImage::from_pixel(1, 1, image::Rgb([220, 40, 80]));
+    image::DynamicImage::ImageRgb8(jpeg)
+        .save_with_format(&image_path, image::ImageFormat::Jpeg)
+        .map_err(|error| WinxError::InvalidInput(error.to_string()))?;
 
     // Initialize bash state
     let bash_state_arc: Arc<Mutex<Option<BashState>>> = Arc::new(Mutex::new(None));
@@ -1250,8 +1225,11 @@ async fn test_read_image_jpeg() -> Result<()> {
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
-    let read_image =
-        ReadImage { file_path: image_path.to_string_lossy().to_string(), thread_id: String::new() };
+    let read_image = ReadImage {
+        file_path: image_path.to_string_lossy().to_string(),
+        thread_id: String::new(),
+        force: false,
+    };
 
     let (mime_type, _base64_data) =
         winx_code_agent::tools::read_image::handle_tool_call(&bash_state_arc, read_image).await?;
@@ -1284,6 +1262,7 @@ async fn test_read_image_nonexistent() -> Result<()> {
     let read_image = ReadImage {
         file_path: temp_dir.path().join("nonexistent.png").to_string_lossy().to_string(),
         thread_id: String::new(),
+        force: false,
     };
 
     let result =
@@ -1318,8 +1297,11 @@ async fn test_read_image_non_image_file() -> Result<()> {
     };
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
-    let read_image =
-        ReadImage { file_path: text_path.to_string_lossy().to_string(), thread_id: String::new() };
+    let read_image = ReadImage {
+        file_path: text_path.to_string_lossy().to_string(),
+        thread_id: String::new(),
+        force: false,
+    };
 
     // ReadImage should still work (returns base64 of any file with guessed MIME type)
     // It falls back to image/jpeg for unknown types per the implementation
