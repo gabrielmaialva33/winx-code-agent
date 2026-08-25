@@ -89,10 +89,7 @@ fn references_with_paths(
     } else if root.is_dir() {
         walk_workspace_files(&root)
     } else {
-        return Err(WinxError::FileAccessError {
-            path: root.clone(),
-            message: "path not found (or not a regular file/directory)".to_string(),
-        });
+        return Err(WinxError::FileNotFound { path: root.clone() });
     };
 
     let mut context = TagsContext::new();

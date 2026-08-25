@@ -8,7 +8,7 @@
 //! calls would leave.
 //!
 //! The write stage is a sequence of individually-atomic single-file renames
-//! (`commit_edit` -> `write_no_follow`). It stops at the first I/O failure and
+//! (`commit_edit` -> preconditioned atomic replacement). It stops at the first I/O failure and
 //! reports which files were already written; it does NOT roll them back (each is
 //! already crash-safe on its own, and a second write pass could fail and corrupt
 //! more state).
@@ -206,6 +206,14 @@ fn contextualize_plan_error(
                 source: Box::new(source),
             }
         }
+        source @ (WinxError::FileNotFound { .. }
+        | WinxError::FileReadRequired { .. }
+        | WinxError::FileOperationDenied { .. }
+        | WinxError::ConcurrentFileModification { .. }) => WinxError::MultiFilePlanError {
+            index: index + 1,
+            path: resolved_entry_path(bash_state, &entry.file_path),
+            source: Box::new(source),
+        },
         WinxError::SearchReplaceSyntaxError(message) => {
             WinxError::SearchReplaceSyntaxError(format!("{context}: {message}"))
         }

@@ -250,10 +250,7 @@ fn outline_with_paths(
         outline_repo(&root, &workspace_root, args, &mut context, &mut configs, payload_max_bytes)
     } else {
         // Don't silently degrade a typo'd file path into a whole-workspace scan.
-        Err(WinxError::FileAccessError {
-            path: root.clone(),
-            message: "path not found (or not a regular file/directory)".to_string(),
-        })
+        Err(WinxError::FileNotFound { path: root.clone() })
     }
 }
 

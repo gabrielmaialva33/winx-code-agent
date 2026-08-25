@@ -123,6 +123,16 @@ impl FileWhitelistData {
     pub fn needs_more_reading(&self) -> bool {
         !self.is_read_enough()
     }
+
+    /// Whether every line in one inclusive range was visible to the model for
+    /// this exact file hash.
+    pub fn covers_range(&self, start: usize, end: usize) -> bool {
+        start <= end
+            && self
+                .line_ranges_read
+                .iter()
+                .any(|(covered_start, covered_end)| *covered_start <= start && *covered_end >= end)
+    }
 }
 
 /// How many edit checkpoints to keep per session for `UndoEdit`. In-memory only
@@ -145,6 +155,31 @@ const MAX_WHITELIST_FILES: usize = 1_024;
 /// no image bytes and is intentionally not persisted; it only prevents an LLM
 /// from resending the same unchanged image in one conversation.
 const IMAGE_DELIVERY_CACHE_CAP: usize = 32;
+
+/// Recent committed-edit receipts retained per logical session. The records
+/// contain only request/file fingerprints and are persisted so an MCP adapter
+/// restart cannot blindly repeat a mutation whose response was lost.
+const EDIT_MUTATION_RECEIPT_CAP: usize = 64;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct EditMutationPostcondition {
+    pub path: String,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct EditMutationReceipt {
+    pub fingerprint: String,
+    pub receipt_id: String,
+    pub tool: String,
+    pub status: String,
+    pub committed_at_unix_ms: u64,
+    pub postconditions: Vec<EditMutationPostcondition>,
+    #[serde(default)]
+    pub persisted: bool,
+    #[serde(default)]
+    pub verification_pending: bool,
+}
 
 /// A single file's pre-edit state, captured by `FileWriteOrEdit`/`MultiFileEdit`
 /// after a successful write so `UndoEdit` can restore it. Only existing files get
@@ -188,6 +223,7 @@ pub struct BashState {
     /// Canonical `CodeMap` calls are intentionally not counted.
     pub derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage,
     image_deliveries: VecDeque<String>,
+    edit_mutation_receipts: VecDeque<EditMutationReceipt>,
 }
 
 impl Default for BashState {
@@ -220,6 +256,48 @@ impl BashState {
             edit_checkpoints: VecDeque::new(),
             derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage::default(),
             image_deliveries: VecDeque::new(),
+            edit_mutation_receipts: VecDeque::new(),
+        }
+    }
+
+    pub(crate) fn edit_mutation_receipt(
+        &mut self,
+        fingerprint: &str,
+        now_unix_ms: u64,
+        ttl_ms: u64,
+    ) -> Option<EditMutationReceipt> {
+        self.edit_mutation_receipts
+            .retain(|receipt| now_unix_ms.saturating_sub(receipt.committed_at_unix_ms) <= ttl_ms);
+        let index = self
+            .edit_mutation_receipts
+            .iter()
+            .position(|receipt| receipt.fingerprint == fingerprint)?;
+        let receipt = self.edit_mutation_receipts.remove(index)?;
+        self.edit_mutation_receipts.push_back(receipt.clone());
+        Some(receipt)
+    }
+
+    pub(crate) fn record_edit_mutation_receipt(&mut self, receipt: EditMutationReceipt) {
+        if let Some(index) = self
+            .edit_mutation_receipts
+            .iter()
+            .position(|existing| existing.fingerprint == receipt.fingerprint)
+        {
+            self.edit_mutation_receipts.remove(index);
+        }
+        self.edit_mutation_receipts.push_back(receipt);
+        while self.edit_mutation_receipts.len() > EDIT_MUTATION_RECEIPT_CAP {
+            self.edit_mutation_receipts.pop_front();
+        }
+    }
+
+    pub(crate) fn mark_edit_mutation_receipt_volatile(&mut self, fingerprint: &str) {
+        if let Some(receipt) = self
+            .edit_mutation_receipts
+            .iter_mut()
+            .find(|receipt| receipt.fingerprint == fingerprint)
+        {
+            receipt.persisted = false;
         }
     }
 
@@ -270,6 +348,16 @@ impl BashState {
         let index =
             self.edit_checkpoints.iter().rposition(|cp| cp.file_path_str == file_path_str)?;
         self.edit_checkpoints.remove(index)
+    }
+
+    /// Clone the most recent per-file checkpoint without consuming it. Undo
+    /// removes the checkpoint only after the replacement commits successfully.
+    pub fn latest_edit_checkpoint_for(&self, file_path_str: &str) -> Option<EditCheckpoint> {
+        self.edit_checkpoints
+            .iter()
+            .rev()
+            .find(|checkpoint| checkpoint.file_path_str == file_path_str)
+            .cloned()
     }
 
     /// Merge visible read coverage for `path` and make it the newest guarded
@@ -403,12 +491,13 @@ impl BashState {
         BashStateSnapshot::from_state(
             &self.cwd.to_string_lossy(),
             &self.workspace_root.to_string_lossy(),
-            &self.mode,
+            self.mode,
             &self.bash_command_mode,
             &self.file_edit_mode,
             &self.write_if_empty_mode,
             &self.whitelist_for_overwrite,
             &self.current_thread_id,
+            &self.edit_mutation_receipts,
         )
     }
 
@@ -426,6 +515,7 @@ impl BashState {
         self.whitelist_for_overwrite = whitelist;
         self.rebuild_whitelist_recency();
         self.current_thread_id = tid;
+        self.edit_mutation_receipts = snapshot.edit_mutation_receipts.iter().cloned().collect();
         if image_identity_changed {
             self.image_deliveries.clear();
         }
@@ -465,7 +555,10 @@ pub fn generate_thread_id() -> String {
 
 #[cfg(test)]
 mod whitelist_range_tests {
-    use super::{BashState, FileWhitelistData, MAX_WHITELIST_FILES};
+    use super::{
+        BashState, EditMutationPostcondition, EditMutationReceipt, FileWhitelistData,
+        MAX_WHITELIST_FILES,
+    };
 
     fn wl(ranges: &[(usize, usize)], total: usize) -> FileWhitelistData {
         FileWhitelistData::new("h".to_string(), ranges.to_vec(), total)
@@ -559,5 +652,34 @@ mod whitelist_range_tests {
         other.current_thread_id = "two".to_string();
         state.apply_snapshot(&other.snapshot());
         assert!(!state.image_was_delivered("fingerprint"));
+    }
+
+    #[test]
+    fn mutation_receipts_survive_snapshot_and_expire_closed() -> Result<(), &'static str> {
+        let mut state = BashState::new();
+        state.record_edit_mutation_receipt(EditMutationReceipt {
+            fingerprint: "fingerprint".to_string(),
+            receipt_id: "edit_receipt".to_string(),
+            tool: "FileWriteOrEdit".to_string(),
+            status: "completed".to_string(),
+            committed_at_unix_ms: 1_000,
+            postconditions: vec![EditMutationPostcondition {
+                path: "/workspace/file.rs".to_string(),
+                sha256: "hash".to_string(),
+            }],
+            persisted: true,
+            verification_pending: false,
+        });
+
+        let snapshot = state.snapshot();
+        let mut restored = BashState::new();
+        restored.apply_snapshot(&snapshot);
+        let receipt = restored
+            .edit_mutation_receipt("fingerprint", 1_500, 1_000)
+            .ok_or("fresh persisted receipt missing")?;
+        assert_eq!(receipt.receipt_id, "edit_receipt");
+        assert!(receipt.persisted);
+        assert!(restored.edit_mutation_receipt("fingerprint", 3_000, 1_000).is_none());
+        Ok(())
     }
 }

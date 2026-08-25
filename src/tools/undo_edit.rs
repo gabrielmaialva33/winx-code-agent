@@ -14,7 +14,9 @@ use tracing::instrument;
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
-use crate::tools::file_write_or_edit::{ensure_parent_dirs, hash_content, write_no_follow};
+use crate::tools::file_write_or_edit::{
+    ensure_parent_dirs, hash_content, write_no_follow_if_unchanged,
+};
 use crate::types::{normalize_thread_id, UndoEdit};
 use crate::utils::path::{expand_user, validate_path_in_workspace};
 
@@ -51,7 +53,7 @@ pub async fn handle_tool_call(
         bash_state.whitelist_for_overwrite.get(&file_path_str).map(|w| w.file_hash.clone());
     let unchanged = matches!((&on_disk, &wrote_hash), (Some(c), Some(h)) if &hash_content(c) == h);
     if !unchanged {
-        return Err(WinxError::FileAccessError {
+        return Err(WinxError::FileChangedAfterEdit {
             path,
             message: format!(
                 "{file_path_str} changed since its last winx edit (or was deleted), so UndoEdit \
@@ -61,21 +63,17 @@ pub async fn handle_tool_call(
         });
     }
 
-    let Some(checkpoint) = bash_state.pop_edit_checkpoint_for(&file_path_str) else {
-        return Err(WinxError::FileAccessError {
-            path,
-            message: format!(
-                "No undo checkpoint for {file_path_str} in this session. winx keeps the last few \
-                 edits per session in memory; a brand-new file's creation is not undoable."
-            ),
-        });
+    let Some(checkpoint) = bash_state.latest_edit_checkpoint_for(&file_path_str) else {
+        return Err(WinxError::UndoCheckpointNotFound { path });
     };
 
     // Restore the prior content atomically, then roll the whitelist back so a
     // later edit's hash gate matches the reverted content (or drop it, forcing a
     // re-read, when there was none).
     ensure_parent_dirs(&path)?;
-    write_no_follow(&path, checkpoint.prior_content.as_bytes())?;
+    write_no_follow_if_unchanged(&path, checkpoint.prior_content.as_bytes(), on_disk.as_deref())?;
+    let removed = bash_state.pop_edit_checkpoint_for(&file_path_str);
+    debug_assert!(removed.is_some(), "checkpoint disappeared while the session lock was held");
     match checkpoint.prior_whitelist {
         Some(whitelist) => {
             bash_state.set_whitelist_entry(&file_path_str, whitelist);

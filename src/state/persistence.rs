@@ -14,7 +14,7 @@ use crate::types::{
     AllowedCommands, AllowedGlobs, BashCommandMode, BashMode, FileEditMode, Modes, WriteIfEmptyMode,
 };
 
-use super::bash_state::FileWhitelistData;
+use super::bash_state::{EditMutationReceipt, FileWhitelistData};
 
 /// Snapshot of `BashState` that can be serialized to disk
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +28,8 @@ pub struct BashStateSnapshot {
     pub chat_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cwd: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) edit_mutation_receipts: Vec<EditMutationReceipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,15 +185,16 @@ pub fn delete_bash_state(thread_id: &str) -> Result<()> {
 
 impl BashStateSnapshot {
     #[allow(clippy::too_many_arguments)]
-    pub fn from_state(
+    pub(crate) fn from_state(
         cwd: &str,
         workspace_root: &str,
-        mode: &Modes,
+        mode: Modes,
         bash_command_mode: &BashCommandMode,
         file_edit_mode: &FileEditMode,
         write_if_empty_mode: &WriteIfEmptyMode,
         whitelist: &HashMap<String, FileWhitelistData>,
         thread_id: &str,
+        edit_mutation_receipts: &std::collections::VecDeque<EditMutationReceipt>,
     ) -> Self {
         Self {
             bash_command_mode: BashCommandModeSnapshot::from(bash_command_mode),
@@ -205,6 +208,7 @@ impl BashStateSnapshot {
             workspace_root: workspace_root.to_string(),
             chat_id: thread_id.to_string(),
             cwd: if cwd == workspace_root { String::new() } else { cwd.to_string() },
+            edit_mutation_receipts: edit_mutation_receipts.iter().cloned().collect(),
         }
     }
 

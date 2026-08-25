@@ -21,7 +21,7 @@ use crate::state::bash_state::BashState;
 use crate::types::{normalize_thread_id, FileWriteOrEdit};
 pub(crate) use commit::{
     commit_edit, ensure_parent_dirs, hash_content, invalidate_edit_read_permit, plan_edit,
-    write_no_follow,
+    plan_revision_edit, write_no_follow_if_unchanged,
 };
 
 #[cfg(feature = "fuzzing")]
