@@ -11,11 +11,11 @@ use tokio::sync::Mutex;
 
 use super::lifecycle::{GuardianLifecycle, GuardianLimits};
 use super::protocol::{
-    read_json_frame, write_json_frame, CancelActionParams, ConfigureSessionParams, HelloResult,
-    JournalReadParams, PruneParams, RpcError, RpcRequest, RpcResponse, RunActionParams,
-    SessionInfo, SessionParams, CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY,
-    COMPACT_ACTION_OUTPUT_CAPABILITY, GENERATION_BOUND_ACTIONS_CAPABILITY, MAX_FRAME_BYTES,
-    PROTOCOL_MAJOR, PROTOCOL_MINOR, TYPED_ACTION_RESULT_CAPABILITY,
+    read_json_frame, write_json_frame, CancelActionParams, ConfigureSessionParams,
+    DaemonProcessRole, HelloResult, JournalReadParams, PruneParams, RpcError, RpcRequest,
+    RpcResponse, RunActionParams, SessionInfo, SessionParams,
+    CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY, COMPACT_ACTION_OUTPUT_CAPABILITY,
+    GENERATION_BOUND_ACTIONS_CAPABILITY, PROTOCOL_MAJOR, TYPED_ACTION_RESULT_CAPABILITY,
 };
 use crate::errors::{Result, WinxError};
 use crate::types::normalize_thread_id;
@@ -169,10 +169,9 @@ async fn dispatch(
     if request.method == "winx.hello" {
         return rpc_result(
             request.id,
-            &HelloResult {
-                protocol_major: PROTOCOL_MAJOR,
-                protocol_minor: PROTOCOL_MINOR,
-                capabilities: vec![
+            &HelloResult::current(
+                DaemonProcessRole::Control,
+                vec![
                     "per_session_guardians".to_string(),
                     "planned_control_restart".to_string(),
                     "guardian_quota".to_string(),
@@ -194,10 +193,8 @@ async fn dispatch(
                     "multi_consumer_cursors".to_string(),
                     "idempotency".to_string(),
                 ],
-                max_frame_bytes: MAX_FRAME_BYTES,
-                daemon_epoch: epoch.to_string(),
-                daemon_pid: std::process::id(),
-            },
+                epoch,
+            ),
         );
     }
 
@@ -687,9 +684,12 @@ async fn list_sessions(guardian_dir: &Path) -> Result<Vec<SessionInfo>> {
             method: "session.list".to_string(),
             params: serde_json::json!({}),
         };
-        let Ok((response, _)) = relay(&path, request).await else { continue };
+        let Ok((response, hello)) = relay(&path, request).await else { continue };
         let Some(result) = response.result else { continue };
         if let Ok(mut guardian_sessions) = serde_json::from_value::<Vec<SessionInfo>>(result) {
+            for session in &mut guardian_sessions {
+                session.runtime = Some(hello.clone());
+            }
             sessions.append(&mut guardian_sessions);
         }
     }
@@ -755,9 +755,11 @@ mod tests {
             protocol_major: PROTOCOL_MAJOR,
             protocol_minor: 4,
             capabilities: vec![TYPED_ACTION_RESULT_CAPABILITY.to_string()],
-            max_frame_bytes: MAX_FRAME_BYTES,
+            max_frame_bytes: crate::daemon::protocol::MAX_FRAME_BYTES,
             daemon_epoch: "guardian-14".to_string(),
             daemon_pid: 14,
+            process_role: None,
+            build: None,
         }
     }
 

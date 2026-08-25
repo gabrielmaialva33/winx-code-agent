@@ -4,17 +4,27 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+use crate::build_info::BuildIdentity;
 use crate::state::persistence::BashStateSnapshot;
 use crate::tools::bash_command::BashCommandState;
 use crate::types::BashCommand;
 
 pub const PROTOCOL_MAJOR: u16 = 1;
-pub const PROTOCOL_MINOR: u16 = 5;
+pub const PROTOCOL_MINOR: u16 = 6;
 pub const TYPED_ACTION_RESULT_CAPABILITY: &str = "typed_action_result";
 pub const COMPACT_ACTION_OUTPUT_CAPABILITY: &str = "compact_action_output";
 pub const GENERATION_BOUND_ACTIONS_CAPABILITY: &str = "generation_bound_actions";
 pub const CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY: &str = "cancellable_action_reservations";
+pub const BUILD_IDENTITY_CAPABILITY: &str = "build_identity";
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
+/// Process role advertised during daemon negotiation.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DaemonProcessRole {
+    Control,
+    Guardian,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct RpcRequest {
@@ -40,7 +50,7 @@ pub(crate) struct RpcError {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct HelloResult {
     pub protocol_major: u16,
     pub protocol_minor: u16,
@@ -48,6 +58,38 @@ pub struct HelloResult {
     pub max_frame_bytes: usize,
     pub daemon_epoch: String,
     pub daemon_pid: u32,
+    /// Absent when talking to a daemon from before protocol 1.6.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_role: Option<DaemonProcessRole>,
+    /// Exact executable identity. Optional for backwards-compatible decoding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build: Option<BuildIdentity>,
+}
+
+impl HelloResult {
+    pub(crate) fn current(
+        process_role: DaemonProcessRole,
+        mut capabilities: Vec<String>,
+        daemon_epoch: impl Into<String>,
+    ) -> Self {
+        if !capabilities.iter().any(|value| value == BUILD_IDENTITY_CAPABILITY) {
+            capabilities.push(BUILD_IDENTITY_CAPABILITY.to_string());
+        }
+        Self {
+            protocol_major: PROTOCOL_MAJOR,
+            protocol_minor: PROTOCOL_MINOR,
+            capabilities,
+            max_frame_bytes: MAX_FRAME_BYTES,
+            daemon_epoch: daemon_epoch.into(),
+            daemon_pid: std::process::id(),
+            process_role: Some(process_role),
+            build: Some(BuildIdentity::current()),
+        }
+    }
+
+    pub fn build_matches(&self, expected: &BuildIdentity) -> bool {
+        self.build.as_ref().is_some_and(|build| build.is_compatible_build(expected))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -142,6 +184,10 @@ pub struct SessionInfo {
     pub last_command_at_unix_ms: Option<u64>,
     #[serde(default)]
     pub ever_ran_command: bool,
+    /// Guardian identity attached by the control plane. Direct and legacy
+    /// guardian responses omit it and remain wire-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<HelloResult>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

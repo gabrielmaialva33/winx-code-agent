@@ -364,7 +364,7 @@ impl GuardianLifecycle {
         for observation in candidates {
             let mut reclaimed = PruneResult::default();
             if self.terminate_observation(&observation, &mut reclaimed).await? {
-                tracing::warn!(
+                tracing::info!(
                     session = %observation.thread_id,
                     "reclaimed an unused guardian under quota pressure"
                 );
@@ -654,6 +654,7 @@ mod tests {
             last_activity_unix_ms: None,
             last_command_at_unix_ms: None,
             ever_ran_command: false,
+            runtime: None,
         }
     }
 

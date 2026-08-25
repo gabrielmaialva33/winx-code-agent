@@ -1016,6 +1016,8 @@ mod tests {
                             max_frame_bytes: super::super::protocol::MAX_FRAME_BYTES,
                             daemon_epoch: "control-15".to_string(),
                             daemon_pid: 15,
+                            process_role: None,
+                            build: None,
                         })
                         .expect("control hello value"),
                     ),
@@ -1041,6 +1043,8 @@ mod tests {
                             max_frame_bytes: super::super::protocol::MAX_FRAME_BYTES,
                             daemon_epoch: "guardian-14".to_string(),
                             daemon_pid: 14,
+                            process_role: None,
+                            build: None,
                         })
                         .expect("guardian hello value"),
                     ),
@@ -1163,6 +1167,8 @@ mod tests {
                                 max_frame_bytes: super::super::protocol::MAX_FRAME_BYTES,
                                 daemon_epoch: control_epoch.to_string(),
                                 daemon_pid: 15,
+                                process_role: None,
+                                build: None,
                             })
                             .expect("control hello value"),
                         ),
@@ -1189,6 +1195,8 @@ mod tests {
                                 max_frame_bytes: super::super::protocol::MAX_FRAME_BYTES,
                                 daemon_epoch: guardian_epoch.to_string(),
                                 daemon_pid: 16,
+                                process_role: None,
+                                build: None,
                             })
                             .expect("guardian hello value"),
                         ),
@@ -1257,6 +1265,8 @@ mod tests {
                     max_frame_bytes: super::super::protocol::MAX_FRAME_BYTES,
                     daemon_epoch: format!("guardian-{index}"),
                     daemon_pid: u32::try_from(index).unwrap_or(u32::MAX),
+                    process_role: None,
+                    build: None,
                 },
                 stream,
             }));
@@ -1282,6 +1292,8 @@ mod tests {
                     max_frame_bytes: super::super::protocol::MAX_FRAME_BYTES,
                     daemon_epoch: format!("active-{index}"),
                     daemon_pid: u32::try_from(index).unwrap_or(u32::MAX),
+                    process_role: None,
+                    build: None,
                 },
                 stream,
             }));
@@ -1305,6 +1317,8 @@ mod tests {
                 max_frame_bytes: super::super::protocol::MAX_FRAME_BYTES,
                 daemon_epoch: "overflow".to_string(),
                 daemon_pid: 999,
+                process_role: None,
+                build: None,
             },
             stream,
         }));

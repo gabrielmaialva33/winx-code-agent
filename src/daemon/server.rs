@@ -11,11 +11,11 @@ use tokio::sync::{watch, Mutex, Notify, RwLock};
 
 use super::protocol::{
     read_json_frame, write_json_frame, CancelActionParams, ConfigureSessionParams,
-    ConfigureSessionResult, ConfigureSessionTransition, HelloResult, JournalRead,
-    JournalReadParams, RpcError, RpcRequest, RpcResponse, RunActionParams, RunActionResult,
-    SessionInfo, SessionParams, WireShellError, CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY,
-    COMPACT_ACTION_OUTPUT_CAPABILITY, GENERATION_BOUND_ACTIONS_CAPABILITY, MAX_FRAME_BYTES,
-    PROTOCOL_MAJOR, PROTOCOL_MINOR, TYPED_ACTION_RESULT_CAPABILITY,
+    ConfigureSessionResult, ConfigureSessionTransition, DaemonProcessRole, HelloResult,
+    JournalRead, JournalReadParams, RpcError, RpcRequest, RpcResponse, RunActionParams,
+    RunActionResult, SessionInfo, SessionParams, WireShellError,
+    CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY, COMPACT_ACTION_OUTPUT_CAPABILITY,
+    GENERATION_BOUND_ACTIONS_CAPABILITY, TYPED_ACTION_RESULT_CAPABILITY,
 };
 use crate::errors::{Result, WinxError};
 use crate::runtime::{lock_session_store, ShellExecutionToken, ShellTarget};
@@ -401,10 +401,9 @@ async fn dispatch(
     match request.method.as_str() {
         "winx.hello" | "session.negotiate" => rpc_result(
             request.id,
-            &HelloResult {
-                protocol_major: PROTOCOL_MAJOR,
-                protocol_minor: PROTOCOL_MINOR,
-                capabilities: vec![
+            &HelloResult::current(
+                DaemonProcessRole::Guardian,
+                vec![
                     "session.configure".to_string(),
                     "session.negotiate".to_string(),
                     "shell.run_action".to_string(),
@@ -420,10 +419,8 @@ async fn dispatch(
                     "session_activity_timestamps".to_string(),
                     "attach_or_create".to_string(),
                 ],
-                max_frame_bytes: MAX_FRAME_BYTES,
-                daemon_epoch: epoch.to_string(),
-                daemon_pid: std::process::id(),
-            },
+                epoch,
+            ),
         ),
         "session.configure" => {
             let params: ConfigureSessionParams = match serde_json::from_value(request.params) {
@@ -1175,6 +1172,7 @@ async fn session_info(session: &Arc<DaemonSession>) -> Option<SessionInfo> {
         last_activity_unix_ms: Some(session.last_activity_unix_ms.load(Ordering::Acquire)),
         last_command_at_unix_ms: (last_command_at_unix_ms > 0).then_some(last_command_at_unix_ms),
         ever_ran_command: session.ever_ran_command.load(Ordering::Acquire),
+        runtime: None,
     })
 }
 

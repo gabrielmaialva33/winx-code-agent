@@ -5,25 +5,15 @@ mod control;
 mod lifecycle;
 mod protocol;
 mod server;
-
-use std::path::PathBuf;
+mod socket;
 
 pub use client::{DaemonClient, DaemonShellRuntime};
 pub use control::ControlServer;
 pub use protocol::{
-    HelloResult, JournalRead, PruneResult, SessionInfo, COMPACT_ACTION_OUTPUT_CAPABILITY,
+    DaemonProcessRole, HelloResult, JournalRead, PruneResult, SessionInfo,
+    BUILD_IDENTITY_CAPABILITY, COMPACT_ACTION_OUTPUT_CAPABILITY,
     GENERATION_BOUND_ACTIONS_CAPABILITY, MAX_FRAME_BYTES, PROTOCOL_MAJOR, PROTOCOL_MINOR,
     TYPED_ACTION_RESULT_CAPABILITY,
 };
 pub use server::DaemonServer;
-
-/// Resolve the daemon socket without creating it.
-pub fn default_socket_path() -> PathBuf {
-    if let Some(path) = std::env::var_os("WINX_SOCKET") {
-        return PathBuf::from(path);
-    }
-    if let Some(runtime_dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(runtime_dir).join("winx/winxd.sock");
-    }
-    PathBuf::from(format!("/tmp/winx-{}/winxd.sock", crate::os::unix::effective_uid()))
-}
+pub use socket::{default_socket_path, socket_candidates, DaemonSocketCandidate};
