@@ -6,11 +6,14 @@
 mod catalog;
 mod coherence;
 mod handler;
+mod mutations;
 mod outcomes;
 mod principal;
+mod recovery;
 mod sessions;
 mod tasks;
 mod tool_dispatch;
+mod usage;
 
 #[cfg(test)]
 mod tests;
@@ -41,6 +44,7 @@ pub struct WinxService {
     tasks: Arc<Mutex<TaskRegistry>>,
     root_bootstrap: Arc<Mutex<()>>,
     shell_runtime: Arc<dyn ShellRuntime>,
+    mutations: mutations::MutationCoordinator,
     /// Version information advertised in the MCP handshake.
     pub version: String,
     isolation: SessionIsolation,
