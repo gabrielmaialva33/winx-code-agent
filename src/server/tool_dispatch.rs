@@ -169,6 +169,13 @@ impl WinxService {
                 response_bytes = outcomes::result_size_bytes(call),
                 "tool call failed — {summary}"
             ),
+            Ok(call) if outcomes::result_status(call) == "completed_with_issues" => info!(
+                tool = %tool,
+                ms = elapsed_ms,
+                status = outcomes::result_status(call),
+                response_bytes = outcomes::result_size_bytes(call),
+                "tool call completed with follow-up — {summary}"
+            ),
             Ok(call) => info!(
                 tool = %tool,
                 ms = elapsed_ms,
@@ -622,7 +629,12 @@ impl WinxService {
                 )
                 .await
             }
-            Err(error) => outcomes::tool_failure("FileWriteOrEdit", &error, Some(&recovery_args)),
+            Err(error) => {
+                if error.is_search_match_conflict() {
+                    self.persist_state(&slot).await;
+                }
+                outcomes::tool_failure("FileWriteOrEdit", &error, Some(&recovery_args))
+            }
         }
     }
 
@@ -658,7 +670,12 @@ impl WinxService {
                 )
                 .await
             }
-            Err(error) => outcomes::tool_failure("MultiFileEdit", &error, Some(&recovery_args)),
+            Err(error) => {
+                if error.is_search_match_conflict() {
+                    self.persist_state(&slot).await;
+                }
+                outcomes::tool_failure("MultiFileEdit", &error, Some(&recovery_args))
+            }
         }
     }
 
