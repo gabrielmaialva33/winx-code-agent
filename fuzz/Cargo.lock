@@ -2654,7 +2654,7 @@ dependencies = [
 
 [[package]]
 name = "winx-code-agent"
-version = "0.2.342"
+version = "0.2.343"
 dependencies = [
  "anyhow",
  "axum",
