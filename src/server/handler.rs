@@ -89,8 +89,19 @@ struct UsageEvent {
 }
 
 #[derive(Default)]
+struct UsageRecoveryMetadata<'a> {
+    next_action_tool: &'a str,
+    required_read_count: u64,
+    retry_same_call: bool,
+    edit_applied: bool,
+    fresh_read_required: bool,
+    verification_status: &'a str,
+}
+
+#[derive(Default)]
 struct UsageResultMetadata<'a> {
     error_code: &'a str,
+    recovery: UsageRecoveryMetadata<'a>,
     source_kind: &'a str,
     payload_bytes: u64,
     source_bytes: u64,
@@ -117,6 +128,33 @@ fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageResultMetadata
             .and_then(|structured| structured.get("errorCode"))
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default(),
+        recovery: UsageRecoveryMetadata {
+            next_action_tool: structured
+                .and_then(|structured| structured.get("nextAction"))
+                .and_then(|action| action.get("tool"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+            required_read_count: structured
+                .and_then(|structured| structured.get("requiredReads"))
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, |reads| u64::try_from(reads.len()).unwrap_or(u64::MAX)),
+            retry_same_call: structured
+                .and_then(|structured| structured.get("retrySameCall"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            edit_applied: domain_data
+                .and_then(|data| data.get("edit_applied"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            fresh_read_required: domain_data
+                .and_then(|data| data.get("fresh_read_required"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            verification_status: domain_data
+                .and_then(|data| data.get("verification_status"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default(),
+        },
         source_kind: structured
             .and_then(|structured| structured.get("sourceKind"))
             .or_else(|| domain_data.and_then(|data| data.get("source_kind")))
@@ -382,6 +420,12 @@ impl UsageEvent {
             batch_items = self.batch_items,
             worker_limit = self.worker_limit,
             error_code = metadata.error_code,
+            next_action_tool = metadata.recovery.next_action_tool,
+            required_read_count = metadata.recovery.required_read_count,
+            retry_same_call = metadata.recovery.retry_same_call,
+            edit_applied = metadata.recovery.edit_applied,
+            fresh_read_required = metadata.recovery.fresh_read_required,
+            verification_status = metadata.recovery.verification_status,
             source_kind = metadata.source_kind,
             payload_bytes = metadata.payload_bytes,
             source_bytes = metadata.source_bytes,
@@ -1128,6 +1172,44 @@ mod tests {
         assert_eq!(metadata.temporary_session_files, 129);
         assert_eq!(metadata.temporary_session_bytes, 4096);
         assert!(metadata.temporary_over_budget);
+
+        let edit_follow_up = result_with(serde_json::json!({
+            "errorCode": "verification_failed",
+            "retrySameCall": false,
+            "nextAction": {"tool": "BashCommand"},
+            "requiredReads": [],
+            "data": {
+                "edit_applied": true,
+                "verification_status": "failed"
+            }
+        }));
+        let metadata = usage_result_metadata(Some(&edit_follow_up));
+        assert_eq!(metadata.error_code, "verification_failed");
+        assert_eq!(metadata.recovery.next_action_tool, "BashCommand");
+        assert_eq!(metadata.recovery.required_read_count, 0);
+        assert!(!metadata.recovery.retry_same_call);
+        assert!(metadata.recovery.edit_applied);
+        assert!(!metadata.recovery.fresh_read_required);
+        assert_eq!(metadata.recovery.verification_status, "failed");
+
+        let edit_conflict = result_with(serde_json::json!({
+            "errorCode": "search_block_not_found",
+            "retrySameCall": false,
+            "nextAction": {"tool": "ReadFiles"},
+            "requiredReads": [{"path": "/workspace/lib.rs", "ranges": []}],
+            "data": {
+                "edit_applied": false,
+                "fresh_read_required": true
+            }
+        }));
+        let metadata = usage_result_metadata(Some(&edit_conflict));
+        assert_eq!(metadata.error_code, "search_block_not_found");
+        assert_eq!(metadata.recovery.next_action_tool, "ReadFiles");
+        assert_eq!(metadata.recovery.required_read_count, 1);
+        assert!(!metadata.recovery.retry_same_call);
+        assert!(!metadata.recovery.edit_applied);
+        assert!(metadata.recovery.fresh_read_required);
+        assert_eq!(metadata.recovery.verification_status, "");
     }
 
     #[test]
