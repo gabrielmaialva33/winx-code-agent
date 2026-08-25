@@ -975,6 +975,68 @@ async fn repeated_initialize_for_another_workspace_is_terminal_over_http() -> an
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn stale_reset_initialize_recovers_missing_session_over_http() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (old_address, old_server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let old_initialize = initialize_modern_as(
+        old_address,
+        TEST_TOKEN,
+        workspace.path(),
+        "ignored-under-workspace-affinity",
+        "recover-stale-reset-seed",
+    )
+    .await?;
+    let stale_thread_id = initialized_thread_id(&old_initialize)?;
+    drop(old_server);
+
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "recover-stale-reset",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("recover-stale-reset-client", false),
+            "name": "Initialize",
+            "arguments": {
+                "type": "reset_shell",
+                "any_workspace_path": workspace.path(),
+                "mode_name": "wcgw",
+                "thread_id": stale_thread_id
+            }
+        }
+    });
+
+    let initialized =
+        post_json_as(address, "2026-07-28", "tools/call", &request.to_string(), TEST_TOKEN).await?;
+    let parsed = response_json(&initialized)?;
+    assert_eq!(parsed["result"]["isError"], false, "{parsed}");
+    assert_eq!(parsed["result"]["structuredContent"]["status"], "completed", "{parsed}");
+    assert_eq!(
+        parsed["result"]["structuredContent"]["data"]["initialize_transition"], "created",
+        "{parsed}"
+    );
+    assert_eq!(
+        parsed["result"]["structuredContent"]["data"]["initialize_recovered_missing_session"], true,
+        "{parsed}"
+    );
+    assert!(
+        parsed["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("Recovered missing live session")),
+        "{parsed}"
+    );
+
+    let thread_id = initialized_thread_id(&initialized)?;
+    let bash =
+        bash_as(address, TEST_TOKEN, &thread_id, "recover-stale-reset-bash", "printf recovered")
+            .await?;
+    let bash = response_json(&bash)?;
+    assert_eq!(bash["result"]["isError"], false, "{bash}");
+    assert_eq!(bash["result"]["structuredContent"]["status"], "completed", "{bash}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn oauth_well_known_probes_return_404_without_bearer_auth() -> anyhow::Result<()> {
     let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
 
