@@ -170,6 +170,16 @@ impl Write for SecureUsageWriter {
 /// Call this only after the optional Landlock domain has been applied so the
 /// writer thread inherits the same filesystem restrictions as every other child.
 pub fn initialize(verbose: bool, debug: bool) -> Result<LoggingGuard> {
+    initialize_inner(verbose, debug, true)
+}
+
+/// Install stderr logging without opening or rotating the usage sink. Offline
+/// inspection commands use this so observing logs cannot mutate them.
+pub fn initialize_without_usage(verbose: bool, debug: bool) -> Result<LoggingGuard> {
+    initialize_inner(verbose, debug, false)
+}
+
+fn initialize_inner(verbose: bool, debug: bool, usage_enabled: bool) -> Result<LoggingGuard> {
     let level = if debug {
         tracing::Level::DEBUG
     } else if verbose {
@@ -184,7 +194,7 @@ pub fn initialize(verbose: bool, debug: bool) -> Result<LoggingGuard> {
     };
     let stderr_json = crate::config::env_text("WINX_LOG_FORMAT")
         .is_some_and(|format| format.eq_ignore_ascii_case("json"));
-    let usage = usage_log_writer()?;
+    let usage = if usage_enabled { usage_log_writer()? } else { None };
 
     let guard = match (stderr_json, usage) {
         (true, Some((writer, guard))) => {
