@@ -14,6 +14,7 @@ use crate::tools::bash_command::BashCommandState;
 #[serde(rename_all = "snake_case")]
 pub(super) enum ToolResultStatus {
     Completed,
+    CompletedWithIssues,
     Running,
     AwaitingInput,
     AwaitingApproval,
@@ -139,6 +140,14 @@ pub(super) fn tool_failure(
                 workspace_root.display()
             )
         }
+        ("FileWriteOrEdit" | "MultiFileEdit", error) if error.is_search_match_conflict() => {
+            format!(
+                "{tool} failed: {error}\n\nNo file was changed by this call. Winx invalidated \
+                 the prior read permit for the conflicting target. Call the exact ReadFiles \
+                 nextAction, rebuild SEARCH from the returned current text, and do not retry this \
+                 edit unchanged. A shell read does not refresh the edit guard."
+            )
+        }
         _ => format!("{tool} failed: {error}"),
     };
     let envelope = error_envelope(tool, error, arguments, text.clone());
@@ -205,6 +214,64 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
     result.structured_content = Some(value);
 }
 
+/// Render verification guidance with committed-edit state before diagnostic output.
+fn edit_verification_presentation(
+    tool: &str,
+    edit_text: &str,
+    verification_text: &str,
+    verification_error: bool,
+    active: bool,
+    nested_status: &str,
+    exit_code: Option<i64>,
+) -> (String, String) {
+    let status_label = if verification_error {
+        "completed_with_issues"
+    } else if active {
+        nested_status
+    } else {
+        "completed"
+    };
+    let message = if verification_error {
+        format!(
+            "{tool} applied the edit, but verification failed. The edit remains applied; do not \
+             repeat the original edit. Diagnose the verification output and make only corrective \
+             changes."
+        )
+    } else if active {
+        format!("{tool} applied the edit; verification is still {status_label}.")
+    } else {
+        format!("{tool} applied the edit and verification completed.")
+    };
+    let summary = if verification_error {
+        exit_code.map_or_else(
+            || "EDIT APPLIED. Verification failed; do not repeat the original edit.".to_string(),
+            |code| {
+                format!(
+                    "EDIT APPLIED. Verification failed with exit code {code}; do not repeat the \
+                     original edit."
+                )
+            },
+        )
+    } else if active {
+        format!("Verification is still {status_label}.")
+    } else {
+        exit_code.map_or_else(
+            || "Verification completed.".to_string(),
+            |code| format!("Verification completed with exit code {code}."),
+        )
+    };
+    let combined_text = if verification_error && verification_text.trim().is_empty() {
+        format!("{summary}\n\n{edit_text}")
+    } else if verification_error {
+        format!("{summary}\n\n{edit_text}\n\n{verification_text}")
+    } else if verification_text.trim().is_empty() {
+        format!("{edit_text}\n\n{summary}")
+    } else {
+        format!("{edit_text}\n\n{summary}\n{verification_text}")
+    };
+    (message, combined_text)
+}
+
 /// Combine an already-applied edit with its optional foreground verification.
 /// The command remains a nested Bash result, while the outer status makes it
 /// explicit that a failed verification does not roll the edit back.
@@ -229,41 +296,39 @@ pub(super) fn edit_verification_result(
     let nonzero_exit = exit_code.is_some_and(|code| code != 0);
     let verification_error = verification_is_error || nonzero_exit;
     let active = matches!(nested_status, "running" | "awaiting_input" | "awaiting_approval");
-    let outer_status = if nonzero_exit {
-        "failed"
-    } else if active || verification_error {
-        nested_status
-    } else {
-        "completed"
-    };
-    let message = if verification_error {
-        format!("{tool} applied the edit, but verification failed; the edit was not rolled back.")
+    let outer_status = if verification_error {
+        ToolResultStatus::CompletedWithIssues
     } else if active {
-        format!("{tool} applied the edit; verification is still {outer_status}.")
+        match nested_status {
+            "running" => ToolResultStatus::Running,
+            "awaiting_input" => ToolResultStatus::AwaitingInput,
+            "awaiting_approval" => ToolResultStatus::AwaitingApproval,
+            _ => ToolResultStatus::Completed,
+        }
     } else {
-        format!("{tool} applied the edit and verification completed.")
+        ToolResultStatus::Completed
     };
-    let verification_summary = if verification_error {
-        exit_code.map_or_else(
-            || "Verification failed; the edit remains applied.".to_string(),
-            |code| format!("Verification failed with exit code {code}; the edit remains applied."),
-        )
-    } else if active {
-        format!("Verification is still {outer_status}.")
-    } else {
-        exit_code.map_or_else(
-            || "Verification completed.".to_string(),
-            |code| format!("Verification completed with exit code {code}."),
-        )
-    };
-    let combined_text = if verification_text.trim().is_empty() {
-        format!("{edit_text}\n\n{verification_summary}")
-    } else {
-        format!("{edit_text}\n\n{verification_summary}\n{verification_text}")
-    };
+    let (message, combined_text) = edit_verification_presentation(
+        tool,
+        edit_text,
+        &verification_text,
+        verification_error,
+        active,
+        nested_status,
+        exit_code,
+    );
 
     let mut data = safe_success_data(tool, arguments, &combined_text, false);
     data.insert("edit_applied".to_string(), Value::Bool(true));
+    data.insert("original_edit_retryable".to_string(), Value::Bool(false));
+    data.insert("follow_up_required".to_string(), Value::Bool(verification_error || active));
+    data.insert(
+        "verification_status".to_string(),
+        Value::String(if verification_error { "failed" } else { nested_status }.to_string()),
+    );
+    if !active {
+        data.insert("verification_passed".to_string(), Value::Bool(!verification_error));
+    }
     data.insert("verification".to_string(), nested.clone());
     if let Some(exit_code) = exit_code {
         data.insert("verification_exit_code".to_string(), json!(exit_code));
@@ -273,7 +338,11 @@ pub(super) fn edit_verification_result(
         "status": outer_status,
         "tool": tool,
         "message": message,
-        "retryable": nested.get("retryable").and_then(Value::as_bool).unwrap_or(false),
+        "retryable": if verification_error {
+            false
+        } else {
+            nested.get("retryable").and_then(Value::as_bool).unwrap_or(false)
+        },
         "retrySameCall": false,
         "requiredReads": [],
         "data": data,
@@ -292,12 +361,18 @@ pub(super) fn edit_verification_result(
             envelope[key] = value.clone();
         }
     }
+    if verification_error && envelope.get("nextAction").is_none() {
+        envelope["nextAction"] = json!({
+            "tool": "BashCommand",
+            "instruction": "The edit is already applied. Diagnose the verification output, make only corrective changes, then rerun verification separately. Do not repeat the original edit."
+        });
+    }
 
-    let mut result = if verification_error {
-        CallToolResult::error(vec![ContentBlock::text(combined_text)])
-    } else {
-        CallToolResult::success(vec![ContentBlock::text(combined_text)])
-    };
+    // Once the edit committed, reporting an MCP tool error is misleading: many
+    // agents retry the entire edit and create SEARCH-conflict loops. Verification
+    // remains explicit machine-readable follow-up state, while the committed side
+    // effect is reported as a successful tool delivery.
+    let mut result = CallToolResult::success(vec![ContentBlock::text(combined_text)]);
     result.structured_content = Some(envelope);
     result
 }
@@ -927,6 +1002,11 @@ fn error_envelope(
         data.insert("unique_files_used".to_string(), json!(unique_files_used));
         data.insert("unique_files_limit".to_string(), json!(unique_files_limit));
     }
+    if error.is_search_match_conflict() {
+        data.insert("edit_applied".to_string(), Value::Bool(false));
+        data.insert("fresh_read_required".to_string(), Value::Bool(true));
+        data.insert("read_permit_invalidated".to_string(), Value::Bool(true));
+    }
     ToolResultEnvelope {
         status,
         tool: tool.to_string(),
@@ -1010,7 +1090,9 @@ fn read_action(arguments: Option<&Value>, path: &str, ranges: &[String]) -> Opti
     copy_session_binding(arguments, &mut value);
     Some(ToolNextAction {
         tool: "ReadFiles".to_string(),
-        instruction: "Perform every required read before retrying the edit. Do not retry the same edit unchanged first."
+        instruction: "Call ReadFiles exactly as specified before another edit attempt. Bash/cat \
+                      does not refresh the edit guard. Rebuild SEARCH from the returned current \
+                      text, then make one corrected retry; never resend the failed edit unchanged."
             .to_string(),
         arguments: Some(value),
     })
@@ -1688,7 +1770,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_edit_verification_is_an_error_but_never_claims_rollback() {
+    fn failed_edit_verification_is_completed_with_issues_and_never_retries_the_edit() {
         let result = edit_verification_result(
             "MultiFileEdit",
             Some(&json!({"thread_id":"thread","files":[]})),
@@ -1696,13 +1778,21 @@ mod tests {
             exited_verification(7),
         );
 
-        assert_eq!(result.is_error, Some(true));
+        assert_ne!(result.is_error, Some(true));
         let text = result.content[0].as_text().expect("text result");
-        assert!(text.text.contains("edit remains applied"));
+        assert!(text.text.starts_with("EDIT APPLIED."));
+        assert!(text.text.contains("do not repeat the original edit"));
         let structured = result.structured_content.expect("structured verification");
-        assert_eq!(structured["status"], "failed");
+        assert_eq!(structured["status"], "completed_with_issues");
         assert_eq!(structured["errorCode"], "verification_failed");
+        assert_eq!(structured["retryable"], false);
+        assert_eq!(structured["retrySameCall"], false);
+        assert_eq!(structured["nextAction"]["tool"], "BashCommand");
         assert_eq!(structured["data"]["edit_applied"], true);
+        assert_eq!(structured["data"]["original_edit_retryable"], false);
+        assert_eq!(structured["data"]["follow_up_required"], true);
+        assert_eq!(structured["data"]["verification_status"], "failed");
+        assert_eq!(structured["data"]["verification_passed"], false);
         assert_eq!(structured["data"]["verification_exit_code"], 7);
     }
 
