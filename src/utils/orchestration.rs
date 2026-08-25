@@ -5,7 +5,10 @@ const DEFAULT_INSTRUCTIONS: &str = concat!(
     "authoritative. Never repeat a failed tool call unchanged: execute next_action and every ",
     "required_read first. Keep the exact thread_id/workspace_root pair for the user's current ",
     "project; never borrow one from another chat. workspace_root identifies the session, not a ",
-    "path sandbox: allowed absolute targets outside it do not require rebinding. If Initialize ",
+    "path sandbox: allowed absolute targets outside it do not require rebinding. After an edit ",
+    "conflict, only ReadFiles refreshes the edit guard; rebuild SEARCH from its returned text. If ",
+    "edit_applied=true or status=completed_with_issues, never repeat the original edit: diagnose ",
+    "verification and make only corrective changes. If Initialize ",
     "reports initialize_workspace_already_bound or workspace_change_requires_new_session, do not ",
     "call Initialize again in that conversation. If a reset or mode change follows adapter state ",
     "loss, accept the recovered first_call result and continue with its returned pair. Use CodeMap ",
@@ -81,5 +84,14 @@ mod tests {
         assert!(instructions.contains("workspace_change_requires_new_session"));
         assert!(instructions.contains("do not call Initialize again"));
         assert!(instructions.contains("allowed absolute targets outside it"));
+    }
+
+    #[test]
+    fn default_contract_distinguishes_edit_conflicts_from_verification_follow_up() {
+        let instructions = server_instructions();
+        assert!(instructions.contains("only ReadFiles refreshes the edit guard"));
+        assert!(instructions.contains("edit_applied=true"));
+        assert!(instructions.contains("status=completed_with_issues"));
+        assert!(instructions.contains("never repeat the original edit"));
     }
 }

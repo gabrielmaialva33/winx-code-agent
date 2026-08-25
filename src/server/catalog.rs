@@ -227,10 +227,10 @@ const READ_FILES_DESCRIPTION: &str =
     "Read exact canonical text from one or more absolute paths and record visible coverage required by edit tools. Prefer this over cat/head/tail. Use :start-end suffixes for targeted ranges; omitted bounds are allowed. Token truncation never records unseen lines. Use ReadImage for images and do not read binary files.";
 
 const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
-    "Edit one previously read file; use MultiFileEdit across files. For <=50% change, send exact concise SEARCH/REPLACE blocks and optional @line anchors; for larger changes, read and provide the complete file. On needs_read, stale, missing, or ambiguous results, perform required_reads/next_action before a corrected retry. Temporary helpers must use temporary_artifact_dir. verify_command runs one bounded post-edit check; a failed check does not roll back the edit.";
+    "Edit one read file; use MultiFileEdit for batches. For <=50%, use exact SEARCH/REPLACE blocks (optional @line); otherwise read and send the complete file. A SEARCH conflict revokes the read permit: execute its ReadFiles next_action (shell reads do not count), rebuild SEARCH, and retry once. Put helpers in temporary_artifact_dir. verify_command is post-commit; completed_with_issues means the edit remains applied - diagnose it, never repeat it.";
 
 const MULTI_FILE_EDIT_DESCRIPTION: &str =
-    "Validate and edit 2+ previously read files as one batch. Search matching is computed before writing, so validation failure writes nothing; a rare filesystem failure reports any already-written files. Entries use FileWriteOrEdit semantics and paths must be unique. Optional verify_command runs after commit and never rolls edits back.";
+    "Atomically edit 2+ read, unique files. Validation failure writes nothing and revokes only the conflicting target's permit; execute its ReadFiles next_action before one corrected retry. Uses FileWriteOrEdit semantics. verify_command is post-commit; completed_with_issues means edits remain applied - never repeat them.";
 
 const UNDO_EDIT_DESCRIPTION: &str =
     "Restore one file to its previous Winx edit checkpoint in this session. Repeated calls walk backward per file. Undo is refused after an external change and cannot remove a newly created file.";
