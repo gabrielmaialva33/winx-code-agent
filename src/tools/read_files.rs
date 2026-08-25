@@ -4,6 +4,7 @@
 //! to read and display the contents of files, optionally with line numbers and
 //! line range filtering.
 
+use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
@@ -24,9 +25,38 @@ const NONCODING_MAX_TOKENS: usize = 8_000;
 const DEFAULT_READ_PARALLELISM: usize = 4;
 const MAX_READ_PARALLELISM: usize = 32;
 
-/// Type alias for file reading result
-type FileReadResult = (String, bool, usize, String, (usize, usize), String, usize);
 type ReadCoverage = (Vec<(usize, usize)>, String, usize);
+
+#[derive(Debug)]
+struct FileReadResult {
+    content: String,
+    truncated: bool,
+    canonical_path: String,
+    visible_range: (usize, usize),
+    file_hash: String,
+    total_lines: usize,
+}
+
+/// Revision receipt for one successful file read. `revision` is opaque to MCP
+/// callers and may be supplied to `ApplyPatch` as a compare-and-swap guard.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadFileRevision {
+    pub path: String,
+    pub revision: String,
+    pub total_lines: usize,
+    pub visible_ranges: Vec<ReadLineRange>,
+    pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_start_line: Option<usize>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadLineRange {
+    pub start_line: usize,
+    pub end_line: usize,
+}
 
 #[derive(Clone)]
 struct FileReadRequest {
@@ -43,6 +73,7 @@ struct ReadBatchState {
     file_ranges: HashMap<String, ReadCoverage>,
     stats_paths: Vec<PathBuf>,
     successful_files: usize,
+    revisions: Vec<ReadFileRevision>,
     errors: Vec<WinxError>,
 }
 
@@ -56,11 +87,20 @@ impl ReadBatchState {
         total_files: usize,
     ) -> bool {
         match result {
-            Ok((content, truncated, _, canon_path, line_range, file_hash, total_lines)) => {
+            Ok(result) => {
+                let FileReadResult {
+                    content,
+                    truncated,
+                    canonical_path,
+                    visible_range,
+                    file_hash,
+                    total_lines,
+                } = result;
                 self.successful_files = self.successful_files.saturating_add(1);
+                let revision = revision_from_hash(&file_hash);
                 let entry = self
                     .file_ranges
-                    .entry(canon_path.clone())
+                    .entry(canonical_path.clone())
                     .or_insert_with(|| (Vec::new(), file_hash.clone(), total_lines));
                 if entry.1 != file_hash || entry.2 != total_lines {
                     // The same path can be requested more than once in one
@@ -68,14 +108,30 @@ impl ReadBatchState {
                     // for the version whose hash will guard the next edit.
                     *entry = (Vec::new(), file_hash, total_lines);
                 }
-                entry.0.push(line_range);
+                entry.0.push(visible_range);
+                self.revisions.push(ReadFileRevision {
+                    path: canonical_path.clone(),
+                    revision,
+                    total_lines,
+                    visible_ranges: (visible_range.0 <= visible_range.1)
+                        .then_some(ReadLineRange {
+                            start_line: visible_range.0,
+                            end_line: visible_range.1,
+                        })
+                        .into_iter()
+                        .collect(),
+                    truncated,
+                    next_start_line: truncated
+                        .then_some(visible_range.1.saturating_add(1))
+                        .filter(|line| *line <= total_lines),
+                });
                 let _ = write!(
                     self.message,
                     "\n{}{}\n```\n{content}\n```",
                     request.clean_path,
                     range_format(request.start_line_num, request.end_line_num)
                 );
-                self.stats_paths.push(PathBuf::from(canon_path));
+                self.stats_paths.push(PathBuf::from(canonical_path));
 
                 if truncated {
                     let remaining = total_files.saturating_sub(request.index + 1);
@@ -105,6 +161,7 @@ impl ReadBatchState {
 pub struct ReadFilesOutcome {
     pub text: String,
     pub successful_files: usize,
+    pub files: Vec<ReadFileRevision>,
     pub errors: Vec<WinxError>,
 }
 
@@ -140,10 +197,7 @@ fn read_file(
     };
 
     if !path.exists() {
-        return Err(WinxError::FileAccessError {
-            path: path.clone(),
-            message: "File does not exist".to_string(),
-        });
+        return Err(WinxError::FileNotFound { path: path.clone() });
     }
 
     let path = match validate_path_in_workspace(&path, workspace_root) {
@@ -232,15 +286,14 @@ fn read_file(
     let canon_path = path.to_string_lossy().to_string();
     let effective_end_line = if truncated { last_shown } else { effective_end };
 
-    Ok((
-        result_content,
+    Ok(FileReadResult {
+        content: result_content,
         truncated,
-        tokens_count,
-        canon_path,
-        (effective_start, effective_end_line.min(total_lines.max(1))),
+        canonical_path: canon_path,
+        visible_range: (effective_start, effective_end_line.min(total_lines.max(1))),
         file_hash,
         total_lines,
-    ))
+    })
 }
 
 fn hash_content(content: &str) -> String {
@@ -249,6 +302,10 @@ fn hash_content(content: &str) -> String {
         let _ = write!(hash, "{byte:02x}");
         hash
     })
+}
+
+pub(crate) fn revision_from_hash(hash: &str) -> String {
+    format!("sha256:{hash}")
 }
 
 fn truncate_to_token_budget(content: &mut String, max_tokens: usize, ids: Option<Vec<u32>>) {
@@ -469,7 +526,8 @@ pub async fn handle_tool_call_detailed(
     let batch =
         execute_read_requests(&requests, &cwd, &workspace_root, read_files.show_line_numbers())
             .await;
-    let ReadBatchState { message, file_ranges, stats_paths, successful_files, errors } = batch;
+    let ReadBatchState { message, file_ranges, stats_paths, successful_files, revisions, errors } =
+        batch;
     persist_read_stats(&workspace_root, stats_paths).await;
 
     let mut bash_state_guard = bash_state_arc.lock().await;
@@ -479,7 +537,7 @@ pub async fn handle_tool_call_detailed(
         }
     }
 
-    Ok(ReadFilesOutcome { text: message, successful_files, errors })
+    Ok(ReadFilesOutcome { text: message, successful_files, files: revisions, errors })
 }
 
 #[cfg(test)]
@@ -513,19 +571,23 @@ mod tests {
         std::fs::write(&path, source)?;
         let path = path.to_str().ok_or_else(|| anyhow::anyhow!("fixture path is not UTF-8"))?;
 
-        let (content, truncated, _, _, range, hash, total_lines) =
-            read_file(path, Some(50), temp.path(), temp.path(), false, None, None)?;
+        let result = read_file(path, Some(50), temp.path(), temp.path(), false, None, None)?;
 
-        assert!(truncated);
-        let visible = content
+        assert!(result.truncated);
+        let visible = result
+            .content
             .split_once("\n(...truncated)")
             .map(|(visible, _)| visible)
             .ok_or_else(|| anyhow::anyhow!("truncation marker is missing"))?;
         let visible_lines = visible.lines().count();
-        assert_eq!(range, (1, visible_lines));
-        let coverage = FileWhitelistData::new(hash, vec![range], total_lines);
+        assert_eq!(result.visible_range, (1, visible_lines));
+        let coverage = FileWhitelistData::new(
+            result.file_hash,
+            vec![result.visible_range],
+            result.total_lines,
+        );
         assert!(!coverage.is_read_enough());
-        assert_eq!(coverage.get_unread_ranges(), vec![(visible_lines + 1, total_lines)]);
+        assert_eq!(coverage.get_unread_ranges(), vec![(visible_lines + 1, result.total_lines)]);
         Ok(())
     }
 
@@ -536,13 +598,16 @@ mod tests {
         std::fs::write(&path, "x".repeat(10_000))?;
         let path = path.to_str().ok_or_else(|| anyhow::anyhow!("fixture path is not UTF-8"))?;
 
-        let (content, truncated, _, _, range, hash, total_lines) =
-            read_file(path, Some(10), temp.path(), temp.path(), false, None, None)?;
+        let result = read_file(path, Some(10), temp.path(), temp.path(), false, None, None)?;
 
-        assert!(truncated);
-        assert!(content.starts_with("\n(...truncated) Showing up to line 0"));
-        assert_eq!(range, (1, 0));
-        let coverage = FileWhitelistData::new(hash, vec![range], total_lines);
+        assert!(result.truncated);
+        assert!(result.content.starts_with("\n(...truncated) Showing up to line 0"));
+        assert_eq!(result.visible_range, (1, 0));
+        let coverage = FileWhitelistData::new(
+            result.file_hash,
+            vec![result.visible_range],
+            result.total_lines,
+        );
         assert!(coverage.line_ranges_read.is_empty());
         assert_eq!(coverage.get_unread_ranges(), vec![(1, 1)]);
         Ok(())
