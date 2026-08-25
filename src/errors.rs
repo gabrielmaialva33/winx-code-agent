@@ -1,6 +1,14 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+/// Machine-readable reason an edit must be preceded by another `ReadFiles` call.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReadRequirement {
+    NeverRead,
+    Stale,
+    InsufficientCoverage,
+}
+
 /// Errors that can occur in the Winx application
 #[derive(Error, Debug)]
 pub enum WinxError {
@@ -47,6 +55,39 @@ pub enum WinxError {
     /// Error when trying to access a file or directory
     #[error("File access error for {path}: {message}")]
     FileAccessError { path: PathBuf, message: String },
+
+    /// A requested path does not exist.
+    #[error("File not found: {path}")]
+    FileNotFound { path: PathBuf },
+
+    /// The edit guard requires a fresh or broader read before mutation.
+    #[error("Fresh read required for {path}: {message}")]
+    FileReadRequired {
+        path: PathBuf,
+        reason: ReadRequirement,
+        ranges: Vec<String>,
+        message: String,
+    },
+
+    /// An undo/edit postcondition no longer matches the on-disk file.
+    #[error("File changed after the last Winx edit: {path}: {message}")]
+    FileChangedAfterEdit { path: PathBuf, message: String },
+
+    /// No in-session undo checkpoint exists for the requested file.
+    #[error("No undo checkpoint exists for {path}")]
+    UndoCheckpointNotFound { path: PathBuf },
+
+    /// A file operation was rejected by an explicit policy or OS permission.
+    #[error("File operation denied for {path}: {message}")]
+    FileOperationDenied { path: PathBuf, message: String },
+
+    /// A live file changed repeatedly while Winx was taking a bounded snapshot.
+    #[error("File changed during read after {attempts} attempts: {path}")]
+    ConcurrentFileModification { path: PathBuf, attempts: usize },
+
+    /// A compare-and-swap edit targeted a different file revision.
+    #[error("File revision mismatch for {path}: expected {expected}, current {actual}")]
+    FileRevisionMismatch { path: PathBuf, expected: String, actual: String },
 
     /// Security error - path traversal or symlink escape attempt
     #[error("Security violation: {message}")]
@@ -302,184 +343,5 @@ impl ErrorRecovery {
 
     pub fn null_value(field: &str) -> WinxError {
         WinxError::NullValueError { field: field.to_string() }
-    }
-}
-
-/// Enable cloning for `WinxError`
-impl Clone for WinxError {
-    #[allow(clippy::too_many_lines)] // exhaustive variant-preserving clone
-    fn clone(&self) -> Self {
-        match self {
-            Self::ShellInitializationError(msg) => Self::ShellInitializationError(msg.clone()),
-            Self::WorkspacePathError(msg) => Self::WorkspacePathError(msg.clone()),
-            Self::BashStateLockError(msg) => Self::BashStateLockError(msg.clone()),
-            Self::BashStateNotInitialized => Self::BashStateNotInitialized,
-            Self::CommandExecutionError(msg) => Self::CommandExecutionError(msg.clone()),
-            Self::NoActiveCommand(msg) => Self::NoActiveCommand(msg.clone()),
-            Self::BackgroundSessionNotFound(msg) => Self::BackgroundSessionNotFound(msg.clone()),
-            Self::EmptyInteractiveInput { action } => {
-                Self::EmptyInteractiveInput { action: action.clone() }
-            }
-            Self::InteractiveTargetNotRunning(msg) => {
-                Self::InteractiveTargetNotRunning(msg.clone())
-            }
-            Self::CommandNotAllowed(msg) => Self::CommandNotAllowed(msg.clone()),
-            Self::ThreadIdMismatch(msg) => Self::ThreadIdMismatch(msg.clone()),
-            Self::WorkspaceBindingRequired { thread_id } => {
-                Self::WorkspaceBindingRequired { thread_id: thread_id.clone() }
-            }
-            Self::WorkspaceThreadMismatch { thread_id, workspace_root } => {
-                Self::WorkspaceThreadMismatch {
-                    thread_id: thread_id.clone(),
-                    workspace_root: workspace_root.clone(),
-                }
-            }
-            Self::WorkspaceBindingMismatch { thread_id, requested_workspace, bound_workspace } => {
-                Self::WorkspaceBindingMismatch {
-                    thread_id: thread_id.clone(),
-                    requested_workspace: requested_workspace.clone(),
-                    bound_workspace: bound_workspace.clone(),
-                }
-            }
-            Self::WorkspaceChangeRequiresNewSession { workspace_root } => {
-                Self::WorkspaceChangeRequiresNewSession { workspace_root: workspace_root.clone() }
-            }
-            Self::ArgumentParseError(msg) => Self::ArgumentParseError(msg.clone()),
-            Self::FileAccessError { path, message } => {
-                Self::FileAccessError { path: path.clone(), message: message.clone() }
-            }
-            Self::TemporaryArtifactPolicy { path, temporary_artifact_dir, message } => {
-                Self::TemporaryArtifactPolicy {
-                    path: path.clone(),
-                    temporary_artifact_dir: temporary_artifact_dir.clone(),
-                    message: message.clone(),
-                }
-            }
-            Self::TemporaryArtifactBudgetExceeded {
-                temporary_artifact_dir,
-                total_bytes,
-                max_total_bytes,
-                session_bytes,
-                max_session_bytes,
-                session_files,
-                max_session_files,
-                largest_file_bytes,
-                max_file_bytes,
-            } => Self::TemporaryArtifactBudgetExceeded {
-                temporary_artifact_dir: temporary_artifact_dir.clone(),
-                total_bytes: *total_bytes,
-                max_total_bytes: *max_total_bytes,
-                session_bytes: *session_bytes,
-                max_session_bytes: *max_session_bytes,
-                session_files: *session_files,
-                max_session_files: *max_session_files,
-                largest_file_bytes: *largest_file_bytes,
-                max_file_bytes: *max_file_bytes,
-            },
-            Self::InvalidWaitPolicyForAction { wait_policy, action } => {
-                Self::InvalidWaitPolicyForAction {
-                    wait_policy: wait_policy.clone(),
-                    action: action.clone(),
-                }
-            }
-            Self::DerivedCodeMapBudget {
-                path,
-                temporary_artifact_dir,
-                calls_used,
-                calls_limit,
-                unique_files_used,
-                unique_files_limit,
-                message,
-            } => Self::DerivedCodeMapBudget {
-                path: path.clone(),
-                temporary_artifact_dir: temporary_artifact_dir.clone(),
-                calls_used: *calls_used,
-                calls_limit: *calls_limit,
-                unique_files_used: *unique_files_used,
-                unique_files_limit: *unique_files_limit,
-                message: message.clone(),
-            },
-            Self::DeserializationError(msg) => Self::DeserializationError(msg.clone()),
-            Self::SerializationError(msg) => Self::SerializationError(msg.clone()),
-            Self::SearchReplaceSyntaxError(msg) => Self::SearchReplaceSyntaxError(msg.clone()),
-            Self::SearchBlockNotFound(msg) => Self::SearchBlockNotFound(msg.clone()),
-            Self::SearchBlockAmbiguous { block_content, match_count, suggestions } => {
-                Self::SearchBlockAmbiguous {
-                    block_content: block_content.clone(),
-                    match_count: *match_count,
-                    suggestions: suggestions.clone(),
-                }
-            }
-            Self::MultiFilePlanError { index, path, source } => Self::MultiFilePlanError {
-                index: *index,
-                path: path.clone(),
-                source: Box::new((**source).clone()),
-            },
-            Self::SearchReplaceSyntaxErrorDetailed {
-                message,
-                line_number,
-                block_type,
-                suggestions,
-            } => Self::SearchReplaceSyntaxErrorDetailed {
-                message: message.clone(),
-                line_number: *line_number,
-                block_type: block_type.clone(),
-                suggestions: suggestions.clone(),
-            },
-            Self::JsonParseError(msg) => Self::JsonParseError(msg.clone()),
-            Self::FileTooLarge { path, size, max_size } => {
-                Self::FileTooLarge { path: path.clone(), size: *size, max_size: *max_size }
-            }
-            Self::FileWriteError { path, message } => {
-                Self::FileWriteError { path: path.clone(), message: message.clone() }
-            }
-            Self::DataLoadingError(msg) => Self::DataLoadingError(msg.clone()),
-            Self::ParameterValidationError { field, message } => {
-                Self::ParameterValidationError { field: field.clone(), message: message.clone() }
-            }
-            Self::MissingParameterError { field, message } => {
-                Self::MissingParameterError { field: field.clone(), message: message.clone() }
-            }
-            Self::NullValueError { field } => Self::NullValueError { field: field.clone() },
-            Self::RecoverableSuggestionError { message, suggestion } => {
-                Self::RecoverableSuggestionError {
-                    message: message.clone(),
-                    suggestion: suggestion.clone(),
-                }
-            }
-            Self::ContextSaveError(msg) => Self::ContextSaveError(msg.clone()),
-            Self::CommandTimeout { command, timeout_seconds } => {
-                Self::CommandTimeout { command: command.clone(), timeout_seconds: *timeout_seconds }
-            }
-            Self::InteractiveCommandDetected { command } => {
-                Self::InteractiveCommandDetected { command: command.clone() }
-            }
-            Self::CommandAlreadyRunning { current_command, duration_seconds } => {
-                Self::CommandAlreadyRunning {
-                    current_command: current_command.clone(),
-                    duration_seconds: *duration_seconds,
-                }
-            }
-            Self::ProcessCleanupError { message } => {
-                Self::ProcessCleanupError { message: message.clone() }
-            }
-            Self::BufferOverflow { size, max_size } => {
-                Self::BufferOverflow { size: *size, max_size: *max_size }
-            }
-            Self::SessionRecoveryError { message } => {
-                Self::SessionRecoveryError { message: message.clone() }
-            }
-            Self::ResourceAllocationError { message } => {
-                Self::ResourceAllocationError { message: message.clone() }
-            }
-            Self::IoError(err) => Self::IoError(std::io::Error::new(err.kind(), err.to_string())),
-            Self::ConfigurationError(msg) => Self::ConfigurationError(msg.clone()),
-            Self::ParseError(msg) => Self::ParseError(msg.clone()),
-            Self::InvalidInput(msg) => Self::InvalidInput(msg.clone()),
-            Self::FileError(msg) => Self::FileError(msg.clone()),
-            Self::PathSecurityError { path, message } => {
-                Self::PathSecurityError { path: path.clone(), message: message.clone() }
-            }
-        }
     }
 }
