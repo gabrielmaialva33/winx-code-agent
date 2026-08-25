@@ -23,6 +23,32 @@ pub(crate) struct PlannedEdit {
     uses_search_replace: bool,
 }
 
+fn resolve_edit_path(bash_state: &BashState, file_path: &str) -> Result<(PathBuf, PathBuf)> {
+    let expanded_path = expand_user(file_path);
+    let requested_path = if Path::new(&expanded_path).is_absolute() {
+        PathBuf::from(&expanded_path)
+    } else {
+        bash_state.cwd.join(&expanded_path)
+    };
+    let path = validate_path_in_workspace(&requested_path, &bash_state.workspace_root).map_err(
+        |error| WinxError::PathSecurityError {
+            path: requested_path.clone(),
+            message: error.to_string(),
+        },
+    )?;
+    Ok((requested_path, path))
+}
+
+/// Revoke the exact-text evidence that led to a failed SEARCH match. The next
+/// edit must be preceded by a visible `ReadFiles` call, which repopulates the
+/// whitelist with the current file hash and prevents blind retry loops.
+pub(crate) fn invalidate_edit_read_permit(bash_state: &mut BashState, file_path: &str) -> bool {
+    let Ok((_, path)) = resolve_edit_path(bash_state, file_path) else {
+        return false;
+    };
+    bash_state.remove_whitelist_entry(path.to_string_lossy().as_ref()).is_some()
+}
+
 impl PlannedEdit {
     pub(crate) fn target(&self) -> &str {
         &self.file_path_str
@@ -48,18 +74,7 @@ pub(crate) fn plan_edit(
     blocks: &str,
     validate_temp_quota: bool,
 ) -> Result<PlannedEdit> {
-    let expanded_path = expand_user(file_path);
-    let requested_path = if Path::new(&expanded_path).is_absolute() {
-        PathBuf::from(&expanded_path)
-    } else {
-        bash_state.cwd.join(&expanded_path)
-    };
-    let path = validate_path_in_workspace(&requested_path, &bash_state.workspace_root).map_err(
-        |error| WinxError::PathSecurityError {
-            path: requested_path.clone(),
-            message: error.to_string(),
-        },
-    )?;
+    let (requested_path, path) = resolve_edit_path(bash_state, file_path)?;
     let file_path_str = path.to_string_lossy().to_string();
 
     let search_replace = uses_search_replace(percentage_to_change, blocks);

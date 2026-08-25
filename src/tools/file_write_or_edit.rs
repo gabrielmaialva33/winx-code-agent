@@ -20,7 +20,8 @@ use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
 use crate::types::{normalize_thread_id, FileWriteOrEdit};
 pub(crate) use commit::{
-    commit_edit, ensure_parent_dirs, hash_content, plan_edit, write_no_follow,
+    commit_edit, ensure_parent_dirs, hash_content, invalidate_edit_read_permit, plan_edit,
+    write_no_follow,
 };
 
 #[cfg(feature = "fuzzing")]
@@ -46,13 +47,21 @@ pub async fn handle_tool_call(
     let recovery_state = state.clone();
     let joined = tokio::task::spawn_blocking(move || {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let planned = plan_edit(
+            let planned = match plan_edit(
                 &state,
                 &file_write_or_edit.file_path,
                 file_write_or_edit.percentage_to_change,
                 &file_write_or_edit.text_or_search_replace_blocks,
                 true,
-            )?;
+            ) {
+                Ok(planned) => planned,
+                Err(error) => {
+                    if error.is_search_match_conflict() {
+                        invalidate_edit_read_permit(&mut state, &file_write_or_edit.file_path);
+                    }
+                    return Err(error);
+                }
+            };
             commit_edit(&mut state, planned)
         }))
         .unwrap_or_else(|_| {

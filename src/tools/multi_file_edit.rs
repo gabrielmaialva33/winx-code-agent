@@ -22,7 +22,7 @@ use tracing::instrument;
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
-use crate::tools::file_write_or_edit::{commit_edit, plan_edit};
+use crate::tools::file_write_or_edit::{commit_edit, invalidate_edit_read_permit, plan_edit};
 use crate::types::{normalize_thread_id, FileEditEntry, MultiFileEdit};
 
 /// Upper bound on files per batch. The whole batch holds the `bash_state` lock
@@ -103,14 +103,21 @@ fn apply_batch(bash_state: &mut BashState, files: &[FileEditEntry]) -> Result<St
     // Any failure aborts the whole batch having touched nothing on disk.
     let mut planned = Vec::with_capacity(files.len());
     for (index, entry) in files.iter().enumerate() {
-        let edit = plan_edit(
+        let edit = match plan_edit(
             bash_state,
             &entry.file_path,
             entry.percentage_to_change,
             &entry.text_or_search_replace_blocks,
             false,
-        )
-        .map_err(|error| contextualize_plan_error(bash_state, index, entry, error))?;
+        ) {
+            Ok(edit) => edit,
+            Err(error) => {
+                if error.is_search_match_conflict() {
+                    invalidate_edit_read_permit(bash_state, &entry.file_path);
+                }
+                return Err(contextualize_plan_error(bash_state, index, entry, error));
+            }
+        };
         planned.push(edit);
     }
 
