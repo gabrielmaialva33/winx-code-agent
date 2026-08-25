@@ -44,7 +44,7 @@ anyhow = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
-time = { version = "0.3.55", default-features = false, features = ["std"] }
+time = { version = "0.3.55", default-features = false, features = ["parsing", "std"] }
 
 # File and system operations
 home = "0.5"
@@ -59,7 +59,6 @@ image = { version = "0.25.10", default-features = false, features = [
     "webp",
 ] }
 percent-encoding = "2.3"
-memmap2 = "0.9"
 tempfile = "3.14"
 toml = "1.1"
 
@@ -169,14 +168,22 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 
 [lints.rust]
-# Unsafe is denied at the crate level after remaining OS/mmap call sites are
-# isolated behind narrowly-audited modules.
+# Unsafe is denied crate-wide. The only narrowly audited exemption is the libc
+# process-control boundary in src/os.rs; file snapshots use safe std APIs.
 
 [profile.release]
+lto = "thin"
+codegen-units = 8
+panic = "unwind"
+strip = true
+
+# Reproducible, maximally optimized artifacts for publishing/versioned local
+# installation. Keep unwinding enabled: these binaries are long-lived services,
+# and one panicking task must not abort every active ChatGPT session.
+[profile.dist]
+inherits = "release"
 lto = true
 codegen-units = 1
-panic = "abort"
-strip = true
 
 [profile.dev]
 opt-level = 0
