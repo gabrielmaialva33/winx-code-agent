@@ -283,6 +283,10 @@ impl UsageEvent {
                 .and_then(|data| data.get("initialize_reused"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
+            let initialize_recovered_missing_session = data
+                .and_then(|data| data.get("initialize_recovered_missing_session"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let initialize_response_mode = data
                 .and_then(|data| data.get("initialize_response_mode"))
                 .and_then(serde_json::Value::as_str)
@@ -307,6 +311,7 @@ impl UsageEvent {
                 .and_then(|data| data.get("shell_spawners_present"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
+            let error_code = usage_result_metadata(result).error_code;
             tracing::info!(
                 target: "winx::usage",
                 event = "tool_call",
@@ -328,12 +333,14 @@ impl UsageEvent {
                 worker_limit = self.worker_limit,
                 initialize_transition,
                 initialize_reused,
+                initialize_recovered_missing_session,
                 initialize_response_mode,
                 context_bytes,
                 guidelines_bytes,
                 initial_files_count,
                 code_writer_policy_strength,
                 shell_spawners_present,
+                error_code,
                 result_status,
                 response_bytes,
                 duration_ms =
