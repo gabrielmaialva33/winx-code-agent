@@ -383,6 +383,7 @@ impl WinxService {
                     "initialize_transition": outcome.transition.as_str(),
                     "initialize_reused": outcome.transition
                         == crate::tools::initialize::InitializeTransition::AttachedExisting,
+                    "initialize_recovered_missing_session": outcome.recovered_missing_session,
                     "initialize_response_mode": if outcome.compact_response {
                         "compact"
                     } else {

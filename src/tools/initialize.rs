@@ -46,6 +46,7 @@ impl InitializeTransition {
 pub(crate) struct InitializeOutcome {
     pub(crate) text: String,
     pub(crate) transition: InitializeTransition,
+    pub(crate) recovered_missing_session: bool,
     pub(crate) context_bytes: usize,
     pub(crate) guidelines_bytes: usize,
     pub(crate) initial_files_count: usize,
@@ -335,7 +336,7 @@ pub async fn handle_tool_call_with_runtime(
 pub(crate) async fn handle_tool_call_with_runtime_detailed(
     runtime: &dyn ShellRuntime,
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
-    initialize: Initialize,
+    mut initialize: Initialize,
 ) -> Result<InitializeOutcome> {
     let mut response = String::new();
     let mut context_bytes = 0;
@@ -347,6 +348,19 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
     validate_thread_id(&initialize)?;
     let thread_id = initialize_thread_id(&initialize);
     let mut bash_state_guard = bash_state_arc.lock().await;
+    let recovered_request = if bash_state_guard.is_none() {
+        match initialize.init_type {
+            InitializeType::UserAskedModeChange => Some("user_asked_mode_change"),
+            InitializeType::ResetShell => Some("reset_shell"),
+            InitializeType::FirstCall | InitializeType::UserAskedChangeWorkspace => None,
+        }
+    } else {
+        None
+    };
+    if let Some(requested_transition) = recovered_request {
+        info!(requested_transition, "Initialize recovered a missing live session as first_call");
+        initialize.init_type = InitializeType::FirstCall;
+    }
     if initialize.init_type != InitializeType::FirstCall && bash_state_guard.is_none() {
         return Err(WinxError::BashStateNotInitialized);
     }
@@ -544,6 +558,15 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
                     }
                 }
             }
+            if let Some(requested_transition) = recovered_request {
+                let _ = writeln!(
+                    response,
+                    "\nRecovered missing live session: `{requested_transition}` arrived after \
+                     the adapter no longer had session state. Winx safely performed `first_call` \
+                     with the same thread and intended workspace; continue with the returned \
+                     thread_id/workspace_root pair."
+                );
+            }
         }
         InitializeType::UserAskedModeChange => {
             transition = InitializeTransition::ModeChanged;
@@ -665,6 +688,7 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
     Ok(InitializeOutcome {
         text: response,
         transition,
+        recovered_missing_session: recovered_request.is_some(),
         context_bytes,
         guidelines_bytes,
         initial_files_count,

@@ -114,6 +114,7 @@ impl WinxService {
         }
 
         let requested_workspace = canonical_initialize_workspace(&workspace)?;
+        let mut recovering_missing_session = false;
         if let Some(bound_workspace) = self.bound_workspace(internal_thread_id).await {
             let bound_workspace = canonical_workspace_identity(&bound_workspace.to_string_lossy());
             if requested_workspace != bound_workspace {
@@ -124,10 +125,14 @@ impl WinxService {
                 });
             }
         } else if kind != "first_call" {
-            return Err(WinxError::BashStateNotInitialized);
+            if matches!(kind.as_str(), "reset_shell" | "user_asked_mode_change") {
+                recovering_missing_session = true;
+            } else {
+                return Err(WinxError::BashStateNotInitialized);
+            }
         }
 
-        Ok(if kind == "first_call" {
+        Ok(if kind == "first_call" || recovering_missing_session {
             WorkspaceCoherence::FirstCall
         } else {
             WorkspaceCoherence::Validated
@@ -308,5 +313,60 @@ mod tests {
             )
             .await;
         assert_eq!(result.expect("file hint"), WorkspaceCoherence::FirstCall);
+    }
+
+    #[tokio::test]
+    async fn strict_remote_initialize_recovers_safe_transitions_after_state_loss() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let service = WinxService::with_isolation(SessionIsolation::Strict);
+
+        for (kind, thread_id) in
+            [("reset_shell", "reset-thread"), ("user_asked_mode_change", "mode-thread")]
+        {
+            let request = request(
+                "Initialize",
+                &serde_json::json!({
+                    "type": kind,
+                    "any_workspace_path": workspace.path(),
+                    "mode_name": "wcgw",
+                    "thread_id": thread_id
+                }),
+            );
+            let result = service
+                .validate_workspace_coherence(
+                    &request,
+                    &RequestScope::default(),
+                    HttpSessionAffinity::Thread,
+                    None,
+                )
+                .await;
+            assert_eq!(result.expect("missing session recovery"), WorkspaceCoherence::FirstCall);
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_remote_initialize_keeps_workspace_change_fail_closed_after_state_loss() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let service = WinxService::with_isolation(SessionIsolation::Strict);
+        let request = request(
+            "Initialize",
+            &serde_json::json!({
+                "type": "user_asked_change_workspace",
+                "any_workspace_path": workspace.path(),
+                "mode_name": "wcgw",
+                "thread_id": "workspace-change-thread"
+            }),
+        );
+
+        let error = service
+            .validate_workspace_coherence(
+                &request,
+                &RequestScope::default(),
+                HttpSessionAffinity::Thread,
+                None,
+            )
+            .await
+            .expect_err("workspace changes must still require a separate session");
+        assert!(matches!(error, WinxError::WorkspaceChangeRequiresNewSession { .. }));
     }
 }
