@@ -550,6 +550,62 @@ async fn write_with_verification(
     response_json(&response)
 }
 
+fn read_files_request(
+    request_id: &str,
+    client_name: &str,
+    thread_id: &str,
+    file_paths: &[&Path],
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta(client_name, false),
+            "name": "ReadFiles",
+            "arguments": {
+                "file_paths": file_paths,
+                "thread_id": thread_id
+            }
+        }
+    })
+}
+
+fn multi_search_edit_request(
+    request_id: &str,
+    thread_id: &str,
+    first: &Path,
+    second: &Path,
+    second_search: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("multi-search-conflict-client", false),
+            "name": "MultiFileEdit",
+            "arguments": {
+                "files": [
+                    {
+                        "file_path": first,
+                        "percentage_to_change": 10,
+                        "text_or_search_replace_blocks": "<<<<<<< SEARCH\nfirst original\n=======\nfirst replacement\n>>>>>>> REPLACE"
+                    },
+                    {
+                        "file_path": second,
+                        "percentage_to_change": 10,
+                        "text_or_search_replace_blocks": format!(
+                            "<<<<<<< SEARCH\n{second_search}\n=======\nsecond replacement\n>>>>>>> REPLACE"
+                        )
+                    }
+                ],
+                "thread_id": thread_id
+            }
+        }
+    })
+}
+
 async fn pwd_as(
     address: std::net::SocketAddr,
     token: &str,
@@ -1302,6 +1358,117 @@ async fn recoverable_edit_failure_is_a_structured_tool_result() -> anyhow::Resul
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn search_conflict_requires_readfiles_before_a_corrected_edit() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let target = workspace.path().join("conflict.txt");
+    std::fs::write(&target, "current text\n")?;
+
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "search-conflict-barrier",
+        "search-conflict-barrier-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    let read = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "search-conflict-initial-read",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("search-conflict-barrier-client", false),
+            "name": "ReadFiles",
+            "arguments": {
+                "file_paths": [target],
+                "thread_id": thread_id
+            }
+        }
+    });
+    let read_response = post_json(address, "2026-07-28", "tools/call", &read.to_string()).await?;
+    let read_response = response_json(&read_response)?;
+    assert_eq!(read_response["result"]["isError"], false, "{read_response}");
+
+    let edit_call = |id: &str, search: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "_meta": modern_request_meta("search-conflict-barrier-client", false),
+                "name": "FileWriteOrEdit",
+                "arguments": {
+                    "file_path": target,
+                    "percentage_to_change": 10,
+                    "text_or_search_replace_blocks": format!(
+                        "<<<<<<< SEARCH\n{search}\n=======\nreplacement\n>>>>>>> REPLACE"
+                    ),
+                    "thread_id": thread_id
+                }
+            }
+        })
+    };
+
+    let conflict_call = edit_call("search-conflict", "stale text");
+    let conflict =
+        post_json(address, "2026-07-28", "tools/call", &conflict_call.to_string()).await?;
+    let conflict = response_json(&conflict)?;
+    assert_eq!(conflict["result"]["isError"], true, "{conflict}");
+    let structured = &conflict["result"]["structuredContent"];
+    assert_eq!(structured["status"], "conflict", "{conflict}");
+    assert_eq!(structured["errorCode"], "search_block_not_found", "{conflict}");
+    assert_eq!(structured["retrySameCall"], false, "{conflict}");
+    assert_eq!(structured["nextAction"]["tool"], "ReadFiles", "{conflict}");
+    assert_eq!(structured["data"]["edit_applied"], false, "{conflict}");
+    assert_eq!(structured["data"]["fresh_read_required"], true, "{conflict}");
+    assert_eq!(structured["data"]["read_permit_invalidated"], true, "{conflict}");
+    assert_eq!(std::fs::read_to_string(&target)?, "current text\n");
+
+    let premature_retry = edit_call("search-conflict-premature-retry", "current text");
+    let premature_retry =
+        post_json(address, "2026-07-28", "tools/call", &premature_retry.to_string()).await?;
+    let premature_retry = response_json(&premature_retry)?;
+    assert_eq!(premature_retry["result"]["isError"], true, "{premature_retry}");
+    assert_eq!(
+        premature_retry["result"]["structuredContent"]["status"], "needs_read",
+        "{premature_retry}"
+    );
+    assert_eq!(
+        premature_retry["result"]["structuredContent"]["errorCode"], "read_required",
+        "{premature_retry}"
+    );
+    assert_eq!(std::fs::read_to_string(&target)?, "current text\n");
+
+    let recovery_tool = structured["nextAction"]["tool"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("nextAction has no tool: {conflict}"))?;
+    let recovery_read = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "search-conflict-recovery-read",
+        "method": "tools/call",
+        "params": {
+        "_meta": modern_request_meta("search-conflict-barrier-client", false),
+            "name": recovery_tool,
+            "arguments": structured["nextAction"]["arguments"].clone()
+        }
+    });
+    let recovery =
+        post_json(address, "2026-07-28", "tools/call", &recovery_read.to_string()).await?;
+    let recovery = response_json(&recovery)?;
+    assert_eq!(recovery["result"]["isError"], false, "{recovery}");
+
+    let corrected = edit_call("search-conflict-corrected", "current text");
+    let corrected = post_json(address, "2026-07-28", "tools/call", &corrected.to_string()).await?;
+    let corrected = response_json(&corrected)?;
+    assert_eq!(corrected["result"]["isError"], false, "{corrected}");
+    assert_eq!(corrected["result"]["structuredContent"]["status"], "completed", "{corrected}");
+    assert_eq!(std::fs::read_to_string(&target)?, "replacement\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
     let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
@@ -1342,10 +1509,24 @@ async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::
         "false",
     )
     .await?;
-    assert_eq!(failing["result"]["isError"], true, "{failing}");
-    assert_eq!(failing["result"]["structuredContent"]["status"], "failed", "{failing}");
+    assert_eq!(failing["result"]["isError"], false, "{failing}");
+    assert_eq!(
+        failing["result"]["structuredContent"]["status"], "completed_with_issues",
+        "{failing}"
+    );
     assert_eq!(
         failing["result"]["structuredContent"]["errorCode"], "verification_failed",
+        "{failing}"
+    );
+    assert_eq!(failing["result"]["structuredContent"]["retryable"], false, "{failing}");
+    assert_eq!(failing["result"]["structuredContent"]["retrySameCall"], false, "{failing}");
+    assert_eq!(
+        failing["result"]["structuredContent"]["nextAction"]["tool"], "BashCommand",
+        "{failing}"
+    );
+    assert_eq!(failing["result"]["structuredContent"]["data"]["edit_applied"], true, "{failing}");
+    assert_eq!(
+        failing["result"]["structuredContent"]["data"]["original_edit_retryable"], false,
         "{failing}"
     );
     assert_eq!(std::fs::read_to_string(&failing_path)?, "verified content\n");
@@ -1773,47 +1954,23 @@ async fn multi_file_edit_preserves_search_conflict_recovery() -> anyhow::Result<
     .await?;
     let thread_id = initialized_thread_id(&initialize)?;
 
-    let read = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": "multi-search-read",
-        "method": "tools/call",
-        "params": {
-            "_meta": modern_request_meta("multi-search-conflict-client", false),
-            "name": "ReadFiles",
-            "arguments": {
-                "file_paths": [first, second],
-                "thread_id": thread_id
-            }
-        }
-    });
+    let read = read_files_request(
+        "multi-search-read",
+        "multi-search-conflict-client",
+        &thread_id,
+        &[&first, &second],
+    );
     let read_response = post_json(address, "2026-07-28", "tools/call", &read.to_string()).await?;
     let read_response = response_json(&read_response)?;
     assert_eq!(read_response["result"]["isError"], false, "{read_response}");
 
-    let call = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": "multi-search-conflict-call",
-        "method": "tools/call",
-        "params": {
-            "_meta": modern_request_meta("multi-search-conflict-client", false),
-            "name": "MultiFileEdit",
-            "arguments": {
-                "files": [
-                    {
-                        "file_path": first,
-                        "percentage_to_change": 10,
-                        "text_or_search_replace_blocks": "<<<<<<< SEARCH\nfirst original\n=======\nfirst replacement\n>>>>>>> REPLACE"
-                    },
-                    {
-                        "file_path": second,
-                        "percentage_to_change": 10,
-                        "text_or_search_replace_blocks": "<<<<<<< SEARCH\nmissing text\n=======\nsecond replacement\n>>>>>>> REPLACE"
-                    }
-                ],
-                "thread_id": thread_id
-            }
-        }
-    });
+    let call = multi_search_edit_request(
+        "multi-search-conflict-call",
+        &thread_id,
+        &first,
+        &second,
+        "missing text",
+    );
     let response = post_json(address, "2026-07-28", "tools/call", &call.to_string()).await?;
     let response = response_json(&response)?;
     assert_eq!(response["result"]["isError"], true, "{response}");
@@ -1821,6 +1978,10 @@ async fn multi_file_edit_preserves_search_conflict_recovery() -> anyhow::Result<
     assert_eq!(structured["status"], "conflict", "{response}");
     assert_eq!(structured["errorCode"], "search_block_not_found", "{response}");
     assert_eq!(structured["nextAction"]["tool"], "ReadFiles", "{response}");
+    assert_eq!(structured["retrySameCall"], false, "{response}");
+    assert_eq!(structured["data"]["edit_applied"], false, "{response}");
+    assert_eq!(structured["data"]["fresh_read_required"], true, "{response}");
+    assert_eq!(structured["data"]["read_permit_invalidated"], true, "{response}");
     assert_eq!(
         structured["requiredReads"][0]["path"].as_str(),
         Some(canonical_path_string(&second)?.as_str()),
@@ -1828,6 +1989,49 @@ async fn multi_file_edit_preserves_search_conflict_recovery() -> anyhow::Result<
     );
     assert_eq!(std::fs::read_to_string(&first)?, "first original\n");
     assert_eq!(std::fs::read_to_string(&second)?, "second original\n");
+
+    let mut premature_retry = call.clone();
+    premature_retry["id"] = serde_json::json!("multi-search-premature-retry");
+    let premature_retry =
+        post_json(address, "2026-07-28", "tools/call", &premature_retry.to_string()).await?;
+    let premature_retry = response_json(&premature_retry)?;
+    assert_eq!(premature_retry["result"]["isError"], true, "{premature_retry}");
+    assert_eq!(
+        premature_retry["result"]["structuredContent"]["status"], "needs_read",
+        "{premature_retry}"
+    );
+    assert_eq!(
+        premature_retry["result"]["structuredContent"]["requiredReads"][0]["path"].as_str(),
+        Some(canonical_path_string(&second)?.as_str()),
+        "{premature_retry}"
+    );
+    assert_eq!(std::fs::read_to_string(&first)?, "first original\n");
+    assert_eq!(std::fs::read_to_string(&second)?, "second original\n");
+
+    let recovery_read = read_files_request(
+        "multi-search-recovery-read",
+        "multi-search-conflict-client",
+        &thread_id,
+        &[&second],
+    );
+    let recovery =
+        post_json(address, "2026-07-28", "tools/call", &recovery_read.to_string()).await?;
+    let recovery = response_json(&recovery)?;
+    assert_eq!(recovery["result"]["isError"], false, "{recovery}");
+
+    let corrected = multi_search_edit_request(
+        "multi-search-corrected",
+        &thread_id,
+        &first,
+        &second,
+        "second original",
+    );
+    let corrected = post_json(address, "2026-07-28", "tools/call", &corrected.to_string()).await?;
+    let corrected = response_json(&corrected)?;
+    assert_eq!(corrected["result"]["isError"], false, "{corrected}");
+    assert_eq!(corrected["result"]["structuredContent"]["status"], "completed", "{corrected}");
+    assert_eq!(std::fs::read_to_string(&first)?, "first replacement\n");
+    assert_eq!(std::fs::read_to_string(&second)?, "second replacement\n");
     Ok(())
 }
 
