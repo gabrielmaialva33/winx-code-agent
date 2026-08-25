@@ -1,556 +1,243 @@
-// File lengths are validated against explicit u64 ceilings before these casts;
-// mmap APIs then require platform-sized usize lengths.
-#![allow(unsafe_code, clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+//! Race-safe bounded file reads.
+//!
+//! The module name is retained for source compatibility, but project files are
+//! intentionally no longer memory-mapped. A repository file can be truncated
+//! by another editor or agent at any time; copying through `Read` keeps those
+//! races inside Rust's safe I/O model.
 
-use memmap2::{Mmap, MmapOptions};
-use rayon::prelude::*;
 use std::cmp::min;
-use std::fs::File;
-use std::io::{BufReader, Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tracing::{debug, info, trace, warn};
+use std::fs::{File, Metadata};
+use std::io::{Read, Seek, SeekFrom};
+#[cfg(not(unix))]
+use std::time::SystemTime;
+use std::{path::Path, path::PathBuf, sync::Arc};
+
+use rayon::prelude::*;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt as _;
+use tracing::debug;
 
 use crate::errors::{Result, WinxError};
 
-/// Maximum file size for direct reading (10MB)
+/// Legacy threshold retained for callers that used the old tuning constants.
 pub const DIRECT_READ_THRESHOLD: u64 = 10_000_000;
-
-/// Maximum file size for single memory mapping (1GB)
+/// Historical single-map ceiling, now the maximum `ShareableMap` snapshot size.
 pub const MAX_MMAP_SIZE: u64 = 1_000_000_000;
-
-/// Maximum file size for segmented memory mapping (4GB)
+/// Legacy segmented-map ceiling retained for API compatibility.
 pub const MAX_SEGMENTED_MMAP_SIZE: u64 = 4_000_000_000;
-
-/// Segment size for large file memory mapping (256MB)
+/// Legacy map segment size retained for API compatibility.
 pub const SEGMENT_SIZE: u64 = 256_000_000;
 
-const DIRECT_READ_CHUNK_SIZE: usize = 1_048_576;
-const STREAMING_CHUNK_SIZE: usize = 4_194_304;
-
-/// Upper bound on the up-front `Vec::with_capacity` hint derived from (untrusted)
-/// file metadata. A sparse or racing file can report a size far larger than the
-/// bytes it will actually yield; pre-allocating that size lets a caller force a
-/// multi-GB allocation before a single byte is read, and under `panic = "abort"`
-/// an allocation failure takes down the whole server. We cap the hint and let
-/// the `Vec` grow as bytes actually arrive (this mirrors `read_streaming`).
+const READ_CHUNK_SIZE: usize = 256 * 1024;
 const MAX_PREALLOC_BYTES: usize = 64 * 1024 * 1024;
+const MAX_STABILITY_ATTEMPTS: usize = 3;
 
-/// Read file contents optimally based on file size
-///
-/// This function chooses the optimal reading strategy based on file size:
-/// - Small files: Direct read with standard File I/O
-/// - Medium files: Memory-mapped reading for performance
-/// - Large files: Segmented memory-mapped reading
-/// - Extreme files: Windowed access with streaming
-///
-/// # Arguments
-///
-/// * `path` - Path to the file to read
-/// * `max_file_size` - Maximum allowed file size
-///
-/// # Returns
-///
-/// A vector containing the file contents
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read or exceeds the size limit
-pub fn read_file_optimized(path: &Path, max_file_size: u64) -> Result<Vec<u8>> {
-    // Get file metadata
-    let file = File::open(path).map_err(|e| WinxError::FileAccessError {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct FileVersion {
+    len: u64,
+    #[cfg(unix)]
+    device: u64,
+    #[cfg(unix)]
+    inode: u64,
+    #[cfg(unix)]
+    modified_seconds: i64,
+    #[cfg(unix)]
+    modified_nanoseconds: i64,
+    #[cfg(unix)]
+    changed_seconds: i64,
+    #[cfg(unix)]
+    changed_nanoseconds: i64,
+    #[cfg(not(unix))]
+    modified: Option<SystemTime>,
+}
+
+impl From<&Metadata> for FileVersion {
+    fn from(metadata: &Metadata) -> Self {
+        Self {
+            len: metadata.len(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+            #[cfg(unix)]
+            modified_seconds: metadata.mtime(),
+            #[cfg(unix)]
+            modified_nanoseconds: metadata.mtime_nsec(),
+            #[cfg(unix)]
+            changed_seconds: metadata.ctime(),
+            #[cfg(unix)]
+            changed_nanoseconds: metadata.ctime_nsec(),
+            #[cfg(not(unix))]
+            modified: metadata.modified().ok(),
+        }
+    }
+}
+
+fn access_error(path: &Path, operation: &str, error: impl std::fmt::Display) -> WinxError {
+    WinxError::FileAccessError {
         path: path.to_path_buf(),
-        message: format!("Error opening file: {e}"),
-    })?;
+        message: format!("{operation}: {error}"),
+    }
+}
 
-    let metadata = file.metadata().map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Failed to get file metadata: {e}"),
+fn open_with_version(path: &Path, max_file_size: u64) -> Result<(File, FileVersion)> {
+    let file = File::open(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => WinxError::FileNotFound { path: path.to_path_buf() },
+        std::io::ErrorKind::PermissionDenied => {
+            WinxError::FileOperationDenied { path: path.to_path_buf(), message: error.to_string() }
+        }
+        _ => access_error(path, "Error opening file", error),
     })?;
-
-    // Check file size
-    let file_size = metadata.len();
-    if file_size > max_file_size {
+    let metadata = file
+        .metadata()
+        .map_err(|error| access_error(path, "Failed to get file metadata", error))?;
+    let version = FileVersion::from(&metadata);
+    if version.len > max_file_size {
         return Err(WinxError::FileTooLarge {
             path: path.to_path_buf(),
-            size: file_size,
+            size: version.len,
             max_size: max_file_size,
         });
     }
-
-    // Choose reading strategy based on file size
-    if file_size < DIRECT_READ_THRESHOLD {
-        debug!("Using direct read for file: {}", path.display());
-        read_direct(&file, file_size, path)
-    } else if file_size < MAX_MMAP_SIZE {
-        debug!("Using memory-mapped read for file: {}", path.display());
-        read_mmap(&file, path)
-    } else if file_size < MAX_SEGMENTED_MMAP_SIZE {
-        debug!("Using segmented memory-mapped read for file: {}", path.display());
-        read_segmented_mmap(&file, file_size, path)
-    } else {
-        debug!("Using streaming read for extremely large file: {}", path.display());
-        read_streaming(&file, file_size, path)
-    }
+    Ok((file, version))
 }
 
-/// Read file contents directly using standard I/O
-///
-/// This is efficient for small files.
-///
-/// # Arguments
-///
-/// * `file` - Open file handle
-/// * `file_size` - Size of the file
-/// * `path` - Path to the file (for error reporting)
-///
-/// # Returns
-///
-/// A vector containing the file contents
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read
-fn read_direct(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
-    // For very small files (< 1MB), use an optimized approach
-    if file_size < 1_000_000 {
-        // Pre-allocate an exact-sized buffer
-        let mut buffer = Vec::with_capacity(min(file_size as usize, MAX_PREALLOC_BYTES));
+fn bounded_capacity(reported_size: u64, limit: u64) -> usize {
+    let bounded = min(reported_size, limit);
+    usize::try_from(bounded).unwrap_or(usize::MAX).min(MAX_PREALLOC_BYTES)
+}
 
-        // Create a mutable file handle and seek to the beginning
-        let mut file_handle = file.try_clone().map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Error cloning file handle: {e}"),
-        })?;
-
-        file_handle.seek(SeekFrom::Start(0)).map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Error seeking to start of file: {e}"),
-        })?;
-
-        // Use a BufReader with an appropriate buffer size (4K-64K)
-        let mut reader = BufReader::with_capacity(min(file_size as usize, 64 * 1024), file_handle);
-
-        // Read directly to the end
-        reader.read_to_end(&mut buffer).map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Error reading file: {e}"),
-        })?;
-
-        return Ok(buffer);
-    }
-
-    // For larger files, use a chunked reading approach with progress tracking.
-    // Cap the up-front hint to MAX_PREALLOC_BYTES like the small-file branch above
-    // (line 114) and read_streaming: file_size comes from untrusted metadata and a
-    // sparse/racing file can report a size far bigger than it yields, turning this
-    // into a forced multi-GB allocation (OOM = abort under panic = "abort").
-    let mut buffer = Vec::with_capacity(min(file_size as usize, MAX_PREALLOC_BYTES));
-
-    // Create a mutable file handle and seek to the beginning
-    let mut file_handle = file.try_clone().map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Error cloning file handle: {e}"),
+fn read_bounded<R: Read>(
+    reader: &mut R,
+    reported_size: u64,
+    limit: u64,
+    path: &Path,
+) -> Result<Vec<u8>> {
+    let mut result = Vec::new();
+    result.try_reserve(bounded_capacity(reported_size, limit)).map_err(|error| {
+        WinxError::ResourceAllocationError {
+            message: format!(
+                "Unable to reserve a bounded file buffer for {}: {error}",
+                path.display()
+            ),
+        }
     })?;
-
-    file_handle.seek(SeekFrom::Start(0)).map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Error seeking to start of file: {e}"),
-    })?;
-
-    let mut reader = BufReader::with_capacity(262_144, file_handle); // 256KB buffer
-
-    let mut chunk = vec![0; DIRECT_READ_CHUNK_SIZE];
-    let mut bytes_read = 0;
+    let mut chunk = vec![0_u8; READ_CHUNK_SIZE];
 
     loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => break, // EOF
-            Ok(n) => {
-                buffer.extend_from_slice(&chunk[..n]);
-                bytes_read += n as u64;
-
-                // Log progress for larger files
-                if file_size > 5_000_000 && bytes_read % 5_000_000 < DIRECT_READ_CHUNK_SIZE as u64 {
-                    trace!(
-                        "Read progress for {}: {}MB/{}MB ({}%)",
-                        path.display(),
-                        bytes_read / 1_000_000,
-                        file_size / 1_000_000,
-                        bytes_read * 100 / file_size
-                    );
-                }
-            }
-            Err(e) => {
-                return Err(WinxError::FileAccessError {
-                    path: path.to_path_buf(),
-                    message: format!("Error reading file chunk: {e}"),
-                });
-            }
+        let count = match reader.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(access_error(path, "Error reading file", error)),
+        };
+        let observed = u64::try_from(result.len())
+            .unwrap_or(u64::MAX)
+            .saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        if observed > limit {
+            return Err(WinxError::FileTooLarge {
+                path: path.to_path_buf(),
+                size: observed,
+                max_size: limit,
+            });
         }
-    }
-
-    Ok(buffer)
-}
-
-/// Read file contents using memory mapping
-///
-/// This is efficient for larger files as it avoids loading the entire
-/// file into memory at once.
-///
-/// # Arguments
-///
-/// * `file` - Open file handle
-/// * `path` - Path to the file (for error reporting)
-///
-/// # Returns
-///
-/// A vector containing the file contents
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be mapped
-fn read_mmap(file: &File, path: &Path) -> Result<Vec<u8>> {
-    // Check for empty file to avoid mmap error
-    if file.metadata().map_or(0, |m| m.len()) == 0 {
-        return Ok(Vec::new());
-    }
-
-    // SAFETY: Memory mapping a file is inherently unsafe because:
-    // - The file could be modified by another process during access
-    // - The file could be truncated, causing access to invalid memory
-    // We mitigate these risks by:
-    // - Using the mapped data immediately and converting to Vec<u8>
-    // - Not holding the mmap across async boundaries
-    // - File size was verified before this call
-    let mmap = unsafe { MmapOptions::new().map(file) }.map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Failed to memory-map file: {e}"),
-    })?;
-
-    // Copy the mapped bytes into an owned Vec. Copying out of an mmap is
-    // bandwidth-bound (a memcpy), so the old Rayon "parallel" path bought
-    // nothing: it allocated the file twice — a zero-filled `result` plus a
-    // Vec of per-chunk `to_vec()`s — only to memcpy between them. `to_vec()`
-    // allocates exactly `mmap.len()` (the real mapped size, not an untrusted
-    // metadata hint) and copies once.
-    Ok(mmap.to_vec())
-}
-
-/// Read large file with segmented memory mapping
-///
-/// This function reads a large file using multiple memory mapped segments,
-/// which allows handling files larger than the maximum mapping size.
-///
-/// # Arguments
-///
-/// * `file` - Open file handle
-/// * `file_size` - Size of the file
-/// * `path` - Path to the file (for error reporting)
-///
-/// # Returns
-///
-/// A vector containing the file contents
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read or mapped
-fn read_segmented_mmap(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
-    // Calculate number of segments needed
-    let segment_count = file_size.div_ceil(SEGMENT_SIZE);
-    debug!(
-        "Reading file {} in {} segments of {}MB each",
-        path.display(),
-        segment_count,
-        SEGMENT_SIZE / 1_000_000
-    );
-
-    // Pre-allocate result vector (capped — see MAX_PREALLOC_BYTES)
-    let mut result = Vec::with_capacity(min(file_size as usize, MAX_PREALLOC_BYTES));
-
-    // Process each segment
-    for i in 0..segment_count {
-        let segment_start = i * SEGMENT_SIZE;
-        let segment_size = min(SEGMENT_SIZE, file_size - segment_start);
-
-        info!(
-            "Processing segment {}/{} of file {} ({:.1}%)",
-            i + 1,
-            segment_count,
-            path.display(),
-            (segment_start as f64 / file_size as f64) * 100.0
-        );
-
-        // SAFETY: the shared file handle stays valid for the whole loop; mmap
-        // uses the explicit `.offset()`, not the fd seek position, so segments
-        // never conflict and no per-segment open()/seek() is needed. Bounds come
-        // from the verified file size; data is copied to Vec, not held.
-        let segment_mmap = unsafe {
-            MmapOptions::new().offset(segment_start).len(segment_size as usize).map(file)
-        }
-        .map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Failed to memory-map file segment {i}: {e}"),
+        result.try_reserve(count).map_err(|error| WinxError::ResourceAllocationError {
+            message: format!("Unable to grow file buffer for {}: {error}", path.display()),
         })?;
-
-        // Append segment data to result
-        result.extend_from_slice(&segment_mmap);
+        result.extend_from_slice(&chunk[..count]);
     }
-
     Ok(result)
 }
 
-/// Read extremely large file with streaming
-///
-/// This function reads an extremely large file using a streaming approach,
-/// which minimizes memory usage by processing the file in small chunks.
-///
-/// # Arguments
-///
-/// * `file` - Open file handle
-/// * `file_size` - Size of the file
-/// * `path` - Path to the file (for error reporting)
-///
-/// # Returns
-///
-/// A vector containing the file contents
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read
-fn read_streaming(file: &File, file_size: u64, path: &Path) -> Result<Vec<u8>> {
-    warn!(
-        "Reading extremely large file ({}GB) with streaming approach: {}",
-        file_size / 1_000_000_000,
-        path.display()
-    );
-
-    // For extreme files, pre-allocate a bounded vector and grow as bytes arrive.
-    // Cap at MAX_PREALLOC_BYTES (not file_size, not 1GB): file_size is untrusted
-    // metadata, and a multi-GB up-front Vec is exactly the OOM-via-abort vector the
-    // cap exists to close. The extra reallocs on a genuinely huge file are rare and
-    // cheap next to crashing the server.
-    let initial_capacity = min(file_size as usize, MAX_PREALLOC_BYTES);
-    let mut buffer = Vec::with_capacity(initial_capacity);
-
-    let mut reader = BufReader::with_capacity(STREAMING_CHUNK_SIZE, file);
-    let mut chunk = vec![0; STREAMING_CHUNK_SIZE];
-    let mut bytes_read = 0;
-
-    loop {
-        match reader.read(&mut chunk) {
-            Ok(0) => break, // EOF
-            Ok(n) => {
-                buffer.extend_from_slice(&chunk[..n]);
-                bytes_read += n as u64;
-
-                // Log progress every 100MB
-                if bytes_read % 100_000_000 < STREAMING_CHUNK_SIZE as u64 {
-                    info!(
-                        "Read progress for large file {}: {:.2}GB/{:.2}GB ({:.1}%)",
-                        path.display(),
-                        bytes_read as f64 / 1_000_000_000.0,
-                        file_size as f64 / 1_000_000_000.0,
-                        bytes_read as f64 * 100.0 / file_size as f64
-                    );
-                }
-            }
-            Err(e) => {
-                return Err(WinxError::FileAccessError {
-                    path: path.to_path_buf(),
-                    message: format!("Error reading file chunk at position {bytes_read}: {e}"),
-                });
-            }
-        }
-    }
-
-    Ok(buffer)
+fn snapshot_is_stable(file: &File, path: &Path, before: &FileVersion, observed: u64) -> bool {
+    let descriptor_after = file.metadata().ok().as_ref().map(FileVersion::from);
+    let path_after = std::fs::metadata(path).ok().as_ref().map(FileVersion::from);
+    let length_matches = before.len == 0 || observed == before.len;
+    descriptor_after.as_ref() == Some(before)
+        && path_after.as_ref() == Some(before)
+        && length_matches
 }
 
-/// Read a specific segment of a file
-///
-/// This function reads a specific segment of a file using memory mapping
-/// or direct I/O, depending on the segment size.
-///
-/// # Arguments
-///
-/// * `path` - Path to the file
-/// * `offset` - Starting offset in bytes
-/// * `length` - Length of segment to read in bytes
-/// * `max_file_size` - Maximum allowed file size
-///
-/// # Returns
-///
-/// A vector containing the file segment contents
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read or exceeds the size limit
+fn changed_during_read(path: &Path) -> WinxError {
+    WinxError::ConcurrentFileModification {
+        path: path.to_path_buf(),
+        attempts: MAX_STABILITY_ATTEMPTS,
+    }
+}
+
+fn read_file_optimized_with_hook<F>(
+    path: &Path,
+    max_file_size: u64,
+    mut after_read: F,
+) -> Result<Vec<u8>>
+where
+    F: FnMut(usize, &Path),
+{
+    for attempt in 0..MAX_STABILITY_ATTEMPTS {
+        let (mut file, before) = open_with_version(path, max_file_size)?;
+        let bytes = read_bounded(&mut file, before.len, max_file_size, path)?;
+        after_read(attempt, path);
+        let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if snapshot_is_stable(&file, path, &before, observed) {
+            return Ok(bytes);
+        }
+        debug!(
+            path = %path.display(),
+            attempt = attempt + 1,
+            "file changed during bounded read; retrying from a fresh descriptor"
+        );
+    }
+    Err(changed_during_read(path))
+}
+
+/// Read a complete file through bounded, race-detecting safe I/O.
+pub fn read_file_optimized(path: &Path, max_file_size: u64) -> Result<Vec<u8>> {
+    read_file_optimized_with_hook(path, max_file_size, |_, _| {})
+}
+
+/// Read a specific byte segment through bounded, race-detecting safe I/O.
 pub fn read_file_segment(
     path: &Path,
     offset: u64,
     length: u64,
     max_file_size: u64,
 ) -> Result<Vec<u8>> {
-    // Get file metadata
-    let file = File::open(path).map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Error opening file: {e}"),
-    })?;
-
-    let metadata = file.metadata().map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Failed to get file metadata: {e}"),
-    })?;
-
-    // Check file size
-    let file_size = metadata.len();
-    if file_size > max_file_size {
-        return Err(WinxError::FileTooLarge {
-            path: path.to_path_buf(),
-            size: file_size,
-            max_size: max_file_size,
-        });
+    for attempt in 0..MAX_STABILITY_ATTEMPTS {
+        let (mut file, before) = open_with_version(path, max_file_size)?;
+        if offset >= before.len {
+            return Err(WinxError::FileAccessError {
+                path: path.to_path_buf(),
+                message: format!("Offset {offset} exceeds file size {}", before.len),
+            });
+        }
+        let requested = min(length, before.len - offset);
+        file.seek(SeekFrom::Start(offset))
+            .map_err(|error| access_error(path, "Failed to seek to requested offset", error))?;
+        let bytes = {
+            let mut limited = (&mut file).take(requested);
+            read_bounded(&mut limited, requested, requested, path)?
+        };
+        let observed = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if observed == requested && snapshot_is_stable(&file, path, &before, before.len) {
+            return Ok(bytes);
+        }
+        debug!(
+            path = %path.display(),
+            attempt = attempt + 1,
+            "file changed during segment read; retrying from a fresh descriptor"
+        );
     }
-
-    // Validate offset and length
-    if offset >= file_size {
-        return Err(WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Offset {offset} exceeds file size {file_size}"),
-        });
-    }
-
-    // Adjust length if needed to stay within file bounds
-    let length = min(length, file_size - offset);
-
-    // Choose reading strategy based on segment size
-    if length < DIRECT_READ_THRESHOLD {
-        debug!("Using direct read for file segment: {}", path.display());
-        read_segment_direct(&file, offset, length, path)
-    } else {
-        debug!("Using memory-mapped read for file segment: {}", path.display());
-        read_segment_mmap(&file, offset, length, path)
-    }
+    Err(changed_during_read(path))
 }
 
-/// Read a file segment directly using standard I/O
-///
-/// # Arguments
-///
-/// * `file` - Open file handle
-/// * `offset` - Starting offset in bytes
-/// * `length` - Length of segment to read in bytes
-/// * `path` - Path to the file (for error reporting)
-///
-/// # Returns
-///
-/// A vector containing the file segment contents
-///
-/// # Errors
-///
-/// Returns an error if the file segment cannot be read
-fn read_segment_direct(file: &File, offset: u64, length: u64, path: &Path) -> Result<Vec<u8>> {
-    // Create a new file object that can be seeked
-    let mut seekable_file = file.try_clone().map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Failed to clone file handle: {e}"),
-    })?;
-
-    // Seek to the specified offset
-    seekable_file.seek(SeekFrom::Start(offset)).map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Failed to seek to offset {offset}: {e}"),
-    })?;
-
-    // Read the specified length
-    let mut buffer = Vec::with_capacity(length as usize);
-    let reader = BufReader::with_capacity(min(length as usize, 64 * 1024), seekable_file);
-
-    // Use take to limit the read to the specified length
-    reader.take(length).read_to_end(&mut buffer).map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Error reading file segment: {e}"),
-    })?;
-
-    Ok(buffer)
-}
-
-/// Read a file segment using memory mapping
-///
-/// # Arguments
-///
-/// * `file` - Open file handle
-/// * `offset` - Starting offset in bytes
-/// * `length` - Length of segment to read in bytes
-/// * `path` - Path to the file (for error reporting)
-///
-/// # Returns
-///
-/// A vector containing the file segment contents
-///
-/// # Errors
-///
-/// Returns an error if the file segment cannot be mapped
-fn read_segment_mmap(file: &File, offset: u64, length: u64, path: &Path) -> Result<Vec<u8>> {
-    // SAFETY: Memory mapping is safe here because:
-    // - Offset and length were validated against file size by caller
-    // - Data is immediately copied to Vec<u8>, not held
-    // - File handle remains valid for duration of the map operation
-    let segment_mmap = unsafe { MmapOptions::new().offset(offset).len(length as usize).map(file) }
-        .map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Failed to memory-map file segment: {e}"),
-        })?;
-
-    // Copy segment data to result
-    Ok(segment_mmap.to_vec())
-}
-
-/// Read a text file as a string using the optimal reading strategy
-///
-/// This function reads a file as text, using the most efficient strategy
-/// based on the file size.
-///
-/// # Arguments
-///
-/// * `path` - Path to the file to read
-/// * `max_file_size` - Maximum allowed file size
-///
-/// # Returns
-///
-/// A string containing the file contents
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read or exceeds the size limit
+/// Read a UTF-8 file through the bounded snapshot reader.
 pub fn read_file_to_string(path: &Path, max_file_size: u64) -> Result<String> {
     let bytes = read_file_optimized(path, max_file_size)?;
-
-    String::from_utf8(bytes).map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Failed to decode file as UTF-8: {e}"),
-    })
+    String::from_utf8(bytes)
+        .map_err(|error| access_error(path, "Failed to decode file as UTF-8", error))
 }
 
-/// Read a text file in a parallel, line-by-line fashion
-///
-/// This processes lines in parallel using Rayon for faster processing
-/// of large text files.
-///
-/// # Arguments
-///
-/// * `path` - Path to the file to read
-/// * `max_file_size` - Maximum allowed file size
-/// * `line_processor` - Function to process each line
-///
-/// # Returns
-///
-/// Result indicating success or failure
-///
-/// # Errors
-///
-/// Returns an error if the file cannot be read or exceeds the size limit
+/// Process UTF-8 lines in parallel once the immutable snapshot exceeds 1 MB.
 pub fn process_text_file_parallel<F>(
     path: &Path,
     max_file_size: u64,
@@ -560,39 +247,15 @@ where
     F: Fn(&str) + Sync,
 {
     let content = read_file_to_string(path, max_file_size)?;
-
-    // For larger files, use parallel processing
     if content.len() > 1_000_000 {
-        // 1MB
-        content.par_lines().for_each(|line| {
-            line_processor(line);
-        });
+        content.par_lines().for_each(&line_processor);
     } else {
-        // For smaller files, process sequentially
-        content.lines().for_each(|line| {
-            line_processor(line);
-        });
+        content.lines().for_each(line_processor);
     }
-
     Ok(())
 }
 
-/// Read a text file segment as a string
-///
-/// # Arguments
-///
-/// * `path` - Path to the file to read
-/// * `offset` - Starting offset in bytes
-/// * `length` - Length of segment to read in bytes
-/// * `max_file_size` - Maximum allowed file size
-///
-/// # Returns
-///
-/// A string containing the file segment contents
-///
-/// # Errors
-///
-/// Returns an error if the file segment cannot be read
+/// Read one UTF-8 byte segment through the bounded snapshot reader.
 pub fn read_file_segment_to_string(
     path: &Path,
     offset: u64,
@@ -600,130 +263,57 @@ pub fn read_file_segment_to_string(
     max_file_size: u64,
 ) -> Result<String> {
     let bytes = read_file_segment(path, offset, length, max_file_size)?;
-
-    String::from_utf8(bytes).map_err(|e| WinxError::FileAccessError {
-        path: path.to_path_buf(),
-        message: format!("Failed to decode file segment as UTF-8: {e}"),
-    })
+    String::from_utf8(bytes)
+        .map_err(|error| access_error(path, "Failed to decode file segment as UTF-8", error))
 }
 
-/// `ShareableMap` provides a thread-safe memory-mapped file access
-///
-/// This is useful for providing read-only access to multiple threads
-/// without copying the data, especially for large files.
+/// Cloneable immutable file snapshot retained under the historical API name.
 #[derive(Clone)]
 pub struct ShareableMap {
-    /// The memory-mapped file data
-    data: Arc<Mmap>,
-    /// The path to the mapped file
+    data: Arc<[u8]>,
     path: PathBuf,
 }
 
 impl ShareableMap {
-    /// Create a new `ShareableMap` from a file
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the file to map
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the `ShareableMap` or an error
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file cannot be mapped
+    /// Snapshot a non-empty file without retaining an alias to the live inode.
     pub fn new(path: &Path) -> Result<Self> {
-        let file = File::open(path).map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Error opening file: {e}"),
-        })?;
-
-        // Check for empty file
-        if file
-            .metadata()
-            .map_err(|e| WinxError::FileAccessError {
-                path: path.to_path_buf(),
-                message: format!("Failed to get metadata: {e}"),
-            })?
-            .len()
-            == 0
-        {
+        let data = read_file_optimized(path, MAX_MMAP_SIZE)?;
+        if data.is_empty() {
             return Err(WinxError::FileAccessError {
                 path: path.to_path_buf(),
-                message: "Cannot memory map empty file".to_string(),
+                message: "Cannot create a shared snapshot of an empty file".to_string(),
             });
         }
-
-        // SAFETY: ShareableMap wraps the Mmap in Arc for thread-safe sharing.
-        // The mapped data is read-only and the Arc ensures the Mmap outlives
-        // all references. Users must be aware the underlying file should not
-        // be modified while ShareableMap is in use.
-        let mmap =
-            unsafe { MmapOptions::new().map(&file) }.map_err(|e| WinxError::FileAccessError {
-                path: path.to_path_buf(),
-                message: format!("Failed to memory-map file: {e}"),
-            })?;
-
-        Ok(Self { data: Arc::new(mmap), path: path.to_path_buf() })
+        Ok(Self { data: Arc::from(data), path: path.to_path_buf() })
     }
 
-    /// Create a new `ShareableMap` for a segment of a file
-    ///
-    /// # Arguments
-    ///
-    /// * `path` - Path to the file to map
-    /// * `offset` - Starting offset in bytes
-    /// * `length` - Length of segment to map in bytes
-    ///
-    /// # Returns
-    ///
-    /// A Result containing the `ShareableMap` or an error
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file segment cannot be mapped
+    /// Snapshot a non-empty file segment without retaining a live mapping.
     pub fn new_segment(path: &Path, offset: u64, length: u64) -> Result<Self> {
         if length == 0 {
             return Err(WinxError::FileAccessError {
                 path: path.to_path_buf(),
-                message: "Cannot memory map segment of length 0".to_string(),
+                message: "Cannot create a shared snapshot of a zero-length segment".to_string(),
             });
         }
-
-        let file = File::open(path).map_err(|e| WinxError::FileAccessError {
-            path: path.to_path_buf(),
-            message: format!("Error opening file: {e}"),
-        })?;
-
-        // SAFETY: Same as ShareableMap::new, plus:
-        // - Caller is responsible for ensuring offset+length is within file bounds
-        // - The segment mapping is wrapped in Arc for safe sharing
-        let mmap = unsafe { MmapOptions::new().offset(offset).len(length as usize).map(&file) }
-            .map_err(|e| WinxError::FileAccessError {
-                path: path.to_path_buf(),
-                message: format!("Failed to memory-map file segment: {e}"),
-            })?;
-
-        Ok(Self { data: Arc::new(mmap), path: path.to_path_buf() })
+        let file_size = std::fs::metadata(path)
+            .map_err(|error| access_error(path, "Failed to get file metadata", error))?
+            .len();
+        let data = read_file_segment(path, offset, length, file_size)?;
+        Ok(Self { data: Arc::from(data), path: path.to_path_buf() })
     }
 
-    /// Get the data as a byte slice
     pub fn as_slice(&self) -> &[u8] {
         &self.data
     }
 
-    /// Get the path to the mapped file
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Get the size of the mapped data
     pub fn len(&self) -> usize {
         self.data.len()
     }
 
-    /// Check if the mapped data is empty
     pub fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
@@ -731,112 +321,104 @@ impl ShareableMap {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::io::Write;
+    #![allow(clippy::cast_possible_truncation)]
+
+    use std::io::Write as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
     use tempfile::NamedTempFile;
+
+    use super::*;
 
     fn create_test_file(size: usize) -> Result<(NamedTempFile, Vec<u8>)> {
         let mut file = NamedTempFile::new()?;
-        let mut data = Vec::with_capacity(size);
-
-        // Fill with pattern data (more realistic than zeros)
-        for i in 0..size {
-            data.push((i % 256) as u8);
-        }
-
+        let data = (0..size).map(|index| (index % 256) as u8).collect::<Vec<_>>();
         file.write_all(&data)?;
         file.flush()?;
-
         Ok((file, data))
     }
 
     #[test]
-    fn test_direct_read_small_file() -> Result<()> {
-        let size = 10 * 1024; // 10KB
-        let (file, expected_data) = create_test_file(size)?;
-
-        let result = read_direct(file.as_file(), size as u64, file.path())?;
-        assert_eq!(result, expected_data);
-        Ok(())
-    }
-
-    #[test]
-    fn test_mmap_read() -> Result<()> {
-        let size = 1024 * 1024; // 1MB
-        let (file, expected_data) = create_test_file(size)?;
-
-        let result = read_mmap(file.as_file(), file.path())?;
-        assert_eq!(result, expected_data);
-        Ok(())
-    }
-
-    #[test]
-    fn test_file_segment_read() -> Result<()> {
-        let size = 1024 * 1024; // 1MB
-        let (file, data) = create_test_file(size)?;
-
-        // Read a segment from the middle
-        let offset = 100 * 1024; // 100KB
-        let length = 200 * 1024; // 200KB
-        let expected_segment = &data[offset as usize..(offset + length) as usize];
-
-        let result = read_segment_direct(file.as_file(), offset, length, file.path())?;
-        assert_eq!(result, expected_segment);
-
-        let result = read_segment_mmap(file.as_file(), offset, length, file.path())?;
-        assert_eq!(result, expected_segment);
-        Ok(())
-    }
-
-    #[test]
-    fn test_shareable_map() -> Result<()> {
-        let size = 100 * 1024; // 100KB
-        let (file, data) = create_test_file(size)?;
-
-        let map = ShareableMap::new(file.path())?;
-        assert_eq!(map.as_slice(), &data);
-
-        // Test segment
-        let offset = 10 * 1024; // 10KB
-        let length = 20 * 1024; // 20KB
-        let segment_map = ShareableMap::new_segment(file.path(), offset, length)?;
-        assert_eq!(segment_map.as_slice(), &data[offset as usize..(offset + length) as usize]);
-        Ok(())
-    }
-
-    #[test]
-    fn test_parallel_processing() -> Result<()> {
-        // Create a test file with lines
-        let mut file = NamedTempFile::new()?;
-        let mut lines = Vec::new();
-
-        for i in 0..1000 {
-            let line = format!("Line {i}\n");
-            file.write_all(line.as_bytes())?;
-            lines.push(format!("Line {i}"));
+    fn bounded_reader_preserves_small_and_large_files() -> Result<()> {
+        for size in [10 * 1024, 11 * 1024 * 1024] {
+            let (file, expected) = create_test_file(size)?;
+            assert_eq!(read_file_optimized(file.path(), size as u64)?, expected);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn concurrent_replacement_retries_from_a_fresh_descriptor() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        file.write_all(b"first revision")?;
         file.flush()?;
+        let replaced = AtomicBool::new(false);
 
-        // Test parallel processing
-        let processed_lines = std::sync::Mutex::new(Vec::new());
-
-        process_text_file_parallel(file.path(), 1_000_000, |line| {
-            if let Ok(mut lines) = processed_lines.lock() {
-                lines.push(line.to_string());
+        let result = read_file_optimized_with_hook(file.path(), 1_024, |attempt, path| {
+            if attempt == 0 && !replaced.swap(true, Ordering::AcqRel) {
+                let replaced = std::fs::write(path, b"second revision is current");
+                assert!(replaced.is_ok(), "failed to replace test file: {replaced:?}");
             }
         })?;
 
-        // Verify results (order may differ due to parallel processing)
-        let result =
-            processed_lines.lock().map_err(|error| WinxError::ResourceAllocationError {
-                message: format!("Failed to lock processed lines: {error}"),
-            })?;
-        assert_eq!(result.len(), lines.len());
+        assert_eq!(result, b"second revision is current");
+        Ok(())
+    }
 
-        // Check that all lines are present
-        for line in &lines {
-            assert!(result.contains(line));
+    #[test]
+    fn file_size_limit_is_enforced_before_allocating_the_payload() -> Result<()> {
+        let (file, _) = create_test_file(4_096)?;
+        assert!(matches!(
+            read_file_optimized(file.path(), 1_024),
+            Err(WinxError::FileTooLarge { .. })
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn file_segment_read_uses_the_same_stable_snapshot_contract() -> Result<()> {
+        let (file, data) = create_test_file(1024 * 1024)?;
+        let offset = 100 * 1024;
+        let length = 200 * 1024;
+        let expected = &data[offset..offset + length];
+        let result =
+            read_file_segment(file.path(), offset as u64, length as u64, data.len() as u64)?;
+        assert_eq!(result, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn shareable_map_is_an_owned_snapshot() -> Result<()> {
+        let (file, data) = create_test_file(100 * 1024)?;
+        let snapshot = ShareableMap::new(file.path())?;
+        std::fs::write(file.path(), b"changed after snapshot")?;
+        assert_eq!(snapshot.as_slice(), &data);
+
+        let segment = ShareableMap::new_segment(snapshot.path(), 0, 7)?;
+        assert_eq!(segment.as_slice(), b"changed");
+        Ok(())
+    }
+
+    #[test]
+    fn parallel_processing_observes_every_line() -> Result<()> {
+        let mut file = NamedTempFile::new()?;
+        let expected = (0..1_000).map(|index| format!("Line {index}")).collect::<Vec<_>>();
+        for line in &expected {
+            writeln!(file, "{line}")?;
         }
+        file.flush()?;
+
+        let processed = std::sync::Mutex::new(Vec::new());
+        process_text_file_parallel(file.path(), 1_000_000, |line| {
+            if let Ok(mut entries) = processed.lock() {
+                entries.push(line.to_string());
+            }
+        })?;
+        let result = processed.lock().map_err(|error| WinxError::ResourceAllocationError {
+            message: format!("Failed to lock processed lines: {error}"),
+        })?;
+        assert_eq!(result.len(), expected.len());
+        assert!(expected.iter().all(|line| result.contains(line)));
         Ok(())
     }
 }
