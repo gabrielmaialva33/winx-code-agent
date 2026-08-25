@@ -123,6 +123,9 @@ real monorepo/cross-directory work possible without allowing a chat to silently 
 
 For a different project, call `Initialize` with `type="first_call"` and the new path, then use the returned pair. Remote
 `user_asked_change_workspace` calls fail closed so a durable key is never repointed to a different project in place.
+If an adapter restart removed live state for the same project, a subsequent `reset_shell` or `user_asked_mode_change`
+request is safely recovered as a first call with the supplied thread/workspace pair. The response sets
+`initialize_recovered_missing_session=true`; workspace changes remain fail-closed.
 
 ## Session affinity
 
@@ -498,7 +501,7 @@ reduced to `0600`, and newly created log directories use `0700`. Each tool event
 thread, hashed request and MCP-session correlation, client name and version, negotiated protocol, outcome, result status,
 duration, response size, batch item count, and the configured worker limit (`0` for non-batched tools). HTTP events contain
 peer, method, status, and duration. Initialize events additionally record the transition (`created`, `attached_existing`,
-or an explicit change), whether it reused a session, compact/full response mode, generated context/guideline sizes,
+or an explicit change), whether it reused or recovered a missing session, compact/full response mode, generated context/guideline sizes,
 initial-file count, and effective code-writer policy strength. Command text, file contents, tool
 output, bearer tokens, and raw conversation identities are never written to this sink. Ordinary warnings and diagnostics
 continue to stderr according to `RUST_LOG` and `WINX_LOG_FORMAT`.

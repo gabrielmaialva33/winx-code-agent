@@ -118,6 +118,9 @@ silenciosamente o terminal de outro projeto.
 Para outro projeto, chame `Initialize` com `type="first_call"` e o novo caminho, e passe a usar o novo par retornado.
 Chamadas remotas `user_asked_change_workspace` falham de forma segura para que uma chave durável nunca seja redirecionada
 para outro projeto no mesmo lugar.
+Se um reinício do adapter remover o estado ativo do mesmo projeto, uma chamada posterior de `reset_shell` ou
+`user_asked_mode_change` será recuperada com segurança como `first_call`, preservando o par de thread/workspace informado.
+A resposta indica `initialize_recovered_missing_session=true`; trocas de workspace continuam falhando de forma segura.
 
 ## Afinidade de Sessão
 
