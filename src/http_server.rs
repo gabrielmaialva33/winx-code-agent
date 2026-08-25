@@ -9,6 +9,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -17,12 +18,14 @@ use axum::{
     http::{header, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    Router,
+    routing::get,
+    Json, Router,
 };
 use rand::RngExt as _;
 use rmcp::transport::streamable_http_server::{
     session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
 };
+use serde::Serialize;
 use tokio::sync::{Mutex, Semaphore};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
@@ -40,6 +43,17 @@ const MAX_RATE_TRACKED_IPS: usize = 4_096;
 const INVALID_AUTH_DELAY: Duration = Duration::from_millis(100);
 pub const DEFAULT_MAX_CONCURRENCY: usize = 32;
 pub const DEFAULT_REQUESTS_PER_MINUTE: u32 = 120;
+
+#[derive(Debug)]
+struct HealthState {
+    ready: AtomicBool,
+}
+
+#[derive(Serialize)]
+struct HealthResponse {
+    status: &'static str,
+    ready: bool,
+}
 
 /// Opaque per-request correlation shared by the HTTP middleware and MCP handler.
 /// It contains no client input and is safe to include in metadata-only usage logs.
@@ -144,7 +158,12 @@ pub async fn start_http_server_with_runtime(
     // Keep OAuth discovery probes and every unrelated path outside bearer auth.
     // Winx does not advertise OAuth metadata, so those routes should be ordinary
     // 404s instead of 401s that encourage clients to start a nonexistent flow.
-    let app = Router::new().merge(protected_mcp);
+    let health_state = Arc::new(HealthState { ready: AtomicBool::new(true) });
+    let health_routes = Router::new()
+        .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
+        .with_state(Arc::clone(&health_state));
+    let app = Router::new().merge(health_routes).merge(protected_mcp);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::warn!(
@@ -158,8 +177,52 @@ pub async fn start_http_server_with_runtime(
             "query-token authentication is enabled; URLs may expose credentials in proxy logs/history"
         );
     }
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown_signal(health_state))
+        .await?;
     Ok(())
+}
+
+async fn healthz() -> impl IntoResponse {
+    (StatusCode::OK, Json(HealthResponse { status: "ok", ready: true }))
+}
+
+async fn readyz(State(state): State<Arc<HealthState>>) -> impl IntoResponse {
+    let ready = state.ready.load(Ordering::Acquire);
+    let status = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (status, Json(HealthResponse { status: if ready { "ready" } else { "draining" }, ready }))
+}
+
+async fn shutdown_signal(state: Arc<HealthState>) {
+    #[cfg(unix)]
+    {
+        let terminate = async {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut signal) => {
+                    signal.recv().await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to install SIGTERM handler");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "failed while waiting for Ctrl-C");
+                }
+            }
+            () = terminate => {}
+        }
+    }
+    #[cfg(not(unix))]
+    if let Err(error) = tokio::signal::ctrl_c().await {
+        tracing::warn!(%error, "failed while waiting for Ctrl-C");
+    }
+
+    state.ready.store(false, Ordering::Release);
+    tracing::info!("HTTP shutdown requested; draining in-flight requests");
 }
 
 fn validate_options(options: &HttpServerOptions) -> Result<SocketAddr, BoxError> {
@@ -332,11 +395,17 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     use axum::body::Body;
-    use axum::extract::Request;
+    use axum::extract::{Request, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse as _;
 
-    use super::{authenticate_request, validate_options, HttpServerOptions, RateLimiter};
+    use super::{
+        authenticate_request, readyz, validate_options, HealthState, HttpServerOptions, RateLimiter,
+    };
     use crate::config::HttpPrincipal;
 
     fn request(uri: &str, authorization: Option<&str>) -> Request {
@@ -403,5 +472,16 @@ mod tests {
         let mut options = strong_options("127.0.0.1:8000");
         options.principals = vec![principal("same", 'a'), principal("same", 'b')];
         assert!(validate_options(&options).is_err());
+    }
+
+    #[tokio::test]
+    async fn readiness_turns_unavailable_while_draining() {
+        let state = Arc::new(HealthState { ready: AtomicBool::new(true) });
+        let ready = readyz(State(Arc::clone(&state))).await.into_response();
+        assert_eq!(ready.status(), StatusCode::OK);
+
+        state.ready.store(false, Ordering::Release);
+        let draining = readyz(State(state)).await.into_response();
+        assert_eq!(draining.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
