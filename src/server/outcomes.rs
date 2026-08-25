@@ -652,12 +652,7 @@ fn error_envelope(
             status = ToolResultStatus::NeedsInitialize;
             error_code = "not_initialized".to_string();
             retryable = true;
-            next_action = Some(ToolNextAction {
-                tool: "Initialize".to_string(),
-                instruction: "Initialize the intended workspace once, preserve the returned thread_id, then retry."
-                    .to_string(),
-                arguments: None,
-            });
+            next_action = Some(missing_session_initialize_action(tool, arguments));
         }
         WinxError::WorkspaceBindingRequired { .. } => {
             status = ToolResultStatus::NeedsInitialize;
@@ -1036,6 +1031,35 @@ fn initialize_workspace_action(workspace_root: &std::path::Path) -> ToolNextActi
     }
 }
 
+fn missing_session_initialize_action(tool: &str, arguments: Option<&Value>) -> ToolNextAction {
+    let corrected_arguments = if tool == "Initialize" {
+        arguments.and_then(Value::as_object).map(|arguments| {
+            let mut corrected = arguments.clone();
+            corrected.insert("type".to_string(), Value::String("first_call".to_string()));
+            Value::Object(corrected)
+        })
+    } else {
+        string_argument(arguments, "workspace_root").map(|workspace_root| {
+            let mut corrected = json!({
+                "type": "first_call",
+                "any_workspace_path": workspace_root,
+                "initial_files_to_read": [],
+                "mode_name": "wcgw"
+            });
+            if let Some(thread_id) = string_argument(arguments, "thread_id") {
+                corrected["thread_id"] = Value::String(thread_id);
+            }
+            corrected
+        })
+    };
+    ToolNextAction {
+        tool: "Initialize".to_string(),
+        instruction: "Call this corrected first_call exactly once for the intended workspace, preserve the returned thread_id/workspace_root pair, then retry the interrupted operation. Do not retry the prior reset, mode change, or stateful tool first."
+            .to_string(),
+        arguments: corrected_arguments,
+    }
+}
+
 fn copy_session_binding(arguments: Option<&Value>, target: &mut Value) {
     for key in ["thread_id", "workspace_root"] {
         if let Some(value) = string_argument(arguments, key) {
@@ -1141,6 +1165,49 @@ mod tests {
         assert_eq!(structured["data"]["initialize_response_mode"], "compact");
         assert_eq!(structured["data"]["workspace_root"], "/workspace");
         assert!(structured["data"].get("result").is_none());
+    }
+
+    #[test]
+    fn missing_session_recovery_supplies_an_exact_first_call() {
+        let initialize = tool_failure(
+            "Initialize",
+            &WinxError::BashStateNotInitialized,
+            Some(&json!({
+                "type": "reset_shell",
+                "any_workspace_path": "/workspace",
+                "initial_files_to_read": ["README.md"],
+                "mode_name": "code_writer",
+                "thread_id": "thread",
+                "code_writer_config": {"allowed_commands": ["cargo"], "allowed_globs": ["**/*.rs"]}
+            })),
+        )
+        .expect("Initialize recovery result");
+        let structured = initialize.structured_content.expect("structured Initialize recovery");
+        let arguments = &structured["nextAction"]["arguments"];
+        assert_eq!(structured["status"], "needs_initialize");
+        assert_eq!(structured["errorCode"], "not_initialized");
+        assert_eq!(arguments["type"], "first_call");
+        assert_eq!(arguments["any_workspace_path"], "/workspace");
+        assert_eq!(arguments["thread_id"], "thread");
+        assert_eq!(arguments["mode_name"], "code_writer");
+        assert_eq!(arguments["initial_files_to_read"], json!(["README.md"]));
+
+        let stateful = tool_failure(
+            "ReadFiles",
+            &WinxError::BashStateNotInitialized,
+            Some(&json!({
+                "file_paths": ["/workspace/README.md"],
+                "thread_id": "thread",
+                "workspace_root": "/workspace"
+            })),
+        )
+        .expect("stateful recovery result");
+        let structured = stateful.structured_content.expect("structured stateful recovery");
+        let arguments = &structured["nextAction"]["arguments"];
+        assert_eq!(arguments["type"], "first_call");
+        assert_eq!(arguments["any_workspace_path"], "/workspace");
+        assert_eq!(arguments["thread_id"], "thread");
+        assert_eq!(arguments["mode_name"], "wcgw");
     }
 
     #[test]
