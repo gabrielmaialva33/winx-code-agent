@@ -1006,6 +1006,33 @@ pub struct FileWriteOrEdit {
     pub thread_id: String,
 }
 
+/// One compare-and-swap line patch. Coordinates refer to the original revision,
+/// are one-based, and all patches are applied together.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct LinePatch {
+    /// Original line before which replacement starts (`totalLines + 1` appends).
+    pub start_line: usize,
+    /// Number of original lines to remove; zero performs an insertion.
+    pub delete_lines: usize,
+    /// Exact replacement bytes. Include newlines intentionally.
+    pub replacement: String,
+}
+
+/// Apply one or more non-overlapping line patches to an exact `ReadFiles`
+/// revision. This is preferable to SEARCH/REPLACE when line coordinates are
+/// already known.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ApplyPatch {
+    /// Path returned by `ReadFiles.files[].path`.
+    pub file_path: String,
+    /// Opaque `ReadFiles.files[].revision` compare-and-swap token.
+    pub expected_revision: String,
+    /// Ordered, non-overlapping edits against that original revision.
+    pub patches: Vec<LinePatch>,
+    /// Thread ID for the same project session that produced the revision.
+    pub thread_id: String,
+}
+
 /// One file's worth of edits in a [`MultiFileEdit`] batch. Same semantics as the
 /// corresponding [`FileWriteOrEdit`] fields.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -1032,6 +1059,20 @@ pub struct MultiFileEdit {
     pub files: Vec<FileEditEntry>,
 
     /// The thread ID for this session
+    pub thread_id: String,
+}
+
+/// Parameters for rerunning a post-edit verification without repeating the edit.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct VerifyEdit {
+    /// Deterministic receipt returned by the edit that first ran this command.
+    pub verification_id: String,
+    /// Exact finite foreground verification command from the edit receipt.
+    pub command: String,
+    /// Optional bounded inline wait, from 0 through 60 seconds.
+    #[serde(default)]
+    pub wait_for_seconds: Option<f32>,
+    /// The thread ID for the same project session as the original edit.
     pub thread_id: String,
 }
 
