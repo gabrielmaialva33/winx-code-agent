@@ -19,7 +19,7 @@ use winx_code_agent::{start_winx_server, Result, WinxError};
 #[derive(Parser)]
 #[command(name = "winx-code-agent")]
 #[command(author = "Gabriel Maia")]
-#[command(version)]
+#[command(version = env!("WINX_BUILD_IDENTITY"))]
 #[command(
     about = "Remote-first MCP runtime with Streamable HTTP, durable PTYs, and guarded shell/file tools",
     long_about = None
@@ -178,16 +178,37 @@ enum Commands {
 
     /// Print a redacted runtime/configuration diagnostic report
     Doctor,
+
+    /// Aggregate privacy-safe tool/HTTP usage telemetry from JSONL logs
+    Report {
+        /// Base usage log path. Rotated siblings are discovered automatically.
+        #[arg(long, value_name = "PATH")]
+        log: Option<PathBuf>,
+        /// Maximum number of matching events to aggregate.
+        #[arg(long, default_value_t = 10_000)]
+        last: usize,
+        /// Ignore events older than this many minutes (zero disables filtering).
+        #[arg(long, default_value_t = 0)]
+        since_minutes: u64,
+        /// Exact build display identity or package version to include.
+        #[arg(long)]
+        build: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let offline_report = matches!(&cli.command, Some(Commands::Report { .. }));
 
     // Apply Landlock before ANY worker thread exists. This includes the optional
     // non-blocking usage-log writer as well as Tokio and PTY children; otherwise
     // that writer would remain outside the Landlock domain for the process lifetime.
     let sandbox_report = winx_code_agent::sandbox::apply_if_requested();
-    let _logging_guard = winx_code_agent::logging::initialize(cli.verbose, cli.debug)?;
+    let _logging_guard = if offline_report {
+        winx_code_agent::logging::initialize_without_usage(cli.verbose, cli.debug)?
+    } else {
+        winx_code_agent::logging::initialize(cli.verbose, cli.debug)?
+    };
     sandbox_report.emit();
 
     tokio::runtime::Runtime::new()
@@ -245,6 +266,9 @@ async fn async_main(cli: Cli) -> Result<()> {
         #[cfg(unix)]
         Some(Commands::RestartDaemon { socket }) => run_restart_daemon(socket).await,
         Some(Commands::Doctor) => run_doctor().await,
+        Some(Commands::Report { log, last, since_minutes, build }) => {
+            run_report(log, last, since_minutes, build).await
+        }
         // Default: stdio transport for local MCP clients.
         None | Some(Commands::Serve { .. }) => run_server().await,
     }
@@ -335,69 +359,27 @@ async fn run_restart_daemon(socket: Option<PathBuf>) -> Result<()> {
 }
 
 async fn run_doctor() -> Result<()> {
-    let runtime = winx_code_agent::runtime::configured_runtime_mode().map_or_else(
-        |error| format!("invalid: {error}"),
-        |mode| format!("{mode:?}").to_ascii_lowercase(),
-    );
-    let mut report = serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "platform": {
-            "os": std::env::consts::OS,
-            "arch": std::env::consts::ARCH
-        },
-        "cwd": std::env::current_dir().ok().map(|path| path.display().to_string()),
-        "runtime": runtime,
-        "environment": {
-            "sandbox_requested": winx_code_agent::config::env_flag("WINX_SANDBOX"),
-            "redaction_disabled": winx_code_agent::config::env_flag("WINX_NO_REDACT"),
-            "compression_disabled": winx_code_agent::config::env_flag("WINX_NO_COMPRESS"),
-            "http_token_configured": winx_code_agent::config::env_text("WINX_HTTP_TOKEN").is_some(),
-            "usage_log_configured": winx_code_agent::config::env_text("WINX_USAGE_LOG").is_some()
-        }
-    });
-    let allowed_roots = winx_code_agent::utils::path::configured_allowed_roots();
-    let unconfined =
-        cfg!(unix) && allowed_roots.iter().any(|root| root == std::path::Path::new("/"));
-    let containment_mode = if unconfined {
-        "unconfined"
-    } else if allowed_roots.is_empty() {
-        "workspace"
-    } else {
-        "extended"
-    };
-    report["file_tool_containment"] = serde_json::json!({
-        "mode": containment_mode,
-        "extra_roots": allowed_roots
-            .iter()
-            .map(|path| path.display().to_string())
-            .collect::<Vec<_>>()
-    });
+    let report = winx_code_agent::diagnostics::doctor_report().await;
 
-    #[cfg(unix)]
-    {
-        let socket = default_socket_path();
-        let daemon = match DaemonClient::new(&socket).hello().await {
-            Ok(hello) => serde_json::json!({
-                "reachable": true,
-                "socket": socket.display().to_string(),
-                "pid": hello.daemon_pid,
-                "epoch": hello.daemon_epoch,
-                "protocol": format!("{}.{}", hello.protocol_major, hello.protocol_minor),
-                "capabilities": hello.capabilities
-            }),
-            Err(error) => serde_json::json!({
-                "reachable": false,
-                "socket": socket.display().to_string(),
-                "error": error.to_string()
-            }),
-        };
-        report["daemon"] = daemon;
-        report["daemon_binary"] = match configured_daemon_binary() {
-            Ok(path) => serde_json::json!({"available": true, "path": path.display().to_string()}),
-            Err(error) => serde_json::json!({"available": false, "error": error.to_string()}),
-        };
-    }
+    serde_json::to_writer_pretty(std::io::stdout().lock(), &report)
+        .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+    writeln!(std::io::stdout().lock())?;
+    Ok(())
+}
 
+async fn run_report(
+    log: Option<PathBuf>,
+    last: usize,
+    since_minutes: u64,
+    build: Option<String>,
+) -> Result<()> {
+    let report = tokio::task::spawn_blocking(move || {
+        winx_code_agent::report::usage_report(log.as_deref(), last, since_minutes, build.as_deref())
+    })
+    .await
+    .map_err(|error| {
+        WinxError::CommandExecutionError(format!("report worker failed: {error}"))
+    })??;
     serde_json::to_writer_pretty(std::io::stdout().lock(), &report)
         .map_err(|error| WinxError::SerializationError(error.to_string()))?;
     writeln!(std::io::stdout().lock())?;
@@ -444,7 +426,10 @@ async fn run_http_server(
         max_concurrency,
         requests_per_minute,
     };
-    tracing::info!("Starting winx remote MCP (HTTP) v{} on {bind}", env!("CARGO_PKG_VERSION"));
+    tracing::info!(
+        build = %winx_code_agent::build_info::display_version(),
+        "Starting winx remote MCP (HTTP) on {bind}"
+    );
 
     winx_code_agent::http_server::start_http_server_with_options(options).await.map_err(|error| {
         WinxError::ShellInitializationError(format!("HTTP server failed: {error}"))
@@ -453,7 +438,10 @@ async fn run_http_server(
 
 /// Executes the MCP server
 async fn run_server() -> Result<()> {
-    tracing::info!("Starting winx MCP server v{}", env!("CARGO_PKG_VERSION"));
+    tracing::info!(
+        build = %winx_code_agent::build_info::display_version(),
+        "Starting winx MCP server"
+    );
 
     match start_winx_server().await {
         Ok(()) => {
