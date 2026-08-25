@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use crate::daemon::{
-    default_socket_path, DaemonClient, DaemonShellRuntime, HelloResult,
-    TYPED_ACTION_RESULT_CAPABILITY,
+    default_socket_path, DaemonClient, DaemonProcessRole, DaemonShellRuntime, HelloResult,
+    BUILD_IDENTITY_CAPABILITY, TYPED_ACTION_RESULT_CAPABILITY,
 };
 use crate::errors::{Result, WinxError};
 
@@ -117,9 +117,16 @@ fn has_capability(hello: &HelloResult, name: &str) -> bool {
 
 #[cfg(unix)]
 fn control_is_current(hello: &HelloResult) -> bool {
-    [GUARDIAN_LIFECYCLE_CAPABILITY, TYPED_ACTION_RESULT_CAPABILITY, SESSION_NEGOTIATE_CAPABILITY]
+    hello.process_role == Some(DaemonProcessRole::Control)
+        && [
+            GUARDIAN_LIFECYCLE_CAPABILITY,
+            TYPED_ACTION_RESULT_CAPABILITY,
+            SESSION_NEGOTIATE_CAPABILITY,
+            BUILD_IDENTITY_CAPABILITY,
+        ]
         .into_iter()
         .all(|capability| has_capability(hello, capability))
+        && hello.build_matches(&crate::build_info::BuildIdentity::current())
 }
 
 /// Ensure the current control-plane feature set is reachable. An older `winxd`
@@ -150,6 +157,7 @@ pub async fn ensure_control_daemon_at(socket: &Path, daemon_binary: &Path) -> Re
         GUARDIAN_LIFECYCLE_CAPABILITY,
         TYPED_ACTION_RESULT_CAPABILITY,
         SESSION_NEGOTIATE_CAPABILITY,
+        BUILD_IDENTITY_CAPABILITY,
     ] {
         if !has_capability(&restarted, capability) {
             return Err(WinxError::ConfigurationError(format!(
@@ -157,6 +165,16 @@ pub async fn ensure_control_daemon_at(socket: &Path, daemon_binary: &Path) -> Re
                 socket.display()
             )));
         }
+    }
+    let expected = crate::build_info::BuildIdentity::current();
+    if restarted.process_role != Some(DaemonProcessRole::Control)
+        || !restarted.build_matches(&expected)
+    {
+        return Err(WinxError::ConfigurationError(format!(
+            "restarted daemon at {} is not the expected winxd build {}",
+            socket.display(),
+            expected.display
+        )));
     }
     Ok(())
 }
@@ -296,8 +314,37 @@ mod tests {
             max_frame_bytes: 1024,
             daemon_epoch: "control-14".to_string(),
             daemon_pid: 14,
+            process_role: None,
+            build: None,
         };
         assert!(!super::control_is_current(&hello));
         assert!(super::has_capability(&hello, super::PLANNED_CONTROL_RESTART_CAPABILITY));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_control_requires_the_exact_role_and_build() {
+        let capabilities = vec![
+            super::GUARDIAN_LIFECYCLE_CAPABILITY.to_string(),
+            super::TYPED_ACTION_RESULT_CAPABILITY.to_string(),
+            super::SESSION_NEGOTIATE_CAPABILITY.to_string(),
+            super::BUILD_IDENTITY_CAPABILITY.to_string(),
+        ];
+        let hello = crate::daemon::HelloResult::current(
+            crate::daemon::DaemonProcessRole::Control,
+            capabilities,
+            "current",
+        );
+        assert!(super::control_is_current(&hello));
+
+        let mut wrong_role = hello.clone();
+        wrong_role.process_role = Some(crate::daemon::DaemonProcessRole::Guardian);
+        assert!(!super::control_is_current(&wrong_role));
+
+        let mut wrong_build = hello;
+        if let Some(build) = wrong_build.build.as_mut() {
+            build.display.push_str("-different");
+        }
+        assert!(!super::control_is_current(&wrong_build));
     }
 }

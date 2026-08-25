@@ -98,6 +98,9 @@ fn bash_accepts_syntax(command: &str) -> bool {
         .arg("-n")
         .arg("-c")
         .arg(command)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .status()
         .is_ok_and(|status| status.success())
 }
