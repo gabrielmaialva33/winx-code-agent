@@ -802,12 +802,26 @@ mod schema_tests {
             assert_eq!(properties["verify_wait_for_seconds"]["minimum"], 0, "{name}");
             assert_eq!(properties["verify_wait_for_seconds"]["maximum"], 60, "{name}");
         }
+        let verify = winx_tools()
+            .into_iter()
+            .find(|tool| tool.name == "VerifyEdit")
+            .expect("VerifyEdit catalog entry");
+        let properties = verify
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .expect("VerifyEdit input properties");
+        assert_eq!(properties["command"]["minLength"], 1);
+        assert_eq!(properties["wait_for_seconds"]["minimum"], 0);
+        assert_eq!(properties["wait_for_seconds"]["maximum"], 60);
+        assert_eq!(properties["verification_id"]["pattern"], "^verify_[0-9a-f]{24}$");
     }
 
     #[test]
     fn advertises_latest_protocol_and_tasks_extension() {
         let info = ServerHandler::get_info(&super::WinxService::new());
         assert_eq!(info.protocol_version, ProtocolVersion::V_2026_07_28);
+        assert_eq!(info.server_info.version, crate::build_info::display_version());
         assert!(info.capabilities.supports_tasks());
         assert!(info.capabilities.extensions.as_ref().is_some_and(|extensions| {
             extensions.contains_key(super::handler::COMPACT_BASH_OUTPUT_EXTENSION)
@@ -817,7 +831,7 @@ mod schema_tests {
     #[test]
     fn every_tool_advertises_orchestration_output_schema() {
         let tools = winx_tools();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), crate::tool_registry::ToolKind::ALL.len());
         for tool in &tools {
             let output = tool.output_schema.as_ref().expect("tool outputSchema");
             let properties = output
@@ -1057,8 +1071,10 @@ mod error_mapping_tests {
 
     #[test]
     fn recoverable_execution_failures_are_visible_tool_results() {
-        let error = WinxError::FileAccessError {
+        let error = WinxError::FileReadRequired {
             path: PathBuf::from("/workspace/file.rs"),
+            reason: crate::errors::ReadRequirement::NeverRead,
+            ranges: Vec::new(),
             message: "This file exists but hasn't been read in this session.".into(),
         };
         let result = super::outcomes::tool_failure(

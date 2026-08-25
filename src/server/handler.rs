@@ -1,9 +1,6 @@
-use std::fmt::Write as _;
-
-use axum::http::request::Parts;
 use rmcp::{
     model::{
-        CacheScope, CallToolRequestParams, CallToolResponse, CallToolResult, CancelTaskParams,
+        CacheScope, CallToolRequestParams, CallToolResponse, CancelTaskParams,
         GetPromptRequestParams, GetPromptResponse, GetPromptResult, GetTaskParams, GetTaskResult,
         Icon, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
         PaginatedRequestParams, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
@@ -13,16 +10,17 @@ use rmcp::{
     service::{NotificationContext, RequestContext, RoleServer},
     ErrorData as McpError, ServerHandler,
 };
-use sha2::{Digest, Sha256};
 
 use super::catalog::{server_icon_data_uri, winx_prompts, winx_tools, winx_tools_for_policy};
 use super::outcomes;
 use super::principal::{
     conversation_identity_from_context, principal_from_context, scope_tool_request,
-    session_affinity_from_context, task_belongs_to_principal, RequestScope,
+    session_affinity_from_context, task_belongs_to_principal,
 };
+use super::usage::UsageEvent;
 use super::WinxService;
 use crate::runtime::ShellActionOptions;
+use crate::tool_registry::ToolKind;
 use crate::types::{BashCommand, BashWaitPolicy};
 
 pub(crate) const COMPACT_BASH_OUTPUT_EXTENSION: &str = "io.winx/compact-bash-output";
@@ -66,412 +64,6 @@ fn adaptive_action_options(compact_output: bool) -> ShellActionOptions {
     }
 }
 
-/// One structured `winx::usage` event per tool call. Only metadata is logged —
-/// never tool arguments, command text, or file contents (secrets/PII).
-struct UsageEvent {
-    tool: String,
-    action: String,
-    ws: String,
-    principal: String,
-    thread_id: String,
-    request_id: String,
-    client_name: String,
-    client_version: String,
-    protocol: String,
-    client_session: String,
-    conversation_source: String,
-    conversation_id: String,
-    workspace_id: String,
-    workspace_coherence: String,
-    batch_items: usize,
-    worker_limit: usize,
-    started: std::time::Instant,
-}
-
-#[derive(Default)]
-struct UsageRecoveryMetadata<'a> {
-    next_action_tool: &'a str,
-    required_read_count: u64,
-    retry_same_call: bool,
-    edit_applied: bool,
-    fresh_read_required: bool,
-    verification_status: &'a str,
-}
-
-#[derive(Default)]
-struct UsageResultMetadata<'a> {
-    error_code: &'a str,
-    recovery: UsageRecoveryMetadata<'a>,
-    source_kind: &'a str,
-    payload_bytes: u64,
-    source_bytes: u64,
-    image_transcoded: bool,
-    image_deduplicated: bool,
-    temporary_session_files: u64,
-    temporary_session_bytes: u64,
-    temporary_over_budget: bool,
-}
-
-fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageResultMetadata<'_> {
-    let structured = result.and_then(|result| result.structured_content.as_ref());
-    let data = structured.and_then(|structured| structured.get("data"));
-    let domain_data = data.and_then(|data| data.get("result")).or(data).or(structured);
-    let temporary = data.and_then(|data| data.get("temporary_artifact_budget")).or_else(|| {
-        domain_data.filter(|data| {
-            data.get("temporary_artifact_cleanup_required")
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false)
-        })
-    });
-    UsageResultMetadata {
-        error_code: structured
-            .and_then(|structured| structured.get("errorCode"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default(),
-        recovery: UsageRecoveryMetadata {
-            next_action_tool: structured
-                .and_then(|structured| structured.get("nextAction"))
-                .and_then(|action| action.get("tool"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default(),
-            required_read_count: structured
-                .and_then(|structured| structured.get("requiredReads"))
-                .and_then(serde_json::Value::as_array)
-                .map_or(0, |reads| u64::try_from(reads.len()).unwrap_or(u64::MAX)),
-            retry_same_call: structured
-                .and_then(|structured| structured.get("retrySameCall"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            edit_applied: domain_data
-                .and_then(|data| data.get("edit_applied"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            fresh_read_required: domain_data
-                .and_then(|data| data.get("fresh_read_required"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false),
-            verification_status: domain_data
-                .and_then(|data| data.get("verification_status"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default(),
-        },
-        source_kind: structured
-            .and_then(|structured| structured.get("sourceKind"))
-            .or_else(|| domain_data.and_then(|data| data.get("source_kind")))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default(),
-        payload_bytes: structured
-            .and_then(|structured| structured.get("payloadBytes"))
-            .or_else(|| domain_data.and_then(|data| data.get("payload_bytes")))
-            .or_else(|| domain_data.and_then(|data| data.get("delivered_bytes")))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
-        source_bytes: domain_data
-            .and_then(|data| data.get("source_bytes"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
-        image_transcoded: domain_data
-            .and_then(|data| data.get("transcoded"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        image_deduplicated: domain_data
-            .and_then(|data| data.get("deduplicated"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
-        temporary_session_files: temporary
-            .and_then(|temporary| temporary.get("session_files"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
-        temporary_session_bytes: temporary
-            .and_then(|temporary| temporary.get("session_bytes"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
-        temporary_over_budget: temporary
-            .and_then(|temporary| temporary.get("over_budget"))
-            .and_then(serde_json::Value::as_bool)
-            .or_else(|| {
-                temporary
-                    .and_then(|temporary| temporary.get("temporary_artifact_cleanup_required"))
-                    .and_then(serde_json::Value::as_bool)
-            })
-            .unwrap_or(false),
-    }
-}
-
-impl UsageEvent {
-    fn start(
-        request: &CallToolRequestParams,
-        scope: &RequestScope,
-        context: &RequestContext<RoleServer>,
-    ) -> Self {
-        let arguments = request.arguments.as_ref();
-        let thread_id = arguments
-            .and_then(|arguments| arguments.get("thread_id"))
-            .and_then(serde_json::Value::as_str)
-            .map(|thread_id| scope.unscope_text(thread_id))
-            .unwrap_or_default();
-        let action =
-            if request.name == "BashCommand" { bash_action(arguments) } else { String::new() };
-        let ws = if request.name == "Initialize" {
-            arguments
-                .and_then(|arguments| arguments.get("any_workspace_path"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        } else {
-            String::new()
-        };
-        let workspace = if request.name == "Initialize" {
-            arguments
-                .and_then(|arguments| arguments.get("any_workspace_path"))
-                .and_then(serde_json::Value::as_str)
-        } else {
-            arguments
-                .and_then(|arguments| arguments.get("workspace_root"))
-                .and_then(serde_json::Value::as_str)
-        }
-        .unwrap_or_default();
-        let workspace_id =
-            if workspace.is_empty() { String::new() } else { short_fingerprint("w", workspace) };
-        let client = context.client_info();
-        let client_name =
-            client.as_ref().map_or("unknown", |client| client.name.as_str()).to_string();
-        let client_version =
-            client.as_ref().map_or("unknown", |client| client.version.as_str()).to_string();
-        let protocol = context
-            .protocol_version()
-            .map_or_else(|| "unknown".to_string(), |version| version.to_string());
-        let request_id = context
-            .extensions
-            .get::<Parts>()
-            .and_then(|parts| parts.extensions.get::<crate::http_server::RequestCorrelation>())
-            .map_or_else(
-                || {
-                    serde_json::to_string(&context.id)
-                        .map_or_else(|_| "unknown".to_string(), |id| short_fingerprint("r", &id))
-                },
-                |correlation| correlation.as_str().to_string(),
-            );
-        let client_session = context
-            .extensions
-            .get::<Parts>()
-            .and_then(|parts| parts.headers.get("mcp-session-id"))
-            .and_then(|value| value.to_str().ok())
-            .map_or_else(|| "stateless".to_string(), |id| short_fingerprint("s", id));
-        let (conversation_source, conversation_id) = conversation_telemetry(context);
-        let batch_items = match request.name.as_ref() {
-            "ReadFiles" => arguments
-                .and_then(|arguments| arguments.get("file_paths"))
-                .and_then(serde_json::Value::as_array)
-                .map_or(0, Vec::len),
-            "MultiFileEdit" => arguments
-                .and_then(|arguments| arguments.get("files"))
-                .and_then(serde_json::Value::as_array)
-                .map_or(0, Vec::len),
-            _ => 0,
-        };
-        let worker_limit = if request.name == "ReadFiles" {
-            crate::tools::read_files::configured_parallelism()
-        } else {
-            0
-        };
-        Self {
-            tool: request.name.to_string(),
-            action,
-            ws,
-            principal: scope
-                .principal()
-                .map_or_else(|| "local".to_string(), |principal| principal.name().to_string()),
-            thread_id,
-            request_id,
-            client_name,
-            client_version,
-            protocol,
-            client_session,
-            conversation_source,
-            conversation_id,
-            workspace_id,
-            workspace_coherence: "unchecked".to_string(),
-            batch_items,
-            worker_limit,
-            started: std::time::Instant::now(),
-        }
-    }
-
-    fn set_workspace_coherence(&mut self, value: &str) {
-        self.workspace_coherence = value.to_string();
-    }
-
-    fn emit(
-        &self,
-        outcome: &str,
-        result_status: &str,
-        response_bytes: usize,
-        result: Option<&CallToolResult>,
-    ) {
-        if self.tool == "Initialize" {
-            let data = result
-                .and_then(|result| result.structured_content.as_ref())
-                .and_then(|structured| structured.get("data"));
-            let initialize_transition = data
-                .and_then(|data| data.get("initialize_transition"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let initialize_reused = data
-                .and_then(|data| data.get("initialize_reused"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let initialize_recovered_missing_session = data
-                .and_then(|data| data.get("initialize_recovered_missing_session"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let initialize_response_mode = data
-                .and_then(|data| data.get("initialize_response_mode"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let context_bytes = data
-                .and_then(|data| data.get("context_bytes"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let guidelines_bytes = data
-                .and_then(|data| data.get("guidelines_bytes"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let initial_files_count = data
-                .and_then(|data| data.get("initial_files_count"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0);
-            let code_writer_policy_strength = data
-                .and_then(|data| data.get("code_writer_policy_strength"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let shell_spawners_present = data
-                .and_then(|data| data.get("shell_spawners_present"))
-                .and_then(serde_json::Value::as_bool)
-                .unwrap_or(false);
-            let error_code = usage_result_metadata(result).error_code;
-            tracing::info!(
-                target: "winx::usage",
-                event = "tool_call",
-                tool = %self.tool,
-                action = %self.action,
-                ws = %self.ws,
-                principal = %self.principal,
-                thread_id = %self.thread_id,
-                request_id = %self.request_id,
-                client_name = %self.client_name,
-                client_version = %self.client_version,
-                protocol = %self.protocol,
-                client_session = %self.client_session,
-                conversation_source = %self.conversation_source,
-                conversation_id = %self.conversation_id,
-                workspace_id = %self.workspace_id,
-                workspace_coherence = %self.workspace_coherence,
-                batch_items = self.batch_items,
-                worker_limit = self.worker_limit,
-                initialize_transition,
-                initialize_reused,
-                initialize_recovered_missing_session,
-                initialize_response_mode,
-                context_bytes,
-                guidelines_bytes,
-                initial_files_count,
-                code_writer_policy_strength,
-                shell_spawners_present,
-                error_code,
-                result_status,
-                response_bytes,
-                duration_ms =
-                    u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
-                outcome,
-                "tool call"
-            );
-            return;
-        }
-
-        self.emit_non_initialize(outcome, result_status, response_bytes, result);
-    }
-
-    fn emit_non_initialize(
-        &self,
-        outcome: &str,
-        result_status: &str,
-        response_bytes: usize,
-        result: Option<&CallToolResult>,
-    ) {
-        let metadata = usage_result_metadata(result);
-        tracing::info!(
-            target: "winx::usage",
-            event = "tool_call",
-            tool = %self.tool,
-            action = %self.action,
-            ws = %self.ws,
-            principal = %self.principal,
-            thread_id = %self.thread_id,
-            request_id = %self.request_id,
-            client_name = %self.client_name,
-            client_version = %self.client_version,
-            protocol = %self.protocol,
-            client_session = %self.client_session,
-            conversation_source = %self.conversation_source,
-            conversation_id = %self.conversation_id,
-            workspace_id = %self.workspace_id,
-            workspace_coherence = %self.workspace_coherence,
-            batch_items = self.batch_items,
-            worker_limit = self.worker_limit,
-            error_code = metadata.error_code,
-            next_action_tool = metadata.recovery.next_action_tool,
-            required_read_count = metadata.recovery.required_read_count,
-            retry_same_call = metadata.recovery.retry_same_call,
-            edit_applied = metadata.recovery.edit_applied,
-            fresh_read_required = metadata.recovery.fresh_read_required,
-            verification_status = metadata.recovery.verification_status,
-            source_kind = metadata.source_kind,
-            payload_bytes = metadata.payload_bytes,
-            source_bytes = metadata.source_bytes,
-            image_transcoded = metadata.image_transcoded,
-            image_deduplicated = metadata.image_deduplicated,
-            temporary_session_files = metadata.temporary_session_files,
-            temporary_session_bytes = metadata.temporary_session_bytes,
-            temporary_over_budget = metadata.temporary_over_budget,
-            result_status,
-            response_bytes,
-            duration_ms = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
-            outcome,
-            "tool call"
-        );
-    }
-}
-
-fn short_fingerprint(prefix: &str, value: &str) -> String {
-    let digest = Sha256::digest(value.as_bytes());
-    let mut output = format!("{prefix}_");
-    for byte in &digest[..8] {
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
-}
-
-fn conversation_telemetry(context: &RequestContext<RoleServer>) -> (String, String) {
-    let Some(parts) = context.extensions.get::<Parts>() else {
-        return ("none".to_string(), String::new());
-    };
-    for (header, source) in
-        [("mcp-session-id", "mcp_session"), ("x-winx-conversation-id", "gateway_header")]
-    {
-        if let Some(value) = parts
-            .headers
-            .get(header)
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return (source.to_string(), short_fingerprint("c", value));
-        }
-    }
-    ("none".to_string(), String::new())
-}
-
 /// Emit the cache fields required by MCP 2026-07-28 without changing the wire
 /// shape for clients that negotiated an older protocol revision.
 fn cache_hints_for_protocol(
@@ -495,12 +87,15 @@ fn supports_compact_bash_output(context: &RequestContext<RoleServer>) -> bool {
 }
 
 fn request_requires_bash_capability(request: &CallToolRequestParams) -> bool {
-    matches!(request.name.as_ref(), "FileWriteOrEdit" | "MultiFileEdit")
-        && request
-            .arguments
-            .as_ref()
-            .and_then(|arguments| arguments.get("verify_command"))
-            .is_some_and(|command| !command.is_null())
+    ToolKind::parse(request.name.as_ref()).is_some_and(|kind| {
+        kind.requires_bash_companion()
+            || (kind.is_file_mutation()
+                && request
+                    .arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.get("verify_command"))
+                    .is_some_and(|command| !command.is_null()))
+    })
 }
 
 fn normalized_wait_request(
@@ -539,47 +134,6 @@ fn normalized_wait_request(
     );
     request.arguments = Some(arguments);
     Ok(request)
-}
-
-/// Classify a `BashCommand` call by action kind (`command`, `status_check`,
-/// `send_text`, ...) without touching the command text itself. Mirrors the
-/// lenient forms accepted by the `BashCommand` deserializer: a typed
-/// `action_json` object, a JSON-encoded string, a bare command string, or
-/// legacy shorthand keys at the top level.
-fn bash_action(arguments: Option<&rmcp::model::JsonObject>) -> String {
-    use serde_json::Value;
-    const KINDS: [&str; 7] = [
-        "command",
-        "status_check",
-        "send_text",
-        "send_specials",
-        "send_ascii",
-        "screen",
-        "wait_for_turn",
-    ];
-    let Some(arguments) = arguments else {
-        return String::new();
-    };
-    let parsed;
-    let action = match arguments.get("action_json") {
-        Some(Value::Object(object)) => object,
-        Some(Value::String(text)) => {
-            match serde_json::from_str::<Value>(&text.replace('\n', " ")) {
-                Ok(Value::Object(object)) => {
-                    parsed = object;
-                    &parsed
-                }
-                // A non-object string is treated as a bare command downstream.
-                _ => return "command".to_string(),
-            }
-        }
-        // Legacy shorthand: the argument object itself is the action.
-        _ => arguments,
-    };
-    if let Some(kind) = action.get("type").and_then(Value::as_str) {
-        return kind.to_string();
-    }
-    KINDS.iter().find(|kind| action.contains_key(**kind)).map_or("?", |kind| kind).to_string()
 }
 
 #[allow(clippy::unused_async_trait_impl)] // rmcp's trait requires these async signatures
@@ -829,10 +383,13 @@ impl ServerHandler for WinxService {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        let tool_kind = ToolKind::parse(request.name.as_ref()).ok_or_else(|| {
+            McpError::invalid_request(format!("Unknown tool: {}", request.name), None)
+        })?;
         let principal = principal_from_context(&context);
         if principal
             .as_ref()
-            .is_some_and(|principal| !principal.tool_policy().allows(request.name.as_ref()))
+            .is_some_and(|principal| !principal.tool_policy().allows_kind(tool_kind))
         {
             return Err(McpError::invalid_request(
                 format!("Tool is not available for this principal: {}", request.name),
@@ -840,12 +397,12 @@ impl ServerHandler for WinxService {
             ));
         }
         if request_requires_bash_capability(&request)
-            && principal
-                .as_ref()
-                .is_some_and(|principal| !principal.tool_policy().allows("BashCommand"))
+            && principal.as_ref().is_some_and(|principal| {
+                !principal.tool_policy().allows_kind(ToolKind::BashCommand)
+            })
         {
             return Err(McpError::invalid_request(
-                "verify_command requires BashCommand in this principal's tool policy",
+                "Edit verification requires BashCommand in this principal's tool policy",
                 None,
             ));
         }
@@ -886,7 +443,7 @@ impl ServerHandler for WinxService {
         let compact_bash_output = supports_compact_bash_output(&context);
         let supports_tasks =
             context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks());
-        let wait_policy = if request.name == "BashCommand" {
+        let wait_policy = if tool_kind == ToolKind::BashCommand {
             Some(Self::bash_wait_policy(&request)?)
         } else {
             None
@@ -1070,7 +627,9 @@ impl ServerHandler for WinxService {
 
 #[cfg(test)]
 mod tests {
+    use super::super::usage::usage_result_metadata;
     use super::*;
+    use rmcp::model::CallToolResult;
 
     #[test]
     fn cache_hints_follow_negotiated_protocol_version() {
@@ -1176,21 +735,26 @@ mod tests {
         let edit_follow_up = result_with(serde_json::json!({
             "errorCode": "verification_failed",
             "retrySameCall": false,
-            "nextAction": {"tool": "BashCommand"},
+            "nextAction": {"tool": "VerifyEdit"},
             "requiredReads": [],
             "data": {
                 "edit_applied": true,
-                "verification_status": "failed"
+                "verification_status": "failed",
+                "mutation_transition": "committed",
+                "mutation_replayed": false,
+                "mutation_receipt_persisted": true
             }
         }));
         let metadata = usage_result_metadata(Some(&edit_follow_up));
         assert_eq!(metadata.error_code, "verification_failed");
-        assert_eq!(metadata.recovery.next_action_tool, "BashCommand");
+        assert_eq!(metadata.recovery.next_action_tool, "VerifyEdit");
         assert_eq!(metadata.recovery.required_read_count, 0);
         assert!(!metadata.recovery.retry_same_call);
         assert!(metadata.recovery.edit_applied);
         assert!(!metadata.recovery.fresh_read_required);
         assert_eq!(metadata.recovery.verification_status, "failed");
+        assert_eq!(metadata.recovery.mutation_transition, "committed");
+        assert_eq!(metadata.recovery.mutation_receipt_state, "persisted");
 
         let edit_conflict = result_with(serde_json::json!({
             "errorCode": "search_block_not_found",
@@ -1199,7 +763,9 @@ mod tests {
             "requiredReads": [{"path": "/workspace/lib.rs", "ranges": []}],
             "data": {
                 "edit_applied": false,
-                "fresh_read_required": true
+                "fresh_read_required": true,
+                "recovery_attempt": 2,
+                "recovery_escalated": true
             }
         }));
         let metadata = usage_result_metadata(Some(&edit_conflict));
@@ -1210,6 +776,8 @@ mod tests {
         assert!(!metadata.recovery.edit_applied);
         assert!(metadata.recovery.fresh_read_required);
         assert_eq!(metadata.recovery.verification_status, "");
+        assert_eq!(metadata.recovery.recovery_attempt, 2);
+        assert_eq!(metadata.recovery.recovery_level, "escalated");
     }
 
     #[test]

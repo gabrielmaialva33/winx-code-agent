@@ -15,6 +15,7 @@ use super::tool_dispatch::ToolCallExecution;
 use super::WinxService;
 use crate::runtime::{ShellActionOptions, ShellExecutionToken};
 use crate::state::task_state::{TaskEntry, DEFAULT_TASK_TTL_MS};
+use crate::tool_registry::ToolKind;
 use crate::types::{normalize_thread_id, BashCommand, BashCommandAction, BashWaitPolicy};
 
 const MAX_TASK_RUNTIME: Duration = Duration::from_secs(60 * 60);
@@ -255,7 +256,7 @@ impl WinxService {
     }
 
     pub(super) fn bash_task_is_eligible(request: &CallToolRequestParams) -> bool {
-        if request.name != "BashCommand" {
+        if ToolKind::parse(request.name.as_ref()) != Some(ToolKind::BashCommand) {
             return false;
         }
         let Some(arguments) = request.arguments.clone() else {
@@ -529,7 +530,8 @@ fn status_request(thread_id: &str) -> Result<CallToolRequestParams, McpError> {
         wait_for_seconds: Some(20.0),
         thread_id: thread_id.to_string(),
     };
-    Ok(CallToolRequestParams::new("BashCommand").with_arguments(task_arguments(&status)?))
+    Ok(CallToolRequestParams::new(ToolKind::BashCommand.as_str())
+        .with_arguments(task_arguments(&status)?))
 }
 
 fn task_action_options(

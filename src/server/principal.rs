@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use crate::config::{HttpPrincipal, HttpSessionAffinity};
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::generate_thread_id;
+use crate::tool_registry::ToolKind;
 use crate::types::{normalize_thread_id, MAX_NORMALIZED_THREAD_ID_BYTES};
 
 const SCOPED_HASH_SUFFIX_BYTES: usize = 9;
@@ -112,7 +113,7 @@ pub(super) fn scope_tool_request(
     let arguments = request.arguments.get_or_insert_default();
     let supplied = arguments.get("thread_id").and_then(Value::as_str).unwrap_or_default();
     let normalized = normalize_thread_id(supplied);
-    let first_call = request.name == "Initialize"
+    let first_call = ToolKind::parse(request.name.as_ref()) == Some(ToolKind::Initialize)
         && arguments.get("type").and_then(Value::as_str).is_none_or(|kind| kind == "first_call");
     let external = if first_call {
         match session_affinity {
@@ -229,18 +230,10 @@ fn workspace_label(value: &str) -> String {
 }
 
 fn tool_uses_thread_id(name: &str) -> bool {
-    matches!(
-        name,
-        "Initialize"
-            | "BashCommand"
-            | "ReadFiles"
-            | "FileWriteOrEdit"
-            | "MultiFileEdit"
-            | "UndoEdit"
-            | "ContextSave"
-            | "ReadImage"
-            | "CodeMap"
-    )
+    // Every registered Winx tool participates in the principal-scoped logical
+    // session. Keep this derived from the registry so unknown extension tools
+    // are never rewritten accidentally.
+    ToolKind::parse(name).is_some()
 }
 
 fn scoped_thread_id(principal: &HttpPrincipal, external: &str) -> Result<String> {

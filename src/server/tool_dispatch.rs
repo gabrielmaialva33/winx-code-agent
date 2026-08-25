@@ -7,13 +7,15 @@ use rmcp::ErrorData as McpError;
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
+use super::mutations::MutationStart;
 use super::{outcomes, SharedBashState, WinxService};
 use crate::errors::WinxError;
 use crate::runtime::{ShellActionOptions, ShellExecutionToken};
 use crate::state::bash_state::generate_thread_id;
+use crate::tool_registry::ToolKind;
 use crate::types::{
-    normalize_thread_id, BashCommand, CodeMap, ContextSave, FileWriteOrEdit, Initialize,
-    MultiFileEdit, ReadFiles, ReadImage, UndoEdit,
+    normalize_thread_id, ApplyPatch, BashCommand, CodeMap, ContextSave, FileWriteOrEdit,
+    Initialize, MultiFileEdit, ReadFiles, ReadImage, UndoEdit, VerifyEdit,
 };
 
 const MAX_VERIFY_WAIT_SECONDS: f32 = 60.0;
@@ -86,7 +88,15 @@ impl ToolCallExecution {
 }
 
 fn is_expected_recovery_status(status: &str) -> bool {
-    matches!(status, "needs_read" | "needs_initialize" | "not_found" | "invalid_input" | "conflict")
+    matches!(
+        status,
+        "needs_read"
+            | "needs_initialize"
+            | "not_found"
+            | "invalid_input"
+            | "conflict"
+            | "recovery_exhausted"
+    )
 }
 
 pub(super) struct BashCallExecution {
@@ -96,49 +106,51 @@ pub(super) struct BashCallExecution {
     generation_bound_actions: bool,
 }
 
+type BashRuntimeMetadata = (Option<u64>, Option<ShellExecutionToken>, bool);
+
 impl WinxService {
     pub(super) async fn execute_tool_call(
         &self,
         param: CallToolRequestParams,
         bash_options: ShellActionOptions,
     ) -> Result<ToolCallExecution, McpError> {
-        let tool = param.name.to_string();
+        let requested_tool = param.name.to_string();
+        let tool_kind = ToolKind::parse(&requested_tool).ok_or_else(|| {
+            McpError::invalid_request(format!("Unknown tool: {requested_tool}"), None)
+        })?;
+        let tool = tool_kind.as_str();
         let args_value = param.arguments.map(Value::Object);
         let orchestration_args = args_value.clone();
         let summary =
-            crate::utils::redact::redact(&audit_summary(&tool, args_value.as_ref())).into_owned();
+            crate::utils::redact::redact(&audit_summary(tool, args_value.as_ref())).into_owned();
         let started = std::time::Instant::now();
 
-        let (result, bash_runtime) = match tool.as_str() {
-            "Initialize" => (self.handle_initialize(args_value).await, None),
-            "BashCommand" => {
-                match self.handle_bash_command_with_output(args_value, bash_options.clone()).await {
-                    Ok(execution) => (
-                        Ok(execution.result),
-                        Some((
-                            execution.command_generation,
-                            execution.execution_token,
-                            execution.generation_bound_actions,
-                        )),
-                    ),
-                    Err(error) => (Err(error), None),
-                }
+        let mutation_start = self.begin_edit_mutation(tool_kind, orchestration_args.as_ref()).await;
+        let mut mutation_owner = match mutation_start {
+            MutationStart::Bypass => None,
+            MutationStart::Owner(owner) => Some(owner),
+            MutationStart::Replay(mut result) => {
+                redact_result(&mut result);
+                info!(
+                    tool = %tool,
+                    ms = started.elapsed().as_millis(),
+                    status = outcomes::result_status(&result),
+                    response_bytes = outcomes::result_size_bytes(&result),
+                    "tool call replayed from mutation receipt — {summary}"
+                );
+                return Ok(ToolCallExecution::legacy(result));
             }
-            "ReadFiles" => (self.handle_read_files(args_value).await, None),
-            "FileWriteOrEdit" => {
-                (self.handle_file_write_or_edit(args_value, bash_options.clone()).await, None)
-            }
-            "MultiFileEdit" => (self.handle_multi_file_edit(args_value, bash_options).await, None),
-            "UndoEdit" => (self.handle_undo_edit(args_value).await, None),
-            "ContextSave" => (self.handle_context_save(args_value).await, None),
-            "ReadImage" => (self.handle_read_image(args_value).await, None),
-            "CodeMap" => (self.handle_code_map(args_value).await, None),
-            _ => (Err(McpError::invalid_request(format!("Unknown tool: {tool}"), None)), None),
         };
+
+        let (result, bash_runtime) = self.dispatch_tool(tool_kind, args_value, bash_options).await;
 
         let result = match result {
             Ok(mut call) => {
-                outcomes::decorate_success(&tool, orchestration_args.as_ref(), &mut call);
+                outcomes::decorate_success(tool, orchestration_args.as_ref(), &mut call);
+                self.apply_edit_recovery_budget(tool_kind, orchestration_args.as_ref(), &mut call);
+                if let Some(owner) = mutation_owner.take() {
+                    self.finish_edit_mutation(owner, &mut call).await;
+                }
                 redact_result(&mut call);
                 Ok(call)
             }
@@ -203,6 +215,43 @@ impl WinxService {
                 generation_bound_actions,
             }
         })
+    }
+
+    async fn dispatch_tool(
+        &self,
+        tool: ToolKind,
+        args: Option<Value>,
+        bash_options: ShellActionOptions,
+    ) -> (Result<CallToolResult, McpError>, Option<BashRuntimeMetadata>) {
+        match tool {
+            ToolKind::Initialize => (self.handle_initialize(args).await, None),
+            ToolKind::BashCommand => {
+                match self.handle_bash_command_with_output(args, bash_options.clone()).await {
+                    Ok(execution) => (
+                        Ok(execution.result),
+                        Some((
+                            execution.command_generation,
+                            execution.execution_token,
+                            execution.generation_bound_actions,
+                        )),
+                    ),
+                    Err(error) => (Err(error), None),
+                }
+            }
+            ToolKind::ReadFiles => (self.handle_read_files(args).await, None),
+            ToolKind::FileWriteOrEdit => {
+                (self.handle_file_write_or_edit(args, bash_options.clone()).await, None)
+            }
+            ToolKind::MultiFileEdit => {
+                (self.handle_multi_file_edit(args, bash_options).await, None)
+            }
+            ToolKind::VerifyEdit => (self.handle_verify_edit(args, bash_options).await, None),
+            ToolKind::UndoEdit => (self.handle_undo_edit(args).await, None),
+            ToolKind::ContextSave => (self.handle_context_save(args).await, None),
+            ToolKind::ReadImage => (self.handle_read_image(args).await, None),
+            ToolKind::CodeMap => (self.handle_code_map(args).await, None),
+            ToolKind::ApplyPatch => (self.handle_apply_patch(args, bash_options).await, None),
+        }
     }
 
     pub(super) async fn knowledge_transfer_prompt_text(
@@ -535,11 +584,15 @@ impl WinxService {
                                 json!(outcome.successful_files),
                             );
                             data.insert("failed_files".to_string(), json!(outcome.errors.len()));
+                            data.insert("files".to_string(), json!(outcome.files));
                         }
                     }
                     Ok(result)
                 } else {
-                    Ok(CallToolResult::success(vec![ContentBlock::text(outcome.text)]))
+                    let mut result =
+                        CallToolResult::success(vec![ContentBlock::text(outcome.text)]);
+                    result.structured_content = Some(json!({"files": outcome.files}));
+                    Ok(result)
                 }
             }
             Err(error) => outcomes::tool_failure("ReadFiles", &error, Some(&recovery_args)),
@@ -573,6 +626,19 @@ impl WinxService {
         let Some(verification) = verification else {
             return Ok(CallToolResult::success(vec![ContentBlock::text(edit_result)]));
         };
+        let verification_id =
+            super::mutations::verification_receipt_id(Some(recovery_args), &verification.command);
+        let mut retry_arguments = json!({
+            "verification_id": verification_id,
+            "command": verification.command,
+            "thread_id": thread_id
+        });
+        if let Some(workspace_root) = recovery_args.get("workspace_root").and_then(Value::as_str) {
+            retry_arguments["workspace_root"] = Value::String(workspace_root.to_string());
+        }
+        if let Some(wait) = verification.wait_for_seconds {
+            retry_arguments["wait_for_seconds"] = json!(wait);
+        }
         let mut arguments = json!({
             "action_json": {
                 "type": "command",
@@ -594,6 +660,7 @@ impl WinxService {
             Some(recovery_args),
             &edit_result,
             execution.result,
+            &outcomes::VerificationRecovery { id: verification_id, arguments: retry_arguments },
         ))
     }
 
@@ -618,7 +685,7 @@ impl WinxService {
         }
         match crate::tools::file_write_or_edit::handle_tool_call(&slot, edit).await {
             Ok(result) => {
-                self.persist_state(&slot).await;
+                self.checkpoint_committed_edit(ToolKind::FileWriteOrEdit, &recovery_args).await;
                 self.finish_edit_verification(
                     "FileWriteOrEdit",
                     &recovery_args,
@@ -659,7 +726,7 @@ impl WinxService {
         }
         match crate::tools::multi_file_edit::handle_tool_call(&slot, multi).await {
             Ok(result) => {
-                self.persist_state(&slot).await;
+                self.checkpoint_committed_edit(ToolKind::MultiFileEdit, &recovery_args).await;
                 self.finish_edit_verification(
                     "MultiFileEdit",
                     &recovery_args,
@@ -677,6 +744,117 @@ impl WinxService {
                 outcomes::tool_failure("MultiFileEdit", &error, Some(&recovery_args))
             }
         }
+    }
+
+    async fn handle_apply_patch(
+        &self,
+        args: Option<Value>,
+        bash_options: ShellActionOptions,
+    ) -> Result<CallToolResult, McpError> {
+        let mut args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
+        let verification = take_edit_verification(&mut args)?;
+        let patch: ApplyPatch = Self::lenient_from_value(args).map_err(|error| {
+            McpError::invalid_request(format!("Invalid ApplyPatch parameters: {error}"), None)
+        })?;
+        let thread_id = normalize_thread_id(&patch.thread_id);
+        let (slot, _session_guard) = self.session_for(&thread_id).await;
+        if let Some(verification) = verification.as_ref() {
+            if let Err(error) = Self::validate_edit_verification(&slot, verification).await {
+                return outcomes::tool_failure("ApplyPatch", &error, Some(&recovery_args));
+            }
+        }
+        match crate::tools::apply_patch::handle_tool_call(&slot, patch).await {
+            Ok(outcome) => {
+                self.checkpoint_committed_edit(ToolKind::ApplyPatch, &recovery_args).await;
+                let mut result = self
+                    .finish_edit_verification(
+                        "ApplyPatch",
+                        &recovery_args,
+                        &thread_id,
+                        outcome.text,
+                        verification,
+                        bash_options,
+                    )
+                    .await?;
+                attach_result_data(&mut result, "new_revision", Value::String(outcome.revision));
+                Ok(result)
+            }
+            Err(error) => outcomes::tool_failure("ApplyPatch", &error, Some(&recovery_args)),
+        }
+    }
+
+    async fn handle_verify_edit(
+        &self,
+        args: Option<Value>,
+        bash_options: ShellActionOptions,
+    ) -> Result<CallToolResult, McpError> {
+        let args = args.ok_or_else(|| McpError::invalid_request("Missing arguments", None))?;
+        let recovery_args = args.clone();
+        let verify: VerifyEdit = Self::lenient_from_value(args).map_err(|error| {
+            McpError::invalid_request(format!("Invalid VerifyEdit parameters: {error}"), None)
+        })?;
+        let command = verify.command.trim().to_string();
+        if command.is_empty() {
+            return outcomes::tool_failure(
+                "VerifyEdit",
+                &WinxError::InvalidInput("command must not be empty".to_string()),
+                Some(&recovery_args),
+            );
+        }
+        if verify.wait_for_seconds.is_some_and(|wait| {
+            !wait.is_finite() || !(0.0..=MAX_VERIFY_WAIT_SECONDS).contains(&wait)
+        }) {
+            return outcomes::tool_failure(
+                "VerifyEdit",
+                &WinxError::InvalidInput(format!(
+                    "wait_for_seconds must be between 0 and {MAX_VERIFY_WAIT_SECONDS}"
+                )),
+                Some(&recovery_args),
+            );
+        }
+        let expected_id = super::mutations::verification_receipt_id(Some(&recovery_args), &command);
+        if verify.verification_id != expected_id {
+            return outcomes::tool_failure(
+                "VerifyEdit",
+                &WinxError::InvalidInput(
+                    "verification_id does not match this command and project session; use the exact VerifyEdit nextAction returned by the committed edit"
+                        .to_string(),
+                ),
+                Some(&recovery_args),
+            );
+        }
+
+        let thread_id = normalize_thread_id(&verify.thread_id);
+        let (slot, _session_guard) = self.session_for(&thread_id).await;
+        let verification = EditVerification {
+            command: command.clone(),
+            wait_for_seconds: verify.wait_for_seconds,
+        };
+        if let Err(error) = Self::validate_edit_verification(&slot, &verification).await {
+            return outcomes::tool_failure("VerifyEdit", &error, Some(&recovery_args));
+        }
+        let mut arguments = json!({
+            "action_json": {
+                "type": "command",
+                "command": command,
+                "is_background": false,
+                "allow_multi": false
+            },
+            "thread_id": thread_id
+        });
+        if let Some(workspace_root) = recovery_args.get("workspace_root").and_then(Value::as_str) {
+            arguments["workspace_root"] = Value::String(workspace_root.to_string());
+        }
+        if let Some(wait) = verify.wait_for_seconds {
+            arguments["wait_for_seconds"] = json!(wait);
+        }
+        let execution = self.handle_bash_command_with_output(Some(arguments), bash_options).await?;
+        Ok(outcomes::verify_edit_result(
+            Some(&recovery_args),
+            &verify.verification_id,
+            execution.result,
+        ))
     }
 
     async fn handle_undo_edit(&self, args: Option<Value>) -> Result<CallToolResult, McpError> {
@@ -777,7 +955,7 @@ pub(super) fn audit_summary(tool: &str, args: Option<&Value>) -> String {
     };
     let string = |key: &str| args.get(key).and_then(Value::as_str).unwrap_or("").to_string();
     match tool {
-        "BashCommand" => {
+        "BashCommand" | "VerifyEdit" => {
             let action = args.get("action_json");
             let command = action
                 .and_then(|action| action.get("command"))
@@ -800,6 +978,12 @@ pub(super) fn audit_summary(tool: &str, args: Option<&Value>) -> String {
                 args.get("verify_command").is_some_and(|value| !value.is_null())
             )
         }
+        "ApplyPatch" => format!(
+            "path={} patches={} verify={}",
+            string("file_path"),
+            args.get("patches").and_then(Value::as_array).map_or(0, Vec::len),
+            args.get("verify_command").is_some_and(|value| !value.is_null())
+        ),
         "ReadImage" | "UndoEdit" => format!("path={}", string("file_path")),
         "MultiFileEdit" => {
             format!(
@@ -820,6 +1004,22 @@ pub(super) fn audit_summary(tool: &str, args: Option<&Value>) -> String {
             format!("op={} path={} name={}", string("operation"), string("path"), string("name"))
         }
         _ => String::new(),
+    }
+}
+
+fn attach_result_data(result: &mut CallToolResult, key: &str, value: Value) {
+    let Some(Value::Object(structured)) = result.structured_content.as_mut() else {
+        result.structured_content = Some(json!({key: value}));
+        return;
+    };
+    if structured.get("status").is_some() {
+        let data =
+            structured.entry("data").or_insert_with(|| Value::Object(serde_json::Map::new()));
+        if let Value::Object(data) = data {
+            data.insert(key.to_string(), value);
+        }
+    } else {
+        structured.insert(key.to_string(), value);
     }
 }
 

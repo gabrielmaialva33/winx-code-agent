@@ -114,7 +114,8 @@ impl WinxService {
             tasks: Arc::new(Mutex::new(TaskRegistry::default())),
             root_bootstrap: Arc::new(Mutex::new(())),
             shell_runtime,
-            version: env!("CARGO_PKG_VERSION").to_string(),
+            mutations: super::mutations::MutationCoordinator::default(),
+            version: crate::build_info::display_version().to_string(),
             isolation,
         }
     }

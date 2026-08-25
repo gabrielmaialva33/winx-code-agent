@@ -6,6 +6,7 @@ use super::principal::{canonical_workspace_identity, expected_affinity_thread_id
 use super::{SessionIsolation, WinxService};
 use crate::config::HttpSessionAffinity;
 use crate::errors::{Result, WinxError};
+use crate::tool_registry::ToolKind;
 
 /// Result recorded in usage telemetry after the request's project identity has
 /// been checked. It contains no user path or transport identity.
@@ -47,7 +48,7 @@ impl WinxService {
         let internal_thread_id = string_argument(arguments, "thread_id").unwrap_or_default();
         let external_thread_id = scope.unscope_text(&internal_thread_id);
 
-        if request.name == "Initialize" {
+        if ToolKind::parse(request.name.as_ref()) == Some(ToolKind::Initialize) {
             return self
                 .validate_remote_initialize(arguments, &internal_thread_id, &external_thread_id)
                 .await;

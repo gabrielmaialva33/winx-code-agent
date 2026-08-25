@@ -6,9 +6,10 @@ use serde_json::Value;
 
 use super::outcomes::{CodeMapToolResultEnvelope, ToolResultEnvelope};
 use crate::tool_policy::ToolPolicy;
+use crate::tool_registry::{ToolAccess, ToolKind, ToolOutputContract, ToolWorld};
 use crate::types::{
-    BashCommand, CodeMap, ContextSave, FileWriteOrEdit, Initialize, MultiFileEdit, ReadFiles,
-    ReadImage, UndoEdit,
+    ApplyPatch, BashCommand, CodeMap, ContextSave, FileWriteOrEdit, Initialize, MultiFileEdit,
+    ReadFiles, ReadImage, UndoEdit, VerifyEdit,
 };
 
 /// Convert a schemars schema into the MCP tool input-schema representation.
@@ -212,25 +213,66 @@ fn edit_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, V
     with_workspace_binding(Arc::new(schema))
 }
 
+fn apply_patch_input_schema() -> Arc<serde_json::Map<String, Value>> {
+    let mut schema = Arc::unwrap_or_clone(edit_input_schema::<ApplyPatch>());
+    if let Some(Value::Object(properties)) = schema.get_mut("properties") {
+        if let Some(Value::Object(revision)) = properties.get_mut("expected_revision") {
+            revision
+                .insert("pattern".to_string(), Value::String("^sha256:[0-9a-f]{64}$".to_string()));
+        }
+        if let Some(Value::Object(patches)) = properties.get_mut("patches") {
+            patches.insert("minItems".to_string(), Value::from(1));
+            patches.insert("maxItems".to_string(), Value::from(256));
+        }
+    }
+    Arc::new(schema)
+}
+
+fn verify_edit_input_schema() -> Arc<serde_json::Map<String, Value>> {
+    let mut schema = (*schema_to_input_schema::<VerifyEdit>()).clone();
+    let properties = schema
+        .entry("properties".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Value::Object(properties) = properties {
+        if let Some(Value::Object(command)) = properties.get_mut("command") {
+            command.insert("minLength".to_string(), Value::from(1));
+        }
+        if let Some(Value::Object(receipt)) = properties.get_mut("verification_id") {
+            receipt.insert("pattern".to_string(), Value::String("^verify_[0-9a-f]{24}$".into()));
+        }
+        if let Some(Value::Object(wait)) = properties.get_mut("wait_for_seconds") {
+            wait.insert("minimum".to_string(), Value::from(0));
+            wait.insert("maximum".to_string(), Value::from(60));
+        }
+    }
+    with_workspace_binding(Arc::new(schema))
+}
+
 fn with_output_schema<T: schemars::JsonSchema>(mut tool: Tool) -> Tool {
     tool.output_schema = Some(schema_to_input_schema::<T>());
     tool
 }
 
 const INITIALIZE_DESCRIPTION: &str =
-    "Open one project workspace before stateful tools, unless MCP Roots already did so. Set any_workspace_path from the user's project or file and normally use first_call + wcgw. Preserve the returned thread_id/workspace_root pair in this conversation; workspace_root is identity, not a path sandbox. Do not call Initialize again with a valid pair: use user_asked_mode_change only for an explicit mode change and reset_shell only after repeated shell failure. If adapter state was lost, either transition safely recreates the same intended project session and reports initialize_recovered_missing_session. A different project identity requires a new conversation. temporary_artifact_dir is the only location for non-canonical derived helpers.";
+    "Open one project before stateful tools unless MCP Roots did. Use first_call + wcgw with the user's project/file and preserve the returned thread_id/workspace_root pair; workspace_root is identity, not a path sandbox. Never reinitialize a valid pair. Use user_asked_mode_change only when asked and reset_shell only after repeated shell failure. State loss safely recreates the intended session; another project needs a new conversation. Put derived helpers only in temporary_artifact_dir.";
 
 const BASH_COMMAND_DESCRIPTION: &str =
-    "Run shell commands, tests, builds, servers, and TUIs after Initialize. Combine related finite checks with &&. adaptive is default; until_complete is only for a finite foreground command, and return_early gives prompt control. Incompatible policies return corrected next_action arguments. For running results, wait retry_after_ms and execute next_action/status_check; never resubmit the command. Read dropped_output_file only when output_truncated history matters. Use background and interactive actions for long-lived work, and file tools for canonical reads/edits. Keep shell-derived helpers under $WINX_TEMP_DIR, reuse stable names, and never create CodeMap-only carriers. Winx audits its budget after Bash; explicitly clean obsolete helpers when directed.";
+    "Run commands, tests, builds, servers, and TUIs after Initialize. Combine finite checks with &&. adaptive is default; until_complete is for finite foreground commands, return_early gives prompt control. For running results, wait retry_after_ms and execute next_action/status_check; never resubmit the command. Use background/interactive actions for long-lived work and file tools for canonical reads/edits. Keep helpers under $WINX_TEMP_DIR, reuse names, never create CodeMap-only carriers, and clean obsolete helpers when directed.";
 
 const READ_FILES_DESCRIPTION: &str =
-    "Read exact canonical text from one or more absolute paths and record visible coverage required by edit tools. Prefer this over cat/head/tail. Use :start-end suffixes for targeted ranges; omitted bounds are allowed. Token truncation never records unseen lines. Use ReadImage for images and do not read binary files.";
+    "Read exact canonical text and record visible edit coverage. Prefer this over cat/head/tail. Use :start-end targeted ranges; bounds may be omitted. Each file returns a path/revision/visibleRanges receipt for ApplyPatch. Truncation never records unseen lines. Use ReadImage for images.";
 
 const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
     "Edit one read file; use MultiFileEdit for batches. For <=50%, use exact SEARCH/REPLACE blocks (optional @line); otherwise read and send the complete file. A SEARCH conflict revokes the read permit: execute its ReadFiles next_action (shell reads do not count), rebuild SEARCH, and retry once. Put helpers in temporary_artifact_dir. verify_command is post-commit; completed_with_issues means the edit remains applied - diagnose it, never repeat it.";
 
 const MULTI_FILE_EDIT_DESCRIPTION: &str =
     "Atomically edit 2+ read, unique files. Validation failure writes nothing and revokes only the conflicting target's permit; execute its ReadFiles next_action before one corrected retry. Uses FileWriteOrEdit semantics. verify_command is post-commit; completed_with_issues means edits remain applied - never repeat them.";
+
+const APPLY_PATCH_DESCRIPTION: &str =
+    "Patch one exact ReadFiles revision with ordered non-overlapping 1-based ranges. Copy path/revision; delete_lines=0 inserts and totalLines+1 appends. Only visible lines may change. On revision_mismatch execute the exact ReadFiles nextAction; never retry stale input. Prefer this over SEARCH when coordinates are known.";
+
+const VERIFY_EDIT_DESCRIPTION: &str =
+    "Rerun a post-edit check without repeating the committed edit. Use the exact nextAction receipt after completed_with_issues, correct the code first, and never retry a failing check unchanged.";
 
 const UNDO_EDIT_DESCRIPTION: &str =
     "Restore one file to its previous Winx edit checkpoint in this session. Repeated calls walk backward per file. Undo is refused after an external change and cannot remove a newly created file.";
@@ -258,58 +300,84 @@ pub(super) fn winx_tools_for_policy(policy: ToolPolicy) -> Vec<Tool> {
 }
 
 fn build_winx_tools() -> Vec<Tool> {
-    vec![
-        with_output_schema::<ToolResultEnvelope>(mcp_tool::<Initialize>(
-            "Initialize",
+    ToolKind::ALL.into_iter().map(build_winx_tool).collect()
+}
+
+fn annotations(kind: ToolKind) -> ToolAnnotations {
+    let descriptor = kind.descriptor();
+    let annotations = ToolAnnotations::new().open_world(descriptor.world == ToolWorld::Open);
+    match descriptor.access {
+        ToolAccess::ReadOnly => annotations.read_only(true),
+        ToolAccess::Neutral => annotations.destructive(false),
+        ToolAccess::Destructive => annotations.destructive(true),
+    }
+}
+
+fn build_winx_tool(kind: ToolKind) -> Tool {
+    let tool = match kind {
+        ToolKind::Initialize => mcp_tool::<Initialize>(
+            kind.as_str(),
             INITIALIZE_DESCRIPTION,
-            ToolAnnotations::new().read_only(true).open_world(false),
-        )),
-        with_output_schema::<ToolResultEnvelope>(
-            Tool::new("BashCommand", BASH_COMMAND_DESCRIPTION, bash_command_input_schema())
-                .with_annotations(ToolAnnotations::new().destructive(true).open_world(true)),
+            annotations(kind),
         ),
-        with_output_schema::<ToolResultEnvelope>(mcp_session_tool::<ReadFiles>(
-            "ReadFiles",
+        ToolKind::BashCommand => Tool::new(
+            kind.as_str(),
+            BASH_COMMAND_DESCRIPTION,
+            bash_command_input_schema(),
+        )
+        .with_annotations(annotations(kind)),
+        ToolKind::ReadFiles => mcp_session_tool::<ReadFiles>(
+            kind.as_str(),
             READ_FILES_DESCRIPTION,
-            ToolAnnotations::new().read_only(true).open_world(false),
-        )),
-        with_output_schema::<ToolResultEnvelope>(
-            Tool::new(
-                "FileWriteOrEdit",
-                FILE_WRITE_OR_EDIT_DESCRIPTION,
-                edit_input_schema::<FileWriteOrEdit>(),
-            )
-            .with_annotations(ToolAnnotations::new().destructive(true).open_world(true)),
+            annotations(kind),
         ),
-        with_output_schema::<ToolResultEnvelope>(
-            Tool::new(
-                "MultiFileEdit",
-                MULTI_FILE_EDIT_DESCRIPTION,
-                edit_input_schema::<MultiFileEdit>(),
-            )
-            .with_annotations(ToolAnnotations::new().destructive(true).open_world(true)),
-        ),
-        with_output_schema::<ToolResultEnvelope>(mcp_session_tool::<UndoEdit>(
-            "UndoEdit",
+        ToolKind::FileWriteOrEdit => Tool::new(
+            kind.as_str(),
+            FILE_WRITE_OR_EDIT_DESCRIPTION,
+            edit_input_schema::<FileWriteOrEdit>(),
+        )
+        .with_annotations(annotations(kind)),
+        ToolKind::MultiFileEdit => Tool::new(
+            kind.as_str(),
+            MULTI_FILE_EDIT_DESCRIPTION,
+            edit_input_schema::<MultiFileEdit>(),
+        )
+        .with_annotations(annotations(kind)),
+        ToolKind::VerifyEdit => {
+            Tool::new(kind.as_str(), VERIFY_EDIT_DESCRIPTION, verify_edit_input_schema())
+                .with_annotations(annotations(kind))
+        }
+        ToolKind::UndoEdit => mcp_session_tool::<UndoEdit>(
+            kind.as_str(),
             UNDO_EDIT_DESCRIPTION,
-            ToolAnnotations::new().destructive(true).open_world(false),
-        )),
-        with_output_schema::<ToolResultEnvelope>(mcp_session_tool::<ContextSave>(
-            "ContextSave",
+            annotations(kind),
+        ),
+        ToolKind::ContextSave => mcp_session_tool::<ContextSave>(
+            kind.as_str(),
             CONTEXT_SAVE_DESCRIPTION,
-            ToolAnnotations::new().destructive(false).open_world(false),
-        )),
-        with_output_schema::<ToolResultEnvelope>(mcp_session_tool::<ReadImage>(
-            "ReadImage",
+            annotations(kind),
+        ),
+        ToolKind::ReadImage => mcp_session_tool::<ReadImage>(
+            kind.as_str(),
             "Read validated JPEG/PNG/GIF/WebP as native MCP image content. Large images are bounded; unchanged session repeats return a compact reference. Set force=true only for an intentional resend.",
-            ToolAnnotations::new().read_only(true).open_world(false),
-        )),
-        with_output_schema::<CodeMapToolResultEnvelope>(mcp_session_tool::<CodeMap>(
-            "CodeMap",
+            annotations(kind),
+        ),
+        ToolKind::CodeMap => mcp_session_tool::<CodeMap>(
+            kind.as_str(),
             CODE_MAP_DESCRIPTION,
-            ToolAnnotations::new().read_only(true).open_world(false),
-        )),
-    ]
+            annotations(kind),
+        ),
+        ToolKind::ApplyPatch => Tool::new(
+            kind.as_str(),
+            APPLY_PATCH_DESCRIPTION,
+            apply_patch_input_schema(),
+        )
+        .with_annotations(annotations(kind)),
+    };
+    match kind.descriptor().output_contract {
+        ToolOutputContract::Shared => with_output_schema::<ToolResultEnvelope>(tool),
+        ToolOutputContract::CodeMap => with_output_schema::<CodeMapToolResultEnvelope>(tool),
+    }
 }
 
 pub(super) fn winx_prompts() -> Vec<Prompt> {

@@ -21,6 +21,7 @@ pub(super) enum ToolResultStatus {
     NeedsRead,
     NeedsInitialize,
     Conflict,
+    RecoveryExhausted,
     NotFound,
     Denied,
     InvalidInput,
@@ -174,7 +175,7 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
     let text = result_text(result);
     let mut data = safe_success_data(tool, arguments, &text, false);
     if let Some(existing) = existing.as_ref() {
-        if tool == "Initialize" {
+        if matches!(tool, "Initialize" | "ReadFiles" | "ApplyPatch") {
             if let Value::Object(metadata) = existing {
                 for (key, value) in metadata {
                     data.entry(key.clone()).or_insert_with(|| value.clone());
@@ -272,6 +273,11 @@ fn edit_verification_presentation(
     (message, combined_text)
 }
 
+pub(super) struct VerificationRecovery {
+    pub id: String,
+    pub arguments: Value,
+}
+
 /// Combine an already-applied edit with its optional foreground verification.
 /// The command remains a nested Bash result, while the outer status makes it
 /// explicit that a failed verification does not roll the edit back.
@@ -280,6 +286,7 @@ pub(super) fn edit_verification_result(
     arguments: Option<&Value>,
     edit_text: &str,
     verification: CallToolResult,
+    recovery: &VerificationRecovery,
 ) -> CallToolResult {
     let verification_text = result_text(&verification);
     let verification_is_error = verification.is_error == Some(true);
@@ -330,6 +337,7 @@ pub(super) fn edit_verification_result(
         data.insert("verification_passed".to_string(), Value::Bool(!verification_error));
     }
     data.insert("verification".to_string(), nested.clone());
+    data.insert("verification_id".to_string(), Value::String(recovery.id.clone()));
     if let Some(exit_code) = exit_code {
         data.insert("verification_exit_code".to_string(), json!(exit_code));
     }
@@ -361,10 +369,11 @@ pub(super) fn edit_verification_result(
             envelope[key] = value.clone();
         }
     }
-    if verification_error && envelope.get("nextAction").is_none() {
+    if verification_error {
         envelope["nextAction"] = json!({
-            "tool": "BashCommand",
-            "instruction": "The edit is already applied. Diagnose the verification output, make only corrective changes, then rerun verification separately. Do not repeat the original edit."
+            "tool": "VerifyEdit",
+            "instruction": "The edit is already applied. Diagnose the output and make only corrective changes. After that, execute these exact VerifyEdit arguments; never repeat the original edit.",
+            "arguments": recovery.arguments
         });
     }
 
@@ -373,6 +382,94 @@ pub(super) fn edit_verification_result(
     // remains explicit machine-readable follow-up state, while the committed side
     // effect is reported as a successful tool delivery.
     let mut result = CallToolResult::success(vec![ContentBlock::text(combined_text)]);
+    result.structured_content = Some(envelope);
+    result
+}
+
+/// Present a verification retry as its own operation. A non-zero check is a
+/// `VerifyEdit` failure, never a reason to replay the already-committed edit.
+pub(super) fn verify_edit_result(
+    arguments: Option<&Value>,
+    verification_id: &str,
+    verification: CallToolResult,
+) -> CallToolResult {
+    let verification_text = result_text(&verification);
+    let verification_is_error = verification.is_error == Some(true);
+    let nested = verification.structured_content.unwrap_or_else(|| {
+        json!({
+            "status": if verification_is_error { "failed" } else { "completed" },
+            "tool": "BashCommand",
+            "message": "Verification returned no structured result."
+        })
+    });
+    let nested_status = nested.get("status").and_then(Value::as_str).unwrap_or("failed");
+    let exit_code =
+        nested.get("data").and_then(|data| data.get("exit_code")).and_then(Value::as_i64);
+    let failed = verification_is_error || exit_code.is_some_and(|code| code != 0);
+    let active = matches!(nested_status, "running" | "awaiting_input" | "awaiting_approval");
+    let status = if failed {
+        ToolResultStatus::Failed
+    } else if active {
+        match nested_status {
+            "running" => ToolResultStatus::Running,
+            "awaiting_input" => ToolResultStatus::AwaitingInput,
+            "awaiting_approval" => ToolResultStatus::AwaitingApproval,
+            _ => ToolResultStatus::Completed,
+        }
+    } else {
+        ToolResultStatus::Completed
+    };
+    let message = if failed {
+        "VerifyEdit failed. The original edit remains applied; fix the reported issue before rerunning this verification."
+    } else if active {
+        "VerifyEdit is still running."
+    } else {
+        "VerifyEdit passed. The original edit remains committed."
+    };
+    let rendered = if failed {
+        format!(
+            "VERIFICATION FAILED. Do not repeat the original edit. Make corrective changes first.\n\n{verification_text}"
+        )
+    } else {
+        verification_text
+    };
+    let mut data = safe_success_data("VerifyEdit", arguments, &rendered, false);
+    data.insert("verification_id".to_string(), Value::String(verification_id.to_string()));
+    data.insert("verification_passed".to_string(), Value::Bool(!failed && !active));
+    data.insert("original_edit_retryable".to_string(), Value::Bool(false));
+    data.insert("verification".to_string(), nested.clone());
+    if let Some(exit_code) = exit_code {
+        data.insert("verification_exit_code".to_string(), json!(exit_code));
+    }
+
+    let mut envelope = json!({
+        "status": status,
+        "tool": "VerifyEdit",
+        "message": message,
+        "retryable": failed,
+        "retrySameCall": false,
+        "requiredReads": [],
+        "data": data,
+    });
+    if failed {
+        envelope["errorCode"] = Value::String("verification_failed".to_string());
+        envelope["nextAction"] = json!({
+            "tool": "VerifyEdit",
+            "instruction": "Do not retry unchanged. Correct the diagnosed code or configuration first, then rerun the same verification receipt."
+        });
+    } else if active {
+        for key in ["retryAfterMs", "nextAction"] {
+            if let Some(value) = nested.get(key) {
+                envelope[key] = value.clone();
+            }
+        }
+    }
+
+    let mut result = if failed {
+        CallToolResult::error(vec![ContentBlock::text(rendered)])
+    } else {
+        CallToolResult::success(vec![ContentBlock::text(rendered)])
+    };
     result.structured_content = Some(envelope);
     result
 }
@@ -769,18 +866,6 @@ fn error_envelope(
             retry_after_ms = Some(1_000);
             next_action = Some(status_check_action(arguments));
         }
-        WinxError::FileAccessError { path, message } => {
-            classify_file_error(
-                path.to_string_lossy().as_ref(),
-                message,
-                arguments,
-                &mut status,
-                &mut error_code,
-                &mut retryable,
-                &mut next_action,
-                &mut required_reads,
-            );
-        }
         WinxError::TemporaryArtifactPolicy { temporary_artifact_dir, .. } => {
             status = ToolResultStatus::InvalidInput;
             error_code = "temporary_artifact_policy".to_string();
@@ -851,31 +936,6 @@ fn error_envelope(
                 arguments: None,
             });
         }
-        WinxError::SearchBlockNotFound(_) | WinxError::SearchBlockAmbiguous { .. } => {
-            status = ToolResultStatus::Conflict;
-            error_code = if matches!(error, WinxError::SearchBlockAmbiguous { .. }) {
-                "search_block_ambiguous".to_string()
-            } else {
-                "search_block_not_found".to_string()
-            };
-            retryable = true;
-            if let Some(path) = string_argument(arguments, "file_path") {
-                required_reads.push(RequiredRead { path: path.clone(), ranges: Vec::new() });
-                next_action = read_action(arguments, &path, &[]);
-            }
-        }
-        WinxError::MultiFilePlanError { path, source, .. } => {
-            status = ToolResultStatus::Conflict;
-            error_code = if matches!(source.as_ref(), WinxError::SearchBlockAmbiguous { .. }) {
-                "search_block_ambiguous".to_string()
-            } else {
-                "search_block_not_found".to_string()
-            };
-            retryable = true;
-            let path = path.to_string_lossy().into_owned();
-            required_reads.push(RequiredRead { path: path.clone(), ranges: Vec::new() });
-            next_action = read_action(arguments, &path, &[]);
-        }
         WinxError::PathSecurityError { .. } | WinxError::CommandNotAllowed(_) => {
             status = ToolResultStatus::Denied;
             error_code = "operation_denied".to_string();
@@ -915,6 +975,15 @@ fn error_envelope(
             retry_after_ms = Some(timeout_seconds.saturating_mul(1_000));
         }
         _ => {}
+    }
+
+    if let Some(plan) = super::recovery::classify(error, arguments) {
+        status = plan.status;
+        error_code = plan.error_code.to_string();
+        retryable = plan.retryable;
+        retry_after_ms = plan.retry_after_ms;
+        next_action = plan.next_action;
+        required_reads = plan.required_reads;
     }
 
     let mut data = Map::new();
@@ -1021,46 +1090,6 @@ fn error_envelope(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn classify_file_error(
-    path: &str,
-    message: &str,
-    arguments: Option<&Value>,
-    status: &mut ToolResultStatus,
-    error_code: &mut String,
-    retryable: &mut bool,
-    next_action: &mut Option<ToolNextAction>,
-    required_reads: &mut Vec<RequiredRead>,
-) {
-    let lower = message.to_ascii_lowercase();
-    if lower.contains("hasn't been read")
-        || lower.contains("changed on disk since you last read")
-        || lower.contains("read more of the file")
-    {
-        *status = ToolResultStatus::NeedsRead;
-        *error_code = "read_required".to_string();
-        *retryable = true;
-        let ranges = unread_ranges(message);
-        required_reads.push(RequiredRead { path: path.to_string(), ranges: ranges.clone() });
-        *next_action = read_action(arguments, path, &ranges);
-    } else if lower.contains("changed since its last winx edit") {
-        *status = ToolResultStatus::Conflict;
-        *error_code = "file_changed_after_edit".to_string();
-        *retryable = true;
-        required_reads.push(RequiredRead { path: path.to_string(), ranges: Vec::new() });
-        *next_action = read_action(arguments, path, &[]);
-    } else if lower.contains("does not exist")
-        || lower.contains("path not found")
-        || lower.contains("no undo checkpoint")
-    {
-        *status = ToolResultStatus::NotFound;
-        *error_code = "file_not_found".to_string();
-    } else if lower.contains("not allowed") || lower.contains("permission denied") {
-        *status = ToolResultStatus::Denied;
-        *error_code = "file_operation_denied".to_string();
-    }
-}
-
 fn status_check_action(arguments: Option<&Value>) -> ToolNextAction {
     let mut value = json!({
         "action_json": {
@@ -1075,27 +1104,6 @@ fn status_check_action(arguments: Option<&Value>) -> ToolNextAction {
             .to_string(),
         arguments: Some(value),
     }
-}
-
-fn read_action(arguments: Option<&Value>, path: &str, ranges: &[String]) -> Option<ToolNextAction> {
-    if path.is_empty() {
-        return None;
-    }
-    let file_paths = if ranges.is_empty() {
-        vec![Value::String(path.to_string())]
-    } else {
-        ranges.iter().map(|range| Value::String(format!("{path}:{range}"))).collect()
-    };
-    let mut value = json!({"file_paths": file_paths});
-    copy_session_binding(arguments, &mut value);
-    Some(ToolNextAction {
-        tool: "ReadFiles".to_string(),
-        instruction: "Call ReadFiles exactly as specified before another edit attempt. Bash/cat \
-                      does not refresh the edit guard. Rebuild SEARCH from the returned current \
-                      text, then make one corrected retry; never resend the failed edit unchanged."
-            .to_string(),
-        arguments: Some(value),
-    })
 }
 
 fn initialize_workspace_action(workspace_root: &std::path::Path) -> ToolNextAction {
@@ -1148,20 +1156,6 @@ fn copy_session_binding(arguments: Option<&Value>, target: &mut Value) {
             target[key] = Value::String(value);
         }
     }
-}
-
-fn unread_ranges(message: &str) -> Vec<String> {
-    message
-        .split_once("Unread line ranges:")
-        .map(|(_, ranges)| {
-            ranges
-                .split(',')
-                .map(str::trim)
-                .filter(|range| !range.is_empty())
-                .map(ToString::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 fn bash_action(arguments: Option<&Value>) -> Option<String> {
@@ -1294,8 +1288,10 @@ mod tests {
 
     #[test]
     fn unread_file_error_provides_exact_read_call() {
-        let error = WinxError::FileAccessError {
+        let error = WinxError::FileReadRequired {
             path: "/workspace/README.md".into(),
+            reason: crate::errors::ReadRequirement::InsufficientCoverage,
+            ranges: vec!["20-40".into(), "90-".into()],
             message: "Read more of the file before overwriting. Unread line ranges: 20-40, 90-"
                 .to_string(),
         };
@@ -1750,6 +1746,18 @@ mod tests {
         .expect("typed verification result")
     }
 
+    fn verification_recovery() -> VerificationRecovery {
+        VerificationRecovery {
+            id: "verify_receipt".to_string(),
+            arguments: json!({
+                "verification_id": "verify_receipt",
+                "command": "cargo test",
+                "thread_id": "thread",
+                "workspace_root": "/workspace"
+            }),
+        }
+    }
+
     #[test]
     fn edit_verification_surfaces_success_without_losing_edit_metadata() {
         let arguments = json!({"thread_id":"thread","file_path":"/workspace/lib.rs"});
@@ -1758,6 +1766,7 @@ mod tests {
             Some(&arguments),
             "Successfully edited /workspace/lib.rs",
             exited_verification(0),
+            &verification_recovery(),
         );
         decorate_success("FileWriteOrEdit", Some(&arguments), &mut result);
 
@@ -1776,6 +1785,7 @@ mod tests {
             Some(&json!({"thread_id":"thread","files":[]})),
             "MultiFileEdit applied all edits",
             exited_verification(7),
+            &verification_recovery(),
         );
 
         assert_ne!(result.is_error, Some(true));
@@ -1787,13 +1797,35 @@ mod tests {
         assert_eq!(structured["errorCode"], "verification_failed");
         assert_eq!(structured["retryable"], false);
         assert_eq!(structured["retrySameCall"], false);
-        assert_eq!(structured["nextAction"]["tool"], "BashCommand");
+        assert_eq!(structured["nextAction"]["tool"], "VerifyEdit");
+        assert_eq!(structured["nextAction"]["arguments"]["verification_id"], "verify_receipt");
         assert_eq!(structured["data"]["edit_applied"], true);
         assert_eq!(structured["data"]["original_edit_retryable"], false);
         assert_eq!(structured["data"]["follow_up_required"], true);
         assert_eq!(structured["data"]["verification_status"], "failed");
         assert_eq!(structured["data"]["verification_passed"], false);
         assert_eq!(structured["data"]["verification_exit_code"], 7);
+    }
+
+    #[test]
+    fn standalone_verification_failure_is_retryable_only_after_correction() {
+        let arguments = json!({
+            "verification_id": "verify_receipt",
+            "command": "cargo test",
+            "thread_id": "thread",
+            "workspace_root": "/workspace"
+        });
+        let result = verify_edit_result(Some(&arguments), "verify_receipt", exited_verification(2));
+
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured verification");
+        assert_eq!(structured["status"], "failed");
+        assert_eq!(structured["errorCode"], "verification_failed");
+        assert_eq!(structured["retryable"], true);
+        assert_eq!(structured["retrySameCall"], false);
+        assert_eq!(structured["nextAction"]["tool"], "VerifyEdit");
+        assert!(structured["nextAction"].get("arguments").is_none());
+        assert_eq!(structured["data"]["original_edit_retryable"], false);
     }
 
     #[test]
