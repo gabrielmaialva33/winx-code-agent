@@ -3,29 +3,9 @@
 use serde::Deserialize;
 
 use crate::errors::{Result, WinxError};
+use crate::tool_registry::ToolKind;
 
-/// Canonical tool names in the order advertised by `tools/list`.
-pub const ALL_TOOL_NAMES: [&str; 9] = [
-    "Initialize",
-    "BashCommand",
-    "ReadFiles",
-    "FileWriteOrEdit",
-    "MultiFileEdit",
-    "UndoEdit",
-    "ContextSave",
-    "ReadImage",
-    "CodeMap",
-];
-
-const INITIALIZE: u16 = 1 << 0;
-const BASH_COMMAND: u16 = 1 << 1;
-const READ_FILES: u16 = 1 << 2;
-const FILE_WRITE_OR_EDIT: u16 = 1 << 3;
-const MULTI_FILE_EDIT: u16 = 1 << 4;
-const UNDO_EDIT: u16 = 1 << 5;
-const CONTEXT_SAVE: u16 = 1 << 6;
-const READ_IMAGE: u16 = 1 << 7;
-const CODE_MAP: u16 = 1 << 8;
+pub use crate::tool_registry::ALL_TOOL_NAMES;
 
 /// Curated catalog shapes for common MCP clients and workflows.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, clap::ValueEnum)]
@@ -46,27 +26,36 @@ impl ToolProfile {
     const fn mask(self) -> u16 {
         match self {
             Self::Full => {
-                INITIALIZE
-                    | BASH_COMMAND
-                    | READ_FILES
-                    | FILE_WRITE_OR_EDIT
-                    | MULTI_FILE_EDIT
-                    | UNDO_EDIT
-                    | CONTEXT_SAVE
-                    | READ_IMAGE
-                    | CODE_MAP
+                ToolKind::Initialize.bit()
+                    | ToolKind::BashCommand.bit()
+                    | ToolKind::ReadFiles.bit()
+                    | ToolKind::FileWriteOrEdit.bit()
+                    | ToolKind::MultiFileEdit.bit()
+                    | ToolKind::VerifyEdit.bit()
+                    | ToolKind::UndoEdit.bit()
+                    | ToolKind::ContextSave.bit()
+                    | ToolKind::ReadImage.bit()
+                    | ToolKind::CodeMap.bit()
+                    | ToolKind::ApplyPatch.bit()
             }
             Self::Coding => {
-                INITIALIZE
-                    | BASH_COMMAND
-                    | READ_FILES
-                    | FILE_WRITE_OR_EDIT
-                    | MULTI_FILE_EDIT
-                    | UNDO_EDIT
-                    | CODE_MAP
+                ToolKind::Initialize.bit()
+                    | ToolKind::BashCommand.bit()
+                    | ToolKind::ReadFiles.bit()
+                    | ToolKind::FileWriteOrEdit.bit()
+                    | ToolKind::MultiFileEdit.bit()
+                    | ToolKind::VerifyEdit.bit()
+                    | ToolKind::UndoEdit.bit()
+                    | ToolKind::CodeMap.bit()
+                    | ToolKind::ApplyPatch.bit()
             }
-            Self::ReadOnly => INITIALIZE | READ_FILES | READ_IMAGE | CODE_MAP,
-            Self::Terminal => INITIALIZE | BASH_COMMAND,
+            Self::ReadOnly => {
+                ToolKind::Initialize.bit()
+                    | ToolKind::ReadFiles.bit()
+                    | ToolKind::ReadImage.bit()
+                    | ToolKind::CodeMap.bit()
+            }
+            Self::Terminal => ToolKind::Initialize.bit() | ToolKind::BashCommand.bit(),
         }
     }
 }
@@ -100,17 +89,22 @@ impl ToolPolicy {
         for name in names {
             saw_name = true;
             let name = name.as_ref();
-            let bit = tool_bit(name).ok_or_else(|| {
+            let kind = ToolKind::parse(name).ok_or_else(|| {
                 WinxError::ConfigurationError(format!(
                     "unknown MCP tool {name:?}; expected one of {}",
                     ALL_TOOL_NAMES.join(", ")
                 ))
             })?;
-            mask |= bit;
+            mask |= kind.bit();
         }
         if !saw_name {
             return Err(WinxError::ConfigurationError(
                 "MCP tool allowlist cannot be empty".to_string(),
+            ));
+        }
+        if mask & ToolKind::VerifyEdit.bit() != 0 && mask & ToolKind::BashCommand.bit() == 0 {
+            return Err(WinxError::ConfigurationError(
+                "VerifyEdit requires BashCommand in the same MCP tool allowlist".to_string(),
             ));
         }
         Ok(Self { mask })
@@ -126,12 +120,17 @@ impl ToolPolicy {
 
     /// Whether a tool may be advertised and called.
     pub fn allows(self, name: &str) -> bool {
-        tool_bit(name).is_some_and(|bit| self.mask & bit != 0)
+        ToolKind::parse(name).is_some_and(|kind| self.allows_kind(kind))
+    }
+
+    /// Typed policy check used after the wire name has been parsed once.
+    pub const fn allows_kind(self, kind: ToolKind) -> bool {
+        self.mask & kind.bit() != 0
     }
 
     /// Allowed names in stable catalog order.
     pub fn names(self) -> impl Iterator<Item = &'static str> {
-        ALL_TOOL_NAMES.into_iter().filter(move |name| self.allows(name))
+        ToolKind::ALL.into_iter().filter(move |kind| self.allows_kind(*kind)).map(ToolKind::as_str)
     }
 
     /// Number of advertised tools.
@@ -143,10 +142,6 @@ impl ToolPolicy {
     pub fn is_empty(self) -> bool {
         self.mask == 0
     }
-}
-
-fn tool_bit(name: &str) -> Option<u16> {
-    ALL_TOOL_NAMES.iter().position(|candidate| *candidate == name).map(|index| 1 << index)
 }
 
 #[cfg(test)]
@@ -166,8 +161,10 @@ mod tests {
                 "ReadFiles",
                 "FileWriteOrEdit",
                 "MultiFileEdit",
+                "VerifyEdit",
                 "UndoEdit",
                 "CodeMap",
+                "ApplyPatch",
             ]
         );
         assert_eq!(
@@ -187,5 +184,7 @@ mod tests {
         assert_eq!(policy.names().collect::<Vec<_>>(), vec!["Initialize", "ReadFiles"]);
         assert!(ToolPolicy::from_allowed_tools(["readfiles"]).is_err());
         assert!(ToolPolicy::from_allowed_tools(Vec::<String>::new()).is_err());
+        assert!(ToolPolicy::from_allowed_tools(["VerifyEdit"]).is_err());
+        assert!(ToolPolicy::from_allowed_tools(["VerifyEdit", "BashCommand"]).is_ok());
     }
 }
