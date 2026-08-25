@@ -292,8 +292,8 @@ policy before dispatch, so a client cannot call a hidden tool by name.
 
 | Profile     | Advertised tools                                                                                      |
 |-------------|-------------------------------------------------------------------------------------------------------|
-| `full`      | All nine tools (backward-compatible default)                                                          |
-| `coding`    | `Initialize`, `BashCommand`, `ReadFiles`, both edit tools, `UndoEdit`, and `CodeMap`                  |
+| `full`      | All eleven tools (backward-compatible default)                                                        |
+| `coding`    | `Initialize`, `BashCommand`, `ReadFiles`, all edit tools, `VerifyEdit`, `UndoEdit`, and `CodeMap`     |
 | `read-only` | `Initialize`, `ReadFiles`, `ReadImage`, and `CodeMap`                                                 |
 | `terminal`  | `Initialize` and `BashCommand`                                                                        |
 
@@ -380,19 +380,27 @@ with independent decoded-dimension and allocation limits. Delivery is bounded to
 resizing/re-encoding oversized inputs. A bounded per-session content-fingerprint cache replaces unchanged repeats with a
 compact structured reference; `force=true` is the explicit escape hatch when a client genuinely needs the bytes again.
 
-`FileWriteOrEdit` and `MultiFileEdit` accept optional `verify_command` and `verify_wait_for_seconds` (default `15`, maximum
+`FileWriteOrEdit`, `ApplyPatch`, and `MultiFileEdit` accept optional `verify_command` and `verify_wait_for_seconds` (default `15`, maximum
 `60`). Verification runs only after a successful commit, as a foreground command under the same mode allowlist as
-`BashCommand`. Exit code zero completes the combined result. A non-zero exit returns `isError: true` with
-`errorCode: verification_failed` and `data.edit_applied: true`; Winx never claims the edit was rolled back. A check still
-running at the bounded wait returns the normal `BashCommand` `status_check` next action. A principal must permit both the
-edit tool and `BashCommand` to use this option.
+`BashCommand`. Exit code zero completes the combined result. A non-zero exit keeps the committed edit result at
+`isError: false` with `status: completed_with_issues`, `errorCode: verification_failed`, and `data.edit_applied: true`.
+Its exact `VerifyEdit` next action reruns only the check after corrective changes. A check still running at the bounded
+wait returns the normal `BashCommand` `status_check` next action. A principal must permit the edit tool and `BashCommand`;
+custom allowlists cannot expose `VerifyEdit` without `BashCommand`.
+
+Committed edits receive a compact persisted mutation receipt for 30 minutes. Exact duplicate calls are single-flight and
+replayed without another write or verification command while target hashes match. If a target changed, Winx returns
+`mutation_postcondition_changed` instead of overwriting newer state. Three SEARCH conflicts on the same session/target
+escalate to `recovery_exhausted`, which removes the automatic retry action and tells the agent to change strategy.
 
 Generation-bound routing is negotiated with the effective per-session guardian, not inferred from the control daemon's
 version. The adapter keeps that guardian negotiation on an epoch-bound session channel, so ordinary daemon calls add no
 repeated control hello round trips; generation-bound actions perform a final guardian check before relay. A closed channel forces renegotiation before another Task-bound launch.
 
 A `ReadFiles` batch containing one or more failed paths returns `isError: true`; content from successful paths remains in the
-same response, with `successful_files` and `failed_files` counts. `MultiFileEdit` preserves planning failure semantics:
+same response, with `successful_files` and `failed_files` counts. Every successful file also returns a canonical path,
+opaque SHA-256 revision, exact visible ranges, and continuation line. `ApplyPatch` consumes that revision as a
+compare-and-swap token and refuses stale or unread ranges before writing. `MultiFileEdit` preserves planning failure semantics:
 unread and stale files return `needs_read`, while missing or ambiguous SEARCH blocks return `conflict`, all without writing
 any file and with a concrete `ReadFiles` recovery action. Batched reads run filesystem and tokenization work in a bounded
 parallel pool (`WINX_READ_PARALLELISM`, default `4`, maximum `32`) but publish results and read coverage in request order.
@@ -480,6 +488,9 @@ winx-code-agent restart-daemon
 
 # Redacted runtime report
 winx-code-agent doctor
+
+# Offline aggregation and recovery-contract audit; does not open the log writer
+winx-code-agent report --last 10000 --since-minutes 120
 ```
 
 Changing guardian limits or TTL environment variables requires `restart-daemon` because `winxd` reads them at startup.
@@ -497,14 +508,19 @@ winx-code-agent serve --http --token-file ~/.config/winx-http-token
 
 Rotation accepts `daily` (default), `hourly`, or `never`; retention applies to daily/hourly files, and `0` disables pruning.
 On Unix, every initial and rotated file is created/opened with `O_NOFOLLOW` and mode `0600`; an existing broader mode is
-reduced to `0600`, and newly created log directories use `0700`. Each tool event contains the tool/action, principal, scoped
+reduced to `0600`, and newly created log directories use `0700`. Each tool event contains the tool/action, fixed privacy-safe
+command category, exact build identity, principal, scoped
 thread, hashed request and MCP-session correlation, client name and version, negotiated protocol, outcome, result status,
 duration, response size, batch item count, and the configured worker limit (`0` for non-batched tools). HTTP events contain
 peer, method, status, and duration. Initialize events additionally record the transition (`created`, `attached_existing`,
 or an explicit change), whether it reused or recovered a missing session, compact/full response mode, generated context/guideline sizes,
 initial-file count, and effective code-writer policy strength. Command text, file contents, tool
-output, bearer tokens, and raw conversation identities are never written to this sink. Ordinary warnings and diagnostics
+arguments, URLs, output, bearer tokens, and raw conversation identities are never written to this sink. Ordinary warnings and diagnostics
 continue to stderr according to `RUST_LOG` and `WINX_LOG_FORMAT`.
+
+`winx-code-agent report` discovers rotated siblings automatically, supports build/time filters, correlates tool calls with
+HTTP requests, reports latency/bytes/recovery behavior, and audits unsafe retry invariants. It disables the usage writer
+while reading, so generating a report cannot append to, rotate, or prune the observed logs.
 
 For a quick per-tool latency view across the active and rotated files:
 
@@ -648,6 +664,9 @@ Remote Roots bootstrap is disabled on the shared HTTP service; the explicit `Ini
 
 ## Upgrade notes for 0.2.333 and later
 
+- Protocol `1.6` identifies control and guardian roles and their exact package/revision/dirty build, and advertises
+  cancellable action reservations. `winx-code-agent doctor` reports split control sockets and mixed guardian builds so
+  an adapter never silently mistakes an old sibling binary for the executable the user just installed.
 - Protocol `1.5` adds an optional trailer-free runtime payload and generation-bound actions. Protocol-1.4 guardians
   remain usable through bounded synchronous wait-policy fallback; adapters use legacy output when the compact field is
   absent. A newer control plane never substitutes its own capabilities for those of an older session guardian.

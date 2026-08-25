@@ -249,8 +249,8 @@ política é validada antes do dispatch, portanto não é possível chamar pelo 
 
 | Perfil | Ferramentas anunciadas |
 | :--- | :--- |
-| `full` | Todas as nove ferramentas (padrão retrocompatível) |
-| `coding` | `Initialize`, `BashCommand`, `ReadFiles`, as duas ferramentas de edição, `UndoEdit` e `CodeMap` |
+| `full` | Todas as onze ferramentas (padrão retrocompatível) |
+| `coding` | `Initialize`, `BashCommand`, `ReadFiles`, as três ferramentas de edição, `VerifyEdit`, `UndoEdit` e `CodeMap` |
 | `read-only` | `Initialize`, `ReadFiles`, `ReadImage` e `CodeMap` |
 | `terminal` | `Initialize` e `BashCommand` |
 
@@ -314,10 +314,17 @@ alterações por uma referência estruturada compacta; `force=true` solicita exp
 
 `FileWriteOrEdit` e `MultiFileEdit` aceitam `verify_command` e `verify_wait_for_seconds` opcionais (padrão `15`, máximo
 `60`). A verificação só roda depois de um commit bem-sucedido, em foreground e sob a mesma allowlist de modo do
-`BashCommand`. Exit code zero conclui o resultado combinado. Um exit code diferente de zero retorna `isError: true`,
-`errorCode: verification_failed` e `data.edit_applied: true`; o Winx nunca afirma falsamente que desfez a edição. Se a
-verificação continuar executando ao final da espera limitada, o resultado fornece a ação `status_check` normal do
-`BashCommand`. O principal precisa autorizar tanto a ferramenta de edição quanto `BashCommand` para usar essa opção.
+`BashCommand`. Exit code zero conclui o resultado combinado. Um exit code diferente de zero mantém o resultado da edição
+em `isError: false`, com `status: completed_with_issues`, `errorCode: verification_failed` e `data.edit_applied: true`.
+A ação exata `VerifyEdit` repete somente a verificação depois das correções, nunca a edição. Se a verificação continuar
+executando ao final da espera limitada, o resultado fornece a ação `status_check` normal do `BashCommand`. O principal
+precisa autorizar a ferramenta de edição e `BashCommand`; allowlists customizadas não podem expor `VerifyEdit` sem
+`BashCommand`.
+
+Edições confirmadas recebem por 30 minutos um recibo compacto persistido. Chamadas idênticas ficam single-flight e são
+reproduzidas sem nova escrita ou verificação enquanto os hashes finais coincidirem. Mudança posterior no alvo retorna
+`mutation_postcondition_changed` em vez de sobrescrever estado novo. Três conflitos SEARCH na mesma sessão/alvo escalam
+para `recovery_exhausted`, removendo a repetição automática e exigindo mudança de estratégia.
 
 ## Ciclo de Vida do Guardian
 

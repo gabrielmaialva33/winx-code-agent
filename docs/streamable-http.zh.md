@@ -231,8 +231,8 @@ winx-code-agent serve --http \
 
 | 配置 | 公开的工具 |
 | :--- | :--- |
-| `full` | 全部九个工具（向后兼容的默认值） |
-| `coding` | `Initialize`、`BashCommand`、`ReadFiles`、两个编辑工具、`UndoEdit` 和 `CodeMap` |
+| `full` | 全部十一个工具（向后兼容的默认值） |
+| `coding` | `Initialize`、`BashCommand`、`ReadFiles`、三个编辑工具、`VerifyEdit`、`UndoEdit` 和 `CodeMap` |
 | `read-only` | `Initialize`、`ReadFiles`、`ReadImage` 和 `CodeMap` |
 | `terminal` | `Initialize` 和 `BashCommand` |
 
@@ -294,8 +294,10 @@ Winx 会返回可恢复结果（`errorCode: wait_policy_incompatible_with_action
 `force=true`。
 
 `FileWriteOrEdit` 和 `MultiFileEdit` 接受可选的 `verify_command` 与 `verify_wait_for_seconds`（默认 `15`，最大
-`60`）。验证仅在提交成功后运行，并以前台命令形式遵循与 `BashCommand` 相同的模式白名单。退出码为零时组合结果成功；非零退出码返回 `isError: true`、`errorCode: verification_failed` 和
-`data.edit_applied: true`，Winx 不会错误地声称已回滚编辑。若检查在有限等待时间后仍在运行，结果会提供标准的 `BashCommand` `status_check` 下一步动作。主体必须同时允许编辑工具和 `BashCommand` 才能使用此选项。
+`60`）。验证仅在提交成功后运行，并以前台命令形式遵循与 `BashCommand` 相同的模式白名单。退出码为零时组合结果成功；非零退出码保留 `isError: false`，并返回 `status: completed_with_issues`、`errorCode: verification_failed` 和
+`data.edit_applied: true`。明确的 `VerifyEdit` 下一步动作只会在修复后重新执行检查，不会重复编辑。若检查仍在运行，结果会提供标准的 `BashCommand` `status_check` 动作。自定义允许列表不能在没有 `BashCommand` 的情况下公开 `VerifyEdit`。
+
+已提交的编辑会保留 30 分钟的紧凑持久化变更回执。完全相同的调用采用 single-flight，并且仅在目标哈希仍匹配时无副作用重放；若目标后来发生变化，Winx 会返回 `mutation_postcondition_changed`，不会覆盖新状态。同一会话和目标连续三次 SEARCH 冲突会升级为 `recovery_exhausted`，停止自动重试并要求代理改变策略。
 
 ## Guardian 生命周期管理
 
