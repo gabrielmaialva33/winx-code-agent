@@ -125,15 +125,18 @@ Secure MCP Tunnel / VPN / proxy reverso HTTPS autenticado
 | :--- | :--- |
 | `Initialize` | Inicializa o workspace, define o modo de operação e retorna um `thread_id`. Deve ser chamada primeiro, a menos que o cliente exponha MCP Roots. Sem caminho especificado, cria um ambiente scratch temporário; retomar uma tarefa (`task_id_to_resume`) reabre a raiz do projeto salva. |
 | `BashCommand` | Executa comandos, monitora processos longos, envia Enter/Ctrl-C e opera TUIs. A política `wait_policy` suporta: `adaptive` (padrão, mantém chamadas curtas inline e promove comandos longos para Task se suportado); `until_complete` (inicia uma Task imediatamente); `return_early` (retorna imediatamente). Suporta `is_background`, `status_check`, ações de input, `screen` e `wait_for_turn`. |
-| `ReadFiles` | Lê um ou múltiplos arquivos com numeração de linhas. Adicione `:10-40` ao caminho para especificar intervalos. Se o orçamento de tokens for atingido, indica a linha exata e a sintaxe `arquivo:N-M` para continuar a leitura. |
+| `ReadFiles` | Lê um ou múltiplos arquivos com numeração de linhas e devolve revisão opaca e intervalos realmente visíveis. Adicione `:10-40` ao caminho; truncamento nunca registra linhas não exibidas. |
 | `FileWriteOrEdit` | Sobrescrita total ou blocos SEARCH/REPLACE (com âncoras opcionais `@inicio-fim` de linha). Valida a cobertura de leitura e atualidade antes de gravar, aplica tolerâncias e executa checagem de sintaxe via Tree-sitter (18+ linguagens), exibindo um diff compacto das alterações. |
+| `ApplyPatch` | Aplica patches de linha ordenados e não sobrepostos sobre uma revisão exata de `ReadFiles`. Só linhas visíveis podem mudar; revisão ou replay obsoleto falha antes da escrita. |
 | `MultiFileEdit` | Valida e calcula todas as edições em lote na memória antes de escrever qualquer arquivo. Garante atomicidade: se um arquivo falhar na validação, nenhum arquivo é alterado. |
+| `VerifyEdit` | Repete a checagem exata de um recibo pós-edição sem executar novamente a edição já confirmada. |
 | `UndoEdit` | Reverte um arquivo para o conteúdo anterior à última edição por `FileWriteOrEdit`/`MultiFileEdit` na sessão atual (mantém histórico das últimas ~10 edições na memória). |
 | `ContextSave` | Salva descrição da tarefa + arquivos em um único documento estruturado com contexto do workspace, arquivos ativos e git diff/status para transferência rápida de contexto entre sessões. |
 | `ReadImage` | Retorna um bloco nativo de imagem MCP (não base64 como texto comum), permitindo que modelos multimodais processem a imagem visualmente. Confinado ao workspace. |
-| `CodeMap` | Navegação de código com Tree-sitter em uma ferramenta com duas operações: `outline` (mapa de símbolos de classes, funções e tipos com orçamento de tokens) e `references` (busca semântica de definições e referências em 11 linguagens). |
+| `CodeMap` | Navegação de código com Tree-sitter em uma ferramenta com duas operações: `outline` (mapa de símbolos de classes, funções e tipos com orçamento de tokens) e `references` (busca semântica de definições e referências em 13 linguagens). |
 
 O Winx anuncia a especificação MCP `2026-07-28`. Cada ferramenta publica um `outputSchema` e retorna um envelope estruturado `structuredContent`, mantendo compatibilidade de texto/imagem com clientes mais antigos.
+Edições recebem recibos persistidos por 30 minutos: chamadas idênticas não escrevem nem verificam duas vezes enquanto os hashes finais coincidirem. Falhas de verificação retornam `completed_with_issues` e uma ação `VerifyEdit`; três conflitos SEARCH repetidos escalam para `recovery_exhausted`.
 
 ## Edição com Busca/Substituição (Search/Replace)
 
@@ -463,6 +466,9 @@ winx-code-agent restart-daemon
 
 # Relatório de diagnóstico e ambiente
 winx-code-agent doctor
+
+# Agregar telemetria sem modificar os logs e auditar invariantes de recuperação
+winx-code-agent report --last 10000 --since-minutes 120
 ```
 
 ## Implantação Streamable HTTP

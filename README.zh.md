@@ -124,13 +124,17 @@ Secure MCP Tunnel / VPN / 认证 HTTPS 反向代理
 | :--- | :--- |
 | `Initialize` | 初始化工作区、选择安全模式并返回 `thread_id`。除非客户端支持 MCP Roots 自动引导，否则应首先调用此工具。未指定路径时创建临时游乐场；恢复任务时重开保存的项目根目录。 |
 | `BashCommand` | 执行命令、轮询长时间运行的任务、发送 Enter/Ctrl-C 并操作 TUI。`wait_policy` 支持：`adaptive`（默认，短调用内联返回，长命令按需提升为 Task）；`until_complete`（直接创建 Task）；`return_early`（立即返回）。支持 `is_background`、`status_check`、按键输入与 `wait_for_turn`。 |
-| `ReadFiles` | 读取单个或多个文件，带行号输出。支持 `path:10-40` 行号范围。超出 Token 预算时会返回确切的中断行和续读语法。 |
+| `ReadFiles` | 读取单个或多个文件，带行号输出，并返回不透明修订令牌与实际可见范围。支持 `path:10-40`；截断不会记录模型未看到的行。 |
 | `FileWriteOrEdit` | 覆盖文件或使用 SEARCH/REPLACE 块编辑（支持 `@起始-结束` 行号锚点）。写入前验证读取覆盖率与新鲜度，并通过 Tree-sitter 检查语法（支持 18+ 语言），返回改动 Diff。 |
+| `ApplyPatch` | 对精确的 `ReadFiles` 修订应用有序且不重叠的行补丁。只能修改已看到的行；过期修订或重放会在写入前失败。 |
 | `MultiFileEdit` | 批量多文件原子编辑：在内存中验证所有编辑，任何一个文件验证失败都不会更改任何文件。 |
+| `VerifyEdit` | 使用编辑后回执重新执行同一检查，不会重复已提交的编辑。 |
 | `UndoEdit` | 撤销由 `FileWriteOrEdit` 或 `MultiFileEdit` 对某个文件执行的最近一次修改（内存中保留约 10 次历史记录）。 |
 | `ContextSave` | 将任务说明、工作区上下文、活跃文件与 Git Diff 导出为单一文本文件，便于后续会话无缝接力。 |
 | `ReadImage` | 返回原生 MCP 图像内容块（非纯文本 Base64），以便多模态大模型直接查看图像。受工作区目录限制。 |
-| `CodeMap` | 基于 Tree-sitter 的代码导航工具，支持两项操作：`outline`（提取文件或仓库符号大纲）和 `references`（跨仓库查找符号定义与调用位置，支持 11 种语言）。 |
+| `CodeMap` | 基于 Tree-sitter 的代码导航工具，支持两项操作：`outline`（提取文件或仓库符号大纲）和 `references`（跨仓库查找符号定义与调用位置，支持 13 种语言）。 |
+
+已提交的编辑会保留 30 分钟的持久化回执；目标哈希未变化时，完全相同的调用不会再次写入或运行验证。验证失败返回 `completed_with_issues` 和明确的 `VerifyEdit` 动作；同一目标连续三次 SEARCH 冲突会升级为 `recovery_exhausted`。
 
 ## 查找/替换编辑语法 (SEARCH/REPLACE)
 
@@ -459,6 +463,9 @@ winx-code-agent restart-daemon
 
 # 运行环境诊断报告
 winx-code-agent doctor
+
+# 离线汇总遥测并检查恢复流程不变量（不会修改日志）
+winx-code-agent report --last 10000 --since-minutes 120
 ```
 
 ## Streamable HTTP 部署

@@ -25,12 +25,14 @@ cargo check --all-features --locked
 
 ## Project Structure
 
+Read [Architecture and invariants](docs/architecture.md) before changing cross-cutting runtime behavior.
+
 - `src/server.rs`: thin MCP-service facade; catalog, handler, principal isolation, session, Task, dispatch, and tests live in `src/server/`.
 - `src/tools/`: MCP tool facades; `BashCommand` and `FileWriteOrEdit` internals are split into focused submodules.
 - `src/config.rs`: typed environment/secret/principal loading.
 - `src/os.rs`: the narrowly audited libc boundary; the rest of the crate denies unsafe code.
 - `src/state/`: shell, PTY, persistence, and terminal state.
-- `src/utils/`: shared file, path, mmap, repo, and command-safety helpers.
+- `src/utils/`: shared safe file snapshots, path, repository, and command-safety helpers.
 - `tests/`, `benches/`, `fuzz/`: integration tests, Criterion benchmarks, and cargo-fuzz targets.
 - `.github/workflows/`: pinned CI and release automation.
 
