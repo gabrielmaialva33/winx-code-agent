@@ -808,10 +808,7 @@ async fn test_read_files_nonexistent() -> Result<()> {
     };
 
     let result = winx_code_agent::tools::read_files::handle_tool_call(&bash_state_arc, read).await;
-    assert!(matches!(
-        result,
-        Err(WinxError::FileAccessError { message, .. }) if message.contains("does not exist")
-    ));
+    assert!(matches!(result, Err(WinxError::FileNotFound { .. })));
 
     Ok(())
 }
@@ -963,7 +960,7 @@ async fn test_code_writer_mode_enforces_file_write_globs() -> Result<()> {
     )
     .await;
 
-    assert!(matches!(result, Err(WinxError::FileAccessError { .. })));
+    assert!(matches!(result, Err(WinxError::FileOperationDenied { .. })));
 
     Ok(())
 }

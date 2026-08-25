@@ -348,7 +348,11 @@ async fn assert_principal_tool_policies(address: std::net::SocketAddr) -> anyhow
     };
     assert_eq!(tool_names(&left_tools), vec!["Initialize", "BashCommand"]);
     assert_eq!(left_tools["result"]["cacheScope"], "private", "{left_tools}");
-    assert_eq!(tool_names(&right_tools).len(), 9, "{right_tools}");
+    assert_eq!(
+        tool_names(&right_tools).len(),
+        winx_code_agent::tool_registry::ToolKind::ALL.len(),
+        "{right_tools}"
+    );
     assert_eq!(right_tools["result"]["cacheScope"], "public", "{right_tools}");
 
     let forbidden = serde_json::json!({
@@ -1358,6 +1362,107 @@ async fn recoverable_edit_failure_is_a_structured_tool_result() -> anyhow::Resul
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn read_receipt_drives_revision_guarded_patch_over_http() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let target = workspace.path().join("revisioned.txt");
+    std::fs::write(&target, "one\ntwo\nthree\n")?;
+
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "revisioned-patch",
+        "revisioned-patch-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    let read = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "revisioned-read",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("revisioned-patch-client", false),
+            "name": "ReadFiles",
+            "arguments": {
+                "file_paths": [format!("{}:2-2", target.display())],
+                "thread_id": thread_id
+            }
+        }
+    });
+    let read = post_json(address, "2026-07-28", "tools/call", &read.to_string()).await?;
+    let read = response_json(&read)?;
+    assert_eq!(read["result"]["isError"], false, "{read}");
+    let receipt = &read["result"]["structuredContent"]["data"]["files"][0];
+    assert_eq!(receipt["path"], canonical_path_string(&target)?, "{read}");
+    assert_eq!(receipt["totalLines"], 3, "{read}");
+    assert_eq!(
+        receipt["visibleRanges"],
+        serde_json::json!([{"startLine": 2, "endLine": 2}]),
+        "{read}"
+    );
+    assert_eq!(receipt["truncated"], false, "{read}");
+    let revision = receipt["revision"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("ReadFiles omitted revision receipt: {read}"))?
+        .to_string();
+    assert!(revision.starts_with("sha256:"), "{read}");
+
+    let patch_call = |id: &str, replacement: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "_meta": modern_request_meta("revisioned-patch-client", false),
+                "name": "ApplyPatch",
+                "arguments": {
+                    "file_path": target,
+                    "expected_revision": revision,
+                    "patches": [{
+                        "start_line": 2,
+                        "delete_lines": 1,
+                        "replacement": replacement
+                    }],
+                    "thread_id": thread_id
+                }
+            }
+        })
+    };
+
+    let patch = patch_call("revisioned-patch", "TWO\n");
+    let patch = post_json(address, "2026-07-28", "tools/call", &patch.to_string()).await?;
+    let patch = response_json(&patch)?;
+    assert_eq!(patch["result"]["isError"], false, "{patch}");
+    let structured = &patch["result"]["structuredContent"];
+    assert_eq!(structured["status"], "completed", "{patch}");
+    let new_revision = structured["data"]["new_revision"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("ApplyPatch omitted new revision: {patch}"))?;
+    assert!(new_revision.starts_with("sha256:"), "{patch}");
+    assert_ne!(new_revision, revision, "{patch}");
+    assert_eq!(std::fs::read_to_string(&target)?, "one\nTWO\nthree\n");
+
+    let stale = patch_call("revisioned-stale-replay", "WRONG\n");
+    let stale = post_json(address, "2026-07-28", "tools/call", &stale.to_string()).await?;
+    let stale = response_json(&stale)?;
+    assert_eq!(stale["result"]["isError"], true, "{stale}");
+    let structured = &stale["result"]["structuredContent"];
+    assert_eq!(structured["status"], "needs_read", "{stale}");
+    assert_eq!(structured["errorCode"], "revision_mismatch", "{stale}");
+    assert_eq!(structured["retrySameCall"], false, "{stale}");
+    assert_eq!(structured["nextAction"]["tool"], "ReadFiles", "{stale}");
+    assert_eq!(
+        structured["nextAction"]["arguments"]["file_paths"],
+        serde_json::json!([canonical_path_string(&target)?]),
+        "{stale}"
+    );
+    assert_eq!(std::fs::read_to_string(&target)?, "one\nTWO\nthree\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn search_conflict_requires_readfiles_before_a_corrected_edit() -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
     let target = workspace.path().join("conflict.txt");
@@ -1506,7 +1611,7 @@ async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::
         &thread_id,
         "failing-verification",
         &failing_path,
-        "false",
+        "test -f verification-ready",
     )
     .await?;
     assert_eq!(failing["result"]["isError"], false, "{failing}");
@@ -1521,7 +1626,7 @@ async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::
     assert_eq!(failing["result"]["structuredContent"]["retryable"], false, "{failing}");
     assert_eq!(failing["result"]["structuredContent"]["retrySameCall"], false, "{failing}");
     assert_eq!(
-        failing["result"]["structuredContent"]["nextAction"]["tool"], "BashCommand",
+        failing["result"]["structuredContent"]["nextAction"]["tool"], "VerifyEdit",
         "{failing}"
     );
     assert_eq!(failing["result"]["structuredContent"]["data"]["edit_applied"], true, "{failing}");
@@ -1529,6 +1634,31 @@ async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::
         failing["result"]["structuredContent"]["data"]["original_edit_retryable"], false,
         "{failing}"
     );
+    assert_eq!(std::fs::read_to_string(&failing_path)?, "verified content\n");
+    let verification_id = failing["result"]["structuredContent"]["data"]["verification_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("verification receipt missing: {failing}"))?;
+    assert_eq!(
+        failing["result"]["structuredContent"]["nextAction"]["arguments"]["verification_id"],
+        verification_id,
+        "{failing}"
+    );
+
+    std::fs::write(workspace.path().join("verification-ready"), "ready\n")?;
+    let retry = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "verification-retry",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("edit-verification-client", false),
+            "name": failing["result"]["structuredContent"]["nextAction"]["tool"],
+            "arguments": failing["result"]["structuredContent"]["nextAction"]["arguments"]
+        }
+    });
+    let retry = post_tool_value(address, &retry).await?;
+    assert_eq!(retry["result"]["isError"], false, "{retry}");
+    assert_eq!(retry["result"]["structuredContent"]["status"], "completed", "{retry}");
+    assert_eq!(retry["result"]["structuredContent"]["data"]["verification_passed"], true);
     assert_eq!(std::fs::read_to_string(&failing_path)?, "verified content\n");
 
     let rejected_path = workspace.path().join("rejected.txt");
@@ -1542,6 +1672,140 @@ async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::
     .await?;
     assert_eq!(rejected["result"]["isError"], true, "{rejected}");
     assert!(!rejected_path.exists(), "invalid verification must be rejected before editing");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_edit_is_single_flight_and_does_not_repeat_verification() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "mutation-replay",
+        "mutation-replay-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let target = workspace.path().join("deduplicated.txt");
+
+    let (left, right) = tokio::join!(
+        write_with_verification(
+            address,
+            &thread_id,
+            "mutation-replay-left",
+            &target,
+            "printf x >> verification-count.txt",
+        ),
+        write_with_verification(
+            address,
+            &thread_id,
+            "mutation-replay-right",
+            &target,
+            "printf x >> verification-count.txt",
+        )
+    );
+    let left = left?;
+    let right = right?;
+    let mut transitions = [&left, &right]
+        .into_iter()
+        .filter_map(|response| {
+            response["result"]["structuredContent"]["data"]["mutation_transition"].as_str()
+        })
+        .collect::<Vec<_>>();
+    transitions.sort_unstable();
+    assert_eq!(transitions, vec!["committed", "replayed"], "left={left} right={right}");
+    assert_eq!(std::fs::read_to_string(&target)?, "verified content\n");
+    assert_eq!(std::fs::read_to_string(workspace.path().join("verification-count.txt"))?, "x");
+    let committed = [&left, &right]
+        .into_iter()
+        .find(|response| {
+            response["result"]["structuredContent"]["data"]["mutation_transition"] == "committed"
+        })
+        .ok_or_else(|| anyhow::anyhow!("no committed mutation response"))?;
+    assert_eq!(
+        committed["result"]["structuredContent"]["data"]["mutation_receipt_persisted"],
+        true
+    );
+
+    std::fs::write(&target, "newer external state\n")?;
+    let drifted = write_with_verification(
+        address,
+        &thread_id,
+        "mutation-replay-after-drift",
+        &target,
+        "printf x >> verification-count.txt",
+    )
+    .await?;
+    assert_eq!(drifted["result"]["isError"], true, "{drifted}");
+    assert_eq!(
+        drifted["result"]["structuredContent"]["errorCode"], "mutation_postcondition_changed",
+        "{drifted}"
+    );
+    assert_eq!(std::fs::read_to_string(&target)?, "newer external state\n");
+    assert_eq!(std::fs::read_to_string(workspace.path().join("verification-count.txt"))?, "x");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_search_conflicts_trip_the_recovery_circuit() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let target = workspace.path().join("recovery-circuit.txt");
+    std::fs::write(&target, "current text\n")?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "recovery-circuit",
+        "recovery-circuit-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    for attempt in 1..=3_u64 {
+        let read = read_files_request(
+            &format!("recovery-circuit-read-{attempt}"),
+            "recovery-circuit-client",
+            &thread_id,
+            &[&target],
+        );
+        let read = post_tool_value(address, &read).await?;
+        assert_eq!(read["result"]["isError"], false, "{read}");
+
+        let edit = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": format!("recovery-circuit-edit-{attempt}"),
+            "method": "tools/call",
+            "params": {
+                "_meta": modern_request_meta("recovery-circuit-client", false),
+                "name": "FileWriteOrEdit",
+                "arguments": {
+                    "file_path": target,
+                    "percentage_to_change": 10,
+                    "text_or_search_replace_blocks": format!(
+                        "<<<<<<< SEARCH\nstale text {attempt}\n=======\nreplacement\n>>>>>>> REPLACE"
+                    ),
+                    "thread_id": thread_id
+                }
+            }
+        });
+        let edit = post_tool_value(address, &edit).await?;
+        let structured = &edit["result"]["structuredContent"];
+        assert_eq!(edit["result"]["isError"], true, "{edit}");
+        assert_eq!(structured["data"]["recovery_attempt"], attempt, "{edit}");
+        if attempt < 3 {
+            assert_eq!(structured["status"], "conflict", "{edit}");
+            assert_eq!(structured["nextAction"]["tool"], "ReadFiles", "{edit}");
+        } else {
+            assert_eq!(structured["status"], "recovery_exhausted", "{edit}");
+            assert_eq!(structured["errorCode"], "search_recovery_exhausted", "{edit}");
+            assert_eq!(structured["retryable"], false, "{edit}");
+            assert!(structured.get("nextAction").is_none(), "{edit}");
+        }
+    }
+    assert_eq!(std::fs::read_to_string(&target)?, "current text\n");
     Ok(())
 }
 
@@ -2075,6 +2339,7 @@ fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
         .iter()
         .find(|entry| entry["fields"]["event"] == "tool_call")
         .ok_or_else(|| anyhow::anyhow!("missing tool_call event: {contents}"))?;
+    assert_eq!(tool_call["fields"]["usage_schema"], 1);
     assert_eq!(tool_call["fields"]["client_name"], "usage-log-client");
     assert_eq!(tool_call["fields"]["protocol"], "2026-07-28");
     let request_id = tool_call["fields"]["request_id"]
