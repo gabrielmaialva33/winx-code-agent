@@ -268,6 +268,19 @@ impl From<anyhow::Error> for WinxError {
     }
 }
 
+impl WinxError {
+    /// A SEARCH conflict means the caller's exact-text evidence was insufficient.
+    /// File tools use this classification to invalidate the prior read permit and
+    /// force a visible `ReadFiles` refresh before another edit attempt.
+    pub(crate) fn is_search_match_conflict(&self) -> bool {
+        match self {
+            Self::SearchBlockNotFound(_) | Self::SearchBlockAmbiguous { .. } => true,
+            Self::MultiFilePlanError { source, .. } => source.is_search_match_conflict(),
+            _ => false,
+        }
+    }
+}
+
 /// Advanced error recovery and suggestion options
 pub struct ErrorRecovery;
 
