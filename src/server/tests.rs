@@ -348,6 +348,204 @@ mod task_lifecycle_tests {
         }
     }
 
+    #[derive(Clone)]
+    struct DelayedTaskBindingRuntime {
+        launch_started: Arc<tokio::sync::Semaphore>,
+        release_generation: Arc<tokio::sync::Semaphore>,
+        interrupted: Arc<std::sync::Mutex<Vec<crate::runtime::ShellExecutionToken>>>,
+        terminated: Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    impl Default for DelayedTaskBindingRuntime {
+        fn default() -> Self {
+            Self {
+                launch_started: Arc::new(tokio::sync::Semaphore::new(0)),
+                release_generation: Arc::new(tokio::sync::Semaphore::new(0)),
+                interrupted: Arc::new(std::sync::Mutex::new(Vec::new())),
+                terminated: Arc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+    }
+
+    impl ShellRuntime for DelayedTaskBindingRuntime {
+        fn configure_session<'a>(
+            &'a self,
+            _bash_state: &'a mut BashState,
+            _transition: crate::runtime::ShellSessionTransition,
+        ) -> crate::runtime::ShellRuntimeConfigureFuture<'a> {
+            Box::pin(async { Ok(crate::runtime::ShellSessionConfiguration::default()) })
+        }
+
+        fn run_action<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+            _command: BashCommand,
+        ) -> crate::runtime::ShellRuntimeFuture<'a> {
+            Box::pin(async {
+                Err(WinxError::CommandExecutionError(
+                    "use delayed detailed task runtime".to_string(),
+                ))
+            })
+        }
+
+        fn run_action_detailed<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+            _command: BashCommand,
+            _options: crate::runtime::ShellActionOptions,
+        ) -> crate::runtime::ShellRuntimeDetailedFuture<'a> {
+            let launch_started = Arc::clone(&self.launch_started);
+            let release_generation = Arc::clone(&self.release_generation);
+            Box::pin(async move {
+                launch_started.add_permits(1);
+                release_generation
+                    .acquire()
+                    .await
+                    .map_err(|_| {
+                        WinxError::CommandExecutionError(
+                            "delayed generation gate closed".to_string(),
+                        )
+                    })?
+                    .forget();
+                let mut result = crate::runtime::BashCommandRuntimeResult::legacy(
+                    crate::tools::bash_command::BashCommandResult {
+                        output: "delayed-generation-running".to_string(),
+                        state: crate::tools::bash_command::BashCommandState {
+                            process_status: crate::tools::bash_command::BashProcessStatus::Running,
+                            background_id: None,
+                            running_for_seconds: Some(0),
+                            exit_code: None,
+                            cwd: std::env::temp_dir(),
+                            turn_state: None,
+                        },
+                    },
+                );
+                result.command_generation = Some(7);
+                result.execution_token = Some(crate::runtime::ShellExecutionToken {
+                    guardian_epoch: "guardian-delayed".to_string(),
+                    session_epoch: "session-delayed".to_string(),
+                    generation: 7,
+                });
+                result.generation_bound_actions = true;
+                Ok(result)
+            })
+        }
+
+        fn supports_generation_bound_actions(&self) -> crate::runtime::ShellRuntimeBoolFuture<'_> {
+            Box::pin(async { Ok(true) })
+        }
+
+        fn interrupt<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+        ) -> crate::runtime::ShellRuntimeUnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn interrupt_execution<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+            expected: Option<crate::runtime::ShellExecutionToken>,
+        ) -> crate::runtime::ShellRuntimeBoolFuture<'a> {
+            let interrupted = Arc::clone(&self.interrupted);
+            Box::pin(async move {
+                let Some(expected) = expected else { return Ok(false) };
+                interrupted
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(expected);
+                Ok(true)
+            })
+        }
+
+        fn terminate_session<'a>(
+            &'a self,
+            thread_id: &'a str,
+        ) -> crate::runtime::ShellRuntimeUnitFuture<'a> {
+            let terminated = Arc::clone(&self.terminated);
+            let thread_id = thread_id.to_string();
+            Box::pin(async move {
+                terminated
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(thread_id);
+                Ok(())
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn task_cancel_waits_past_old_deadline_for_exact_generation_binding() {
+        let runtime = DelayedTaskBindingRuntime::default();
+        let service =
+            WinxService::with_runtime(SessionIsolation::Lenient, Arc::new(runtime.clone()));
+        let (slot, guard) = service.session_for("delayed-cancel-binding").await;
+        *slot.lock().await = Some(BashState::new());
+        drop(guard);
+        let request = rmcp::model::CallToolRequestParams::new("BashCommand").with_arguments(
+            serde_json::json!({
+                "action_json": {
+                    "type": "command",
+                    "command": "delayed-binding-command",
+                    "is_background": false
+                },
+                "thread_id": "delayed-cancel-binding"
+            })
+            .as_object()
+            .expect("request object")
+            .clone(),
+        );
+        let reservation = service
+            .reserve_bash_task(&request, &crate::server::principal::RequestScope::default())
+            .await
+            .expect("reservation");
+        let task_id = reservation.task_id.clone();
+        service
+            .start_reserved_bash_task(
+                reservation,
+                request,
+                crate::server::principal::RequestScope::default(),
+                None,
+                false,
+            )
+            .await
+            .expect("returned Task");
+
+        let started =
+            tokio::time::timeout(Duration::from_secs(2), runtime.launch_started.acquire())
+                .await
+                .expect("runtime launch did not start")
+                .expect("runtime launch semaphore closed");
+        started.forget();
+
+        let cancel = service.cancel_bash_task(&task_id);
+        tokio::pin!(cancel);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(600), cancel.as_mut()).await.is_err(),
+            "cancellation acknowledged before the delayed execution identity was known"
+        );
+        runtime.release_generation.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(2), cancel.as_mut())
+            .await
+            .expect("cancellation did not settle after generation publication")
+            .expect("cancellation failed");
+
+        {
+            let interrupted =
+                runtime.interrupted.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            assert!(!interrupted.is_empty(), "the delayed execution was never interrupted");
+            assert!(interrupted.iter().all(|token| token.generation == 7));
+        }
+        assert!(
+            runtime.terminated.lock().unwrap_or_else(std::sync::PoisonError::into_inner).is_empty(),
+            "a bounded generation delay must not terminate the session"
+        );
+        assert_eq!(
+            service.tasks.lock().await.get(&task_id).map(|entry| entry.task.status),
+            Some(rmcp::model::TaskStatus::Cancelled)
+        );
+    }
+
     #[tokio::test]
     async fn failed_promotion_interrupts_full_execution_token_and_releases_reservation() {
         let runtime = PromotionContractRuntime::default();
