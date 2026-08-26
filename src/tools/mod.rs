@@ -9,6 +9,7 @@ pub mod background_shell;
 pub mod bash_command;
 pub mod code_map;
 pub mod context_save;
+pub mod edit_files;
 pub mod file_write_or_edit;
 pub mod initialize;
 pub mod multi_file_edit;
