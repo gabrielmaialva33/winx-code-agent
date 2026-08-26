@@ -318,7 +318,7 @@ redimensionando e recomprimindo entradas maiores. Um cache limitado de fingerpri
 alterações por uma referência estruturada compacta; `force=true` solicita explicitamente o reenvio dos bytes.
 
 `EditFiles` é a única superfície pública sobre o motor tipado de mutações. Seus modos explícitos por arquivo são
-`replace`, `search_replace`, `line_patch` e `undo`; um `apply` aceita de um a 100 alvos únicos e valida o lote antes de
+`replace`, `search_replace`, `line_patch` e `undo`; uma chamada de edição aceita de um a 100 alvos únicos e valida o lote antes de
 gravar. Os nomes antigos permanecem como aliases ocultos e não ampliam a autoridade dos modos equivalentes de `EditFiles`.
 
 `EditFiles` aceita `verify_command` e `verify_wait_for_seconds` opcionais (padrão `15`, máximo

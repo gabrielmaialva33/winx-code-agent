@@ -123,7 +123,7 @@ Secure MCP Tunnel / VPN / 认证 HTTPS 反向代理
 
 ## MCP 工具列表
 
-Winx 有意保持面向模型的目录精简。`EditFiles` 将五个重叠的变更入口合并为一个明确操作和每文件一个模式。
+Winx 有意保持面向模型的目录精简。`EditFiles` 将五个重叠的变更入口合并为一次调用和每文件一个明确模式。
 旧名称仍作为隐藏兼容别名供缓存客户端或已打开会话调用，但新客户端只会看到且应使用 `EditFiles`。
 
 请选择能够覆盖客户端需求的最小目录。策略同时作用于发现与调度，内部迁移 Wire 也只能使用该策略已
@@ -150,7 +150,7 @@ winx-code-agent serve --http \
 | `Initialize` | 初始化工作区、选择安全模式并返回 `thread_id`。除非客户端支持 MCP Roots 自动引导，否则应首先调用此工具。未指定路径时创建临时游乐场；恢复任务时重开保存的项目根目录。 |
 | `BashCommand` | 执行命令、轮询长时间运行的任务、发送 Enter/Ctrl-C 并操作 TUI。`wait_policy` 支持：`adaptive`（默认，短调用内联返回，长命令按需提升为 Task）；`until_complete`（直接创建 Task）；`return_early`（立即返回）。支持 `is_background`、`status_check`、按键输入与 `wait_for_turn`。 |
 | `ReadFiles` | 读取单个或多个文件，带行号输出，并返回不透明修订令牌与实际可见范围。支持 `path:10-40`；截断不会记录模型未看到的行。 |
-| `EditFiles` | 创建、更改或撤销一个或多个文件。一次 `apply` 最多接受 100 个唯一目标，并在写入前验证整个批次。每个条目选择明确模式：小范围精确修改用 `search_replace`；已有 `ReadFiles` 修订与可见坐标时用 `line_patch`；新文件或有意完整重写用 `replace`；撤销则用返回的精确 `undo_id`。可选 `verify_command` 仅在提交后运行一次；检查失败绝不会重复编辑。 |
+| `EditFiles` | 创建、更改或撤销一个或多个文件。一次编辑调用最多接受 100 个唯一目标，并在写入前验证整个批次。每个条目选择明确模式：小范围精确修改用 `search_replace`；已有 `ReadFiles` 修订与可见坐标时用 `line_patch`；新文件或有意完整重写用 `replace`；撤销则用返回的精确 `undo_id`。可选 `verify_command` 仅在提交后运行一次；检查失败绝不会重复编辑。 |
 | `ContextSave` | 将任务说明、工作区上下文、活跃文件与 Git Diff 导出为单一文本文件，便于后续会话无缝接力。 |
 | `ReadImage` | 返回原生 MCP 图像内容块（非纯文本 Base64），以便多模态大模型直接查看图像。受工作区目录限制。 |
 | `CodeMap` | 基于 Tree-sitter 的代码导航工具，支持两项操作：`outline`（提取文件或仓库符号大纲）和 `references`（跨仓库查找符号定义与调用位置，支持 13 种语言）。 |

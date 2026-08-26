@@ -125,7 +125,7 @@ Secure MCP Tunnel / VPN / proxy reverso HTTPS autenticado
 ## Ferramentas MCP
 
 O catálogo exposto ao modelo é intencionalmente pequeno. `EditFiles` substitui cinco escolhas de mutação sobrepostas por
-uma operação explícita e um modo por arquivo. Os nomes antigos continuam chamáveis como aliases ocultos para clientes em
+uma chamada e um modo explícito por arquivo. Os nomes antigos continuam chamáveis como aliases ocultos para clientes em
 cache ou conversas já abertas, mas clientes novos veem e devem usar somente `EditFiles`.
 
 Escolha o menor catálogo que cubra o cliente. A política vale tanto na descoberta quanto no dispatch, e o wire interno

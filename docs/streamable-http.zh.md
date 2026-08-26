@@ -297,7 +297,7 @@ Task 取消同样绑定到精确执行代次。若取消与启动并发，Winx �
 `force=true`。
 
 `EditFiles` 是强类型变更引擎唯一的公共入口。它的每文件显式模式为 `replace`、`search_replace`、`line_patch`
-和 `undo`；一次 `apply` 可接收 1 到 100 个唯一目标，并在写入前验证整个批次。旧名称保留为隐藏兼容
+和 `undo`；一次编辑调用可接收 1 到 100 个唯一目标，并在写入前验证整个批次。旧名称保留为隐藏兼容
 别名，不能扩大等价 `EditFiles` 模式已授予的权限。
 
 `EditFiles` 接受可选的 `verify_command` 与 `verify_wait_for_seconds`（默认 `15`，最大
