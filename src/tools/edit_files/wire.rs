@@ -13,13 +13,22 @@ use crate::types::{ApplyPatch, FileWriteOrEdit, LinePatch, MultiFileEdit, UndoEd
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditFilesWire {
-    pub operation: EditOperation,
+    /// Optional explicit operation. Omit it for normal edits; exactly one `mode=undo`
+    /// entry infers `undo`. An explicit value must agree with the listed modes.
+    #[serde(default)]
+    pub operation: Option<EditOperation>,
+    /// One unique target per entry. All apply entries are validated before writing begins.
+    #[schemars(length(min = 1, max = 100))]
     pub files: Vec<EditFileWire>,
+    /// Optional finite foreground check run once after a successful apply.
     #[serde(default)]
     pub verify_command: Option<String>,
+    /// Seconds to wait inline for `verify_command`, from 0 through 60.
     #[serde(default)]
     pub verify_wait_for_seconds: Option<f32>,
+    /// Exact project-session identifier returned by `Initialize`.
     pub thread_id: String,
+    /// Exact project identity returned alongside `thread_id` by `Initialize`.
     #[serde(default)]
     pub workspace_root: Option<String>,
 }
@@ -27,14 +36,25 @@ pub struct EditFilesWire {
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EditFileWire {
+    /// Target path. Relative paths resolve from the session's current shell directory.
     pub file_path: String,
+    /// `search_replace` for small exact edits, `line_patch` with a `ReadFiles` revision,
+    /// `replace` for new files or deliberate whole-file rewrites, and `undo` only with
+    /// `operation=undo`.
     pub mode: EditMode,
+    /// Required by `replace` and `search_replace`; forbidden by other modes. For
+    /// `search_replace`, use one or more exact
+    /// `<<<<<<< SEARCH\nold\n=======\nnew\n>>>>>>> REPLACE` blocks. An optional
+    /// `@line` or `@start-end` may follow `SEARCH` to disambiguate repeated text.
     #[serde(default)]
     pub content: Option<String>,
+    /// Exact `ReadFiles.files[].revision`; required only by `line_patch`.
     #[serde(default)]
     pub expected_revision: Option<String>,
+    /// Ordered, non-overlapping, one-based changes; required only by `line_patch`.
     #[serde(default)]
     pub patches: Option<Vec<LinePatch>>,
+    /// Exact receipt returned by the edit being undone; required only by `undo`.
     #[serde(default)]
     pub undo_id: Option<String>,
 }
@@ -174,7 +194,14 @@ fn normalize_new_wire(
     }
     let verification =
         parse_verification_fields(request.verify_command, request.verify_wait_for_seconds)?;
-    let command = match request.operation {
+    let operation = request.operation.unwrap_or_else(|| {
+        if request.files.len() == 1 && request.files[0].mode == EditMode::Undo {
+            EditOperation::Undo
+        } else {
+            EditOperation::Apply
+        }
+    });
+    let command = match operation {
         EditOperation::Apply => {
             let changes = request
                 .files
@@ -349,7 +376,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn dark_wire_keeps_explicit_workspace_and_verification_fields() -> Result<()> {
+    fn unified_wire_keeps_explicit_workspace_and_verification_fields() -> Result<()> {
         let normalized = normalize_edit_call(
             EditSurface::EditFiles,
             serde_json::json!({
@@ -375,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn dark_wire_rejects_unknown_entry_fields_and_mixed_undo() {
+    fn unified_wire_rejects_unknown_entry_fields_and_mixed_undo() {
         let unknown = serde_json::json!({
             "operation": "apply",
             "files": [{
@@ -398,6 +425,36 @@ mod tests {
             "thread_id": "thread"
         });
         assert!(normalize_edit_call(EditSurface::EditFiles, mixed).is_err());
+    }
+
+    #[test]
+    fn unified_wire_infers_common_apply_and_single_undo_operations() -> Result<()> {
+        let apply = normalize_edit_call(
+            EditSurface::EditFiles,
+            serde_json::json!({
+                "files": [{
+                    "file_path": "/workspace/new.rs",
+                    "mode": "replace",
+                    "content": "fn main() {}"
+                }],
+                "thread_id": "thread"
+            }),
+        )?;
+        assert_eq!(apply.command.operation(), EditOperation::Apply);
+
+        let undo = normalize_edit_call(
+            EditSurface::EditFiles,
+            serde_json::json!({
+                "files": [{
+                    "file_path": "/workspace/new.rs",
+                    "mode": "undo",
+                    "undo_id": "undo_123"
+                }],
+                "thread_id": "thread"
+            }),
+        )?;
+        assert_eq!(undo.command.operation(), EditOperation::Undo);
+        Ok(())
     }
 
     #[test]

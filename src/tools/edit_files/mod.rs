@@ -1,7 +1,8 @@
 //! Unified typed file-mutation engine.
 //!
-//! Phase 1 keeps the legacy MCP catalog intact, but every old edit facade and
-//! the dark `EditFiles` wire form lower into this module before planning.
+//! `EditFiles` is the compact public MCP surface. Hidden legacy aliases lower
+//! into the same module so cached clients keep working without duplicating
+//! planning, authorization, commit, recovery, or receipt semantics.
 
 mod domain;
 mod wire;
@@ -526,7 +527,7 @@ mod tests {
         PreparedEditContext::prepare(normalized, state, ToolPolicy::default().edit_permissions())
     }
 
-    fn prepare_dark_undo(
+    fn prepare_unified_undo(
         state: &BashState,
         file_path: &std::path::Path,
         undo_id: &str,
@@ -616,7 +617,7 @@ mod tests {
     }
 
     #[test]
-    fn error_context_preserves_exact_legacy_surface_and_typed_dark_index() {
+    fn error_context_preserves_exact_legacy_surface_and_typed_unified_index() {
         let source = || WinxError::SearchBlockNotFound("missing block".to_string());
         let indexed = |source| IndexedEditError {
             index: 0,
@@ -634,10 +635,10 @@ mod tests {
         assert_eq!(patch.to_string(), source().to_string());
         assert!(!patch.to_string().contains("MultiFileEdit aborted"));
 
-        let dark = indexed(source()).into_winx(EditSurface::EditFiles);
-        assert!(matches!(dark, WinxError::IndexedEditError { .. }));
-        assert!(dark.to_string().starts_with("EditFiles aborted before writing anything"));
-        assert!(!dark.to_string().contains("MultiFileEdit aborted"));
+        let unified = indexed(source()).into_winx(EditSurface::EditFiles);
+        assert!(matches!(unified, WinxError::IndexedEditError { .. }));
+        assert!(unified.to_string().starts_with("EditFiles aborted before writing anything"));
+        assert!(!unified.to_string().contains("MultiFileEdit aborted"));
 
         let legacy_batch = indexed(source()).into_winx(EditSurface::MultiFileEdit);
         assert_eq!(
@@ -671,7 +672,8 @@ mod tests {
     }
 
     #[test]
-    fn dark_alias_respects_each_custom_legacy_permission_shape_without_widening() -> Result<()> {
+    fn unified_surface_respects_each_custom_legacy_permission_shape_without_widening() -> Result<()>
+    {
         let root = tempfile::tempdir()?;
         let state = state_for(root.path());
         let first = root.path().join("first.rs");
@@ -782,7 +784,7 @@ mod tests {
         let stale_undo = {
             let guard = slot.lock().await;
             let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-            prepare_dark_undo(state, &path, &undo_ids[0])?
+            prepare_unified_undo(state, &path, &undo_ids[0])?
         };
         let Err(error) = handle_prepared(&slot, stale_undo).await else {
             return Err(WinxError::ParseError("stale undo unexpectedly succeeded".to_string()));
@@ -793,7 +795,7 @@ mod tests {
         let latest = {
             let guard = slot.lock().await;
             let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-            prepare_dark_undo(state, &path, &undo_ids[2])?
+            prepare_unified_undo(state, &path, &undo_ids[2])?
         };
         let outcome = handle_prepared(&slot, latest.clone()).await?;
         assert_eq!(outcome.next_undo_id.as_deref(), Some(undo_ids[1].as_str()));
@@ -896,7 +898,7 @@ mod tests {
             .ok_or_else(|| WinxError::ParseError("missing undo id".to_string()))?;
         let undo = {
             let guard = slot.lock().await;
-            prepare_dark_undo(
+            prepare_unified_undo(
                 guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?,
                 &link.join("file.txt"),
                 &undo_id,

@@ -248,6 +248,7 @@ impl EditSurface {
             ToolKind::MultiFileEdit => Some(Self::MultiFileEdit),
             ToolKind::ApplyPatch => Some(Self::ApplyPatch),
             ToolKind::UndoEdit => Some(Self::UndoEdit),
+            ToolKind::EditFiles => Some(Self::EditFiles),
             _ => None,
         }
     }
