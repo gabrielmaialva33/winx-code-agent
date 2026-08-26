@@ -332,9 +332,8 @@ impl ServerHandler for WinxService {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let dark_edit_files = request.name.as_ref() == "EditFiles";
         let tool_kind = ToolKind::parse(request.name.as_ref());
-        if tool_kind.is_none() && !dark_edit_files {
+        if tool_kind.is_none() {
             return Err(McpError::invalid_request(format!("Unknown tool: {}", request.name), None));
         }
         let principal = principal_from_context(&context);
@@ -347,11 +346,7 @@ impl ServerHandler for WinxService {
         // JSON fields and makes malformed edit calls recoverable tool results,
         // even when another gate (workspace or capability) would also reject
         // the request.
-        let edit_surface = if dark_edit_files {
-            Some(EditSurface::EditFiles)
-        } else {
-            tool_kind.and_then(EditSurface::from_public_tool)
-        };
+        let edit_surface = tool_kind.and_then(EditSurface::from_public_tool);
         let normalized_edit = if let Some(surface) = edit_surface {
             let arguments = request
                 .arguments
@@ -369,11 +364,8 @@ impl ServerHandler for WinxService {
         } else {
             None
         };
-        let policy_allows_call = if dark_edit_files {
-            effective_tool_policy.allows_dark_edit_files()
-        } else {
-            tool_kind.is_some_and(|kind| effective_tool_policy.allows_kind(kind))
-        };
+        let policy_allows_call =
+            tool_kind.is_some_and(|kind| effective_tool_policy.allows_call_kind(kind));
         if !policy_allows_call {
             return Err(McpError::invalid_request(
                 format!("Tool is not available for this principal: {}", request.name),

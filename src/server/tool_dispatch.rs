@@ -133,29 +133,22 @@ struct PreparedEditCall {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RequestedTool {
     Public(ToolKind),
-    DarkEditFiles,
 }
 
 impl RequestedTool {
     fn parse(name: &str) -> Option<Self> {
-        if name == "EditFiles" {
-            Some(Self::DarkEditFiles)
-        } else {
-            ToolKind::parse(name).map(Self::Public)
-        }
+        ToolKind::parse(name).map(Self::Public)
     }
 
     const fn name(self) -> &'static str {
         match self {
             Self::Public(kind) => kind.as_str(),
-            Self::DarkEditFiles => "EditFiles",
         }
     }
 
     const fn edit_surface(self) -> Option<EditSurface> {
         match self {
             Self::Public(kind) => EditSurface::from_public_tool(kind),
-            Self::DarkEditFiles => Some(EditSurface::EditFiles),
         }
     }
 }
@@ -363,11 +356,9 @@ impl WinxService {
                 ToolKind::FileWriteOrEdit
                 | ToolKind::MultiFileEdit
                 | ToolKind::UndoEdit
-                | ToolKind::ApplyPatch,
-            )
-            | RequestedTool::DarkEditFiles => {
-                (self.handle_prepared_edit(prepared_edit, bash_options).await, None)
-            }
+                | ToolKind::ApplyPatch
+                | ToolKind::EditFiles,
+            ) => (self.handle_prepared_edit(prepared_edit, bash_options).await, None),
             RequestedTool::Public(ToolKind::ReadFiles) => {
                 (self.handle_read_files(args).await, None)
             }
@@ -1477,7 +1468,7 @@ mod verification_tests {
         });
         let prepared = service
             .prepare_edit_context(
-                RequestedTool::DarkEditFiles,
+                RequestedTool::Public(crate::tool_registry::ToolKind::EditFiles),
                 Some(&arguments),
                 crate::tool_policy::ToolPolicy::default().edit_permissions(),
             )

@@ -66,8 +66,8 @@ enum Commands {
         #[arg(long, value_name = "PATH", conflicts_with_all = ["token", "token_file"])]
         principal_config: Option<PathBuf>,
 
-        /// Curated MCP catalog for a single-token principal. `full` preserves
-        /// every tool; `coding`, `read-only`, and `terminal` reduce schemas and routing.
+        /// Curated MCP catalog for a single-token principal. `full` exposes seven
+        /// distinct capabilities; `coding` exposes the five-tool code-agent core.
         #[arg(
             long,
             value_enum,

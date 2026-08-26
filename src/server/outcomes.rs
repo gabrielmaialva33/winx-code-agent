@@ -707,9 +707,10 @@ pub(super) fn result_size_bytes(result: &CallToolResult) -> usize {
     )
 }
 
-/// Ensure model-facing recovery never points at a tool omitted from this
-/// principal's effective tools/list. Runtime authorization still remains the
-/// final authority; this closes only the orchestration contract.
+/// Ensure model-facing recovery never points at a tool this principal cannot
+/// call. A hidden compatibility alias is permitted only when its equivalent
+/// unified capability is already authorized; runtime authorization remains the
+/// final authority.
 pub(super) fn enforce_next_action_policy(
     result: &mut CallToolResult,
     policy: crate::tool_policy::ToolPolicy,
@@ -720,7 +721,7 @@ pub(super) fn enforce_next_action_policy(
     else {
         return;
     };
-    if policy.names().any(|advertised| advertised == next_tool) {
+    if policy.allows_call(next_tool) {
         return;
     }
     let edit_applied = envelope
@@ -740,7 +741,7 @@ pub(super) fn enforce_next_action_policy(
     if let Value::Object(data) = data {
         data.insert("follow_up_blocked_by_policy".to_string(), Value::Bool(true));
     }
-    let suffix = " Required recovery is unavailable in this request's advertised tool policy; no hidden action was emitted.";
+    let suffix = " Required recovery is unavailable in this request's tool policy; no unauthorized action was emitted.";
     let message = envelope
         .get("message")
         .and_then(Value::as_str)
