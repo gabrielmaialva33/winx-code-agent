@@ -245,12 +245,13 @@ Regras dos principals:
 ### Perfis do catálogo de ferramentas
 
 Os perfis reduzem o payload de schemas de `tools/list` para clientes que não precisam de todas as capacidades. A mesma
-política é validada antes do dispatch, portanto não é possível chamar pelo nome uma ferramenta que ficou oculta.
+política é validada antes do dispatch. Aliases antigos de edição permanecem chamáveis apenas com a autoridade de mutação
+equivalente já concedida, preservando conversas em cache sem ampliar permissões.
 
 | Perfil | Ferramentas anunciadas |
 | :--- | :--- |
-| `full` | Todas as onze ferramentas (padrão retrocompatível) |
-| `coding` | `Initialize`, `BashCommand`, `ReadFiles`, as três ferramentas de edição, `VerifyEdit`, `UndoEdit` e `CodeMap` |
+| `full` | Sete ferramentas: catálogo compacto de código mais `ContextSave` e `ReadImage` (padrão) |
+| `coding` | `Initialize`, `BashCommand`, `ReadFiles`, `CodeMap` e `EditFiles` |
 | `read-only` | `Initialize`, `ReadFiles`, `ReadImage` e `CodeMap` |
 | `terminal` | `Initialize` e `BashCommand` |
 
@@ -273,7 +274,7 @@ modo Winx inicializado e do usuário do sistema operacional.
 
 ## Contrato de Orquestração com LLM
 
-O handshake inicial do MCP estabelece um contrato de orquestração sequencial determinístico: inicializar uma vez, manter o `thread_id` retornado, utilizar `CodeMap` antes de leituras extensas, agrupar leituras com `ReadFiles`, ler arquivos antes de editá-los, compor verificações relacionadas e fail-fast com `&&` e nunca repetir chamadas rejeitadas sem alterações. `Initialize` também retorna um diretório limitado `<workspace_root>/.winx/tmp/session-…/` para helpers derivados que sejam realmente úteis. Eles permanecem não canônicos, preservam a proveniência de caminho/linha e reutilizam nomes estáveis, sem materializar código-fonte ou saída de comandos apenas para chamar `CodeMap`. Mapas de helpers aceitam um único arquivo existente, limitam o payload de navegação a 12 KiB e permitem 24 arquivos únicos / 64 chamadas por sessão ativa; mapas de fontes canônicas não compartilham essa cota agregada. O armazenamento temporário é limitado a 64 MiB / 128 arquivos por sessão e 256 MiB por workspace, com sessões inativas removidas após 24 horas. Helpers nunca codificam payload nos nomes nem poluem a raiz do projeto com artefatos `.winx-*`/`.winx_tmp`. Todo PTY foreground ou background exporta esse diretório exato como `WINX_TEMP_DIR`; escritas shell com destino estático que tentem contorná-lo são rejeitadas com `temporary_artifact_policy`. O Winx também audita o uso real após cada ação Bash, incluindo escritas dinâmicas: o resultado informa bytes e arquivos, e uma sessão acima da cota bloqueia comandos comuns até o agente inspecionar e remover helpers obsoletos explicitamente. Ultrapassar a cota nunca dispara exclusão automática; a limpeza já documentada de sessões inativas após 24 horas permanece igual. Se `Initialize` retornar `initialize_workspace_already_bound` ou `workspace_change_requires_new_session`, a chamada é terminal para aquela conversa: mantenha o par já vinculado ao acessar caminhos absolutos permitidos ou abra outra conversa para um projeto realmente diferente. Uma verificação finita pós-edição pode ser enviada como `verify_command` em qualquer uma das ferramentas de edição, economizando uma ida e volta entre rede e modelo.
+O handshake inicial do MCP estabelece um contrato de orquestração sequencial determinístico: inicializar uma vez, manter o `thread_id` retornado, utilizar `CodeMap` antes de leituras extensas, agrupar leituras com `ReadFiles`, ler arquivos antes de editá-los, compor verificações relacionadas e fail-fast com `&&` e nunca repetir chamadas rejeitadas sem alterações. `Initialize` também retorna um diretório limitado `<workspace_root>/.winx/tmp/session-…/` para helpers derivados que sejam realmente úteis. Eles permanecem não canônicos, preservam a proveniência de caminho/linha e reutilizam nomes estáveis, sem materializar código-fonte ou saída de comandos apenas para chamar `CodeMap`. Mapas de helpers aceitam um único arquivo existente, limitam o payload de navegação a 12 KiB e permitem 24 arquivos únicos / 64 chamadas por sessão ativa; mapas de fontes canônicas não compartilham essa cota agregada. O armazenamento temporário é limitado a 64 MiB / 128 arquivos por sessão e 256 MiB por workspace, com sessões inativas removidas após 24 horas. Helpers nunca codificam payload nos nomes nem poluem a raiz do projeto com artefatos `.winx-*`/`.winx_tmp`. Todo PTY foreground ou background exporta esse diretório exato como `WINX_TEMP_DIR`; escritas shell com destino estático que tentem contorná-lo são rejeitadas com `temporary_artifact_policy`. O Winx também audita o uso real após cada ação Bash, incluindo escritas dinâmicas: o resultado informa bytes e arquivos, e uma sessão acima da cota bloqueia comandos comuns até o agente inspecionar e remover helpers obsoletos explicitamente. Ultrapassar a cota nunca dispara exclusão automática; a limpeza já documentada de sessões inativas após 24 horas permanece igual. Se `Initialize` retornar `initialize_workspace_already_bound` ou `workspace_change_requires_new_session`, a chamada é terminal para aquela conversa: mantenha o par já vinculado ao acessar caminhos absolutos permitidos ou abra outra conversa para um projeto realmente diferente. Uma verificação finita pós-edição pode ser enviada como `verify_command` em `EditFiles`, economizando uma ida e volta entre rede e modelo.
 
 Os arquivos de um lote `ReadFiles` são processados em um pool paralelo limitado (`WINX_READ_PARALLELISM`, padrão `4`, máximo `32`). A resposta e a cobertura do guard rail continuam seguindo exatamente a ordem solicitada.
 
@@ -282,8 +283,8 @@ Cada ferramenta define um `outputSchema` e retorna um envelope `structuredConten
 ```json
 {
   "status": "needs_read",
-  "tool": "FileWriteOrEdit",
-  "message": "FileWriteOrEdit failed: ...",
+  "tool": "EditFiles",
+  "message": "EditFiles failed: ...",
   "errorCode": "read_required",
   "retryable": true,
   "retrySameCall": false,
@@ -316,19 +317,17 @@ com limites independentes de dimensões e alocação decodificada; a entrega fic
 redimensionando e recomprimindo entradas maiores. Um cache limitado de fingerprints por sessão troca repetições sem
 alterações por uma referência estruturada compacta; `force=true` solicita explicitamente o reenvio dos bytes.
 
-`FileWriteOrEdit`, `ApplyPatch`, `MultiFileEdit` e `UndoEdit` são fachadas públicas compatíveis sobre um único motor
-tipado de mutações. Elas compartilham identidade canônica do alvo, evidência de leitura, planejamento/commit, checkpoints,
-recibos e recuperação tipada; o wire de migração não anunciado `EditFiles` não amplia a autoridade dos modos públicos
-equivalentes.
+`EditFiles` é a única superfície pública sobre o motor tipado de mutações. Seus modos explícitos por arquivo são
+`replace`, `search_replace`, `line_patch` e `undo`; um `apply` aceita de um a 100 alvos únicos e valida o lote antes de
+gravar. Os nomes antigos permanecem como aliases ocultos e não ampliam a autoridade dos modos equivalentes de `EditFiles`.
 
-`FileWriteOrEdit`, `ApplyPatch` e `MultiFileEdit` aceitam `verify_command` e `verify_wait_for_seconds` opcionais (padrão `15`, máximo
+`EditFiles` aceita `verify_command` e `verify_wait_for_seconds` opcionais (padrão `15`, máximo
 `60`). A verificação só roda depois de um commit bem-sucedido, em foreground e sob a mesma allowlist de modo do
 `BashCommand`. Exit code zero conclui o resultado combinado. Um exit code diferente de zero mantém o resultado da edição
 em `isError: false`, com `status: completed_with_issues`, `errorCode: verification_failed` e `data.edit_applied: true`.
-A ação exata `VerifyEdit` repete somente a verificação depois das correções, nunca a edição. Se a verificação continuar
-executando ao final da espera limitada, o resultado fornece a ação `status_check` normal do `BashCommand`. O principal
-precisa autorizar a ferramenta de edição e `BashCommand`; allowlists customizadas não podem expor `VerifyEdit` sem
-`BashCommand`.
+A ação vinculada ao recibo em `BashCommand` repete somente a verificação depois das correções, nunca a edição. Se a
+verificação continuar executando ao final da espera limitada, o resultado fornece a ação `status_check` normal do
+`BashCommand`. A verificação exige autoridade para `EditFiles` e `BashCommand`.
 
 Edições confirmadas recebem por 30 minutos um recibo compacto persistido. Chamadas idênticas ficam single-flight e são
 reproduzidas sem nova escrita ou verificação enquanto os hashes finais coincidirem. Mudança posterior no alvo retorna

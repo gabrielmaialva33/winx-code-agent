@@ -84,15 +84,15 @@ an OpenAI-hosted MCP endpoint.
 - **Identity-aware isolation:** one token per principal; thread IDs and MCP Task IDs are scoped internally and translated
   back before the response leaves the server. Workspace affinity absorbs unstable model-generated thread IDs.
 - **Right-sized tool catalogs:** `full`, `coding`, `read-only`, and `terminal` profiles—or an exact per-principal
-  allowlist—reduce discovery/schema payloads and reject calls outside the advertised catalog.
-- **One mutation protocol:** the public edit tools are compatibility-focused views over one typed plan/commit engine, so
-  read evidence, canonical path binding, atomic writes, undo checkpoints, verification receipts, and recovery behave the
-  same way regardless of the edit shape the client selected.
+  allowlist—reduce discovery/schema payloads and reject calls without equivalent effective authority.
+- **One mutation tool:** `EditFiles` creates, edits, batches, patches, verifies, and undoes through one typed
+  plan/commit engine, removing overlapping choices while preserving read evidence, canonical path binding, atomic writes,
+  receipts, and recovery.
 - **Fail-closed network defaults:** loopback-only binding, 32-byte minimum tokens, chmod-600 token files, DNS-rebinding
   host checks, body/time/concurrency limits, per-IP rate limiting, and delayed invalid-auth responses.
 - **Agent-native terminal semantics:** foreground and background commands, status polling, interactive input, stable TUI
   snapshots, turn detection, real exit codes, and bounded output.
-- **Repository tools, not just a shell:** guarded SEARCH/REPLACE edits, multi-file planning, undo, token-budgeted reads,
+- **Repository tools, not just a shell:** one guarded edit protocol, multi-file planning, undo, token-budgeted reads,
   image input, context handoff, and tree-sitter symbol navigation.
 
 ## Choose your transport
@@ -145,8 +145,8 @@ Secure MCP Tunnel / VPN / authenticated reverse proxy
   processes are reaped on drop, and prompt detection is robust to a custom `PS1`. Opt into `zsh` with `WINX_SHELL=zsh`.
 - File reads with WCGW-style line ranges (`file.rs:10-40`, `file.rs:10-`, `file.rs:-40`). Active files are tracked
   and prioritized in the repository context across calls.
-- One typed mutation engine behind `FileWriteOrEdit`, `ApplyPatch`, `MultiFileEdit`, and `UndoEdit`. Replace,
-  SEARCH/REPLACE, revision-bound line patch, batch, and undo operations share canonical-path preflight, read/freshness
+- One public `EditFiles` tool for replace, SEARCH/REPLACE, revision-bound line patch, atomic batches, verification, and
+  undo. Every mode shares canonical-path preflight, read/freshness
   evidence, bounded planning, atomic per-file replacement, compact diffs, typed recovery, and receipt-bound
   verification. A planning failure writes nothing. A rare mid-commit I/O failure stops immediately and reports the
   committed prefix instead of pretending the whole batch rolled back.
@@ -191,21 +191,21 @@ Secure MCP Tunnel / VPN / authenticated reverse proxy
 
 ## MCP Tools
 
-Winx keeps its public catalog stable while reducing internal duplication. The four public mutation facades all lower
-into the same typed engine. The unadvertised `EditFiles` migration wire is an internal compatibility surface, not a
-public API; clients should use only names returned by `tools/list`.
+Winx keeps the model-facing catalog intentionally small. `EditFiles` replaces five overlapping mutation choices with
+one explicit operation and one mode per file. Legacy edit names remain callable as hidden compatibility aliases for
+cached or already-running clients, but new clients see and should use only `EditFiles`.
 
-Choose the smallest catalog that covers the client. The policy is enforced at both discovery and dispatch; the internal
-migration wire is additionally constrained to the equivalent mutation authority already granted by that policy. For a
+Choose the smallest catalog that covers the client. The policy is enforced at both discovery and dispatch; hidden
+compatibility aliases cannot exceed the equivalent `EditFiles` authority granted by that policy. For a
 typical coding agent, `coding` is the recommended starting point; use `full` only when the agent also needs image input
 or context handoff.
 
-| Profile     | Tool count | Capabilities                                                                                     |
-|-------------|-----------:|--------------------------------------------------------------------------------------------------|
-| `terminal`  |          2 | `Initialize`, `BashCommand`                                                                      |
-| `read-only` |          4 | Initialization, exact file/image reads, and `CodeMap`                                             |
-| `coding`    |          9 | Terminal, reads, navigation, and every public edit/verify/undo facade                              |
-| `full`      |         11 | Backward-compatible default; adds `ContextSave` and `ReadImage` to the coding workflow             |
+| Profile     | Tool count | Capabilities                                                                   |
+|-------------|-----------:|--------------------------------------------------------------------------------|
+| `terminal`  |          2 | `Initialize`, `BashCommand`                                                    |
+| `read-only` |          4 | Initialization, exact file/image reads, and `CodeMap`                          |
+| `coding`    |          5 | `Initialize`, `BashCommand`, `ReadFiles`, `CodeMap`, and `EditFiles`           |
+| `full`      |          7 | Default; adds `ContextSave` and `ReadImage` to the compact coding workflow     |
 
 For a single-token HTTP server:
 
@@ -223,14 +223,19 @@ weaken or strengthen the shell/file authority granted by the initialized Winx mo
 | `Initialize`      | Boots the workspace, picks the mode, hands you an inseparable `thread_id`/`workspace_root` pair plus a bounded `temporary_artifact_dir` for session-local derived helpers. Call it once unless a local MCP client exposes Roots, in which case Winx can bootstrap automatically. Repeated `first_call` requests reattach without rebuilding or resending unchanged workspace context. If adapter state disappears, `reset_shell` or `user_asked_mode_change` safely recovers the same intended project as a first call and reports `initialize_recovered_missing_session`. A request that tries to rebind an already-bound remote conversation is terminal: keep the current pair for allowed external targets or start a new conversation for another project. With no workspace path it creates a scratch playground; resuming a task (`task_id_to_resume`) reopens its saved project root.                                                                                           |
 | `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, and drives TUIs. Related finite fail-fast checks can be composed with `&&` in one call. `wait_policy` is generic: `adaptive` (default) keeps short calls inline and promotes an already-running foreground command when Tasks are available; `until_complete` is only for a finite foreground command; `return_early` always stays inline. An incompatible policy is a recoverable tool result with corrected retry arguments. Supports `is_background`, `status_check`, input actions, `screen`, and `wait_for_turn`. Foreground and background PTYs export `WINX_WORKSPACE_ROOT` and the managed helper directory as `WINX_TEMP_DIR`; structured results include its post-action usage. Over-budget sessions require explicit cleanup before ordinary commands continue. When a foreground command finishes, its runtime-owned state reports the real exit code. |
 | `ReadFiles`       | One or many files, with line numbers. Batched reads use a bounded parallel worker pool while preserving request order and read-before-edit coverage. Each file also returns an opaque revision and its exact visible ranges. Append `:10-40` to a path for a range. Token truncation reports the exact continuation and never records unseen lines. |
-| `FileWriteOrEdit` | Single-file view of the shared mutation engine: full replacement or SEARCH/REPLACE blocks, with optional `@start-end` anchors. Validates read coverage, freshness, and canonical target identity before writing; reports tolerances, syntax issues, and a compact diff. Optional `verify_command` runs one finite post-edit check without making verification part of the commit.                                                                                                                                                                                                                                                                                                                                                                                            |
-| `ApplyPatch`      | Revision-bound view of the same engine. Applies ordered, non-overlapping, 1-based line patches to one exact `ReadFiles` revision; only visible lines may change. Stale revisions/replays fail before writing. Use `delete_lines: 0` to insert and `totalLines + 1` to append. Supports the same optional post-edit verification. |
-| `MultiFileEdit`   | Batch view of the same engine. Validates and computes every requested edit before writing, so a planning failure leaves the whole batch untouched. Commits use atomic per-file renames; a rare commit-stage I/O failure reports both committed and uncommitted paths and never claims a rollback that did not happen. Optional `verify_command` runs once after a successful batch commit. For one file use `FileWriteOrEdit`.                                                                                                                                                                                                                                                                                                                                               |
-| `VerifyEdit`      | Reruns the exact check from a post-edit verification receipt without repeating the committed edit. The receipt is bound to its command and project session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `UndoEdit`        | Undo view of the shared engine. Reverts one file to its previous in-session checkpoint (up to 10 retained across the session). It is strict per-file LIFO, fails if the target changed externally, and cannot remove a newly created file.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `EditFiles`       | Creates, changes, or undoes one or many files. One `apply` call may contain up to 100 unique targets and validates the full batch before writing. Each entry selects an explicit mode: `search_replace` for small exact edits, `line_patch` with a `ReadFiles` revision and visible coordinates, `replace` for new files or intentional whole-file rewrites, or `undo` with the exact returned `undo_id`. Optional `verify_command` runs once after commit; a failed check never repeats the edit. |
 | `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `ReadImage`       | Returns validated JPEG, PNG, GIF, or WebP as a native MCP image content block (not base64 text), so multimodal models actually see it. Sources are capped at 50 MiB and bounded by decoded dimensions/allocation; delivery is at most 2 MiB and 2560 px on the long edge, with oversized inputs converted to JPEG. A 32-entry per-session content cache returns compact metadata for unchanged repeats; use `force=true` only for an intentional resend. Path policy matches the other file tools. |
 | `CodeMap`         | Tree-sitter code navigation, in one tool with two `operation`s. `outline`: a symbol map (functions, types, methods, ...) - a file returns its definitions, a directory (or empty) a relevance-ranked, token-budgeted repo symbol map, in 13 languages including Python and Elixir. `references`: where a `name` is defined and used (called) across the repo, counting only real identifier occurrences (never inside strings/comments, unlike grep), definitions first. Unsupported single files return a structured `ReadFiles` fallback; for plain-text/regex search and file discovery, use `rg`/`fd`/`grep` via `BashCommand`.                                                                                                                                                              |
+
+`EditFiles` mode selection is deliberately mechanical:
+
+| Mode             | Use it when                                      | Required payload                                      |
+|------------------|--------------------------------------------------|-------------------------------------------------------|
+| `search_replace` | Changing a small exact block already read        | `content` with SEARCH/REPLACE blocks                  |
+| `line_patch`     | Exact visible line coordinates are already known | `expected_revision` and ordered `patches`             |
+| `replace`        | Creating a file or replacing most/all of it       | Complete `content`                                    |
+| `undo`           | Reverting a prior Winx edit                       | One sole entry and the exact returned `undo_id`       |
 
 Winx advertises MCP `2026-07-28`. Every tool publishes an `outputSchema` and returns a shared
 `structuredContent` orchestration envelope while preserving its existing text or image content for older clients. The
@@ -242,14 +247,14 @@ tool results with `isError: true`, `retrySameCall: false`, and (when Winx can in
 and background-command metadata never feed orchestration decisions. Daemon protocol `1.6` transports that same typed
 state and compact payload end to end while identifying the exact build and process role, so marker-looking text cannot
 manufacture or suppress a polling loop and mixed binaries can be diagnosed explicitly. A `ReadFiles` batch with any
-failed path is an honest `isError: true` result while retaining successfully read content; `MultiFileEdit` preserves
+failed path is an honest `isError: true` result while retaining successfully read content; `EditFiles` preserves
 unread, stale, and SEARCH conflict recovery instead of flattening planning failures into generic invalid input.
 Successful edits receive a persisted, 30-minute mutation receipt. An identical concurrent or resumed call is compactly
 replayed only when the target hashes still match; newer external changes produce a fail-closed conflict instead of an
 overwrite. Three repeated SEARCH conflicts on one target escalate to `recovery_exhausted`.
 Edit verification is bounded to 60 seconds and uses the same mode command policy as `BashCommand`. A non-zero check keeps
 the edit call successful with `status: completed_with_issues`, `errorCode: verification_failed`, and
-`data.edit_applied: true`; its concrete `VerifyEdit` next action reruns only the check after corrective changes. If the
+`data.edit_applied: true`; its receipt-bound `BashCommand` next action reruns only the check after corrective changes. If the
 check is still running, the outer result supplies the normal `BashCommand` `status_check` next action.
 
 MCP Tasks are optional on `BashCommand` and apply only to a foreground `command`; include an explicit `thread_id` and do
@@ -620,9 +625,9 @@ WINX_EMBEDDED=1 cargo run --release
 
 ### Check it's wired up
 
-List MCP tools in your client. You should see 11 entries with `full`, 9 with `coding`, 4 with `read-only`, or 2 with
-`terminal`; an exact allowlist may be smaller. `EditFiles` must not appear because its migration wire is intentionally
-unadvertised. Start with `Initialize` unless a local client exposes MCP Roots and Winx bootstraps from them; preserve its
+List MCP tools in your client. You should see 7 entries with `full`, 5 with `coding`, 4 with `read-only`, or 2 with
+`terminal`; an exact allowlist may be smaller. `EditFiles` should appear in `full` and `coding`; the five legacy edit
+aliases should not. Start with `Initialize` unless a local client exposes MCP Roots and Winx bootstraps from them; preserve its
 returned `thread_id`/`workspace_root` pair for every later call.
 
 ## Durable session lifecycle (Unix)
@@ -796,7 +801,7 @@ All optional - Winx works out of the box without any of these. Boolean variables
 | `WINX_GUARDIAN_SWEEP_INTERVAL_SECS`                        | Interval between automatic guardian sweeps. Defaults to `60` seconds; accepted range is `1..=86400`. Read when `winxd` starts.                                                                                                                                                                                                                                                                                                                          |
 | `WINX_NO_COMPRESS`                                         | Set to `1` to disable output compression and see raw, uncollapsed shell output (the `[winx: ×N]` collapsing is on by default).                                                                                                                                                                                                                                                                                                                          |
 | `WINX_NO_REDACT`                                           | Set to `1` to disable secret redaction. By default winx scrubs high-confidence credentials (provider API keys, JWTs, PEM private keys, `user:pass@` URLs) from all tool output and saved memory, replacing each with `[REDACTED:<rule>]`. Turn this off only when you knowingly need a raw value.                                                                                                                                                       |
-| `WINX_ALLOW_PATHS`                                         | `:`-separated absolute paths the file tools (`ReadFiles`, `FileWriteOrEdit`, `ApplyPatch`, `MultiFileEdit`, `ReadImage`, `UndoEdit`, `CodeMap`) may reach **outside** the workspace (e.g. `WINX_ALLOW_PATHS=/tmp`). Empty by default: everything stays workspace-confined. Read once at startup, so the policy is set by whoever launches the server and cannot be widened mid-session by a tool argument or a shell command. `WINX_ALLOW_PATHS=/` turns containment off entirely (every absolute path is under `/`) - the explicit way to run unconfined. Note `BashCommand` was never path-confined; this only governs the file tools. |
+| `WINX_ALLOW_PATHS`                                         | `:`-separated absolute paths the file tools (`ReadFiles`, `EditFiles`, `ReadImage`, `CodeMap`, plus hidden legacy aliases) may reach **outside** the workspace (e.g. `WINX_ALLOW_PATHS=/tmp`). Empty by default: everything stays workspace-confined. Read once at startup, so the policy is set by whoever launches the server and cannot be widened mid-session by a tool argument or a shell command. `WINX_ALLOW_PATHS=/` turns containment off entirely (every absolute path is under `/`) - the explicit way to run unconfined. Note `BashCommand` was never path-confined; this only governs the file tools. |
 | `WINX_SANDBOX`                                             | Set to `1` to enable an opt-in Landlock filesystem sandbox (Linux 5.13+, EXPERIMENTAL). Confines winx and its shell to write only the workspace (the cwd at startup) plus `/tmp`, and makes the home directory unreadable, so a manipulated agent can't read `~/.ssh`/`~/.aws` or modify files outside the project. Landlock is applied before the usage-log worker, Tokio, or PTY threads are created, so they inherit the same domain. Coarse and best-effort: a command needing a path outside the allowlist fails. Degrades to a warning (unsandboxed) on older kernels. |
 | `WINX_SANDBOX_RO_PATHS` / `WINX_SANDBOX_RW_PATHS`          | `:`-separated absolute paths to additionally allow read-only / read-write under `WINX_SANDBOX` (e.g. `WINX_SANDBOX_RO_PATHS=$HOME/.cargo:$HOME/.rustup` so cargo still works).                                                                                                                                                                                                                                                                          |
 | `WINX_TURN_RECOGNIZER_CONFIG`                              | JSON `{"busy":[…],"awaiting_input":[…],"awaiting_approval":[…]}` of marker strings/regexes. With `recognizer:"configurable"`, lets `wait_for_turn` drive an arbitrary TUI without bespoke code.                                                                                                                                                                                                                                                         |

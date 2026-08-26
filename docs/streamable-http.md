@@ -288,12 +288,13 @@ principal's Task.
 ### Tool catalog profiles
 
 Profiles reduce the `tools/list` schema payload for clients that do not need every capability. Winx also checks the same
-policy before dispatch, so a client cannot call a hidden tool by name.
+policy before dispatch. Hidden legacy edit aliases remain callable only with the equivalent already-authorized mutation
+capability so cached conversations survive catalog refreshes without gaining authority.
 
 | Profile     | Advertised tools                                                                                      |
 |-------------|-------------------------------------------------------------------------------------------------------|
-| `full`      | All eleven tools (backward-compatible default)                                                        |
-| `coding`    | `Initialize`, `BashCommand`, `ReadFiles`, all edit tools, `VerifyEdit`, `UndoEdit`, and `CodeMap`     |
+| `full`      | Seven tools: the compact coding catalog plus `ContextSave` and `ReadImage` (default)                  |
+| `coding`    | `Initialize`, `BashCommand`, `ReadFiles`, `CodeMap`, and `EditFiles`                                 |
 | `read-only` | `Initialize`, `ReadFiles`, `ReadImage`, and `CodeMap`                                                 |
 | `terminal`  | `Initialize` and `BashCommand`                                                                        |
 
@@ -331,7 +332,7 @@ actual usage; after an overage, ordinary commands are blocked until the agent ex
 helpers. An overage never triggers automatic deletion; the 24-hour stale-session pruning remains unchanged. If `Initialize` returns `initialize_workspace_already_bound` or
 `workspace_change_requires_new_session`, that call is terminal for the current conversation: keep its bound pair for
 allowed absolute targets, or start a new conversation for a genuinely different project. A finite post-edit check can be
-supplied as `verify_command` on `FileWriteOrEdit`, `ApplyPatch`, or `MultiFileEdit`, saving one network/model round trip. Extra
+supplied as `verify_command` on `EditFiles`, saving one network/model round trip. Extra
 `WINX_SERVER_INSTRUCTIONS` are appended after those stable rules and are also included in the `Initialize` response for
 clients that do not expose handshake instructions to the model.
 
@@ -341,8 +342,8 @@ remain unchanged for older clients. The main fields are:
 ```json
 {
   "status": "needs_read",
-  "tool": "FileWriteOrEdit",
-  "message": "FileWriteOrEdit failed: ...",
+  "tool": "EditFiles",
+  "message": "EditFiles failed: ...",
   "errorCode": "read_required",
   "retryable": true,
   "retrySameCall": false,
@@ -384,17 +385,18 @@ with independent decoded-dimension and allocation limits. Delivery is bounded to
 resizing/re-encoding oversized inputs. A bounded per-session content-fingerprint cache replaces unchanged repeats with a
 compact structured reference; `force=true` is the explicit escape hatch when a client genuinely needs the bytes again.
 
-`FileWriteOrEdit`, `ApplyPatch`, `MultiFileEdit`, and `UndoEdit` are public compatibility facades over one typed mutation
-engine. They share canonical target binding, read evidence, plan/commit behavior, checkpoint accounting, receipts, and
-typed recovery; the unadvertised `EditFiles` migration wire does not grant authority beyond the equivalent public modes.
+`EditFiles` is the single public mutation surface over the typed engine. Its explicit per-file modes are `replace`,
+`search_replace`, `line_patch`, and `undo`; one apply call accepts one through 100 unique targets and validates the batch
+before writing. The former edit names remain hidden compatibility aliases and cannot grant authority beyond the
+equivalent `EditFiles` modes.
 
-`FileWriteOrEdit`, `ApplyPatch`, and `MultiFileEdit` accept optional `verify_command` and `verify_wait_for_seconds` (default `15`, maximum
+`EditFiles` accepts optional `verify_command` and `verify_wait_for_seconds` (default `15`, maximum
 `60`). Verification runs only after a successful commit, as a foreground command under the same mode allowlist as
 `BashCommand`. Exit code zero completes the combined result. A non-zero exit keeps the committed edit result at
 `isError: false` with `status: completed_with_issues`, `errorCode: verification_failed`, and `data.edit_applied: true`.
-Its exact `VerifyEdit` next action reruns only the check after corrective changes. A check still running at the bounded
-wait returns the normal `BashCommand` `status_check` next action. A principal must permit the edit tool and `BashCommand`;
-custom allowlists cannot expose `VerifyEdit` without `BashCommand`.
+Its receipt-bound `BashCommand` next action reruns only the check after corrective changes. A check still running at the
+bounded wait returns the normal `BashCommand` `status_check` next action. Verification requires both `EditFiles` and
+`BashCommand` authority.
 
 Committed edits receive a compact persisted mutation receipt for 30 minutes. Exact duplicate calls are single-flight and
 replayed without another write or verification command while target hashes match. If a target changed, Winx returns
@@ -407,8 +409,8 @@ repeated control hello round trips; generation-bound actions perform a final gua
 
 A `ReadFiles` batch containing one or more failed paths returns `isError: true`; content from successful paths remains in the
 same response, with `successful_files` and `failed_files` counts. Every successful file also returns a canonical path,
-opaque SHA-256 revision, exact visible ranges, and continuation line. `ApplyPatch` consumes that revision as a
-compare-and-swap token and refuses stale or unread ranges before writing. `MultiFileEdit` preserves planning failure semantics:
+opaque SHA-256 revision, exact visible ranges, and continuation line. `EditFiles` mode `line_patch` consumes that revision
+as a compare-and-swap token and refuses stale or unread ranges before writing. Atomic multi-file `EditFiles` calls preserve planning failure semantics:
 unread and stale files return `needs_read`, while missing or ambiguous SEARCH blocks return `conflict`, all without writing
 any file and with a concrete `ReadFiles` recovery action. Batched reads run filesystem and tokenization work in a bounded
 parallel pool (`WINX_READ_PARALLELISM`, default `4`, maximum `32`) but publish results and read coverage in request order.

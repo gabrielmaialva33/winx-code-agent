@@ -38,8 +38,8 @@ The server path is deliberately layered:
 3. `server::coherence` verifies the immutable conversation/workspace binding. Allowed external paths do not change the
    project identity, even with `WINX_ALLOW_PATHS=/`.
 4. `server::handler` owns protocol negotiation, Task routing, single-flight mutation coordination, and telemetry.
-5. `server::tool_dispatch` deserializes a registered tool, lowers every edit facade into the unified mutation domain,
-   and invokes the resulting operation under the correct logical session.
+5. `server::tool_dispatch` deserializes a registered tool, lowers `EditFiles` and hidden compatibility aliases into the
+   unified mutation domain, and invokes the resulting operation under the correct logical session.
 6. `server::outcomes` converts typed domain results into the shared MCP orchestration envelope.
 
 `tool_registry::ToolKind` is the stable source of truth for tool names, discovery order, policy bits, annotations,
@@ -78,16 +78,16 @@ of a live file.
 Token truncation retreats to a complete newline. Only complete visible lines become edit evidence, so a large-file read
 cannot accidentally authorize an unseen overwrite.
 
-Mutations follow one typed plan/commit boundary. The stable public facades (`FileWriteOrEdit`, `MultiFileEdit`,
-`ApplyPatch`, and `UndoEdit`) and the unadvertised migration wire all lower into `tools::edit_files`; there is one source
-of truth for cardinality, mode authorization, canonical targets, receipt identity, and commit reporting. Planning
+Mutations follow one typed plan/commit boundary. The public `EditFiles` wire and hidden legacy compatibility aliases all
+lower into `tools::edit_files`; there is one source of truth for cardinality, mode authorization, canonical targets,
+receipt identity, and commit reporting. Planning
 validates path policy, mode policy, read coverage, expected revision, and edit syntax while computing the new bytes in
 memory. Commit revalidates both the canonical path binding and original bytes immediately before an atomic replacement.
 A failed plan writes nothing. A commit-stage failure reports the committed prefix and untouched suffix rather than
 claiming cross-file rollback after a write already became durable.
 
-`ApplyPatch` is the preferred compare-and-swap path when the model already has line coordinates. All patches refer to
-one original revision, are ordered and non-overlapping, and may touch only visible ranges. A stale replay returns an
+`EditFiles` mode `line_patch` is the preferred compare-and-swap path when the model already has line coordinates. All
+patches refer to one original revision, are ordered and non-overlapping, and may touch only visible ranges. A stale replay returns an
 exact `ReadFiles` recovery action and cannot mutate the newer file. SEARCH/REPLACE remains available for text-anchored
 work and invalidates its read permit after a conflict.
 
@@ -125,7 +125,7 @@ development remains responsive.
 
 - `src/server/`: MCP lifecycle, catalog, policies at the request boundary, session routing, recovery, mutations, Tasks,
   usage events, and response shaping.
-- `src/tools/`: model-facing facades plus shared domain engines; all file mutations converge in `tools::edit_files`,
+- `src/tools/`: model-facing capabilities, compatibility adapters, and shared domain engines; all file mutations converge in `tools::edit_files`,
   while larger capabilities keep focused parser/planner/commit/report submodules.
 - `src/state/`: PTY, terminal rendering, persistent shell state, bounded journals, and edit/read evidence.
 - `src/daemon/`: wire protocol, control plane, guardian client/server, lifecycle, and socket resolution.

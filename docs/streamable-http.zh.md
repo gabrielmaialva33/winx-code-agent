@@ -227,12 +227,12 @@ winx-code-agent serve --http \
 
 ### 工具目录配置
 
-配置可为不需要全部能力的客户端缩小 `tools/list` Schema 载荷。Winx 在分发前也会执行同一策略，因此客户端无法按名称调用未公开的工具。
+配置可为不需要全部能力的客户端缩小 `tools/list` Schema 载荷。Winx 在分发前也会执行同一策略。旧编辑别名仅在已有等价变更权限时保持可调用，使缓存会话继续工作而不扩大权限。
 
 | 配置 | 公开的工具 |
 | :--- | :--- |
-| `full` | 全部十一个工具（向后兼容的默认值） |
-| `coding` | `Initialize`、`BashCommand`、`ReadFiles`、三个编辑工具、`VerifyEdit`、`UndoEdit` 和 `CodeMap` |
+| `full` | 七个工具：精简代码目录加 `ContextSave` 与 `ReadImage`（默认值） |
+| `coding` | `Initialize`、`BashCommand`、`ReadFiles`、`CodeMap` 与 `EditFiles` |
 | `read-only` | `Initialize`、`ReadFiles`、`ReadImage` 和 `CodeMap` |
 | `terminal` | `Initialize` 和 `BashCommand` |
 
@@ -254,7 +254,7 @@ winx-code-agent serve --http --token-file ~/.config/winx-http-token \
 
 ## LLM 编排规范 (Orchestration Contract)
 
-MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、用 `&&` 合并相关的快速失败检查，并且绝不原样重复已被拒绝的调用。`Initialize` 还会返回一个受限的 `<workspace_root>/.winx/tmp/session-…/` 目录，供确有独立用途的派生辅助文件使用。这些文件不是权威源，必须保留原始源码路径和行号来源，并复用稳定文件名；不得仅为了调用 `CodeMap` 而把源码或命令输出转换为载体。辅助文件映射只接受一个已存在的文件，单次响应上限为 12 KiB，每个活动会话最多映射 24 个不同文件、调用 64 次；规范源码映射不受此聚合配额限制。临时存储每个会话限制为 64 MiB / 128 个文件，每个工作区限制为 256 MiB，闲置会话会在 24 小时后清理。禁止把内容编码进文件名或目录名，也禁止用 `.winx-*`/`.winx_tmp` 文件污染项目根目录。每个前台或后台 PTY 都会把这个精确目录导出为 `WINX_TEMP_DIR`；若 Shell 写入的静态目标绕过该目录，调用会以 `temporary_artifact_policy` 被拒绝。Winx 还会在每次 Bash 操作后审计实际用量，包括静态分析无法预测的动态写入；结果会报告字节数和文件数。超出配额后，普通命令将被阻止，直到代理显式检查并删除过时辅助文件。超额本身不会触发自动删除；原有的 24 小时闲置会话清理规则保持不变。若 `Initialize` 返回 `initialize_workspace_already_bound` 或 `workspace_change_requires_new_session`，则当前对话不得重试该调用：访问策略允许的绝对路径时继续使用现有绑定，真正切换项目时应开启新的对话。两个编辑工具都可通过 `verify_command` 在同一次调用中执行有限的编辑后检查，从而节省一次网络和模型往返。
+MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、用 `&&` 合并相关的快速失败检查，并且绝不原样重复已被拒绝的调用。`Initialize` 还会返回一个受限的 `<workspace_root>/.winx/tmp/session-…/` 目录，供确有独立用途的派生辅助文件使用。这些文件不是权威源，必须保留原始源码路径和行号来源，并复用稳定文件名；不得仅为了调用 `CodeMap` 而把源码或命令输出转换为载体。辅助文件映射只接受一个已存在的文件，单次响应上限为 12 KiB，每个活动会话最多映射 24 个不同文件、调用 64 次；规范源码映射不受此聚合配额限制。临时存储每个会话限制为 64 MiB / 128 个文件，每个工作区限制为 256 MiB，闲置会话会在 24 小时后清理。禁止把内容编码进文件名或目录名，也禁止用 `.winx-*`/`.winx_tmp` 文件污染项目根目录。每个前台或后台 PTY 都会把这个精确目录导出为 `WINX_TEMP_DIR`；若 Shell 写入的静态目标绕过该目录，调用会以 `temporary_artifact_policy` 被拒绝。Winx 还会在每次 Bash 操作后审计实际用量，包括静态分析无法预测的动态写入；结果会报告字节数和文件数。超出配额后，普通命令将被阻止，直到代理显式检查并删除过时辅助文件。超额本身不会触发自动删除；原有的 24 小时闲置会话清理规则保持不变。若 `Initialize` 返回 `initialize_workspace_already_bound` 或 `workspace_change_requires_new_session`，则当前对话不得重试该调用：访问策略允许的绝对路径时继续使用现有绑定，真正切换项目时应开启新的对话。`EditFiles` 可通过 `verify_command` 在同一次调用中执行有限的编辑后检查，从而节省一次网络和模型往返。
 
 `ReadFiles` 批次中的文件会在受限并行池中处理（`WINX_READ_PARALLELISM`，默认 `4`，最大 `32`），但响应内容和读取保护范围始终严格按请求顺序发布。
 
@@ -263,8 +263,8 @@ MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、�
 ```json
 {
   "status": "needs_read",
-  "tool": "FileWriteOrEdit",
-  "message": "FileWriteOrEdit failed: ...",
+  "tool": "EditFiles",
+  "message": "EditFiles failed: ...",
   "errorCode": "read_required",
   "retryable": true,
   "retrySameCall": false,
@@ -296,13 +296,13 @@ Task 取消同样绑定到精确执行代次。若取消与启动并发，Winx �
 都有受限的内容指纹缓存，未变化的重复读取会返回紧凑的结构化引用；只有确实需要再次传输字节时才使用
 `force=true`。
 
-`FileWriteOrEdit`、`ApplyPatch`、`MultiFileEdit` 和 `UndoEdit` 是同一强类型变更引擎的公共兼容入口。它们
-共享规范目标绑定、读取证据、计划/提交、检查点、回执与类型化恢复；未公开的 `EditFiles` 迁移 Wire 不会
-扩大等价公共模式已经授予的权限。
+`EditFiles` 是强类型变更引擎唯一的公共入口。它的每文件显式模式为 `replace`、`search_replace`、`line_patch`
+和 `undo`；一次 `apply` 可接收 1 到 100 个唯一目标，并在写入前验证整个批次。旧名称保留为隐藏兼容
+别名，不能扩大等价 `EditFiles` 模式已授予的权限。
 
-`FileWriteOrEdit`、`ApplyPatch` 和 `MultiFileEdit` 接受可选的 `verify_command` 与 `verify_wait_for_seconds`（默认 `15`，最大
+`EditFiles` 接受可选的 `verify_command` 与 `verify_wait_for_seconds`（默认 `15`，最大
 `60`）。验证仅在提交成功后运行，并以前台命令形式遵循与 `BashCommand` 相同的模式白名单。退出码为零时组合结果成功；非零退出码保留 `isError: false`，并返回 `status: completed_with_issues`、`errorCode: verification_failed` 和
-`data.edit_applied: true`。明确的 `VerifyEdit` 下一步动作只会在修复后重新执行检查，不会重复编辑。若检查仍在运行，结果会提供标准的 `BashCommand` `status_check` 动作。自定义允许列表不能在没有 `BashCommand` 的情况下公开 `VerifyEdit`。
+`data.edit_applied: true`。回执绑定的 `BashCommand` 下一步动作只会在修复后重新执行检查，不会重复编辑。若检查仍在运行，结果会提供标准的 `BashCommand` `status_check` 动作。验证同时需要 `EditFiles` 与 `BashCommand` 权限。
 
 已提交的编辑会保留 30 分钟的紧凑持久化变更回执。完全相同的调用采用 single-flight，并且仅在目标哈希仍匹配时无副作用重放；若目标后来发生变化，Winx 会返回 `mutation_postcondition_changed`，不会覆盖新状态。同一会话和目标连续三次 SEARCH 冲突会升级为 `recovery_exhausted`，停止自动重试并要求代理改变策略。
 

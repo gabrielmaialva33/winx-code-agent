@@ -114,7 +114,7 @@ Secure MCP Tunnel / VPN / proxy reverso HTTPS autenticado
 - Workspaces com três modos de segurança: `wcgw` (acesso total), `architect` (somente leitura), `code_writer` (allowlist de comandos e globs de escrita). A allowlist de comandos é analisada via Tree-sitter, verificando **cada** comando na linha (pipelines, `&&`/`||`/`;`, substituição de comandos `$(...)`, subshells) e não apenas a primeira palavra, impossibilitando bypasses como `ls && curl … | sh` ou `ls $(rm …)`.
 - PTY resiliente: um shell que não retorna ao prompt (mesmo após Ctrl-C) é automaticamente reiniciado no mesmo cwd/modo, processos filhos são eliminados ao encerrar e a detecção de prompt é robusta a `PS1` customizados. Suporte opcional ao `zsh` com `WINX_SHELL=zsh`.
 - Leitura de arquivos com intervalos de linhas estilo WCGW (`file.rs:10-40`, `file.rs:10-`, `file.rs:-40`). Arquivos ativos são rastreados e priorizados no contexto do repositório.
-- Um único motor tipado por trás de `FileWriteOrEdit`, `ApplyPatch`, `MultiFileEdit` e `UndoEdit`. Substituição integral, SEARCH/REPLACE, patch de linhas vinculado à revisão, lote e undo compartilham preflight canônico, evidência de leitura/frescor, planejamento limitado, substituição atômica por arquivo, diffs compactos, recuperação tipada e verificação vinculada a recibos. Falha de planejamento não grava nada; uma rara falha durante o commit relata exatamente o prefixo já persistido.
+- Uma única ferramenta pública `EditFiles` para substituição integral, SEARCH/REPLACE, patch de linhas vinculado à revisão, lote atômico, verificação e undo. Todos os modos compartilham preflight canônico, evidência de leitura/frescor, planejamento limitado, substituição atômica por arquivo, diffs compactos, recuperação tipada e recibos. Falha de planejamento não grava nada; uma rara falha durante o commit relata exatamente o prefixo já persistido.
 - Navegação de código via `CodeMap` com Tree-sitter: mapa de símbolos orçado em tokens de um arquivo ou do repositório inteiro, ou busca de definições/referências para um símbolo em 13 linguagens.
 - `ContextSave` para exportar um resumo da tarefa e seus arquivos para a próxima sessão, incluindo contexto do workspace, arquivos ativos, git status/diff e estado do terminal para retomada limpa.
 - `ReadImage` para que modelos multimodais possam receber capturas de tela, mockups e imagens de erro em blocos de imagem nativos do MCP.
@@ -124,9 +124,9 @@ Secure MCP Tunnel / VPN / proxy reverso HTTPS autenticado
 
 ## Ferramentas MCP
 
-O catálogo público permanece estável enquanto as implementações convergem. As quatro fachadas públicas de mutação usam
-o mesmo motor tipado. O wire de migração não anunciado `EditFiles` é interno, não é API pública e não deve ser chamado
-por clientes; use apenas os nomes retornados por `tools/list`.
+O catálogo exposto ao modelo é intencionalmente pequeno. `EditFiles` substitui cinco escolhas de mutação sobrepostas por
+uma operação explícita e um modo por arquivo. Os nomes antigos continuam chamáveis como aliases ocultos para clientes em
+cache ou conversas já abertas, mas clientes novos veem e devem usar somente `EditFiles`.
 
 Escolha o menor catálogo que cubra o cliente. A política vale tanto na descoberta quanto no dispatch, e o wire interno
 fica limitado à autoridade de mutação equivalente já concedida. Para um agente de código comum, `coding` é o ponto de
@@ -136,8 +136,8 @@ partida recomendado; use `full` quando também precisar de imagens ou handoff de
 | :--- | ---: | :--- |
 | `terminal` | 2 | `Initialize` e `BashCommand` |
 | `read-only` | 4 | Inicialização, leitura exata de arquivos/imagens e `CodeMap` |
-| `coding` | 9 | Terminal, leituras, navegação e todas as fachadas públicas de edição/verificação/undo |
-| `full` | 11 | Padrão retrocompatível; adiciona `ContextSave` e `ReadImage` ao fluxo de código |
+| `coding` | 5 | `Initialize`, `BashCommand`, `ReadFiles`, `CodeMap` e `EditFiles` |
+| `full` | 7 | Padrão; adiciona `ContextSave` e `ReadImage` ao fluxo compacto de código |
 
 ```bash
 winx-code-agent serve --http \
@@ -153,17 +153,13 @@ autoridade de shell/arquivos concedida pelo modo inicializado.
 | `Initialize` | Inicializa o workspace, define o modo de operação e retorna um `thread_id`. Deve ser chamada primeiro, a menos que o cliente exponha MCP Roots. Sem caminho especificado, cria um ambiente scratch temporário; retomar uma tarefa (`task_id_to_resume`) reabre a raiz do projeto salva. |
 | `BashCommand` | Executa comandos, monitora processos longos, envia Enter/Ctrl-C e opera TUIs. A política `wait_policy` suporta: `adaptive` (padrão, mantém chamadas curtas inline e promove comandos longos para Task se suportado); `until_complete` (inicia uma Task imediatamente); `return_early` (retorna imediatamente). Suporta `is_background`, `status_check`, ações de input, `screen` e `wait_for_turn`. |
 | `ReadFiles` | Lê um ou múltiplos arquivos com numeração de linhas e devolve revisão opaca e intervalos realmente visíveis. Adicione `:10-40` ao caminho; truncamento nunca registra linhas não exibidas. |
-| `FileWriteOrEdit` | Visão de arquivo único do motor compartilhado: substituição integral ou SEARCH/REPLACE com âncoras opcionais. Valida cobertura, frescor e identidade canônica do alvo antes de gravar; retorna tolerâncias, problemas de sintaxe e diff compacto. |
-| `ApplyPatch` | Visão vinculada à revisão do mesmo motor. Aplica patches de linha ordenados e não sobrepostos sobre uma revisão exata de `ReadFiles`; só linhas visíveis podem mudar e revisões/replays obsoletos falham antes da escrita. |
-| `MultiFileEdit` | Visão em lote do mesmo motor. Planeja todas as edições antes de gravar; falha de planejamento não altera arquivo algum. Uma rara falha no commit informa caminhos persistidos e não persistidos sem alegar rollback inexistente. |
-| `VerifyEdit` | Repete a checagem exata de um recibo pós-edição sem executar novamente a edição já confirmada. |
-| `UndoEdit` | Visão de undo do motor compartilhado. Reverte um arquivo ao checkpoint anterior da sessão (até 10 retidos), em ordem LIFO por arquivo; recusa alvo modificado externamente e não remove arquivo recém-criado. |
+| `EditFiles` | Cria, altera ou desfaz um ou vários arquivos. Um `apply` aceita até 100 alvos únicos e valida o lote inteiro antes de gravar. Cada entrada usa um modo explícito: `search_replace` para mudanças exatas pequenas, `line_patch` com revisão e coordenadas visíveis de `ReadFiles`, `replace` para arquivo novo ou substituição integral intencional e `undo` com o `undo_id` exato retornado. `verify_command` opcional roda uma vez após o commit; uma falha nunca repete a edição. |
 | `ContextSave` | Salva descrição da tarefa + arquivos em um único documento estruturado com contexto do workspace, arquivos ativos e git diff/status para transferência rápida de contexto entre sessões. |
 | `ReadImage` | Retorna um bloco nativo de imagem MCP (não base64 como texto comum), permitindo que modelos multimodais processem a imagem visualmente. Confinado ao workspace. |
 | `CodeMap` | Navegação de código com Tree-sitter em uma ferramenta com duas operações: `outline` (mapa de símbolos de classes, funções e tipos com orçamento de tokens) e `references` (busca semântica de definições e referências em 13 linguagens). |
 
 O Winx anuncia a especificação MCP `2026-07-28`. Cada ferramenta publica um `outputSchema` e retorna um envelope estruturado `structuredContent`, mantendo compatibilidade de texto/imagem com clientes mais antigos.
-Edições recebem recibos persistidos por 30 minutos: chamadas idênticas não escrevem nem verificam duas vezes enquanto os hashes finais coincidirem. Falhas de verificação retornam `completed_with_issues` e uma ação `VerifyEdit`; três conflitos SEARCH repetidos escalam para `recovery_exhausted`.
+Edições recebem recibos persistidos por 30 minutos: chamadas idênticas não escrevem nem verificam duas vezes enquanto os hashes finais coincidirem. Falhas de verificação retornam `completed_with_issues` e uma ação vinculada a recibo em `BashCommand`; três conflitos SEARCH repetidos escalam para `recovery_exhausted`.
 
 O cancelamento de MCP Tasks é vinculado à geração exata. Se o cancelamento vencer durante o intervalo entre reserva e
 lançamento, o Winx aguarda a identidade exata da execução ou a prova de que nenhum processo iniciou. Um fallback limitado
