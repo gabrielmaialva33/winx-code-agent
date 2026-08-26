@@ -67,7 +67,9 @@ fn classify_with_path(
     contextual_path: Option<&Path>,
 ) -> Option<ErrorRecoveryPlan> {
     match error {
-        WinxError::MultiFilePlanError { path, source, .. } => {
+        WinxError::MultiFilePlanError { path, source, .. }
+        | WinxError::EditContextError { path, source }
+        | WinxError::IndexedEditError { path, source, .. } => {
             classify_with_path(source, arguments, Some(path))
         }
         WinxError::FileReadRequired { path, ranges, .. } => Some(ErrorRecoveryPlan::read(
@@ -103,9 +105,7 @@ fn classify_with_path(
             arguments,
         )),
         WinxError::SearchBlockNotFound(_) | WinxError::SearchBlockAmbiguous { .. } => {
-            let path = contextual_path
-                .map(Path::to_path_buf)
-                .or_else(|| string_argument(arguments, "file_path").map(Into::into))?;
+            let path = contextual_path.map(Path::to_path_buf)?;
             Some(ErrorRecoveryPlan::read(
                 ToolResultStatus::Conflict,
                 if matches!(error, WinxError::SearchBlockAmbiguous { .. }) {
@@ -125,6 +125,12 @@ fn classify_with_path(
             ToolResultStatus::NotFound,
             "undo_checkpoint_not_found",
         )),
+        WinxError::UndoExpired { .. } => {
+            Some(ErrorRecoveryPlan::terminal(ToolResultStatus::NotFound, "undo_expired"))
+        }
+        WinxError::UndoOutOfOrder { .. } => {
+            Some(ErrorRecoveryPlan::terminal(ToolResultStatus::Conflict, "undo_not_latest"))
+        }
         WinxError::FileOperationDenied { .. } => {
             Some(ErrorRecoveryPlan::terminal(ToolResultStatus::Denied, "file_operation_denied"))
         }
@@ -213,6 +219,38 @@ mod tests {
         })?;
         assert_eq!(plan.error_code, "search_block_not_found");
         assert_eq!(plan.required_reads[0].path, "/workspace/src/main.rs");
+        Ok(())
+    }
+
+    #[test]
+    fn transparent_single_edit_context_supplies_path_without_raw_wire_introspection(
+    ) -> crate::errors::Result<()> {
+        let error = WinxError::EditContextError {
+            path: "/workspace/src/lib.rs".into(),
+            source: Box::new(WinxError::SearchBlockNotFound("missing".into())),
+        };
+        let plan =
+            classify(&error, Some(&json!({"thread_id": "thread", "workspace_root": "/workspace"})))
+                .ok_or_else(|| {
+                    WinxError::ParseError("typed recovery plan was not produced".to_string())
+                })?;
+        assert_eq!(plan.error_code, "search_block_not_found");
+        assert_eq!(plan.required_reads[0].path, "/workspace/src/lib.rs");
+        Ok(())
+    }
+
+    #[test]
+    fn missing_receipt_bound_undo_is_nonretryable_and_expired() -> crate::errors::Result<()> {
+        let error = WinxError::UndoExpired {
+            path: "/workspace/src/lib.rs".into(),
+            undo_id: "undo_missing".to_string(),
+        };
+        let plan = classify(&error, None)
+            .ok_or_else(|| WinxError::ParseError("typed undo plan missing".to_string()))?;
+        assert_eq!(plan.status, ToolResultStatus::NotFound);
+        assert_eq!(plan.error_code, "undo_expired");
+        assert!(!plan.retryable);
+        assert!(plan.next_action.is_none());
         Ok(())
     }
 

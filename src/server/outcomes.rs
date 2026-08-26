@@ -175,7 +175,16 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
     let text = result_text(result);
     let mut data = safe_success_data(tool, arguments, &text, false);
     if let Some(existing) = existing.as_ref() {
-        if matches!(tool, "Initialize" | "ReadFiles" | "ApplyPatch") {
+        if matches!(
+            tool,
+            "Initialize"
+                | "ReadFiles"
+                | "FileWriteOrEdit"
+                | "MultiFileEdit"
+                | "UndoEdit"
+                | "ApplyPatch"
+                | "EditFiles"
+        ) {
             if let Value::Object(metadata) = existing {
                 for (key, value) in metadata {
                     data.entry(key.clone()).or_insert_with(|| value.clone());
@@ -213,6 +222,39 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
         }
     }
     result.structured_content = Some(value);
+}
+
+/// Add file-mutation metadata from the normalized domain context. Legacy wire
+/// shapes intentionally are not inspected here, so every edit surface reports
+/// the same resolved targets and operation semantics.
+pub(super) fn attach_prepared_edit_context(
+    result: &mut CallToolResult,
+    prepared: &crate::tools::edit_files::PreparedEditContext,
+) {
+    let Some(Value::Object(envelope)) = result.structured_content.as_mut() else { return };
+    let data = envelope.entry("data").or_insert_with(|| Value::Object(Map::new()));
+    let Some(data) = data.as_object_mut() else { return };
+    let target_paths = prepared.target_paths();
+    data.insert("file_count".to_string(), json!(target_paths.len()));
+    data.insert("file_paths".to_string(), json!(target_paths));
+    if let Some(path) = target_paths.first().filter(|_| target_paths.len() == 1) {
+        data.insert("file_path".to_string(), Value::String(path.clone()));
+    }
+    data.insert(
+        "operation".to_string(),
+        Value::String(prepared.command.operation().as_str().to_string()),
+    );
+    data.insert(
+        "edit_modes".to_string(),
+        Value::Array(
+            prepared
+                .command
+                .modes()
+                .into_iter()
+                .map(|mode| Value::String(mode.as_str().to_string()))
+                .collect(),
+        ),
+    );
 }
 
 /// Render verification guidance with committed-edit state before diagnostic output.
@@ -275,6 +317,7 @@ fn edit_verification_presentation(
 
 pub(super) struct VerificationRecovery {
     pub id: String,
+    pub tool: &'static str,
     pub arguments: Value,
 }
 
@@ -369,10 +412,14 @@ pub(super) fn edit_verification_result(
             envelope[key] = value.clone();
         }
     }
-    if verification_error {
+    if verification_error || active {
         envelope["nextAction"] = json!({
-            "tool": "VerifyEdit",
-            "instruction": "The edit is already applied. Diagnose the output and make only corrective changes. After that, execute these exact VerifyEdit arguments; never repeat the original edit.",
+            "tool": recovery.tool,
+            "instruction": if active {
+                "The edit is already applied and verification is still active. Poll these exact receipt-bound verification arguments; never issue a generic status_check or repeat the original edit."
+            } else {
+                "The edit is already applied. Diagnose the output and make only corrective changes. After that, execute these exact receipt-bound verification arguments; never repeat the original edit."
+            },
             "arguments": recovery.arguments
         });
     }
@@ -455,14 +502,18 @@ pub(super) fn verify_edit_result(
         envelope["errorCode"] = Value::String("verification_failed".to_string());
         envelope["nextAction"] = json!({
             "tool": "VerifyEdit",
-            "instruction": "Do not retry unchanged. Correct the diagnosed code or configuration first, then rerun the same verification receipt."
+            "instruction": "Do not retry unchanged. Correct the diagnosed code or configuration first, then rerun the same verification receipt.",
+            "arguments": arguments
         });
     } else if active {
-        for key in ["retryAfterMs", "nextAction"] {
-            if let Some(value) = nested.get(key) {
-                envelope[key] = value.clone();
-            }
+        if let Some(value) = nested.get("retryAfterMs") {
+            envelope["retryAfterMs"] = value.clone();
         }
+        envelope["nextAction"] = json!({
+            "tool": "VerifyEdit",
+            "instruction": "Poll this exact legacy verification receipt; do not use the nested Bash status action and do not repeat the edit.",
+            "arguments": arguments
+        });
     }
 
     let mut result = if failed {
@@ -656,6 +707,49 @@ pub(super) fn result_size_bytes(result: &CallToolResult) -> usize {
     )
 }
 
+/// Ensure model-facing recovery never points at a tool omitted from this
+/// principal's effective tools/list. Runtime authorization still remains the
+/// final authority; this closes only the orchestration contract.
+pub(super) fn enforce_next_action_policy(
+    result: &mut CallToolResult,
+    policy: crate::tool_policy::ToolPolicy,
+) {
+    let Some(Value::Object(envelope)) = result.structured_content.as_mut() else { return };
+    let Some(next_tool) =
+        envelope.get("nextAction").and_then(|action| action.get("tool")).and_then(Value::as_str)
+    else {
+        return;
+    };
+    if policy.names().any(|advertised| advertised == next_tool) {
+        return;
+    }
+    let edit_applied = envelope
+        .get("data")
+        .and_then(|data| data.get("edit_applied"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    envelope.remove("nextAction");
+    envelope.insert("errorCode".to_string(), Value::String("policy_blocked".to_string()));
+    envelope.insert("retryable".to_string(), Value::Bool(false));
+    envelope.insert("requiredReads".to_string(), Value::Array(Vec::new()));
+    if !edit_applied {
+        envelope.insert("status".to_string(), json!(ToolResultStatus::Denied));
+        result.is_error = Some(true);
+    }
+    let data = envelope.entry("data").or_insert_with(|| Value::Object(Map::new()));
+    if let Value::Object(data) = data {
+        data.insert("follow_up_blocked_by_policy".to_string(), Value::Bool(true));
+    }
+    let suffix = " Required recovery is unavailable in this request's advertised tool policy; no hidden action was emitted.";
+    let message = envelope
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("Tool recovery is blocked by policy.")
+        .to_string();
+    envelope.insert("message".to_string(), Value::String(format!("{message}{suffix}")));
+    result.content.insert(0, ContentBlock::text(format!("POLICY BLOCKED.{suffix}")));
+}
+
 fn result_text(result: &CallToolResult) -> String {
     result
         .content
@@ -737,7 +831,6 @@ fn safe_success_data(
 
     for key in [
         "thread_id",
-        "file_path",
         "operation",
         "path",
         "name",
@@ -750,33 +843,21 @@ fn safe_success_data(
             data.insert(key.to_string(), Value::String(value));
         }
     }
-    if let Some(files) = arguments
-        .and_then(Value::as_object)
-        .and_then(|arguments| arguments.get("file_paths"))
-        .and_then(Value::as_array)
-    {
-        data.insert(
-            "file_paths".to_string(),
-            Value::Array(
-                files.iter().filter_map(Value::as_str).map(|value| json!(value)).collect(),
-            ),
-        );
+    if tool == "ReadImage" {
+        if let Some(file_path) = string_argument(arguments, "file_path") {
+            data.insert("file_path".to_string(), Value::String(file_path));
+        }
     }
-    if tool == "MultiFileEdit" {
+    if tool == "ReadFiles" {
         if let Some(files) = arguments
             .and_then(Value::as_object)
-            .and_then(|arguments| arguments.get("files"))
+            .and_then(|arguments| arguments.get("file_paths"))
             .and_then(Value::as_array)
         {
             data.insert(
                 "file_paths".to_string(),
                 Value::Array(
-                    files
-                        .iter()
-                        .filter_map(|file| file.get("file_path"))
-                        .filter_map(Value::as_str)
-                        .map(|value| json!(value))
-                        .collect(),
+                    files.iter().filter_map(Value::as_str).map(|value| json!(value)).collect(),
                 ),
             );
         }
@@ -812,6 +893,7 @@ fn error_envelope(
     arguments: Option<&Value>,
     text: String,
 ) -> ToolResultEnvelope {
+    let classified_error = error.edit_source();
     let mut status = ToolResultStatus::Failed;
     let mut error_code = "execution_failed".to_string();
     let mut retryable = false;
@@ -819,7 +901,7 @@ fn error_envelope(
     let mut next_action = None;
     let mut required_reads = Vec::new();
 
-    match error {
+    match classified_error {
         WinxError::BashStateNotInitialized => {
             status = ToolResultStatus::NeedsInitialize;
             error_code = "not_initialized".to_string();
@@ -993,7 +1075,8 @@ fn error_envelope(
     if let Some(workspace_root) = string_argument(arguments, "workspace_root") {
         data.insert("workspace_root".to_string(), Value::String(workspace_root));
     }
-    if let WinxError::WorkspaceBindingMismatch { requested_workspace, bound_workspace, .. } = error
+    if let WinxError::WorkspaceBindingMismatch { requested_workspace, bound_workspace, .. } =
+        classified_error
     {
         data.insert(
             "bound_workspace".to_string(),
@@ -1008,7 +1091,9 @@ fn error_envelope(
             data.insert("external_targets_require_reinitialize".to_string(), Value::Bool(false));
         }
     }
-    if let WinxError::TemporaryArtifactPolicy { path, temporary_artifact_dir, .. } = error {
+    if let WinxError::TemporaryArtifactPolicy { path, temporary_artifact_dir, .. } =
+        classified_error
+    {
         data.insert(
             "rejected_path".to_string(),
             Value::String(path.to_string_lossy().into_owned()),
@@ -1028,7 +1113,7 @@ fn error_envelope(
         max_session_files,
         largest_file_bytes,
         max_file_bytes,
-    } = error
+    } = classified_error
     {
         data.insert(
             "temporary_artifact_dir".to_string(),
@@ -1044,7 +1129,7 @@ fn error_envelope(
         data.insert("max_file_bytes".to_string(), json!(max_file_bytes));
         data.insert("temporary_artifact_cleanup_required".to_string(), Value::Bool(true));
     }
-    if let WinxError::InvalidWaitPolicyForAction { wait_policy, action } = error {
+    if let WinxError::InvalidWaitPolicyForAction { wait_policy, action } = classified_error {
         data.insert("wait_policy".to_string(), Value::String(wait_policy.clone()));
         data.insert("action".to_string(), Value::String(action.clone()));
     }
@@ -1056,7 +1141,7 @@ fn error_envelope(
         unique_files_used,
         unique_files_limit,
         ..
-    } = error
+    } = classified_error
     {
         data.insert(
             "rejected_path".to_string(),
@@ -1749,6 +1834,7 @@ mod tests {
     fn verification_recovery() -> VerificationRecovery {
         VerificationRecovery {
             id: "verify_receipt".to_string(),
+            tool: "VerifyEdit",
             arguments: json!({
                 "verification_id": "verify_receipt",
                 "command": "cargo test",
@@ -1775,7 +1861,10 @@ mod tests {
         assert_eq!(structured["status"], "completed");
         assert_eq!(structured["data"]["edit_applied"], true);
         assert_eq!(structured["data"]["verification_exit_code"], 0);
-        assert_eq!(structured["data"]["file_path"], "/workspace/lib.rs");
+        assert!(
+            structured["data"].get("file_path").is_none(),
+            "edit paths are attached later from PreparedEditContext, never raw wire arguments"
+        );
     }
 
     #[test]
@@ -1824,8 +1913,164 @@ mod tests {
         assert_eq!(structured["retryable"], true);
         assert_eq!(structured["retrySameCall"], false);
         assert_eq!(structured["nextAction"]["tool"], "VerifyEdit");
-        assert!(structured["nextAction"].get("arguments").is_none());
+        assert_eq!(structured["nextAction"]["arguments"], arguments);
         assert_eq!(structured["data"]["original_edit_retryable"], false);
+    }
+
+    #[test]
+    fn active_legacy_verification_keeps_exact_verify_edit_recovery_surface() {
+        let arguments = json!({
+            "verification_id": "verify_legacy",
+            "command": "cargo test",
+            "wait_for_seconds": 15.0,
+            "thread_id": "thread",
+            "workspace_root": "/workspace"
+        });
+        let mut nested = CallToolResult::success(vec![ContentBlock::text("still running")]);
+        nested.structured_content = Some(json!({
+            "status": "running",
+            "tool": "BashCommand",
+            "retryAfterMs": 1000,
+            "nextAction": {
+                "tool": "BashCommand",
+                "arguments": {
+                    "action_json": {
+                        "type": "verify",
+                        "verification_id": "verify_canonical",
+                        "command": "cargo test"
+                    }
+                }
+            },
+            "data": {}
+        }));
+        let result = verify_edit_result(Some(&arguments), "verify_legacy", nested);
+        let structured = result.structured_content.expect("structured verification");
+        assert_eq!(structured["status"], "running");
+        assert_eq!(structured["nextAction"]["tool"], "VerifyEdit");
+        assert_eq!(structured["nextAction"]["arguments"], arguments);
+        assert!(!structured["nextAction"].to_string().contains("verify_canonical"));
+    }
+
+    #[test]
+    fn active_initial_legacy_edit_keeps_verify_edit_recovery_surface() {
+        let edit_arguments = json!({
+            "file_path": "/workspace/file.rs",
+            "thread_id": "thread",
+            "workspace_root": "/workspace"
+        });
+        let verify_arguments = json!({
+            "verification_id": "verify_legacy",
+            "command": "cargo test",
+            "wait_for_seconds": 15.0,
+            "thread_id": "thread",
+            "workspace_root": "/workspace"
+        });
+        for tool in ["FileWriteOrEdit", "MultiFileEdit"] {
+            let mut nested = CallToolResult::success(vec![ContentBlock::text("still running")]);
+            nested.structured_content = Some(json!({
+                "status": "running",
+                "tool": "BashCommand",
+                "retryAfterMs": 1000,
+                "nextAction": {
+                    "tool": "BashCommand",
+                    "arguments": {"action_json": {"type": "status_check"}}
+                },
+                "data": {}
+            }));
+
+            let result = edit_verification_result(
+                tool,
+                Some(&edit_arguments),
+                "edit committed",
+                nested,
+                &VerificationRecovery {
+                    id: "verify_legacy".to_string(),
+                    tool: "VerifyEdit",
+                    arguments: verify_arguments.clone(),
+                },
+            );
+            let structured = result.structured_content.expect("structured verification");
+            assert_eq!(structured["status"], "running");
+            assert_eq!(structured["nextAction"]["tool"], "VerifyEdit");
+            assert_eq!(structured["nextAction"]["arguments"], verify_arguments);
+        }
+    }
+
+    #[test]
+    fn nested_edit_errors_keep_syntax_and_temp_policy_classification() {
+        let syntax = WinxError::IndexedEditError {
+            index: 1,
+            path: "/workspace/file.rs".into(),
+            mode: "search_replace".to_string(),
+            source: Box::new(WinxError::SearchReplaceSyntaxError("bad markers".to_string())),
+        };
+        let syntax_result = tool_failure("EditFiles", &syntax, None).expect("syntax result");
+        assert_eq!(
+            syntax_result.structured_content.as_ref().expect("structured")["errorCode"],
+            "invalid_tool_input"
+        );
+
+        let temporary = WinxError::EditContextError {
+            path: "/workspace/.winx_tmp/helper.rs".into(),
+            source: Box::new(WinxError::TemporaryArtifactPolicy {
+                path: "/workspace/.winx_tmp/helper.rs".into(),
+                temporary_artifact_dir: "/workspace/.winx/tmp/session-id".into(),
+                message: "managed path required".to_string(),
+            }),
+        };
+        let temporary_result =
+            tool_failure("FileWriteOrEdit", &temporary, None).expect("temp policy result");
+        assert_eq!(
+            temporary_result.structured_content.as_ref().expect("structured")["errorCode"],
+            "temporary_artifact_policy"
+        );
+    }
+
+    #[test]
+    fn effective_policy_removes_unadvertised_read_recovery() {
+        let error = WinxError::FileReadRequired {
+            path: "/workspace/file.rs".into(),
+            reason: crate::errors::ReadRequirement::NeverRead,
+            ranges: Vec::new(),
+            message: "fresh read required".to_string(),
+        };
+        let mut result = tool_failure(
+            "FileWriteOrEdit",
+            &error,
+            Some(&json!({"thread_id":"thread","workspace_root":"/workspace"})),
+        )
+        .expect("recovery result");
+        let policy = crate::tool_policy::ToolPolicy::from_allowed_tools(["FileWriteOrEdit"])
+            .expect("custom policy");
+        enforce_next_action_policy(&mut result, policy);
+
+        let structured = result.structured_content.expect("structured result");
+        assert_eq!(structured["status"], "denied");
+        assert_eq!(structured["errorCode"], "policy_blocked");
+        assert!(structured.get("nextAction").is_none());
+        assert_eq!(structured["requiredReads"], json!([]));
+    }
+
+    #[test]
+    fn effective_policy_blocks_hidden_verification_without_hiding_committed_edit() {
+        let mut result = edit_verification_result(
+            "FileWriteOrEdit",
+            Some(&json!({"thread_id":"thread","workspace_root":"/workspace"})),
+            "edit committed",
+            exited_verification(1),
+            &verification_recovery(),
+        );
+        let policy =
+            crate::tool_policy::ToolPolicy::from_allowed_tools(["FileWriteOrEdit", "BashCommand"])
+                .expect("custom policy");
+        enforce_next_action_policy(&mut result, policy);
+
+        assert_ne!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured result");
+        assert_eq!(structured["status"], "completed_with_issues");
+        assert_eq!(structured["errorCode"], "policy_blocked");
+        assert_eq!(structured["data"]["edit_applied"], true);
+        assert!(structured.get("nextAction").is_none());
     }
 
     #[test]

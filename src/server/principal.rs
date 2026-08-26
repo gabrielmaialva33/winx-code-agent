@@ -231,9 +231,11 @@ fn workspace_label(value: &str) -> String {
 
 fn tool_uses_thread_id(name: &str) -> bool {
     // Every registered Winx tool participates in the principal-scoped logical
-    // session. Keep this derived from the registry so unknown extension tools
-    // are never rewritten accidentally.
-    ToolKind::parse(name).is_some()
+    // session. `EditFiles` is the one intentionally dark migration surface: it
+    // is routable but absent from the stable public `ToolKind`/catalog. Keep the
+    // exception here so remote calls cannot escape principal scoping merely
+    // because the alias is hidden from tools/list.
+    ToolKind::parse(name).is_some() || name == "EditFiles"
 }
 
 fn scoped_thread_id(principal: &HttpPrincipal, external: &str) -> Result<String> {
@@ -319,6 +321,32 @@ mod tests {
         )
         .expect("right");
         assert_ne!(left.arguments, right.arguments);
+    }
+
+    #[test]
+    fn dark_edit_files_thread_is_principal_scoped_without_becoming_public() {
+        let request = CallToolRequestParams::new("EditFiles").with_arguments(
+            json!({"thread_id": "shared", "mode": "replace", "files": []})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        let (request, _) = scope_tool_request(
+            request,
+            Some(principal("client")),
+            HttpSessionAffinity::Thread,
+            None,
+        )
+        .expect("scope dark edit");
+        let thread_id = request
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments.get("thread_id"))
+            .and_then(Value::as_str)
+            .expect("scoped thread id");
+
+        assert!(thread_id.contains("__shared"), "{thread_id}");
+        assert!(crate::tool_registry::ToolKind::parse("EditFiles").is_none());
     }
 
     #[test]

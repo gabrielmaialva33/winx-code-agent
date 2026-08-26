@@ -66,6 +66,7 @@ pub(super) struct UsageResultMetadata<'a> {
     pub temporary_session_files: u64,
     pub temporary_session_bytes: u64,
     pub temporary_over_budget: bool,
+    pub edit_file_count: u64,
 }
 
 pub(super) fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageResultMetadata<'_> {
@@ -125,6 +126,10 @@ pub(super) fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageRes
                     .and_then(serde_json::Value::as_bool)
             })
             .unwrap_or(false),
+        edit_file_count: domain_data
+            .and_then(|data| data.get("file_count"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
     }
 }
 
@@ -256,10 +261,6 @@ impl UsageEvent {
                 .and_then(|arguments| arguments.get("file_paths"))
                 .and_then(serde_json::Value::as_array)
                 .map_or(0, Vec::len),
-            "MultiFileEdit" => arguments
-                .and_then(|arguments| arguments.get("files"))
-                .and_then(serde_json::Value::as_array)
-                .map_or(0, Vec::len),
             _ => 0,
         };
         let worker_limit = if request.name == "ReadFiles" {
@@ -382,6 +383,10 @@ impl UsageEvent {
         result: Option<&CallToolResult>,
     ) {
         let metadata = usage_result_metadata(result);
+        let batch_items = usize::try_from(metadata.edit_file_count)
+            .ok()
+            .filter(|count| *count > 0)
+            .unwrap_or(self.batch_items);
         tracing::info!(
             target: "winx::usage",
             event = "tool_call",
@@ -405,7 +410,7 @@ impl UsageEvent {
             build_version = %self.build.package_version,
             build_revision = %self.build.revision,
             build_dirty = self.build.dirty,
-            batch_items = self.batch_items,
+            batch_items,
             worker_limit = self.worker_limit,
             error_code = metadata.error_code,
             next_action_tool = metadata.recovery.next_action_tool,

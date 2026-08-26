@@ -20,7 +20,9 @@ use super::principal::{
 use super::usage::UsageEvent;
 use super::WinxService;
 use crate::runtime::ShellActionOptions;
+use crate::tool_policy::ToolPolicy;
 use crate::tool_registry::ToolKind;
+use crate::tools::edit_files::EditSurface;
 use crate::types::{BashCommand, BashWaitPolicy};
 
 pub(crate) const COMPACT_BASH_OUTPUT_EXTENSION: &str = "io.winx/compact-bash-output";
@@ -83,18 +85,6 @@ fn supports_compact_bash_output(context: &RequestContext<RoleServer>) -> bool {
             .extensions
             .as_ref()
             .is_some_and(|extensions| extensions.contains_key(COMPACT_BASH_OUTPUT_EXTENSION))
-    })
-}
-
-fn request_requires_bash_capability(request: &CallToolRequestParams) -> bool {
-    ToolKind::parse(request.name.as_ref()).is_some_and(|kind| {
-        kind.requires_bash_companion()
-            || (kind.is_file_mutation()
-                && request
-                    .arguments
-                    .as_ref()
-                    .and_then(|arguments| arguments.get("verify_command"))
-                    .is_some_and(|command| !command.is_null()))
     })
 }
 
@@ -383,26 +373,59 @@ impl ServerHandler for WinxService {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
-        let tool_kind = ToolKind::parse(request.name.as_ref()).ok_or_else(|| {
-            McpError::invalid_request(format!("Unknown tool: {}", request.name), None)
-        })?;
+        let dark_edit_files = request.name.as_ref() == "EditFiles";
+        let tool_kind = ToolKind::parse(request.name.as_ref());
+        if tool_kind.is_none() && !dark_edit_files {
+            return Err(McpError::invalid_request(format!("Unknown tool: {}", request.name), None));
+        }
         let principal = principal_from_context(&context);
-        if principal
+        let effective_tool_policy = principal
             .as_ref()
-            .is_some_and(|principal| !principal.tool_policy().allows_kind(tool_kind))
-        {
+            .map_or_else(ToolPolicy::default, super::super::config::HttpPrincipal::tool_policy);
+
+        // Parse edit arguments once into the typed domain before any capability
+        // decision. This avoids policy decisions based on loosely typed/raw
+        // JSON fields and makes malformed edit calls recoverable tool results,
+        // even when another gate (workspace or capability) would also reject
+        // the request.
+        let edit_surface = if dark_edit_files {
+            Some(EditSurface::EditFiles)
+        } else {
+            tool_kind.and_then(EditSurface::from_public_tool)
+        };
+        let normalized_edit = if let Some(surface) = edit_surface {
+            let arguments = request
+                .arguments
+                .clone()
+                .map_or(serde_json::Value::Null, serde_json::Value::Object);
+            match crate::tools::edit_files::normalize_edit_call(surface, arguments.clone()) {
+                Ok(normalized) => Some(normalized),
+                Err(error) => {
+                    let mut result =
+                        outcomes::tool_failure(request.name.as_ref(), &error, Some(&arguments))?;
+                    outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
+                    return Ok(result.into());
+                }
+            }
+        } else {
+            None
+        };
+        let policy_allows_call = if dark_edit_files {
+            effective_tool_policy.allows_dark_edit_files()
+        } else {
+            tool_kind.is_some_and(|kind| effective_tool_policy.allows_kind(kind))
+        };
+        if !policy_allows_call {
             return Err(McpError::invalid_request(
                 format!("Tool is not available for this principal: {}", request.name),
                 None,
             ));
         }
-        if request_requires_bash_capability(&request)
-            && principal.as_ref().is_some_and(|principal| {
-                !principal.tool_policy().allows_kind(ToolKind::BashCommand)
-            })
+        if normalized_edit.as_ref().is_some_and(|edit| edit.verification.is_some())
+            && !effective_tool_policy.edit_permissions().allows_verification()
         {
             return Err(McpError::invalid_request(
-                "Edit verification requires BashCommand in this principal's tool policy",
+                format!("{} verification requires BashCommand authority", request.name),
                 None,
             ));
         }
@@ -429,6 +452,7 @@ impl ServerHandler for WinxService {
                 let arguments = request.arguments.clone().map(serde_json::Value::Object);
                 let mut result =
                     outcomes::tool_failure(request.name.as_ref(), &error, arguments.as_ref())?;
+                outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
                 scope.unscope_result(&mut result);
                 let status = outcomes::result_status(&result);
                 usage.emit(
@@ -443,7 +467,7 @@ impl ServerHandler for WinxService {
         let compact_bash_output = supports_compact_bash_output(&context);
         let supports_tasks =
             context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks());
-        let wait_policy = if tool_kind == ToolKind::BashCommand {
+        let wait_policy = if tool_kind == Some(ToolKind::BashCommand) {
             Some(Self::bash_wait_policy(&request)?)
         } else {
             None
@@ -477,6 +501,7 @@ impl ServerHandler for WinxService {
                     let arguments = request.arguments.clone().map(serde_json::Value::Object);
                     let mut result =
                         outcomes::tool_failure("BashCommand", &error, arguments.as_ref())?;
+                    outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
                     scope.unscope_result(&mut result);
                     let status = outcomes::result_status(&result);
                     usage.emit(
@@ -542,7 +567,11 @@ impl ServerHandler for WinxService {
                 let inline_request =
                     normalized_wait_request(request, BashWaitPolicy::Adaptive, true)?;
                 match self
-                    .execute_tool_call(inline_request, adaptive_action_options(compact_bash_output))
+                    .execute_tool_call(
+                        inline_request,
+                        adaptive_action_options(compact_bash_output),
+                        effective_tool_policy.edit_permissions(),
+                    )
                     .await
                 {
                     Ok(execution) if outcomes::result_status(&execution.result) == "running" => {
@@ -568,6 +597,10 @@ impl ServerHandler for WinxService {
                     }
                     Ok(mut execution) => {
                         self.release_bash_task(&reservation).await;
+                        outcomes::enforce_next_action_policy(
+                            &mut execution.result,
+                            effective_tool_policy,
+                        );
                         scope.unscope_result(&mut execution.result);
                         let status = outcomes::result_status(&execution.result);
                         let outcome = if execution.result.is_error == Some(true) {
@@ -605,11 +638,13 @@ impl ServerHandler for WinxService {
                     compact_output: compact_bash_output,
                     ..ShellActionOptions::default()
                 },
+                effective_tool_policy.edit_permissions(),
             )
             .await
         {
             Ok(mut execution) => {
                 let result = &mut execution.result;
+                outcomes::enforce_next_action_policy(result, effective_tool_policy);
                 scope.unscope_result(result);
                 let status = outcomes::result_status(result);
                 let outcome = if result.is_error == Some(true) { "tool_error" } else { "ok" };
@@ -682,6 +717,22 @@ mod tests {
             bash_task_route(true, true, false, BashWaitPolicy::UntilComplete),
             BashTaskRoute::Synchronous
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn receipt_bound_verify_is_not_task_promotable() {
+        let arguments = serde_json::json!({
+            "action_json": {
+                "type": "verify",
+                "verification_id": "verify_123",
+                "command": "cargo test"
+            },
+            "thread_id": "thread"
+        });
+        let request = CallToolRequestParams::new("BashCommand")
+            .with_arguments(arguments.as_object().expect("arguments object").clone());
+        assert!(!WinxService::bash_task_is_eligible(&request));
     }
 
     #[test]

@@ -107,6 +107,7 @@ impl WinxService {
                             Arc::clone(&launch_cancelled),
                             task_id,
                         ),
+                        crate::tool_policy::ToolPolicy::default().edit_permissions(),
                     )
                     .await;
                 match launched {
