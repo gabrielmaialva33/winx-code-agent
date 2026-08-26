@@ -1008,7 +1008,7 @@ pub struct FileWriteOrEdit {
 
 /// One compare-and-swap line patch. Coordinates refer to the original revision,
 /// are one-based, and all patches are applied together.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 pub struct LinePatch {
     /// Original line before which replacement starts (`totalLines + 1` appends).
     pub start_line: usize,
