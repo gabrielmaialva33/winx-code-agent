@@ -386,7 +386,7 @@ resizing/re-encoding oversized inputs. A bounded per-session content-fingerprint
 compact structured reference; `force=true` is the explicit escape hatch when a client genuinely needs the bytes again.
 
 `EditFiles` is the single public mutation surface over the typed engine. Its explicit per-file modes are `replace`,
-`search_replace`, `line_patch`, and `undo`; one apply call accepts one through 100 unique targets and validates the batch
+`search_replace`, `line_patch`, and `undo`; one edit call accepts one through 100 unique targets and validates the batch
 before writing. The former edit names remain hidden compatibility aliases and cannot grant authority beyond the
 equivalent `EditFiles` modes.
 
