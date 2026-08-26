@@ -77,6 +77,18 @@ pub enum WinxError {
     #[error("No undo checkpoint exists for {path}")]
     UndoCheckpointNotFound { path: PathBuf },
 
+    /// An opaque in-memory undo checkpoint was evicted or lost on restart.
+    #[error(
+        "Undo checkpoint {undo_id} is unavailable for {path}; it expired or the server restarted"
+    )]
+    UndoExpired { path: PathBuf, undo_id: String },
+
+    /// A receipt-bound undo may only consume the newest checkpoint for a file.
+    #[error(
+        "Undo checkpoint {undo_id} is not the latest checkpoint for {path}; use {latest_undo_id}"
+    )]
+    UndoOutOfOrder { path: PathBuf, undo_id: String, latest_undo_id: String },
+
     /// A file operation was rejected by an explicit policy or OS permission.
     #[error("File operation denied for {path}: {message}")]
     FileOperationDenied { path: PathBuf, message: String },
@@ -200,6 +212,19 @@ pub enum WinxError {
     )]
     MultiFilePlanError { index: usize, path: PathBuf, source: Box<WinxError> },
 
+    /// Path context for a single-file edit without changing its historical
+    /// display text. Recovery consumes the typed path instead of re-parsing the
+    /// public request shape.
+    #[error("{source}")]
+    EditContextError { path: PathBuf, source: Box<WinxError> },
+
+    /// Neutral path/index context for the unified batch planner. Legacy
+    /// `MultiFileEdit` retains its historical error wording separately.
+    #[error(
+        "EditFiles aborted before writing anything - file {index} ({path}, mode={mode}) failed validation: {source}"
+    )]
+    IndexedEditError { index: usize, path: PathBuf, mode: String, source: Box<WinxError> },
+
     /// Enhanced search/replace syntax error with detailed context
     #[error("Search/replace syntax error: {message}")]
     SearchReplaceSyntaxErrorDetailed {
@@ -316,8 +341,21 @@ impl WinxError {
     pub(crate) fn is_search_match_conflict(&self) -> bool {
         match self {
             Self::SearchBlockNotFound(_) | Self::SearchBlockAmbiguous { .. } => true,
-            Self::MultiFilePlanError { source, .. } => source.is_search_match_conflict(),
+            Self::MultiFilePlanError { source, .. }
+            | Self::EditContextError { source, .. }
+            | Self::IndexedEditError { source, .. } => source.is_search_match_conflict(),
             _ => false,
+        }
+    }
+
+    /// Innermost typed cause after removing edit-index context. Error recovery
+    /// and structured result shaping must never infer the class from display text.
+    pub(crate) fn edit_source(&self) -> &Self {
+        match self {
+            Self::MultiFilePlanError { source, .. }
+            | Self::EditContextError { source, .. }
+            | Self::IndexedEditError { source, .. } => source.edit_source(),
+            _ => self,
         }
     }
 }
