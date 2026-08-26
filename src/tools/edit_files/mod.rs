@@ -499,10 +499,14 @@ mod tests {
         state
     }
 
+    fn canonical_identity(path: &std::path::Path) -> String {
+        path.canonicalize().expect("test edit target must exist").to_string_lossy().into_owned()
+    }
+
     fn record_full_read(state: &mut BashState, path: &std::path::Path, content: &str) {
         let total_lines = content.lines().count().max(1);
         state.record_read_coverage(
-            path.to_string_lossy().as_ref(),
+            &canonical_identity(path),
             [(1, total_lines)],
             hash_content(content),
             total_lines,
@@ -748,6 +752,7 @@ mod tests {
         std::fs::write(&path, "one\n")?;
         let mut state = state_for(root.path());
         record_full_read(&mut state, &path, "one\n");
+        let path_identity = canonical_identity(&path);
         let slot = Arc::new(Mutex::new(Some(state)));
 
         let mut undo_ids = Vec::new();
@@ -799,7 +804,7 @@ mod tests {
             .await
             .as_ref()
             .ok_or(WinxError::BashStateNotInitialized)?
-            .undo_checkpoint_count_for(path.to_string_lossy().as_ref());
+            .undo_checkpoint_count_for(&path_identity);
         let Err(replay_error) = handle_prepared(&slot, latest).await else {
             return Err(WinxError::ParseError(
                 "duplicate undo unexpectedly popped twice".to_string(),
@@ -811,7 +816,7 @@ mod tests {
                 .await
                 .as_ref()
                 .ok_or(WinxError::BashStateNotInitialized)?
-                .undo_checkpoint_count_for(path.to_string_lossy().as_ref()),
+                .undo_checkpoint_count_for(&path_identity),
             count
         );
         Ok(())
@@ -976,8 +981,8 @@ mod tests {
         })?;
 
         assert!(outcome.partial_failure.is_some());
-        assert_eq!(outcome.committed_paths, vec![first.to_string_lossy().into_owned()]);
-        assert_eq!(outcome.uncommitted_paths, vec![second.to_string_lossy().into_owned()]);
+        assert_eq!(outcome.committed_paths, vec![canonical_identity(&first)]);
+        assert_eq!(outcome.uncommitted_paths, vec![canonical_identity(&second)]);
         assert_eq!(std::fs::read_to_string(first)?, "first new\n");
         assert_eq!(std::fs::read_to_string(second)?, "second old\n");
         Ok(())
