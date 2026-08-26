@@ -288,12 +288,19 @@ MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、�
 Winx 会返回可恢复结果（`errorCode: wait_policy_incompatible_with_action`），并在
 `nextAction.arguments` 中把策略修正为 `return_early`。
 
+Task 取消同样绑定到精确执行代次。若取消与启动并发，Winx 会等待启动发布准确执行令牌，或确认没有进程
+启动。若有界握手无法完成，系统会先终止受影响的 Shell 再确认取消，因此过期中断不会命中下一条命令。
+
 `ReadImage` 会根据内容验证 JPEG、PNG、GIF 或 WebP，而不是信任文件扩展名。源文件上限为 50 MiB，并另设
 解码尺寸和内存分配限制；交付内容限制为 2 MiB、长边 2560 px，较大的输入会自动缩放和重新编码。每个会话
 都有受限的内容指纹缓存，未变化的重复读取会返回紧凑的结构化引用；只有确实需要再次传输字节时才使用
 `force=true`。
 
-`FileWriteOrEdit` 和 `MultiFileEdit` 接受可选的 `verify_command` 与 `verify_wait_for_seconds`（默认 `15`，最大
+`FileWriteOrEdit`、`ApplyPatch`、`MultiFileEdit` 和 `UndoEdit` 是同一强类型变更引擎的公共兼容入口。它们
+共享规范目标绑定、读取证据、计划/提交、检查点、回执与类型化恢复；未公开的 `EditFiles` 迁移 Wire 不会
+扩大等价公共模式已经授予的权限。
+
+`FileWriteOrEdit`、`ApplyPatch` 和 `MultiFileEdit` 接受可选的 `verify_command` 与 `verify_wait_for_seconds`（默认 `15`，最大
 `60`）。验证仅在提交成功后运行，并以前台命令形式遵循与 `BashCommand` 相同的模式白名单。退出码为零时组合结果成功；非零退出码保留 `isError: false`，并返回 `status: completed_with_issues`、`errorCode: verification_failed` 和
 `data.edit_applied: true`。明确的 `VerifyEdit` 下一步动作只会在修复后重新执行检查，不会重复编辑。若检查仍在运行，结果会提供标准的 `BashCommand` `status_check` 动作。自定义允许列表不能在没有 `BashCommand` 的情况下公开 `VerifyEdit`。
 

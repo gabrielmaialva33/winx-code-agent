@@ -307,12 +307,21 @@ Falhas recuperáveis retornam resposta com sucesso HTTP/JSON-RPC e `isError: tru
 background, status, entrada, tela ou espera retorna um resultado recuperável com
 `errorCode: wait_policy_incompatible_with_action`; `nextAction.arguments` já corrige a política para `return_early`.
 
+O cancelamento de Tasks também é vinculado à geração. Se ele disputar com o lançamento, o Winx aguarda o token exato da
+execução ou a confirmação de que nenhum processo iniciou. Um fallback limitado encerra o shell afetado antes de confirmar
+o cancelamento, impedindo que um interrupt obsoleto atinja o próximo comando.
+
 `ReadImage` valida o conteúdo como JPEG, PNG, GIF ou WebP em vez de confiar na extensão. A origem tem limite de 50 MiB,
 com limites independentes de dimensões e alocação decodificada; a entrega fica limitada a 2 MiB e 2560 px no maior lado,
 redimensionando e recomprimindo entradas maiores. Um cache limitado de fingerprints por sessão troca repetições sem
 alterações por uma referência estruturada compacta; `force=true` solicita explicitamente o reenvio dos bytes.
 
-`FileWriteOrEdit` e `MultiFileEdit` aceitam `verify_command` e `verify_wait_for_seconds` opcionais (padrão `15`, máximo
+`FileWriteOrEdit`, `ApplyPatch`, `MultiFileEdit` e `UndoEdit` são fachadas públicas compatíveis sobre um único motor
+tipado de mutações. Elas compartilham identidade canônica do alvo, evidência de leitura, planejamento/commit, checkpoints,
+recibos e recuperação tipada; o wire de migração não anunciado `EditFiles` não amplia a autoridade dos modos públicos
+equivalentes.
+
+`FileWriteOrEdit`, `ApplyPatch` e `MultiFileEdit` aceitam `verify_command` e `verify_wait_for_seconds` opcionais (padrão `15`, máximo
 `60`). A verificação só roda depois de um commit bem-sucedido, em foreground e sob a mesma allowlist de modo do
 `BashCommand`. Exit code zero conclui o resultado combinado. Um exit code diferente de zero mantém o resultado da edição
 em `isError: false`, com `status: completed_with_issues`, `errorCode: verification_failed` e `data.edit_applied: true`.

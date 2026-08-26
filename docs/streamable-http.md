@@ -331,7 +331,7 @@ actual usage; after an overage, ordinary commands are blocked until the agent ex
 helpers. An overage never triggers automatic deletion; the 24-hour stale-session pruning remains unchanged. If `Initialize` returns `initialize_workspace_already_bound` or
 `workspace_change_requires_new_session`, that call is terminal for the current conversation: keep its bound pair for
 allowed absolute targets, or start a new conversation for a genuinely different project. A finite post-edit check can be
-supplied as `verify_command` on either edit tool, saving one network/model round trip. Extra
+supplied as `verify_command` on `FileWriteOrEdit`, `ApplyPatch`, or `MultiFileEdit`, saving one network/model round trip. Extra
 `WINX_SERVER_INSTRUCTIONS` are appended after those stable rules and are also included in the `Initialize` response for
 clients that do not expose handshake instructions to the model.
 
@@ -375,10 +375,18 @@ Using `until_complete` with a background, status, input, screen, or wait action 
 identity. A client that advertises the `io.winx/compact-bash-output` extension receives the runtime's trailer-free payload;
 without that explicit capability, the historical text output is unchanged.
 
+Task cancellation is generation-bound too. If it races a launch, Winx waits for that launch to publish its exact
+execution token or prove that no process started. A bounded fail-closed fallback terminates the affected shell before
+acknowledging cancellation, so a stale interrupt can never target the next command.
+
 `ReadImage` validates content as JPEG, PNG, GIF, or WebP instead of trusting the filename. Sources are capped at 50 MiB
 with independent decoded-dimension and allocation limits. Delivery is bounded to 2 MiB and a 2560 px long edge by
 resizing/re-encoding oversized inputs. A bounded per-session content-fingerprint cache replaces unchanged repeats with a
 compact structured reference; `force=true` is the explicit escape hatch when a client genuinely needs the bytes again.
+
+`FileWriteOrEdit`, `ApplyPatch`, `MultiFileEdit`, and `UndoEdit` are public compatibility facades over one typed mutation
+engine. They share canonical target binding, read evidence, plan/commit behavior, checkpoint accounting, receipts, and
+typed recovery; the unadvertised `EditFiles` migration wire does not grant authority beyond the equivalent public modes.
 
 `FileWriteOrEdit`, `ApplyPatch`, and `MultiFileEdit` accept optional `verify_command` and `verify_wait_for_seconds` (default `15`, maximum
 `60`). Verification runs only after a successful commit, as a foreground command under the same mode allowlist as
