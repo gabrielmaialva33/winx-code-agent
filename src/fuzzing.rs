@@ -45,3 +45,15 @@ pub fn edit_blocks(input: &[u8]) {
     };
     crate::tools::file_write_or_edit::fuzz_apply_blocks(&original, &blocks);
 }
+
+/// Exercise the hidden `EditFiles` wire parser and aggregate validators. The
+/// target is intentionally filesystem-free: arbitrary input can reach every
+/// typed mode/state transition without authorizing or committing a path.
+pub fn edit_files_wire(input: &[u8]) {
+    if let Ok(value) = serde_json::from_slice(input) {
+        let _ = crate::tools::edit_files::normalize_edit_call(
+            crate::tools::edit_files::EditSurface::EditFiles,
+            value,
+        );
+    }
+}

@@ -53,3 +53,10 @@ path = "fuzz_targets/edit_blocks.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "edit_files_wire"
+path = "fuzz_targets/edit_files_wire.rs"
+test = false
+doc = false
+bench = false
