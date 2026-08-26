@@ -38,8 +38,8 @@ The server path is deliberately layered:
 3. `server::coherence` verifies the immutable conversation/workspace binding. Allowed external paths do not change the
    project identity, even with `WINX_ALLOW_PATHS=/`.
 4. `server::handler` owns protocol negotiation, Task routing, single-flight mutation coordination, and telemetry.
-5. `server::tool_dispatch` deserializes a registered tool and invokes its focused implementation under the correct
-   logical session.
+5. `server::tool_dispatch` deserializes a registered tool, lowers every edit facade into the unified mutation domain,
+   and invokes the resulting operation under the correct logical session.
 6. `server::outcomes` converts typed domain results into the shared MCP orchestration envelope.
 
 `tool_registry::ToolKind` is the stable source of truth for tool names, discovery order, policy bits, annotations,
@@ -55,6 +55,11 @@ does not mutate the binding or make a different project's PTY current.
 The adapter registry is bounded and pins in-flight sessions against eviction. The guardian owns the authoritative PTY,
 cwd, command generation, output journal, activity clock, and runtime state. Model-controlled terminal text is never
 parsed to infer whether a command is running, awaiting input, or completed.
+
+Task cancellation is bound to that exact runtime identity. A cancellation that races a launch waits for either the
+published generation token or proof that launch finished without a process. If the handshake cannot settle within its
+bounded deadline, Winx terminates the affected session before acknowledging cancellation. It never lets a stale,
+generation-less interrupt escape and target the next command.
 
 ## File evidence and mutation protocol
 
@@ -73,9 +78,13 @@ of a live file.
 Token truncation retreats to a complete newline. Only complete visible lines become edit evidence, so a large-file read
 cannot accidentally authorize an unseen overwrite.
 
-Mutations follow a plan/commit boundary. Planning validates path policy, mode policy, read coverage, expected revision,
-and edit syntax while computing the new bytes in memory. Commit revalidates the original bytes immediately before an
-atomic replacement. A failed plan writes nothing.
+Mutations follow one typed plan/commit boundary. The stable public facades (`FileWriteOrEdit`, `MultiFileEdit`,
+`ApplyPatch`, and `UndoEdit`) and the unadvertised migration wire all lower into `tools::edit_files`; there is one source
+of truth for cardinality, mode authorization, canonical targets, receipt identity, and commit reporting. Planning
+validates path policy, mode policy, read coverage, expected revision, and edit syntax while computing the new bytes in
+memory. Commit revalidates both the canonical path binding and original bytes immediately before an atomic replacement.
+A failed plan writes nothing. A commit-stage failure reports the committed prefix and untouched suffix rather than
+claiming cross-file rollback after a write already became durable.
 
 `ApplyPatch` is the preferred compare-and-swap path when the model already has line coordinates. All patches refer to
 one original revision, are ordered and non-overlapping, and may touch only visible ranges. A stale replay returns an
@@ -116,7 +125,8 @@ development remains responsive.
 
 - `src/server/`: MCP lifecycle, catalog, policies at the request boundary, session routing, recovery, mutations, Tasks,
   usage events, and response shaping.
-- `src/tools/`: one facade per model-visible tool; larger tools have focused parser/planner/commit/report submodules.
+- `src/tools/`: model-facing facades plus shared domain engines; all file mutations converge in `tools::edit_files`,
+  while larger capabilities keep focused parser/planner/commit/report submodules.
 - `src/state/`: PTY, terminal rendering, persistent shell state, bounded journals, and edit/read evidence.
 - `src/daemon/`: wire protocol, control plane, guardian client/server, lifecycle, and socket resolution.
 - `src/runtime/`: one runtime abstraction over embedded and daemon-backed shell execution.
