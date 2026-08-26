@@ -17,6 +17,9 @@ pub enum ToolKind {
     ReadImage = 8,
     CodeMap = 9,
     ApplyPatch = 10,
+    /// Unified mutation surface. Appended so every persisted legacy policy bit
+    /// keeps its original meaning during the catalog migration.
+    EditFiles = 11,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,7 +56,7 @@ pub struct ToolDescriptor {
 }
 
 impl ToolKind {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::Initialize,
         Self::BashCommand,
         Self::ReadFiles,
@@ -65,6 +68,7 @@ impl ToolKind {
         Self::ReadImage,
         Self::CodeMap,
         Self::ApplyPatch,
+        Self::EditFiles,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -80,6 +84,7 @@ impl ToolKind {
             Self::ReadImage => "ReadImage",
             Self::CodeMap => "CodeMap",
             Self::ApplyPatch => "ApplyPatch",
+            Self::EditFiles => "EditFiles",
         }
     }
 
@@ -96,6 +101,7 @@ impl ToolKind {
             "ReadImage" => Some(Self::ReadImage),
             "CodeMap" => Some(Self::CodeMap),
             "ApplyPatch" => Some(Self::ApplyPatch),
+            "EditFiles" => Some(Self::EditFiles),
             _ => None,
         }
     }
@@ -115,7 +121,8 @@ impl ToolKind {
             | Self::FileWriteOrEdit
             | Self::MultiFileEdit
             | Self::ApplyPatch
-            | Self::VerifyEdit => (ToolAccess::Destructive, ToolWorld::Open),
+            | Self::VerifyEdit
+            | Self::EditFiles => (ToolAccess::Destructive, ToolWorld::Open),
         };
         ToolDescriptor {
             access,
@@ -134,7 +141,10 @@ impl ToolKind {
     }
 
     pub const fn is_file_mutation(self) -> bool {
-        matches!(self, Self::FileWriteOrEdit | Self::MultiFileEdit | Self::ApplyPatch)
+        matches!(
+            self,
+            Self::FileWriteOrEdit | Self::MultiFileEdit | Self::ApplyPatch | Self::EditFiles
+        )
     }
 
     pub const fn requires_bash_companion(self) -> bool {
@@ -149,7 +159,7 @@ impl fmt::Display for ToolKind {
 }
 
 /// Backwards-compatible name array derived from the typed stable order.
-pub const ALL_TOOL_NAMES: [&str; 11] = [
+pub const ALL_TOOL_NAMES: [&str; 12] = [
     ToolKind::Initialize.as_str(),
     ToolKind::BashCommand.as_str(),
     ToolKind::ReadFiles.as_str(),
@@ -161,6 +171,7 @@ pub const ALL_TOOL_NAMES: [&str; 11] = [
     ToolKind::ReadImage.as_str(),
     ToolKind::CodeMap.as_str(),
     ToolKind::ApplyPatch.as_str(),
+    ToolKind::EditFiles.as_str(),
 ];
 
 #[cfg(test)]
