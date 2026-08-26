@@ -73,6 +73,24 @@ fn spawn_single_token_allowlist_server(
     Ok(ServerProcess(child))
 }
 
+fn spawn_single_token_server_with_tools(
+    address: std::net::SocketAddr,
+    tools: &[&str],
+) -> anyhow::Result<ServerProcess> {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"));
+    command.args(["serve", "--http", "--bind", &address.to_string(), "--token", TEST_TOKEN]);
+    for tool in tools {
+        command.args(["--allow-tool", tool]);
+    }
+    let child = command
+        .env("WINX_EMBEDDED", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(ServerProcess(child))
+}
+
 fn canonical_path_string(path: &Path) -> anyhow::Result<String> {
     Ok(std::fs::canonicalize(path)?.to_string_lossy().into_owned())
 }
@@ -573,6 +591,122 @@ fn read_files_request(
             }
         }
     })
+}
+
+fn next_action_tool_request(
+    request_id: &str,
+    client_name: &str,
+    next_action: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta(client_name, false),
+            "name": next_action["tool"],
+            "arguments": next_action["arguments"]
+        }
+    })
+}
+
+fn receipt_verification_request(
+    request_id: &str,
+    verification_id: &str,
+    command: &str,
+    wait_for_seconds: f32,
+    thread_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("long-verification-client", false),
+            "name": "BashCommand",
+            "arguments": {
+                "action_json": {
+                    "type": "verify",
+                    "verification_id": verification_id,
+                    "command": command
+                },
+                "wait_for_seconds": wait_for_seconds,
+                "thread_id": thread_id
+            }
+        }
+    })
+}
+
+async fn poll_next_action_until_completed(
+    address: std::net::SocketAddr,
+    next_action: &serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        let request = next_action_tool_request(
+            "long-verification-poll",
+            "long-verification-client",
+            next_action,
+        );
+        let response = post_tool_value(address, &request).await?;
+        if response["result"]["structuredContent"]["status"] == "completed" {
+            return Ok(response);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("verification did not complete: {response}");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn start_long_receipt_verification(
+    address: std::net::SocketAddr,
+    workspace: &Path,
+    target: &Path,
+    command: &str,
+) -> anyhow::Result<(String, serde_json::Value)> {
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace,
+        "long-verification",
+        "long-verification-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let edit = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "long-verification-edit",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("long-verification-client", false),
+            "name": "EditFiles",
+            "arguments": {
+                "operation": "apply",
+                "files": [{
+                    "file_path": target,
+                    "mode": "replace",
+                    "content": "committed before verification\n"
+                }],
+                "verify_command": command,
+                "verify_wait_for_seconds": 0.01,
+                "thread_id": thread_id
+            }
+        }
+    });
+    let first = post_tool_value(address, &edit).await?;
+    if first["result"]["isError"] != false
+        || first["result"]["structuredContent"]["status"] != "running"
+    {
+        anyhow::bail!("long verification did not start: {first}");
+    }
+    let verify_action = first["result"]["structuredContent"]["nextAction"].clone();
+    if verify_action["tool"] != "BashCommand"
+        || verify_action["arguments"]["action_json"]["type"] != "verify"
+    {
+        anyhow::bail!("long verification recovery is not receipt-bound: {first}");
+    }
+    Ok((thread_id, verify_action))
 }
 
 fn multi_search_edit_request(
@@ -1672,6 +1806,744 @@ async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::
     .await?;
     assert_eq!(rejected["result"]["isError"], true, "{rejected}");
     assert!(!rejected_path.exists(), "invalid verification must be rejected before editing");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dark_edit_files_uses_receipt_bound_bash_verification_without_rewriting(
+) -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let target = workspace.path().join("dark-edit.txt");
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "dark-edit-files",
+        "dark-edit-files-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let edit = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "dark-edit-files-call",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("dark-edit-files-client", false),
+            "name": "EditFiles",
+            "arguments": {
+                "operation": "apply",
+                "files": [{
+                    "file_path": target,
+                    "mode": "replace",
+                    "content": "dark wire content\n"
+                }],
+                "verify_command": "test -f verification-ready",
+                "thread_id": thread_id
+            }
+        }
+    });
+    let first = post_tool_value(address, &edit).await?;
+    assert_eq!(first["result"]["isError"], false, "{first}");
+    assert_eq!(first["result"]["structuredContent"]["status"], "completed_with_issues", "{first}");
+    let next_action = &first["result"]["structuredContent"]["nextAction"];
+    assert_eq!(next_action["tool"], "BashCommand", "{first}");
+    assert_eq!(next_action["arguments"]["action_json"]["type"], "verify", "{first}");
+    assert_eq!(next_action["arguments"]["wait_for_seconds"], 15.0, "{first}");
+    assert_eq!(std::fs::read_to_string(&target)?, "dark wire content\n");
+
+    std::fs::write(workspace.path().join("verification-ready"), "ready\n")?;
+    let verify = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "dark-edit-files-verify",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("dark-edit-files-client", false),
+            "name": next_action["tool"],
+            "arguments": next_action["arguments"]
+        }
+    });
+    let verified = post_tool_value(address, &verify).await?;
+    assert_eq!(verified["result"]["isError"], false, "{verified}");
+    assert_eq!(verified["result"]["structuredContent"]["status"], "completed", "{verified}");
+
+    let replay = post_tool_value(address, &edit).await?;
+    assert_eq!(replay["result"]["isError"], false, "{replay}");
+    let replay = &replay["result"]["structuredContent"];
+    assert_eq!(replay["data"]["mutation_transition"], "replayed", "{replay}");
+    assert_eq!(replay["data"]["follow_up_required"], false, "{replay}");
+    assert!(replay.get("nextAction").is_none(), "{replay}");
+    assert_eq!(std::fs::read_to_string(&target)?, "dark wire content\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_edit_domain_input_is_a_tool_result_not_a_protocol_error() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "dark-invalid-input",
+        "dark-invalid-input-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let malformed_domain = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "dark-invalid-domain",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("dark-invalid-input-client", false),
+            "name": "EditFiles",
+            "arguments": {
+                "operation": "apply",
+                "files": [{
+                    "file_path": workspace.path().join("missing-content.txt"),
+                    "mode": "replace"
+                }],
+                "thread_id": thread_id
+            }
+        }
+    });
+    let domain = post_tool_value(address, &malformed_domain).await?;
+    assert!(domain.get("error").is_none(), "{domain}");
+    assert_eq!(domain["result"]["isError"], true, "{domain}");
+    assert_eq!(domain["result"]["structuredContent"]["status"], "invalid_input", "{domain}");
+    assert_eq!(
+        domain["result"]["structuredContent"]["errorCode"], "invalid_tool_input",
+        "{domain}"
+    );
+
+    let malformed_protocol = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "dark-invalid-protocol",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("dark-invalid-input-client", false),
+            "name": "EditFiles",
+            "arguments": []
+        }
+    });
+    let protocol =
+        post_json(address, "2026-07-28", "tools/call", &malformed_protocol.to_string()).await?;
+    let protocol = response_json(&protocol)?;
+    assert!(protocol.get("result").is_none(), "{protocol}");
+    assert!(protocol["error"]["code"].as_i64().is_some(), "{protocol}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn custom_policy_never_emits_hidden_read_or_verification_actions() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let unread = workspace.path().join("unread.txt");
+    std::fs::write(&unread, "existing\n")?;
+    let (address, _server) = spawn_server_on_free_port(|address| {
+        spawn_single_token_server_with_tools(address, &["Initialize", "FileWriteOrEdit"])
+    })
+    .await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "policy-read-closure",
+        "policy-read-closure-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let dark_unread = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "policy-hidden-read",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("policy-read-closure-client", false),
+            "name": "EditFiles",
+            "arguments": {
+                "operation": "apply",
+                "files": [{"file_path": unread, "mode": "replace", "content": "new\n"}],
+                "thread_id": thread_id
+            }
+        }
+    });
+    let blocked_read = post_tool_value(address, &dark_unread).await?;
+    let blocked_read = &blocked_read["result"];
+    assert_eq!(blocked_read["isError"], true, "{blocked_read}");
+    assert_eq!(blocked_read["structuredContent"]["status"], "denied", "{blocked_read}");
+    assert_eq!(blocked_read["structuredContent"]["errorCode"], "policy_blocked", "{blocked_read}");
+    assert!(blocked_read["structuredContent"].get("nextAction").is_none());
+    assert_eq!(std::fs::read_to_string(&unread)?, "existing\n");
+
+    let verification_workspace = tempfile::tempdir()?;
+    let verified_target = verification_workspace.path().join("verified.txt");
+    let (verified_address, _verified_server) = spawn_server_on_free_port(|address| {
+        spawn_single_token_server_with_tools(
+            address,
+            &["Initialize", "BashCommand", "FileWriteOrEdit"],
+        )
+    })
+    .await?;
+    let verified_initialize = initialize_modern_as(
+        verified_address,
+        TEST_TOKEN,
+        verification_workspace.path(),
+        "policy-verification-closure",
+        "policy-verification-closure-client",
+    )
+    .await?;
+    let verified_thread = initialized_thread_id(&verified_initialize)?;
+    let verification = write_with_verification(
+        verified_address,
+        &verified_thread,
+        "policy-hidden-verification",
+        &verified_target,
+        "false",
+    )
+    .await?;
+    let verification = &verification["result"];
+    assert_eq!(verification["isError"], false, "{verification}");
+    assert_eq!(
+        verification["structuredContent"]["status"], "completed_with_issues",
+        "{verification}"
+    );
+    assert_eq!(verification["structuredContent"]["errorCode"], "policy_blocked", "{verification}");
+    assert_eq!(verification["structuredContent"]["data"]["edit_applied"], true);
+    assert!(verification["structuredContent"].get("nextAction").is_none());
+    assert_eq!(std::fs::read_to_string(verified_target)?, "verified content\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn legacy_shadow_dark_replay_and_legacy_verify_share_one_canonical_receipt(
+) -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let target = workspace.path().join("legacy-shadow.txt");
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "legacy-shadow",
+        "legacy-shadow-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let legacy = write_with_verification(
+        address,
+        &thread_id,
+        "legacy-shadow-edit",
+        &target,
+        "test -f verification-ready",
+    )
+    .await?;
+    assert_eq!(legacy["result"]["structuredContent"]["status"], "completed_with_issues");
+    assert_eq!(legacy["result"]["structuredContent"]["nextAction"]["tool"], "VerifyEdit");
+    let legacy_verify = legacy["result"]["structuredContent"]["nextAction"].clone();
+
+    let dark = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "legacy-shadow-dark-replay",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("legacy-shadow-client", false),
+            "name": "EditFiles",
+            "arguments": {
+                "operation": "apply",
+                "files": [{
+                    "file_path": target,
+                    "mode": "replace",
+                    "content": "verified content\n"
+                }],
+                "verify_command": "test -f verification-ready",
+                "verify_wait_for_seconds": 5,
+                "thread_id": thread_id
+            }
+        }
+    });
+    let dark_replay = post_tool_value(address, &dark).await?;
+    let dark_structured = &dark_replay["result"]["structuredContent"];
+    assert_eq!(dark_structured["data"]["mutation_transition"], "replayed", "{dark_replay}");
+    assert_eq!(dark_structured["nextAction"]["tool"], "BashCommand", "{dark_replay}");
+    let canonical_verify = dark_structured["nextAction"].clone();
+
+    std::fs::write(workspace.path().join("verification-ready"), "ready\n")?;
+    let legacy_retry = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "legacy-shadow-verify",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("legacy-shadow-client", false),
+            "name": legacy_verify["tool"],
+            "arguments": legacy_verify["arguments"]
+        }
+    });
+    let legacy_verified = post_tool_value(address, &legacy_retry).await?;
+    assert_eq!(legacy_verified["result"]["isError"], false, "{legacy_verified}");
+    assert_eq!(legacy_verified["result"]["structuredContent"]["status"], "completed");
+
+    let canonical_retry = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "legacy-shadow-canonical-replay",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("legacy-shadow-client", false),
+            "name": canonical_verify["tool"],
+            "arguments": canonical_verify["arguments"]
+        }
+    });
+    let canonical_replay = post_tool_value(address, &canonical_retry).await?;
+    assert_eq!(canonical_replay["result"]["isError"], false, "{canonical_replay}");
+    assert_eq!(
+        canonical_replay["result"]["structuredContent"]["data"]["verification_replayed"], true,
+        "{canonical_replay}"
+    );
+    assert_eq!(std::fs::read_to_string(target)?, "verified content\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dark_receipt_synthesizes_a_resolvable_legacy_shadow() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "dark-first-shadow",
+        "dark-first-shadow-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let reverse_target = workspace.path().join("dark-first-shadow.txt");
+    let dark_first = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "dark-first-edit",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("dark-first-shadow-client", false),
+            "name": "EditFiles",
+            "arguments": {
+                "operation": "apply",
+                "files": [{
+                    "file_path": reverse_target,
+                    "mode": "replace",
+                    "content": "verified content\n"
+                }],
+                "verify_command": "test -f reverse-ready",
+                "verify_wait_for_seconds": 5,
+                "thread_id": thread_id
+            }
+        }
+    });
+    let dark_first = post_tool_value(address, &dark_first).await?;
+    assert_eq!(
+        dark_first["result"]["structuredContent"]["status"], "completed_with_issues",
+        "{dark_first}"
+    );
+    assert_eq!(
+        dark_first["result"]["structuredContent"]["nextAction"]["tool"], "BashCommand",
+        "{dark_first}"
+    );
+    let dark_first_verify = dark_first["result"]["structuredContent"]["nextAction"].clone();
+
+    let legacy_replay = write_with_verification(
+        address,
+        &thread_id,
+        "dark-first-legacy-replay",
+        &reverse_target,
+        "test -f reverse-ready",
+    )
+    .await?;
+    assert_eq!(
+        legacy_replay["result"]["structuredContent"]["data"]["mutation_transition"], "replayed",
+        "{legacy_replay}"
+    );
+    assert_eq!(
+        legacy_replay["result"]["structuredContent"]["nextAction"]["tool"], "VerifyEdit",
+        "{legacy_replay}"
+    );
+    std::fs::write(workspace.path().join("reverse-ready"), "ready\n")?;
+    let legacy_replay_verify = next_action_tool_request(
+        "dark-first-legacy-verify",
+        "dark-first-shadow-client",
+        &legacy_replay["result"]["structuredContent"]["nextAction"],
+    );
+    let legacy_replay_verified = post_tool_value(address, &legacy_replay_verify).await?;
+    assert_eq!(
+        legacy_replay_verified["result"]["structuredContent"]["status"], "completed",
+        "{legacy_replay_verified}"
+    );
+    let canonical_after_legacy = next_action_tool_request(
+        "dark-first-canonical-replay",
+        "dark-first-shadow-client",
+        &dark_first_verify,
+    );
+    let canonical_after_legacy = post_tool_value(address, &canonical_after_legacy).await?;
+    assert_eq!(
+        canonical_after_legacy["result"]["structuredContent"]["data"]["verification_replayed"],
+        true,
+        "{canonical_after_legacy}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reordered_legacy_shadow_cannot_steal_canonical_bash_verification() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let target = workspace.path().join("canonical-after-shadow.txt");
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "canonical-after-shadow",
+        "canonical-after-shadow-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let legacy = write_with_verification(
+        address,
+        &thread_id,
+        "canonical-after-shadow-edit",
+        &target,
+        "test -f verification-ready",
+    )
+    .await?;
+    assert_eq!(legacy["result"]["structuredContent"]["status"], "completed_with_issues");
+    let legacy_verify = legacy["result"]["structuredContent"]["nextAction"].clone();
+
+    let dark = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "canonical-after-shadow-dark-replay",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("canonical-after-shadow-client", false),
+            "name": "EditFiles",
+            "arguments": {
+                "operation": "apply",
+                "files": [{
+                    "file_path": target,
+                    "mode": "replace",
+                    "content": "verified content\n"
+                }],
+                "verify_command": "test -f verification-ready",
+                "verify_wait_for_seconds": 5,
+                "thread_id": thread_id
+            }
+        }
+    });
+    let dark_replay = post_tool_value(address, &dark).await?;
+    let dark_structured = &dark_replay["result"]["structuredContent"];
+    assert_eq!(dark_structured["data"]["mutation_transition"], "replayed", "{dark_replay}");
+    assert_eq!(dark_structured["nextAction"]["tool"], "BashCommand", "{dark_replay}");
+    let canonical_verify = dark_structured["nextAction"].clone();
+
+    std::fs::write(workspace.path().join("verification-ready"), "ready\n")?;
+    let canonical_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "canonical-after-shadow-bash-verify",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("canonical-after-shadow-client", false),
+            "name": canonical_verify["tool"],
+            "arguments": canonical_verify["arguments"]
+        }
+    });
+    let canonical_verified = post_tool_value(address, &canonical_request).await?;
+    assert_eq!(canonical_verified["result"]["isError"], false, "{canonical_verified}");
+    assert_eq!(canonical_verified["result"]["structuredContent"]["status"], "completed");
+    assert_eq!(
+        canonical_verified["result"]["structuredContent"]["data"]["action"], "verify",
+        "{canonical_verified}"
+    );
+    assert_eq!(
+        canonical_verified["result"]["structuredContent"]["data"]["exit_code"], 0,
+        "{canonical_verified}"
+    );
+
+    let legacy_request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "canonical-after-shadow-legacy-replay",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("canonical-after-shadow-client", false),
+            "name": legacy_verify["tool"],
+            "arguments": legacy_verify["arguments"]
+        }
+    });
+    let legacy_replay = post_tool_value(address, &legacy_request).await?;
+    assert_eq!(legacy_replay["result"]["isError"], false, "{legacy_replay}");
+    assert_eq!(legacy_replay["result"]["structuredContent"]["status"], "completed");
+    assert_eq!(std::fs::read_to_string(target)?, "verified content\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn receipt_bound_verification_is_single_flight_through_running_and_completed_states(
+) -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let target = workspace.path().join("long-verification.txt");
+    let marker = workspace.path().join("verification-count.txt");
+    let other_workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let command = "sleep 0.8 && printf x >> verification-count.txt";
+    let (thread_id, verify_action) =
+        start_long_receipt_verification(address, workspace.path(), &target, command).await?;
+
+    let left_request = next_action_tool_request(
+        "long-verification-left",
+        "long-verification-client",
+        &verify_action,
+    );
+    let right_request = next_action_tool_request(
+        "long-verification-right",
+        "long-verification-client",
+        &verify_action,
+    );
+    let (left, right) = tokio::join!(
+        post_tool_value(address, &left_request),
+        post_tool_value(address, &right_request)
+    );
+    let left = left?;
+    let right = right?;
+    for response in [&left, &right] {
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        assert!(
+            matches!(
+                response["result"]["structuredContent"]["status"].as_str(),
+                Some("running" | "completed")
+            ),
+            "{response}"
+        );
+    }
+
+    let canonical_id = verify_action["arguments"]["action_json"]["verification_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing canonical verification id: {verify_action}"))?;
+    let altered_command = post_tool_value(
+        address,
+        &receipt_verification_request(
+            "long-verification-altered-command",
+            canonical_id,
+            "printf altered",
+            0.01,
+            &thread_id,
+        ),
+    )
+    .await?;
+    assert_eq!(altered_command["result"]["isError"], true, "{altered_command}");
+    assert_eq!(altered_command["result"]["structuredContent"]["errorCode"], "invalid_tool_input");
+    let altered_wait = post_tool_value(
+        address,
+        &receipt_verification_request(
+            "long-verification-altered-wait",
+            canonical_id,
+            command,
+            0.02,
+            &thread_id,
+        ),
+    )
+    .await?;
+    assert_eq!(altered_wait["result"]["isError"], true, "{altered_wait}");
+
+    let other_initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        other_workspace.path(),
+        "long-verification-other-project",
+        "long-verification-other-client",
+    )
+    .await?;
+    let other_thread = initialized_thread_id(&other_initialize)?;
+    let altered_project = post_tool_value(
+        address,
+        &receipt_verification_request(
+            "long-verification-altered-project",
+            canonical_id,
+            command,
+            0.01,
+            &other_thread,
+        ),
+    )
+    .await?;
+    assert_eq!(altered_project["result"]["isError"], true, "{altered_project}");
+
+    let completed = poll_next_action_until_completed(address, &verify_action).await?;
+    assert_eq!(completed["result"]["isError"], false, "{completed}");
+    assert_eq!(std::fs::read_to_string(&marker)?, "x");
+
+    let replay_request = next_action_tool_request(
+        "long-verification-completed-replay",
+        "long-verification-client",
+        &verify_action,
+    );
+    let replay = post_tool_value(address, &replay_request).await?;
+    assert_eq!(replay["result"]["isError"], false, "{replay}");
+    assert_eq!(
+        replay["result"]["structuredContent"]["data"]["verification_replayed"], true,
+        "{replay}"
+    );
+    assert_eq!(std::fs::read_to_string(marker)?, "x");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dark_undo_replay_pops_once_and_advances_exactly_one_checkpoint() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let target = workspace.path().join("undo-lifo.txt");
+    std::fs::write(&target, "original\n")?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "undo-lifo",
+        "undo-lifo-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let read = post_tool_value(
+        address,
+        &read_files_request("undo-lifo-read", "undo-lifo-client", &thread_id, &[&target]),
+    )
+    .await?;
+    assert_eq!(read["result"]["isError"], false, "{read}");
+
+    let edit_request = |id: &str, content: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "_meta": modern_request_meta("undo-lifo-client", false),
+                "name": "EditFiles",
+                "arguments": {
+                    "operation": "apply",
+                    "files": [{"file_path": target, "mode": "replace", "content": content}],
+                    "thread_id": thread_id
+                }
+            }
+        })
+    };
+    let first = post_tool_value(address, &edit_request("undo-lifo-first", "first\n")).await?;
+    let first_id = first["result"]["structuredContent"]["data"]["undo_ids"][0]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing first undo id: {first}"))?
+        .to_string();
+    let second = post_tool_value(address, &edit_request("undo-lifo-second", "second\n")).await?;
+    let second_id = second["result"]["structuredContent"]["data"]["undo_ids"][0]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing second undo id: {second}"))?
+        .to_string();
+
+    let undo_request = |id: &str, undo_id: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "_meta": modern_request_meta("undo-lifo-client", false),
+                "name": "EditFiles",
+                "arguments": {
+                    "operation": "undo",
+                    "files": [{"file_path": target, "mode": "undo", "undo_id": undo_id}],
+                    "thread_id": thread_id
+                }
+            }
+        })
+    };
+    let stale = post_tool_value(address, &undo_request("undo-lifo-stale", &first_id)).await?;
+    assert_eq!(stale["result"]["isError"], true, "{stale}");
+    assert_eq!(stale["result"]["structuredContent"]["errorCode"], "undo_not_latest");
+    assert_eq!(std::fs::read_to_string(&target)?, "second\n");
+
+    let undo = undo_request("undo-lifo-latest", &second_id);
+    let undone = post_tool_value(address, &undo).await?;
+    assert_eq!(undone["result"]["isError"], false, "{undone}");
+    assert_eq!(undone["result"]["structuredContent"]["data"]["next_undo_id"], first_id);
+    assert_eq!(std::fs::read_to_string(&target)?, "first\n");
+
+    let replayed = post_tool_value(address, &undo).await?;
+    assert_eq!(replayed["result"]["isError"], false, "{replayed}");
+    assert_eq!(
+        replayed["result"]["structuredContent"]["data"]["mutation_transition"], "replayed",
+        "{replayed}"
+    );
+    assert_eq!(replayed["result"]["structuredContent"]["data"]["next_undo_id"], first_id);
+    assert_eq!(std::fs::read_to_string(&target)?, "first\n");
+
+    let final_undo = post_tool_value(address, &undo_request("undo-lifo-final", &first_id)).await?;
+    assert_eq!(final_undo["result"]["isError"], false, "{final_undo}");
+    assert_eq!(std::fs::read_to_string(&target)?, "original\n");
+
+    let expired = post_tool_value(
+        address,
+        &undo_request("undo-lifo-expired", "undo_absent_after_restart_or_eviction"),
+    )
+    .await?;
+    assert_eq!(expired["result"]["isError"], true, "{expired}");
+    assert_eq!(expired["result"]["structuredContent"]["errorCode"], "undo_expired");
+    assert_eq!(expired["result"]["structuredContent"]["retryable"], false);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tightening_mode_prevents_a_committed_edit_receipt_replay() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let target = workspace.path().join("tightened.txt");
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "tighten-replay",
+        "tighten-replay-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+    let edit = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "tighten-replay-edit",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("tighten-replay-client", false),
+            "name": "EditFiles",
+            "arguments": {
+                "operation": "apply",
+                "files": [{"file_path": target, "mode": "replace", "content": "committed\n"}],
+                "thread_id": thread_id
+            }
+        }
+    });
+    let committed = post_tool_value(address, &edit).await?;
+    assert_eq!(committed["result"]["isError"], false, "{committed}");
+
+    let tighten = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "tighten-replay-mode",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("tighten-replay-client", false),
+            "name": "Initialize",
+            "arguments": {
+                "type": "user_asked_mode_change",
+                "any_workspace_path": workspace.path(),
+                "mode_name": "architect",
+                "thread_id": thread_id
+            }
+        }
+    });
+    let tightened = post_tool_value(address, &tighten).await?;
+    assert_eq!(tightened["result"]["isError"], false, "{tightened}");
+
+    let replay = post_tool_value(address, &edit).await?;
+    assert_eq!(replay["result"]["isError"], true, "{replay}");
+    assert_eq!(replay["result"]["structuredContent"]["status"], "denied", "{replay}");
+    assert_ne!(
+        replay["result"]["structuredContent"]["data"]["mutation_transition"], "replayed",
+        "{replay}"
+    );
+    assert_eq!(std::fs::read_to_string(target)?, "committed\n");
     Ok(())
 }
 
