@@ -39,8 +39,8 @@ pub struct EditFileWire {
     /// Target path. Relative paths resolve from the session's current shell directory.
     pub file_path: String,
     /// `search_replace` for small exact edits, `line_patch` with a `ReadFiles` revision,
-    /// `replace` for new files or deliberate whole-file rewrites, and `undo` only with
-    /// `operation=undo`.
+    /// `replace` for new files or deliberate whole-file rewrites, and `undo` only as
+    /// the sole entry with its exact `undo_id`.
     pub mode: EditMode,
     /// Required by `replace` and `search_replace`; forbidden by other modes. For
     /// `search_replace`, use one or more exact
