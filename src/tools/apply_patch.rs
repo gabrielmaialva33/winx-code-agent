@@ -7,8 +7,7 @@ use tracing::instrument;
 
 use crate::errors::{Result, WinxError};
 use crate::state::bash_state::BashState;
-use crate::tools::file_write_or_edit::{commit_edit, plan_revision_edit};
-use crate::types::{normalize_thread_id, ApplyPatch, LinePatch};
+use crate::types::{ApplyPatch, LinePatch};
 
 const MAX_PATCHES: usize = 256;
 
@@ -23,58 +22,21 @@ pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     request: ApplyPatch,
 ) -> Result<ApplyPatchOutcome> {
-    validate_revision(&request.expected_revision)?;
-    validate_patch_count(&request.patches)?;
-
-    let mut bash_state_guard = bash_state_arc.lock().await;
-    {
-        let state = bash_state_guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-        let thread_id = normalize_thread_id(&request.thread_id);
-        if thread_id != state.current_thread_id {
-            return Err(WinxError::ThreadIdMismatch(thread_id));
-        }
-    }
-
-    let mut state = bash_state_guard.take().ok_or(WinxError::BashStateNotInitialized)?;
-    let recovery_state = state.clone();
-    let joined = tokio::task::spawn_blocking(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let required_ranges = required_read_ranges(&request.patches);
-            let planned = plan_revision_edit(
-                &state,
-                &request.file_path,
-                &request.expected_revision,
-                &required_ranges,
-                |content| apply_line_patches(content, &request.patches),
-            )?;
-            let revision = planned.new_revision();
-            let text = commit_edit(&mut state, planned)?;
-            Ok(ApplyPatchOutcome { text, revision })
-        }))
-        .unwrap_or_else(|_| {
-            Err(WinxError::CommandExecutionError(
-                "ApplyPatch panicked on the blocking worker".to_string(),
-            ))
-        });
-        (state, result)
-    })
-    .await;
-
-    match joined {
-        Ok((state, result)) => {
-            *bash_state_guard = Some(state);
-            result
-        }
-        Err(error) => {
-            *bash_state_guard = Some(recovery_state);
-            Err(WinxError::CommandExecutionError(format!(
-                "ApplyPatch blocking task failed: {error}"
-            )))
-        }
-    }
+    let outcome = crate::tools::edit_files::handle_legacy_tool(
+        bash_state_arc,
+        crate::tools::edit_files::EditSurface::ApplyPatch,
+        request,
+    )
+    .await?;
+    let revision = outcome.revisions.into_iter().next().ok_or_else(|| {
+        WinxError::CommandExecutionError(
+            "ApplyPatch unified engine returned no committed revision".to_string(),
+        )
+    })?;
+    Ok(ApplyPatchOutcome { text: outcome.text, revision })
 }
 
-fn validate_revision(revision: &str) -> Result<()> {
+pub(crate) fn validate_revision(revision: &str) -> Result<()> {
     let hash = revision.strip_prefix("sha256:").unwrap_or_default();
     if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(WinxError::ParameterValidationError {
@@ -93,7 +55,7 @@ fn validate_revision(revision: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_patch_count(patches: &[LinePatch]) -> Result<()> {
+pub(crate) fn validate_patch_count(patches: &[LinePatch]) -> Result<()> {
     if patches.is_empty() || patches.len() > MAX_PATCHES {
         return Err(WinxError::ParameterValidationError {
             field: "patches".to_string(),
@@ -103,7 +65,7 @@ fn validate_patch_count(patches: &[LinePatch]) -> Result<()> {
     Ok(())
 }
 
-fn required_read_ranges(patches: &[LinePatch]) -> Vec<(usize, usize)> {
+pub(crate) fn required_read_ranges(patches: &[LinePatch]) -> Vec<(usize, usize)> {
     patches
         .iter()
         .map(|patch| {
@@ -119,7 +81,7 @@ fn required_read_ranges(patches: &[LinePatch]) -> Vec<(usize, usize)> {
         .collect()
 }
 
-fn apply_line_patches(content: &str, patches: &[LinePatch]) -> Result<String> {
+pub(crate) fn apply_line_patches(content: &str, patches: &[LinePatch]) -> Result<String> {
     let spans = line_spans(content);
     validate_patch_coordinates(patches, spans.len())?;
     let mut output = content.to_string();
@@ -193,7 +155,7 @@ mod tests {
     use tokio::sync::Mutex;
 
     use crate::errors::ReadRequirement;
-    use crate::types::{Modes, ReadFiles};
+    use crate::types::{normalize_thread_id, Modes, ReadFiles};
 
     fn patch(start_line: usize, delete_lines: usize, replacement: &str) -> LinePatch {
         LinePatch { start_line, delete_lines, replacement: replacement.to_string() }

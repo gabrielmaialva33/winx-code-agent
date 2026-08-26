@@ -116,7 +116,7 @@ pub(super) fn parse_blocks(content: &str) -> Result<Vec<SearchReplaceBlock>> {
     Ok(blocks)
 }
 
-pub(super) fn uses_search_replace(percentage_to_change: u32, blocks: &str) -> bool {
+pub(crate) fn uses_search_replace(percentage_to_change: u32, blocks: &str) -> bool {
     if percentage_to_change <= 50 {
         return true;
     }

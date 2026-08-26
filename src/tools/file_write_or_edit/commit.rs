@@ -7,6 +7,7 @@ use sha2::{Digest, Sha256};
 use tracing::debug;
 
 use super::matcher::{apply_blocks_with_unescape_retry, ToleranceKind};
+#[cfg(test)]
 use super::parser::uses_search_replace;
 use super::report::operation_result;
 use crate::errors::{ReadRequirement, Result, WinxError};
@@ -46,11 +47,11 @@ pub(crate) fn resolve_edit_path(
 /// Revoke the exact-text evidence that led to a failed SEARCH match. The next
 /// edit must be preceded by a visible `ReadFiles` call, which repopulates the
 /// whitelist with the current file hash and prevents blind retry loops.
-pub(crate) fn invalidate_edit_read_permit(bash_state: &mut BashState, file_path: &str) -> bool {
-    let Ok((_, path)) = resolve_edit_path(bash_state, file_path) else {
-        return false;
-    };
-    bash_state.remove_whitelist_entry(path.to_string_lossy().as_ref()).is_some()
+pub(crate) fn invalidate_edit_read_permit_at_target(
+    bash_state: &mut BashState,
+    target: &Path,
+) -> bool {
+    bash_state.remove_whitelist_entry(target.to_string_lossy().as_ref()).is_some()
 }
 
 impl PlannedEdit {
@@ -73,8 +74,13 @@ impl PlannedEdit {
     pub(crate) fn new_revision(&self) -> String {
         crate::tools::read_files::revision_from_hash(&hash_content(&self.new_content))
     }
+
+    pub(crate) fn new_hash(&self) -> String {
+        hash_content(&self.new_content)
+    }
 }
 
+#[cfg(test)]
 pub(crate) fn plan_edit(
     bash_state: &BashState,
     file_path: &str,
@@ -82,10 +88,60 @@ pub(crate) fn plan_edit(
     blocks: &str,
     validate_temp_quota: bool,
 ) -> Result<PlannedEdit> {
-    let (requested_path, path) = resolve_edit_path(bash_state, file_path)?;
-    let file_path_str = path.to_string_lossy().to_string();
-
     let search_replace = uses_search_replace(percentage_to_change, blocks);
+    plan_explicit_text_edit(bash_state, file_path, search_replace, blocks, validate_temp_quota)
+}
+
+/// Plan a text edit whose semantic mode was selected explicitly by the typed
+/// `EditFiles` domain layer. Legacy callers continue to use `plan_edit`, which
+/// preserves the historical percentage/marker heuristic exactly.
+#[cfg(test)]
+fn plan_explicit_text_edit(
+    bash_state: &BashState,
+    file_path: &str,
+    search_replace: bool,
+    blocks: &str,
+    validate_temp_quota: bool,
+) -> Result<PlannedEdit> {
+    let (requested_path, path) = resolve_edit_path(bash_state, file_path)?;
+    plan_explicit_text_edit_resolved(
+        bash_state,
+        &requested_path,
+        path,
+        search_replace,
+        blocks,
+        validate_temp_quota,
+    )
+}
+
+/// Plan against the exact canonical target captured by unified edit preflight.
+/// This deliberately performs no path/cwd/symlink resolution.
+pub(crate) fn plan_explicit_text_edit_at_target(
+    bash_state: &BashState,
+    target: &Path,
+    search_replace: bool,
+    blocks: &str,
+    validate_temp_quota: bool,
+) -> Result<PlannedEdit> {
+    plan_explicit_text_edit_resolved(
+        bash_state,
+        target,
+        target.to_path_buf(),
+        search_replace,
+        blocks,
+        validate_temp_quota,
+    )
+}
+
+fn plan_explicit_text_edit_resolved(
+    bash_state: &BashState,
+    requested_path: &Path,
+    path: PathBuf,
+    search_replace: bool,
+    blocks: &str,
+    validate_temp_quota: bool,
+) -> Result<PlannedEdit> {
+    let file_path_str = path.to_string_lossy().to_string();
     let operation_allowed = if search_replace {
         bash_state.is_file_edit_allowed(&file_path_str)
     } else {
@@ -161,7 +217,7 @@ pub(crate) fn plan_edit(
         || bash_state.whitelist_for_overwrite[&file_path_str].is_read_enough();
     finalize_planned_edit(
         bash_state,
-        &requested_path,
+        requested_path,
         path,
         file_path_str,
         action,
@@ -176,14 +232,32 @@ pub(crate) fn plan_edit(
 
 /// Plan a line patch against an exact `ReadFiles` revision. Only lines that
 /// were actually visible for that revision may be touched.
-pub(crate) fn plan_revision_edit(
+/// Revision-edit counterpart to `plan_explicit_text_edit_at_target`.
+pub(crate) fn plan_revision_edit_at_target(
     bash_state: &BashState,
-    file_path: &str,
+    target: &Path,
     expected_revision: &str,
     required_ranges: &[(usize, usize)],
     build_content: impl FnOnce(&str) -> Result<String>,
 ) -> Result<PlannedEdit> {
-    let (requested_path, path) = resolve_edit_path(bash_state, file_path)?;
+    plan_revision_edit_resolved(
+        bash_state,
+        target,
+        target.to_path_buf(),
+        expected_revision,
+        required_ranges,
+        build_content,
+    )
+}
+
+fn plan_revision_edit_resolved(
+    bash_state: &BashState,
+    requested_path: &Path,
+    path: PathBuf,
+    expected_revision: &str,
+    required_ranges: &[(usize, usize)],
+    build_content: impl FnOnce(&str) -> Result<String>,
+) -> Result<PlannedEdit> {
     let file_path_str = path.to_string_lossy().to_string();
     if !bash_state.is_file_edit_allowed(&file_path_str) {
         return Err(WinxError::FileOperationDenied {
@@ -259,7 +333,7 @@ pub(crate) fn plan_revision_edit(
     let new_content = build_content(&previous)?;
     finalize_planned_edit(
         bash_state,
-        &requested_path,
+        requested_path,
         path,
         file_path_str,
         "patched",
@@ -336,12 +410,15 @@ pub(crate) fn commit_edit(bash_state: &mut BashState, planned: PlannedEdit) -> R
 
     if let Some(prior_content) = &previous {
         let prior_whitelist = bash_state.whitelist_for_overwrite.get(&file_path_str).cloned();
-        bash_state.push_edit_checkpoint(EditCheckpoint {
-            file_path_str: file_path_str.clone(),
-            path: path.clone(),
-            prior_content: prior_content.clone(),
-            prior_whitelist,
-        });
+        let _ = bash_state.push_receipt_bound_edit_checkpoint(
+            EditCheckpoint {
+                file_path_str: file_path_str.clone(),
+                path: path.clone(),
+                prior_content: prior_content.clone(),
+                prior_whitelist,
+            },
+            hash_content(&new_content),
+        );
     }
 
     let result = operation_result(
