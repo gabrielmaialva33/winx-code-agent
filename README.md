@@ -85,6 +85,9 @@ an OpenAI-hosted MCP endpoint.
   back before the response leaves the server. Workspace affinity absorbs unstable model-generated thread IDs.
 - **Right-sized tool catalogs:** `full`, `coding`, `read-only`, and `terminal` profiles—or an exact per-principal
   allowlist—reduce discovery/schema payloads and reject calls outside the advertised catalog.
+- **One mutation protocol:** the public edit tools are compatibility-focused views over one typed plan/commit engine, so
+  read evidence, canonical path binding, atomic writes, undo checkpoints, verification receipts, and recovery behave the
+  same way regardless of the edit shape the client selected.
 - **Fail-closed network defaults:** loopback-only binding, 32-byte minimum tokens, chmod-600 token files, DNS-rebinding
   host checks, body/time/concurrency limits, per-IP rate limiting, and delayed invalid-auth responses.
 - **Agent-native terminal semantics:** foreground and background commands, status polling, interactive input, stable TUI
@@ -121,10 +124,12 @@ Secure MCP Tunnel / VPN / authenticated reverse proxy
               ▼
         shared WinxService
               │
-              ▼
-            winxd
+              ├─ workspace coherence + file evidence
+              │       └─ unified mutation engine ── workspace filesystem
               │
-              └─ winx-guardian per session ── real PTY / shell / TUI
+              └─ shell runtime
+                      └─ winxd
+                          └─ winx-guardian per session ── real PTY / shell / TUI
 ```
 
 ## What you get
@@ -140,12 +145,11 @@ Secure MCP Tunnel / VPN / authenticated reverse proxy
   processes are reaped on drop, and prompt detection is robust to a custom `PS1`. Opt into `zsh` with `WINX_SHELL=zsh`.
 - File reads with WCGW-style line ranges (`file.rs:10-40`, `file.rs:10-`, `file.rs:-40`). Active files are tracked
   and prioritized in the repository context across calls.
-- File writes and SEARCH/REPLACE edits that survive ambiguous matches, indentation drift, and the usual unicode
-  quote-mismatches from LLMs. Writes are blocked when the file hasn't been read or the cached content is stale, the
-  success message shows a compact diff of what changed, and recent edits are reversible with `UndoEdit`.
-  `MultiFileEdit` validates and computes every file before writing any of them, so a validation failure on the last file
-  leaves the earlier ones untouched. The commit phase uses atomic per-file renames; a rare mid-commit I/O failure stops
-  immediately but does not roll back files already written.
+- One typed mutation engine behind `FileWriteOrEdit`, `ApplyPatch`, `MultiFileEdit`, and `UndoEdit`. Replace,
+  SEARCH/REPLACE, revision-bound line patch, batch, and undo operations share canonical-path preflight, read/freshness
+  evidence, bounded planning, atomic per-file replacement, compact diffs, typed recovery, and receipt-bound
+  verification. A planning failure writes nothing. A rare mid-commit I/O failure stops immediately and reports the
+  committed prefix instead of pretending the whole batch rolled back.
 - Tree-sitter code navigation via `CodeMap`: a token-budgeted symbol map of a file or the whole repo, or a
   definition/reference lookup for a symbol name - the semantic view that plain `grep` can't give you, across 13
   languages.
@@ -187,16 +191,43 @@ Secure MCP Tunnel / VPN / authenticated reverse proxy
 
 ## MCP Tools
 
+Winx keeps its public catalog stable while reducing internal duplication. The four public mutation facades all lower
+into the same typed engine. The unadvertised `EditFiles` migration wire is an internal compatibility surface, not a
+public API; clients should use only names returned by `tools/list`.
+
+Choose the smallest catalog that covers the client. The policy is enforced at both discovery and dispatch; the internal
+migration wire is additionally constrained to the equivalent mutation authority already granted by that policy. For a
+typical coding agent, `coding` is the recommended starting point; use `full` only when the agent also needs image input
+or context handoff.
+
+| Profile     | Tool count | Capabilities                                                                                     |
+|-------------|-----------:|--------------------------------------------------------------------------------------------------|
+| `terminal`  |          2 | `Initialize`, `BashCommand`                                                                      |
+| `read-only` |          4 | Initialization, exact file/image reads, and `CodeMap`                                             |
+| `coding`    |          9 | Terminal, reads, navigation, and every public edit/verify/undo facade                              |
+| `full`      |         11 | Backward-compatible default; adds `ContextSave` and `ReadImage` to the coding workflow             |
+
+For a single-token HTTP server:
+
+```bash
+winx-code-agent serve --http \
+  --token-file ~/.config/winx-http-token \
+  --tool-profile coding
+```
+
+An exact `--allow-tool NAME` list replaces the selected profile. Catalog selection limits the MCP surface; it does not
+weaken or strengthen the shell/file authority granted by the initialized Winx mode.
+
 | Tool              | What it does                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 |-------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `Initialize`      | Boots the workspace, picks the mode, hands you an inseparable `thread_id`/`workspace_root` pair plus a bounded `temporary_artifact_dir` for session-local derived helpers. Call it once unless a local MCP client exposes Roots, in which case Winx can bootstrap automatically. Repeated `first_call` requests reattach without rebuilding or resending unchanged workspace context. If adapter state disappears, `reset_shell` or `user_asked_mode_change` safely recovers the same intended project as a first call and reports `initialize_recovered_missing_session`. A request that tries to rebind an already-bound remote conversation is terminal: keep the current pair for allowed external targets or start a new conversation for another project. With no workspace path it creates a scratch playground; resuming a task (`task_id_to_resume`) reopens its saved project root.                                                                                           |
 | `BashCommand`     | Runs commands, polls long-running ones, sends Enter/Ctrl-C, and drives TUIs. Related finite fail-fast checks can be composed with `&&` in one call. `wait_policy` is generic: `adaptive` (default) keeps short calls inline and promotes an already-running foreground command when Tasks are available; `until_complete` is only for a finite foreground command; `return_early` always stays inline. An incompatible policy is a recoverable tool result with corrected retry arguments. Supports `is_background`, `status_check`, input actions, `screen`, and `wait_for_turn`. Foreground and background PTYs export `WINX_WORKSPACE_ROOT` and the managed helper directory as `WINX_TEMP_DIR`; structured results include its post-action usage. Over-budget sessions require explicit cleanup before ordinary commands continue. When a foreground command finishes, its runtime-owned state reports the real exit code. |
 | `ReadFiles`       | One or many files, with line numbers. Batched reads use a bounded parallel worker pool while preserving request order and read-before-edit coverage. Each file also returns an opaque revision and its exact visible ranges. Append `:10-40` to a path for a range. Token truncation reports the exact continuation and never records unseen lines. |
-| `FileWriteOrEdit` | Full overwrites or SEARCH/REPLACE blocks (with optional `@start-end` line anchors to pin a repeated block). Validates file read coverage and freshness before writing, reports fuzzy tolerances, runs a syntax check, and returns a compact diff. Optional `verify_command` runs one finite post-edit check in the same MCP round trip.                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `ApplyPatch`      | Applies ordered, non-overlapping, 1-based line patches to an exact `ReadFiles` revision. Only visible lines may change; stale revisions and stale replays fail before writing. Use `delete_lines: 0` to insert and `totalLines + 1` to append. Supports the same optional post-edit verification. |
-| `MultiFileEdit`   | Validates and computes every requested edit in memory before writing any file, so a validation failure leaves the whole batch untouched. Commits then use atomic per-file renames; if a rare I/O failure occurs during that phase, already-written files are reported and are not rolled back. Optional `verify_command` runs after every commit. For a single file use `FileWriteOrEdit`.                                                                                                                                                                                                                                                                                                                                                                                        |
+| `FileWriteOrEdit` | Single-file view of the shared mutation engine: full replacement or SEARCH/REPLACE blocks, with optional `@start-end` anchors. Validates read coverage, freshness, and canonical target identity before writing; reports tolerances, syntax issues, and a compact diff. Optional `verify_command` runs one finite post-edit check without making verification part of the commit.                                                                                                                                                                                                                                                                                                                                                                                            |
+| `ApplyPatch`      | Revision-bound view of the same engine. Applies ordered, non-overlapping, 1-based line patches to one exact `ReadFiles` revision; only visible lines may change. Stale revisions/replays fail before writing. Use `delete_lines: 0` to insert and `totalLines + 1` to append. Supports the same optional post-edit verification. |
+| `MultiFileEdit`   | Batch view of the same engine. Validates and computes every requested edit before writing, so a planning failure leaves the whole batch untouched. Commits use atomic per-file renames; a rare commit-stage I/O failure reports both committed and uncommitted paths and never claims a rollback that did not happen. Optional `verify_command` runs once after a successful batch commit. For one file use `FileWriteOrEdit`.                                                                                                                                                                                                                                                                                                                                               |
 | `VerifyEdit`      | Reruns the exact check from a post-edit verification receipt without repeating the committed edit. The receipt is bound to its command and project session.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `UndoEdit`        | Reverts a file to its content before the last `FileWriteOrEdit`/`MultiFileEdit` this session (per-file, last ~10 edits kept in memory). Refused if the file changed on disk since your edit; a brand-new file's creation isn't undoable.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `UndoEdit`        | Undo view of the shared engine. Reverts one file to its previous in-session checkpoint (up to 10 retained across the session). It is strict per-file LIFO, fails if the target changed externally, and cannot remove a newly created file.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `ContextSave`     | Dumps task description + file globs into a single text file with workspace context, active files, and git status/diff for clean handoff and task resumption.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `ReadImage`       | Returns validated JPEG, PNG, GIF, or WebP as a native MCP image content block (not base64 text), so multimodal models actually see it. Sources are capped at 50 MiB and bounded by decoded dimensions/allocation; delivery is at most 2 MiB and 2560 px on the long edge, with oversized inputs converted to JPEG. A 32-entry per-session content cache returns compact metadata for unchanged repeats; use `force=true` only for an intentional resend. Path policy matches the other file tools. |
 | `CodeMap`         | Tree-sitter code navigation, in one tool with two `operation`s. `outline`: a symbol map (functions, types, methods, ...) - a file returns its definitions, a directory (or empty) a relevance-ranked, token-budgeted repo symbol map, in 13 languages including Python and Elixir. `references`: where a `name` is defined and used (called) across the repo, counting only real identifier occurrences (never inside strings/comments, unlike grep), definitions first. Unsupported single files return a structured `ReadFiles` fallback; for plain-text/regex search and file discovery, use `rg`/`fd`/`grep` via `BashCommand`.                                                                                                                                                              |
@@ -228,6 +259,10 @@ does. Both client Task support and generation-bound runtime actions are required
 synchronous fallback. Task results retain the same structured envelope, are kept for the bounded TTL, and may be fetched repeatedly.
 Daemon capability negotiation is bound to the effective guardian for that session and cached on an epoch-bound channel;
 the control daemon's version or process name never enables Task promotion by itself.
+Task cancellation is also generation-bound. If cancellation wins while a command is between reservation and launch,
+Winx waits until that launch either publishes its exact execution identity or proves that no process started. A bounded
+fail-closed fallback terminates the affected shell before acknowledging cancellation; Winx never sends an unscoped late
+interrupt that could hit the following command.
 Clients may explicitly advertise the `io.winx/compact-bash-output` extension to receive runtime-rendered Bash content
 without the legacy textual status trailer; clients that omit it retain the existing text exactly.
 
@@ -585,9 +620,10 @@ WINX_EMBEDDED=1 cargo run --release
 
 ### Check it's wired up
 
-List MCP tools in your client. You should see eleven entries: `Initialize`, `BashCommand`, `ReadFiles`, `FileWriteOrEdit`,
-`MultiFileEdit`, `VerifyEdit`, `UndoEdit`, `ContextSave`, `ReadImage`, `CodeMap`, `ApplyPatch`. Start with `Initialize` unless your local client exposes
-MCP Roots and Winx bootstraps from them; Winx tracks workspace + mode per thread.
+List MCP tools in your client. You should see 11 entries with `full`, 9 with `coding`, 4 with `read-only`, or 2 with
+`terminal`; an exact allowlist may be smaller. `EditFiles` must not appear because its migration wire is intentionally
+unadvertised. Start with `Initialize` unless a local client exposes MCP Roots and Winx bootstraps from them; preserve its
+returned `thread_id`/`workspace_root` pair for every later call.
 
 ## Durable session lifecycle (Unix)
 
@@ -745,6 +781,7 @@ All optional - Winx works out of the box without any of these. Boolean variables
 | Variable                                                   | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 |------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `RUST_LOG`                                                 | Log verbosity, e.g. `winx_code_agent=info`. At `info` you get the per-call audit trail without command or file content.                                                                                                                                                                                                                                                                                                                                  |
+| `WINX_LOG_FORMAT`                                          | Set to `json` for newline-delimited JSON operational logs on stderr. Leave unset for human-readable logs. This is separate from the privacy-safe usage-event sink.                                                                                                                                                                                                                                                                                         |
 | `WINX_USAGE_LOG`                                           | Optional path for non-blocking JSONL `winx::usage` events. Contains tool/action, a fixed privacy-safe command category, exact build identity, principal, scoped thread, hashed request/session correlation, client/protocol, outcome, result status, duration, and response size. Initialize events also identify created/reused transitions and context sizes. Command text, file contents, URLs, arguments, and credentials are never logged. Analyze rotated logs without modifying them with `winx-code-agent report`. On Unix files are `0600` (`O_NOFOLLOW`) and new log directories are `0700`. |
 | `WINX_USAGE_LOG_ROTATION`                                  | Usage-log rotation: `daily` (default), `hourly`, or `never`. Daily/hourly filenames receive UTC timestamps.                                                                                                                                                                                                                                                                                                                                              |
 | `WINX_USAGE_LOG_KEEP_DAYS`                                 | Approximate retention window for daily/hourly usage logs. Defaults to `7`; `0` disables pruning. Ignored with `never`.                                                                                                                                                                                                                                                                                                                                    |

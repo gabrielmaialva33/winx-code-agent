@@ -68,6 +68,8 @@ Authorization: Bearer <~/.config/winx-http-token 的内容>
 
 - **持久化会话：** 从客户端看 HTTP 是无状态的，但 Unix PTY 运行在独立的会话守护进程中，使用相同的 `thread_id` 即可随时恢复会话。
 - **身份隔离机制：** 每个主体对应独立 Token；线程 ID 与 MCP Task ID 在内部严格隔离命名空间，并在响应返回前自动还原。工作区亲和性（Workspace Affinity）可自动吸收模型生成的不稳定线程 ID。
+- **按需裁剪的工具目录：** `full`、`coding`、`read-only`、`terminal` 配置或每个主体的精确白名单可减少发现与 Schema 负载，并拒绝策略之外的调用。
+- **统一变更协议：** 面向客户端的编辑工具只是同一个强类型计划/提交引擎的兼容视图；读取证据、规范路径绑定、原子写入、撤销检查点、验证回执与恢复规则始终一致。
 - **安全失败默认策略（Fail-Closed）：** 默认仅允许绑定回环地址、Token 最小长度 32 字节、Token 文件权限强制 600、DNS 重绑定检查、请求体/超时/并发限制、基于 IP 的速率限制以及针对无效身份验证的延迟响应。
 - **专为智能体优化的终端语义：** 支持前台/后台命令、状态轮询、交互式输入、稳定的 TUI 快照、轮次检测（Turn Detection）、真实进程退出码与 Token 预算限制。
 - **完备的代码库工具：** 安全的 SEARCH/REPLACE 编辑、多文件原子规划、撤销操作（Undo）、Token 控制的文件读取、图像输入、上下文切换与基于 Tree-sitter 的符号导航。
@@ -98,10 +100,12 @@ Secure MCP Tunnel / VPN / 认证 HTTPS 反向代理
               ▼
         共享 WinxService
               │
-              ▼
-            winxd (控制平面守护进程)
+              ├─ 工作区一致性 + 文件读取证据
+              │       └─ 统一变更引擎 ── 工作区文件系统
               │
-              └─ 每个会话专属 winx-guardian ── 真实 PTY / Shell / TUI
+              └─ Shell 运行时
+                      └─ winxd (控制平面守护进程)
+                          └─ 每个会话专属 winx-guardian ── 真实 PTY / Shell / TUI
 ```
 
 ## 核心功能特性
@@ -110,9 +114,8 @@ Secure MCP Tunnel / VPN / 认证 HTTPS 反向代理
 - 三种工作区安全模式：`wcgw`（完全权限）、`architect`（只读模式）、`code_writer`（白名单命令与写入通配符）。命令白名单通过 Tree-sitter 进行 AST 深度解析，检查命令行中的**每一个**指令（管道、`&&`/`||`/`;`、`$(...)`、子 Shell），防止通过 `ls && curl … | sh` 等手法绕过。
 - 高弹性 PTY：如果 Shell 无法返回提示符（即使在 Ctrl-C 之后），系统会在相同的工作目录和模式下自动重置，并在清理时回收子进程。可通过 `WINX_SHELL=zsh` 启用 zsh。
 - 行号范围读取（如 `file.rs:10-40`、`file.rs:10-`、`file.rs:-40`）。智能跟踪活跃文件并在上下文之中进行优先级排序。
-- 支持容错匹配的 SEARCH/REPLACE 编辑：可自动纠正缩进漂移、Unicode 引号差异等常见 LLM 误差。写入前检查文件是否已被读取且未过期；编辑成功后返回紧凑的 Diff，支持 `UndoEdit` 撤销最近编辑。
-- `MultiFileEdit` 在写入任何文件前在内存中完整验证所有更改；若最后一个文件验证失败，前面的文件将完全保持原样（原子性提交）。
-- 基于 Tree-sitter 的 `CodeMap` 代码导航：提供具备 Token 预算控制的文件或仓库符号图谱，支持 11 种编程语言的定义与引用查找。
+- `FileWriteOrEdit`、`ApplyPatch`、`MultiFileEdit` 与 `UndoEdit` 共用一个强类型变更引擎。完整替换、SEARCH/REPLACE、修订绑定行补丁、批量编辑和撤销共享规范路径预检、读取/新鲜度证据、有界计划、逐文件原子替换、紧凑 Diff、类型化恢复与回执绑定验证。计划失败不会写入；极少发生的提交阶段故障会准确报告已提交前缀。
+- 基于 Tree-sitter 的 `CodeMap` 代码导航：提供具备 Token 预算控制的文件或仓库符号图谱，支持 13 种编程语言的定义与引用查找。
 - `ContextSave` 将当前任务摘要、工作区上下文、活跃文件、Git 状态与 Diff 打包保存，供后续会话恢复。
 - `ReadImage` 为多模态模型提供原生 MCP 图像块支持。
 - 清晰可控的终端输出：通过虚拟终端模拟器消除交互式程序中的 ANSI 控制符与光标噪音，无损压缩重复日志（`line  [winx: ×N]`）。输出溢出时将多余部分写入 `.winx/scratch/` 临时文件供后续查阅。
@@ -120,21 +123,47 @@ Secure MCP Tunnel / VPN / 认证 HTTPS 反向代理
 
 ## MCP 工具列表
 
+Winx 在保持公共目录稳定的同时消除内部重复。四个公共变更入口都使用同一个强类型引擎。未公开的
+`EditFiles` 迁移 Wire 属于内部兼容层，不是公共 API；客户端只应调用 `tools/list` 返回的名称。
+
+请选择能够覆盖客户端需求的最小目录。策略同时作用于发现与调度，内部迁移 Wire 也只能使用该策略已
+授予的等价变更权限。一般代码智能体建议从 `coding` 开始；只有需要图像输入或上下文交接时才使用 `full`。
+
+| 配置 | 工具数量 | 能力范围 |
+| :--- | ---: | :--- |
+| `terminal` | 2 | `Initialize` 与 `BashCommand` |
+| `read-only` | 4 | 初始化、精确文件/图像读取与 `CodeMap` |
+| `coding` | 9 | 终端、读取、导航以及全部公共编辑/验证/撤销入口 |
+| `full` | 11 | 向后兼容默认值；在代码工作流上增加 `ContextSave` 与 `ReadImage` |
+
+```bash
+winx-code-agent serve --http \
+  --token-file ~/.config/winx-http-token \
+  --tool-profile coding
+```
+
+重复使用 `--allow-tool NAME` 可构造精确目录，并替代所选配置。目录只缩小 MCP 表面，不会改变初始化模式
+授予的 Shell 或文件权限。
+
 | 工具名称 | 功能描述 |
 | :--- | :--- |
 | `Initialize` | 初始化工作区、选择安全模式并返回 `thread_id`。除非客户端支持 MCP Roots 自动引导，否则应首先调用此工具。未指定路径时创建临时游乐场；恢复任务时重开保存的项目根目录。 |
 | `BashCommand` | 执行命令、轮询长时间运行的任务、发送 Enter/Ctrl-C 并操作 TUI。`wait_policy` 支持：`adaptive`（默认，短调用内联返回，长命令按需提升为 Task）；`until_complete`（直接创建 Task）；`return_early`（立即返回）。支持 `is_background`、`status_check`、按键输入与 `wait_for_turn`。 |
 | `ReadFiles` | 读取单个或多个文件，带行号输出，并返回不透明修订令牌与实际可见范围。支持 `path:10-40`；截断不会记录模型未看到的行。 |
-| `FileWriteOrEdit` | 覆盖文件或使用 SEARCH/REPLACE 块编辑（支持 `@起始-结束` 行号锚点）。写入前验证读取覆盖率与新鲜度，并通过 Tree-sitter 检查语法（支持 18+ 语言），返回改动 Diff。 |
-| `ApplyPatch` | 对精确的 `ReadFiles` 修订应用有序且不重叠的行补丁。只能修改已看到的行；过期修订或重放会在写入前失败。 |
-| `MultiFileEdit` | 批量多文件原子编辑：在内存中验证所有编辑，任何一个文件验证失败都不会更改任何文件。 |
+| `FileWriteOrEdit` | 共享引擎的单文件视图：完整替换或带可选行锚点的 SEARCH/REPLACE。写入前验证读取覆盖、新鲜度与规范目标身份，并返回容错信息、语法问题和紧凑 Diff。 |
+| `ApplyPatch` | 同一引擎的修订绑定视图。对精确 `ReadFiles` 修订应用有序且不重叠的行补丁；只能修改可见行，过期修订或重放会在写入前失败。 |
+| `MultiFileEdit` | 同一引擎的批量视图。写入前计划所有编辑；计划失败不会修改任何文件。极少发生的提交故障会分别报告已提交与未提交路径，不会声称执行了并不存在的跨文件回滚。 |
 | `VerifyEdit` | 使用编辑后回执重新执行同一检查，不会重复已提交的编辑。 |
-| `UndoEdit` | 撤销由 `FileWriteOrEdit` 或 `MultiFileEdit` 对某个文件执行的最近一次修改（内存中保留约 10 次历史记录）。 |
+| `UndoEdit` | 共享引擎的撤销视图。按文件严格 LIFO 恢复会话内检查点（最多保留 10 个）；目标被外部修改时拒绝执行，也不会删除新建文件。 |
 | `ContextSave` | 将任务说明、工作区上下文、活跃文件与 Git Diff 导出为单一文本文件，便于后续会话无缝接力。 |
 | `ReadImage` | 返回原生 MCP 图像内容块（非纯文本 Base64），以便多模态大模型直接查看图像。受工作区目录限制。 |
 | `CodeMap` | 基于 Tree-sitter 的代码导航工具，支持两项操作：`outline`（提取文件或仓库符号大纲）和 `references`（跨仓库查找符号定义与调用位置，支持 13 种语言）。 |
 
 已提交的编辑会保留 30 分钟的持久化回执；目标哈希未变化时，完全相同的调用不会再次写入或运行验证。验证失败返回 `completed_with_issues` 和明确的 `VerifyEdit` 动作；同一目标连续三次 SEARCH 冲突会升级为 `recovery_exhausted`。
+
+MCP Task 取消操作绑定到精确执行代次。如果取消发生在预留与启动之间，Winx 会等待获得精确执行身份，
+或确认根本没有进程启动。若有界握手无法完成，系统会先终止受影响的会话再确认取消；延迟到达的中断
+永远不会误伤下一条命令。
 
 ## 查找/替换编辑语法 (SEARCH/REPLACE)
 
@@ -529,6 +558,7 @@ winx-code-agent serve --http \
 | 环境变量 | 作用描述 |
 | :--- | :--- |
 | `RUST_LOG` | 日志详细度，例如 `winx_code_agent=info`。 |
+| `WINX_LOG_FORMAT` | 设为 `json` 时在 stderr 输出 JSONL 运行日志；未设置时使用人类可读格式。它与隐私安全的使用事件日志相互独立。 |
 | `WINX_USAGE_LOG` | 异步记录 `winx::usage` JSONL 格式遥测事件的文件路径。 |
 | `WINX_HTTP_TOKEN` | 未配置命令行凭证时的单主体默认 Bearer Token。 |
 | `WINX_RUNTIME` | Unix 运行时模式：`daemon`（默认）或 `embedded`。 |
