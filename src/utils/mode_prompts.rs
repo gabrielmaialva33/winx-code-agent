@@ -17,7 +17,7 @@ const WCGW_PROMPT: &str = "# Operating mode: wcgw (full access)
 - Use the provided shell, file-read and file-write tools to accomplish the objective.
 - Do not provide code snippets unless asked — edit the code directly with the winx tools.
 - Do not install new tools/packages before checking that the tool (or an alternative) doesn't already exist.
-- Do not use echo/cat to write files; always use FileWriteOrEdit to create/update files.
+- Do not use echo/cat to write files; always use EditFiles to create/update files.
 - Do not send Ctrl-c / interrupts without asking — programs often keep running with no visible output.
 - Provide as many file paths as you need to ReadFiles in a single call.
 - Run `pwd` if you hit a file/dir not found error, to make sure you're not lost.";
@@ -25,7 +25,7 @@ const WCGW_PROMPT: &str = "# Operating mode: wcgw (full access)
 /// Read-only architect behavior guidance.
 const ARCHITECT_PROMPT: &str = "# Operating mode: architect (read-only)
 
-- You may NOT edit, create, or overwrite any file. FileWriteOrEdit is disabled in this mode.
+- You may NOT edit, create, or overwrite any file. EditFiles is disabled in this mode.
 - You may NOT run commands that change disk, packages, system config or environment — read-only commands only.
 - The shell runs with `-r` (restricted): you cannot change directory.
 - Only run commands that help you explore the repo, understand the system, or read what's relevant.
@@ -40,7 +40,7 @@ const ARCHITECT_PROMPT: &str = "# Operating mode: architect (read-only)
 /// Common command-discipline lines shared by `code_writer` variants.
 const RUN_COMMAND_COMMON: &str =
     "- Do not send Ctrl-c / interrupts without asking — programs often keep running silently.
-- Do not use echo/cat to write files; always use FileWriteOrEdit.
+- Do not use echo/cat to write files; always use EditFiles.
 - Do not provide code snippets unless asked — edit the code directly with the winx tools.";
 
 /// Build the behavioral prompt for the active mode. `config` is only consulted
@@ -99,7 +99,7 @@ mod tests {
     fn architect_is_read_only_and_names_disabled_tool() {
         let p = mode_prompt(Modes::Architect, None);
         assert!(p.contains("read-only"));
-        assert!(p.contains("FileWriteOrEdit is disabled"));
+        assert!(p.contains("EditFiles is disabled"));
     }
 
     #[test]
