@@ -2,7 +2,9 @@
 use anyhow::Result;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, VecDeque};
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -138,6 +140,14 @@ impl FileWhitelistData {
 /// How many edit checkpoints to keep per session for `UndoEdit`. In-memory only
 /// (not persisted), oldest dropped past the cap, bounding memory on long sessions.
 const EDIT_CHECKPOINT_CAP: usize = 10;
+/// Aggregate source-content budget in addition to the historical count and
+/// per-file limits.
+const EDIT_CHECKPOINT_CONTENT_BYTES_CAP: usize = 4 * 1024 * 1024;
+/// Aggregate metadata budget. In particular this prevents externally-created
+/// `EditCheckpoint` values with enormous read-range vectors from bypassing the
+/// source-content budget.
+const EDIT_CHECKPOINT_METADATA_BYTES_CAP: usize = 256 * 1024;
+const EDIT_CHECKPOINT_MAX_READ_RANGES: usize = 1_024;
 
 /// Largest prior-content a checkpoint will hold. Files (up to the 50 MB edit
 /// ceiling) above this aren't checkpointed, so a session editing huge assets
@@ -169,6 +179,8 @@ pub(crate) struct EditMutationPostcondition {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct EditMutationReceipt {
+    #[serde(default)]
+    pub schema_version: u8,
     pub fingerprint: String,
     pub receipt_id: String,
     pub tool: String,
@@ -179,6 +191,39 @@ pub(crate) struct EditMutationReceipt {
     pub persisted: bool,
     #[serde(default)]
     pub verification_pending: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_verification_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_state: Option<EditVerificationState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification_execution: Option<EditVerificationExecution>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uncommitted_paths: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_undo_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub undo_ids: Vec<Option<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum EditVerificationState {
+    Pending,
+    Reserved,
+    Running,
+    Interrupted,
+    Skipped,
+    Passed,
+    Failed,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct EditVerificationExecution {
+    pub generation: u64,
+    pub guardian_epoch: String,
+    pub session_epoch: String,
 }
 
 /// A single file's pre-edit state, captured by `FileWriteOrEdit`/`MultiFileEdit`
@@ -194,6 +239,13 @@ pub struct EditCheckpoint {
     /// The whitelist entry before the edit, restored on undo so the hash gate of a
     /// later edit matches the reverted content. `None` if there was none.
     pub prior_whitelist: Option<FileWhitelistData>,
+}
+
+#[derive(Debug, Clone)]
+struct EditCheckpointMetadata {
+    checkpoint_fingerprint: String,
+    undo_id: String,
+    wrote_hash: String,
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +271,7 @@ pub struct BashState {
     /// back). Deliberately not part of `BashStateSnapshot`: undo is for immediate
     /// mid-session recovery, not across restarts.
     pub edit_checkpoints: VecDeque<EditCheckpoint>,
+    edit_checkpoint_metadata: VecDeque<EditCheckpointMetadata>,
     /// In-memory aggregate guard for syntax maps over non-canonical helpers.
     /// Canonical `CodeMap` calls are intentionally not counted.
     pub derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage,
@@ -254,6 +307,7 @@ impl BashState {
             foreground_command_gate: Arc::new(Mutex::new(())),
             initialized: false,
             edit_checkpoints: VecDeque::new(),
+            edit_checkpoint_metadata: VecDeque::new(),
             derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage::default(),
             image_deliveries: VecDeque::new(),
             edit_mutation_receipts: VecDeque::new(),
@@ -266,28 +320,138 @@ impl BashState {
         now_unix_ms: u64,
         ttl_ms: u64,
     ) -> Option<EditMutationReceipt> {
-        self.edit_mutation_receipts
-            .retain(|receipt| now_unix_ms.saturating_sub(receipt.committed_at_unix_ms) <= ttl_ms);
+        self.prune_edit_mutation_receipts(now_unix_ms, ttl_ms);
         let index = self
             .edit_mutation_receipts
             .iter()
-            .position(|receipt| receipt.fingerprint == fingerprint)?;
+            .rposition(|receipt| receipt.fingerprint == fingerprint)?;
         let receipt = self.edit_mutation_receipts.remove(index)?;
         self.edit_mutation_receipts.push_back(receipt.clone());
         Some(receipt)
     }
 
+    pub(crate) fn edit_mutation_receipt_variant(
+        &mut self,
+        fingerprint: &str,
+        verification_id: Option<&str>,
+        now_unix_ms: u64,
+        ttl_ms: u64,
+    ) -> Option<EditMutationReceipt> {
+        self.prune_edit_mutation_receipts(now_unix_ms, ttl_ms);
+        let index = self.edit_mutation_receipts.iter().rposition(|receipt| {
+            receipt.fingerprint == fingerprint
+                && receipt.verification_id.as_deref() == verification_id
+        })?;
+        let receipt = self.edit_mutation_receipts.remove(index)?;
+        self.edit_mutation_receipts.push_back(receipt.clone());
+        Some(receipt)
+    }
+
+    #[cfg(test)]
     pub(crate) fn record_edit_mutation_receipt(&mut self, receipt: EditMutationReceipt) {
-        if let Some(index) = self
+        self.record_edit_mutation_receipts([receipt]);
+    }
+
+    pub(crate) fn record_edit_mutation_receipts(
+        &mut self,
+        receipts: impl IntoIterator<Item = EditMutationReceipt>,
+    ) {
+        let receipts = receipts.into_iter().collect::<Vec<_>>();
+        for receipt in &receipts {
+            self.edit_mutation_receipts.retain(|existing| {
+                !(existing.fingerprint == receipt.fingerprint
+                    && existing.verification_id == receipt.verification_id
+                    && existing.legacy_verification_id == receipt.legacy_verification_id)
+            });
+        }
+        self.edit_mutation_receipts.extend(receipts);
+        while self.edit_mutation_receipts.len() > EDIT_MUTATION_RECEIPT_CAP {
+            let Some(group) =
+                self.edit_mutation_receipts.front().map(|receipt| receipt.receipt_id.clone())
+            else {
+                break;
+            };
+            self.edit_mutation_receipts.retain(|receipt| receipt.receipt_id != group);
+        }
+    }
+
+    fn prune_edit_mutation_receipts(&mut self, now_unix_ms: u64, ttl_ms: u64) {
+        let expired_groups = self
             .edit_mutation_receipts
             .iter()
-            .position(|existing| existing.fingerprint == receipt.fingerprint)
-        {
-            self.edit_mutation_receipts.remove(index);
+            .filter(|receipt| now_unix_ms.saturating_sub(receipt.committed_at_unix_ms) > ttl_ms)
+            .map(|receipt| receipt.receipt_id.clone())
+            .collect::<std::collections::HashSet<_>>();
+        self.edit_mutation_receipts.retain(|receipt| !expired_groups.contains(&receipt.receipt_id));
+    }
+
+    pub(crate) fn edit_mutation_receipt_by_verification_id(
+        &mut self,
+        verification_id: &str,
+        now_unix_ms: u64,
+        ttl_ms: u64,
+    ) -> Option<EditMutationReceipt> {
+        self.prune_edit_mutation_receipts(now_unix_ms, ttl_ms);
+        let index = self.edit_mutation_receipts.iter().position(|receipt| {
+            receipt.schema_version >= 1
+                && receipt.tool == "EditFiles"
+                && receipt.verification_id.as_deref() == Some(verification_id)
+        })?;
+        let receipt = self.edit_mutation_receipts.remove(index)?;
+        self.edit_mutation_receipts.push_back(receipt.clone());
+        Some(receipt)
+    }
+
+    pub(crate) fn edit_mutation_receipt_by_legacy_verification_id(
+        &mut self,
+        verification_id: &str,
+        now_unix_ms: u64,
+        ttl_ms: u64,
+    ) -> Option<EditMutationReceipt> {
+        self.prune_edit_mutation_receipts(now_unix_ms, ttl_ms);
+        let index = self.edit_mutation_receipts.iter().position(|receipt| {
+            receipt.tool != "EditFiles"
+                && receipt.legacy_verification_id.as_deref() == Some(verification_id)
+        })?;
+        let receipt = self.edit_mutation_receipts.remove(index)?;
+        self.edit_mutation_receipts.push_back(receipt.clone());
+        Some(receipt)
+    }
+
+    pub(crate) fn update_edit_mutation_verification(
+        &mut self,
+        verification_id: &str,
+        status: &str,
+        verification_state: EditVerificationState,
+        execution: Option<&EditVerificationExecution>,
+        now_unix_ms: u64,
+        ttl_ms: u64,
+    ) -> bool {
+        self.prune_edit_mutation_receipts(now_unix_ms, ttl_ms);
+        let mut updated = false;
+        for receipt in &mut self.edit_mutation_receipts {
+            if receipt.verification_id.as_deref() == Some(verification_id) {
+                receipt.status = status.to_string();
+                receipt.verification_pending = matches!(
+                    verification_state,
+                    EditVerificationState::Pending
+                        | EditVerificationState::Reserved
+                        | EditVerificationState::Running
+                        | EditVerificationState::Interrupted
+                );
+                receipt.verification_state = Some(verification_state);
+                receipt.verification_execution.clone_from(&execution.cloned());
+                updated = true;
+            }
         }
-        self.edit_mutation_receipts.push_back(receipt);
-        while self.edit_mutation_receipts.len() > EDIT_MUTATION_RECEIPT_CAP {
-            self.edit_mutation_receipts.pop_front();
+        updated
+    }
+
+    pub(crate) fn mark_edit_mutation_verification_volatile(&mut self, verification_id: &str) {
+        for receipt in &mut self.edit_mutation_receipts {
+            if receipt.verification_id.as_deref() == Some(verification_id) {
+                receipt.persisted = false;
+            }
         }
     }
 
@@ -326,19 +490,60 @@ impl BashState {
     }
 
     /// Record a pre-edit checkpoint for `UndoEdit`, dropping the oldest past the
-    /// cap. Large files are skipped (not undoable) to bound memory.
+    /// cap. This public API intentionally retains its 0.2.x signature and data
+    /// type; opaque receipt metadata lives in a separate private queue.
     pub fn push_edit_checkpoint(&mut self, checkpoint: EditCheckpoint) {
+        let _ = self.push_edit_checkpoint_inner(checkpoint, None);
+    }
+
+    pub(crate) fn push_receipt_bound_edit_checkpoint(
+        &mut self,
+        checkpoint: EditCheckpoint,
+        wrote_hash: String,
+    ) -> Option<String> {
+        let undo_id = format!("undo_{:032x}", rand::random::<u128>());
+        self.push_edit_checkpoint_inner(
+            checkpoint,
+            Some(EditCheckpointMetadata {
+                checkpoint_fingerprint: String::new(),
+                undo_id: undo_id.clone(),
+                wrote_hash,
+            }),
+        )
+        .then_some(undo_id)
+    }
+
+    fn push_edit_checkpoint_inner(
+        &mut self,
+        mut checkpoint: EditCheckpoint,
+        metadata: Option<EditCheckpointMetadata>,
+    ) -> bool {
         if checkpoint.prior_content.len() > EDIT_CHECKPOINT_MAX_CONTENT_BYTES {
             info!(
                 file = %checkpoint.file_path_str,
                 "UndoEdit: not checkpointing a file over 1 MB (too large to hold in memory)"
             );
-            return;
+            return false;
         }
+        sanitize_checkpoint_metadata(&mut checkpoint);
+        let fingerprint = checkpoint_fingerprint(&checkpoint);
         self.edit_checkpoints.push_back(checkpoint);
-        while self.edit_checkpoints.len() > EDIT_CHECKPOINT_CAP {
-            self.edit_checkpoints.pop_front();
+        if let Some(mut metadata) = metadata {
+            metadata.checkpoint_fingerprint.clone_from(&fingerprint);
+            self.edit_checkpoint_metadata.push_back(metadata);
         }
+        while self.edit_checkpoints.len() > EDIT_CHECKPOINT_CAP
+            || self.undo_content_bytes() > EDIT_CHECKPOINT_CONTENT_BYTES_CAP
+            || self.undo_metadata_bytes() > EDIT_CHECKPOINT_METADATA_BYTES_CAP
+        {
+            if let Some(removed) = self.edit_checkpoints.pop_front() {
+                self.remove_checkpoint_metadata(&checkpoint_fingerprint(&removed));
+            } else {
+                break;
+            }
+        }
+        self.reconcile_checkpoint_metadata();
+        self.edit_checkpoints.iter().any(|item| checkpoint_fingerprint(item) == fingerprint)
     }
 
     /// Remove and return the most recent checkpoint for `file_path_str` (per-file
@@ -347,7 +552,34 @@ impl BashState {
     pub fn pop_edit_checkpoint_for(&mut self, file_path_str: &str) -> Option<EditCheckpoint> {
         let index =
             self.edit_checkpoints.iter().rposition(|cp| cp.file_path_str == file_path_str)?;
-        self.edit_checkpoints.remove(index)
+        let checkpoint = self.edit_checkpoints.remove(index)?;
+        self.remove_checkpoint_metadata(&checkpoint_fingerprint(&checkpoint));
+        Some(checkpoint)
+    }
+
+    pub(crate) fn pop_latest_edit_checkpoint_by_id(
+        &mut self,
+        file_path_str: &str,
+        undo_id: &str,
+    ) -> Option<EditCheckpoint> {
+        let index = self
+            .edit_checkpoints
+            .iter()
+            .rposition(|checkpoint| checkpoint.file_path_str == file_path_str)?;
+        let fingerprint = checkpoint_fingerprint(self.edit_checkpoints.get(index)?);
+        if self
+            .edit_checkpoint_metadata
+            .iter()
+            .rev()
+            .find(|metadata| metadata.checkpoint_fingerprint == fingerprint)?
+            .undo_id
+            != undo_id
+        {
+            return None;
+        }
+        let checkpoint = self.edit_checkpoints.remove(index)?;
+        self.remove_checkpoint_metadata(&fingerprint);
+        Some(checkpoint)
     }
 
     /// Clone the most recent per-file checkpoint without consuming it. Undo
@@ -358,6 +590,95 @@ impl BashState {
             .rev()
             .find(|checkpoint| checkpoint.file_path_str == file_path_str)
             .cloned()
+    }
+
+    pub(crate) fn undo_checkpoint_count_for(&self, file_path_str: &str) -> usize {
+        self.edit_checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.file_path_str == file_path_str)
+            .count()
+    }
+
+    pub(crate) fn next_undo_id_for(&self, file_path_str: &str) -> Option<String> {
+        let checkpoint = self
+            .edit_checkpoints
+            .iter()
+            .rev()
+            .find(|checkpoint| checkpoint.file_path_str == file_path_str)?;
+        let fingerprint = checkpoint_fingerprint(checkpoint);
+        self.edit_checkpoint_metadata
+            .iter()
+            .rev()
+            .find(|metadata| metadata.checkpoint_fingerprint == fingerprint)
+            .map(|metadata| metadata.undo_id.clone())
+    }
+
+    pub(crate) fn latest_receipt_bound_checkpoint(
+        &self,
+        file_path_str: &str,
+    ) -> Option<(EditCheckpoint, String, String)> {
+        let checkpoint = self
+            .edit_checkpoints
+            .iter()
+            .rev()
+            .find(|checkpoint| checkpoint.file_path_str == file_path_str)?;
+        let fingerprint = checkpoint_fingerprint(checkpoint);
+        let metadata = self
+            .edit_checkpoint_metadata
+            .iter()
+            .rev()
+            .find(|metadata| metadata.checkpoint_fingerprint == fingerprint)?;
+        Some((checkpoint.clone(), metadata.undo_id.clone(), metadata.wrote_hash.clone()))
+    }
+
+    /// Whether an opaque undo handle still has its private in-memory checkpoint.
+    /// Mutation receipts outlive the bounded checkpoint queue, so replay must
+    /// consult this before advertising a handle that may have been evicted.
+    pub(crate) fn has_receipt_bound_checkpoint(&self, file_path_str: &str, undo_id: &str) -> bool {
+        self.edit_checkpoints.iter().rev().any(|checkpoint| {
+            if checkpoint.file_path_str != file_path_str {
+                return false;
+            }
+            let fingerprint = checkpoint_fingerprint(checkpoint);
+            self.edit_checkpoint_metadata.iter().rev().any(|metadata| {
+                metadata.checkpoint_fingerprint == fingerprint && metadata.undo_id == undo_id
+            })
+        })
+    }
+
+    fn undo_content_bytes(&self) -> usize {
+        self.edit_checkpoints.iter().map(|checkpoint| checkpoint.prior_content.len()).sum()
+    }
+
+    fn undo_metadata_bytes(&self) -> usize {
+        self.edit_checkpoints.iter().map(checkpoint_metadata_bytes).sum()
+    }
+
+    fn remove_checkpoint_metadata(&mut self, fingerprint: &str) {
+        if let Some(index) = self
+            .edit_checkpoint_metadata
+            .iter()
+            .position(|metadata| metadata.checkpoint_fingerprint == fingerprint)
+        {
+            self.edit_checkpoint_metadata.remove(index);
+        }
+    }
+
+    fn reconcile_checkpoint_metadata(&mut self) {
+        let mut available = HashMap::<String, usize>::new();
+        for checkpoint in &self.edit_checkpoints {
+            *available.entry(checkpoint_fingerprint(checkpoint)).or_default() += 1;
+        }
+        self.edit_checkpoint_metadata.retain(|metadata| {
+            let Some(count) = available.get_mut(&metadata.checkpoint_fingerprint) else {
+                return false;
+            };
+            if *count == 0 {
+                return false;
+            }
+            *count -= 1;
+            true
+        });
     }
 
     /// Merge visible read coverage for `path` and make it the newest guarded
@@ -516,6 +837,27 @@ impl BashState {
         self.rebuild_whitelist_recency();
         self.current_thread_id = tid;
         self.edit_mutation_receipts = snapshot.edit_mutation_receipts.iter().cloned().collect();
+        // Undo checkpoints are deliberately live-process only. Applying a
+        // persisted snapshot is a restart/reattach boundary and must never make
+        // a stale opaque undo receipt valid again.
+        self.edit_checkpoints.clear();
+        self.edit_checkpoint_metadata.clear();
+        for receipt in &mut self.edit_mutation_receipts {
+            // Opaque undo handles are meaningful only while their private
+            // in-memory checkpoints exist. Never advertise one after a
+            // restart/reattach boundary has deliberately dropped that history.
+            receipt.undo_ids.clear();
+            receipt.next_undo_id = None;
+            if matches!(
+                receipt.verification_state,
+                Some(EditVerificationState::Reserved | EditVerificationState::Running)
+            ) {
+                receipt.verification_state = Some(EditVerificationState::Interrupted);
+                receipt.verification_pending = true;
+                receipt.verification_execution = None;
+                receipt.status = "completed_with_issues".to_string();
+            }
+        }
         if image_identity_changed {
             self.image_deliveries.clear();
         }
@@ -548,6 +890,71 @@ impl BashState {
     }
 }
 
+fn sanitize_checkpoint_metadata(checkpoint: &mut EditCheckpoint) {
+    let Some(whitelist) = checkpoint.prior_whitelist.as_mut() else { return };
+    let mut ranges = std::mem::take(&mut whitelist.line_ranges_read);
+    ranges.sort_unstable();
+    let mut bounded: Vec<(usize, usize)> =
+        Vec::with_capacity(ranges.len().min(EDIT_CHECKPOINT_MAX_READ_RANGES));
+    for (start, end) in ranges {
+        if start > end {
+            continue;
+        }
+        if let Some((_, previous_end)) = bounded.last_mut() {
+            if start <= previous_end.saturating_add(1) {
+                *previous_end = (*previous_end).max(end);
+                continue;
+            }
+        }
+        if bounded.len() < EDIT_CHECKPOINT_MAX_READ_RANGES {
+            bounded.push((start, end));
+        } else {
+            break;
+        }
+    }
+    whitelist.line_ranges_read = bounded;
+}
+
+fn checkpoint_metadata_bytes(checkpoint: &EditCheckpoint) -> usize {
+    let whitelist = checkpoint.prior_whitelist.as_ref().map_or(0, |whitelist| {
+        whitelist
+            .file_hash
+            .len()
+            .saturating_add(whitelist.line_ranges_read.len().saturating_mul(2 * size_of::<usize>()))
+            .saturating_add(size_of::<usize>())
+    });
+    checkpoint
+        .file_path_str
+        .len()
+        .saturating_add(checkpoint.path.as_os_str().as_encoded_bytes().len())
+        .saturating_add(whitelist)
+}
+
+fn checkpoint_fingerprint(checkpoint: &EditCheckpoint) -> String {
+    fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(bytes);
+    }
+    let mut hasher = Sha256::new();
+    hash_field(&mut hasher, checkpoint.file_path_str.as_bytes());
+    hash_field(&mut hasher, checkpoint.path.as_os_str().as_encoded_bytes());
+    hash_field(&mut hasher, checkpoint.prior_content.as_bytes());
+    if let Some(whitelist) = checkpoint.prior_whitelist.as_ref() {
+        hash_field(&mut hasher, whitelist.file_hash.as_bytes());
+        hasher.update(u64::try_from(whitelist.total_lines).unwrap_or(u64::MAX).to_le_bytes());
+        for (start, end) in &whitelist.line_ranges_read {
+            hasher.update(u64::try_from(*start).unwrap_or(u64::MAX).to_le_bytes());
+            hasher.update(u64::try_from(*end).unwrap_or(u64::MAX).to_le_bytes());
+        }
+    }
+    let digest = hasher.finalize();
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
+}
+
 pub fn generate_thread_id() -> String {
     let mut rng = rand::rng();
     format!("tid_{:x}", rng.random::<u64>())
@@ -555,9 +962,15 @@ pub fn generate_thread_id() -> String {
 
 #[cfg(test)]
 mod whitelist_range_tests {
+    #![allow(clippy::expect_used)]
+
+    use std::collections::HashMap;
+
     use super::{
-        BashState, EditMutationPostcondition, EditMutationReceipt, FileWhitelistData,
-        MAX_WHITELIST_FILES,
+        BashState, EditCheckpoint, EditMutationPostcondition, EditMutationReceipt,
+        EditVerificationState, FileWhitelistData, EDIT_CHECKPOINT_CAP,
+        EDIT_CHECKPOINT_CONTENT_BYTES_CAP, EDIT_CHECKPOINT_MAX_READ_RANGES,
+        EDIT_CHECKPOINT_METADATA_BYTES_CAP, EDIT_MUTATION_RECEIPT_CAP, MAX_WHITELIST_FILES,
     };
 
     fn wl(ranges: &[(usize, usize)], total: usize) -> FileWhitelistData {
@@ -658,6 +1071,7 @@ mod whitelist_range_tests {
     fn mutation_receipts_survive_snapshot_and_expire_closed() -> Result<(), &'static str> {
         let mut state = BashState::new();
         state.record_edit_mutation_receipt(EditMutationReceipt {
+            schema_version: 0,
             fingerprint: "fingerprint".to_string(),
             receipt_id: "edit_receipt".to_string(),
             tool: "FileWriteOrEdit".to_string(),
@@ -669,6 +1083,13 @@ mod whitelist_range_tests {
             }],
             persisted: true,
             verification_pending: false,
+            verification_id: None,
+            legacy_verification_id: None,
+            verification_state: None,
+            verification_execution: None,
+            uncommitted_paths: Vec::new(),
+            next_undo_id: None,
+            undo_ids: Vec::new(),
         });
 
         let snapshot = state.snapshot();
@@ -681,5 +1102,283 @@ mod whitelist_range_tests {
         assert!(receipt.persisted);
         assert!(restored.edit_mutation_receipt("fingerprint", 3_000, 1_000).is_none());
         Ok(())
+    }
+
+    #[test]
+    fn receipt_bound_verification_updates_without_extending_commit_ttl() -> Result<(), &'static str>
+    {
+        let mut state = BashState::new();
+        state.record_edit_mutation_receipt(EditMutationReceipt {
+            schema_version: 1,
+            fingerprint: "fingerprint".to_string(),
+            receipt_id: "edit_receipt".to_string(),
+            tool: "EditFiles".to_string(),
+            status: "completed_with_issues".to_string(),
+            committed_at_unix_ms: 1_000,
+            postconditions: Vec::new(),
+            persisted: true,
+            verification_pending: true,
+            verification_id: Some("verify_receipt".to_string()),
+            legacy_verification_id: None,
+            verification_state: Some(EditVerificationState::Pending),
+            verification_execution: None,
+            uncommitted_paths: Vec::new(),
+            next_undo_id: None,
+            undo_ids: Vec::new(),
+        });
+        assert!(state.update_edit_mutation_verification(
+            "verify_receipt",
+            "completed",
+            EditVerificationState::Passed,
+            None,
+            1_500,
+            1_000,
+        ));
+        let receipt = state
+            .edit_mutation_receipt("fingerprint", 1_500, 1_000)
+            .ok_or("updated receipt missing")?;
+        assert_eq!(receipt.status, "completed");
+        assert!(!receipt.verification_pending);
+        assert_eq!(receipt.committed_at_unix_ms, 1_000);
+        assert!(state.edit_mutation_receipt("fingerprint", 3_000, 1_000).is_none());
+        Ok(())
+    }
+
+    fn verification_receipt(
+        fingerprint: &str,
+        tool: &str,
+        canonical_id: &str,
+        legacy_id: Option<&str>,
+    ) -> EditMutationReceipt {
+        EditMutationReceipt {
+            schema_version: 1,
+            fingerprint: fingerprint.to_string(),
+            receipt_id: format!("edit_{fingerprint}"),
+            tool: tool.to_string(),
+            status: "completed_with_issues".to_string(),
+            committed_at_unix_ms: 1_000,
+            postconditions: Vec::new(),
+            persisted: true,
+            verification_pending: true,
+            verification_id: Some(canonical_id.to_string()),
+            legacy_verification_id: legacy_id.map(str::to_string),
+            verification_state: Some(EditVerificationState::Pending),
+            verification_execution: None,
+            uncommitted_paths: Vec::new(),
+            next_undo_id: None,
+            undo_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn canonical_verification_lookup_ignores_reordered_legacy_shadow_collision(
+    ) -> Result<(), &'static str> {
+        let mut state = BashState::new();
+        state.record_edit_mutation_receipt(verification_receipt(
+            "canonical",
+            "EditFiles",
+            "verify_same",
+            None,
+        ));
+        state.record_edit_mutation_receipt(verification_receipt(
+            "shadow",
+            "FileWriteOrEdit",
+            "verify_same",
+            Some("verify_legacy"),
+        ));
+
+        let shadow = state
+            .edit_mutation_receipt_by_legacy_verification_id("verify_legacy", 1_001, 10_000)
+            .ok_or("legacy shadow missing")?;
+        assert_eq!(shadow.tool, "FileWriteOrEdit");
+        let canonical = state
+            .edit_mutation_receipt_by_verification_id("verify_same", 1_001, 10_000)
+            .ok_or("canonical receipt missing")?;
+        assert_eq!(canonical.tool, "EditFiles");
+        assert_eq!(canonical.fingerprint, "canonical");
+        Ok(())
+    }
+
+    #[test]
+    fn mutation_receipt_lru_evicts_canonical_shadow_groups_atomically() {
+        let mut state = BashState::new();
+        for index in 0..=(EDIT_MUTATION_RECEIPT_CAP / 2) {
+            let receipt_id = format!("edit-{index}");
+            let canonical_id = format!("verify-{index}");
+            let mut canonical = verification_receipt(
+                &format!("canonical-{index}"),
+                "EditFiles",
+                &canonical_id,
+                None,
+            );
+            canonical.receipt_id.clone_from(&receipt_id);
+            let mut shadow = verification_receipt(
+                &format!("legacy-{index}"),
+                "FileWriteOrEdit",
+                &canonical_id,
+                Some(&format!("legacy-verify-{index}")),
+            );
+            shadow.receipt_id = receipt_id;
+            state.record_edit_mutation_receipts([canonical, shadow]);
+        }
+
+        let groups = state.edit_mutation_receipts.iter().fold(
+            HashMap::<&str, usize>::new(),
+            |mut groups, receipt| {
+                *groups.entry(receipt.receipt_id.as_str()).or_default() += 1;
+                groups
+            },
+        );
+        assert!(state.edit_mutation_receipts.len() <= EDIT_MUTATION_RECEIPT_CAP);
+        assert!(groups.values().all(|count| *count == 2));
+    }
+
+    fn checkpoint(path: &str, _id: usize, prior_content: String) -> EditCheckpoint {
+        EditCheckpoint {
+            file_path_str: path.to_string(),
+            path: path.into(),
+            prior_content,
+            prior_whitelist: None,
+        }
+    }
+
+    #[test]
+    fn undo_history_is_lifo_per_file_and_bounded_by_count() {
+        let mut state = BashState::new();
+        let mut ids = Vec::new();
+        for id in 0..=(EDIT_CHECKPOINT_CAP + 2) {
+            ids.push(
+                state
+                    .push_receipt_bound_edit_checkpoint(
+                        checkpoint("/workspace/hot.rs", id, "x".to_string()),
+                        format!("hash-{id}"),
+                    )
+                    .expect("retained newest checkpoint"),
+            );
+        }
+        assert_eq!(state.undo_checkpoint_count_for("/workspace/hot.rs"), EDIT_CHECKPOINT_CAP);
+        let latest = ids.last().expect("latest id");
+        assert_eq!(state.next_undo_id_for("/workspace/hot.rs").as_deref(), Some(latest.as_str()));
+        assert!(state.pop_latest_edit_checkpoint_by_id("/workspace/hot.rs", &ids[1]).is_none());
+
+        for id in 0..(EDIT_CHECKPOINT_CAP + 8) {
+            let path = format!("/workspace/file-{id}.rs");
+            state.push_edit_checkpoint(checkpoint(&path, 100 + id, String::new()));
+        }
+        assert!(state.edit_checkpoints.len() <= EDIT_CHECKPOINT_CAP);
+    }
+
+    #[test]
+    fn undo_content_and_metadata_budgets_are_deterministic() {
+        let mut state = BashState::new();
+        let chunk = "x".repeat(900_000);
+        state.push_edit_checkpoint(checkpoint("/workspace/cold.rs", 1, chunk.clone()));
+        for id in 2..=6 {
+            state.push_edit_checkpoint(checkpoint("/workspace/hot.rs", id, chunk.clone()));
+        }
+
+        assert!(state.undo_content_bytes() <= EDIT_CHECKPOINT_CONTENT_BYTES_CAP);
+        assert!(state.edit_checkpoints.len() <= EDIT_CHECKPOINT_CAP);
+
+        let mut huge = checkpoint("/workspace/ranges.rs", 7, String::new());
+        huge.prior_whitelist = Some(FileWhitelistData {
+            file_hash: "h".repeat(1_024),
+            line_ranges_read: (0..100_000).map(|index| (index * 2 + 1, index * 2 + 1)).collect(),
+            total_lines: 200_000,
+        });
+        state.push_edit_checkpoint(huge);
+        let retained = state.latest_edit_checkpoint_for("/workspace/ranges.rs").expect("retained");
+        assert!(
+            retained.prior_whitelist.expect("whitelist").line_ranges_read.len()
+                <= EDIT_CHECKPOINT_MAX_READ_RANGES
+        );
+        assert!(state.undo_metadata_bytes() <= EDIT_CHECKPOINT_METADATA_BYTES_CAP);
+    }
+
+    #[test]
+    fn undo_content_is_intentionally_absent_after_snapshot_restart() {
+        let mut state = BashState::new();
+        state.push_edit_checkpoint(checkpoint(
+            "/workspace/file.rs",
+            1,
+            "private prior source".to_string(),
+        ));
+        state.record_edit_mutation_receipt(EditMutationReceipt {
+            schema_version: 1,
+            fingerprint: "apply-fingerprint".to_string(),
+            receipt_id: "edit-apply".to_string(),
+            tool: "EditFiles".to_string(),
+            status: "completed".to_string(),
+            committed_at_unix_ms: 1_000,
+            postconditions: Vec::new(),
+            persisted: true,
+            verification_pending: false,
+            verification_id: None,
+            legacy_verification_id: None,
+            verification_state: None,
+            verification_execution: None,
+            uncommitted_paths: Vec::new(),
+            next_undo_id: Some("undo-next".to_string()),
+            undo_ids: vec![Some("undo-current".to_string()), None],
+        });
+        let snapshot = state.snapshot();
+        let mut restored = BashState::new();
+        restored.apply_snapshot(&snapshot);
+
+        assert!(restored.next_undo_id_for("/workspace/file.rs").is_none());
+        assert_eq!(restored.undo_content_bytes(), 0);
+        let replay = restored
+            .edit_mutation_receipt("apply-fingerprint", 1_001, 10_000)
+            .expect("mutation receipt remains available");
+        assert!(replay.undo_ids.is_empty());
+        assert!(replay.next_undo_id.is_none());
+    }
+
+    #[test]
+    fn restart_interrupts_reserved_and_running_verifications_without_a_binding() {
+        let mut state = BashState::new();
+        for (fingerprint, verification_state, execution) in [
+            ("reserved", EditVerificationState::Reserved, None),
+            (
+                "running",
+                EditVerificationState::Running,
+                Some(super::EditVerificationExecution {
+                    generation: 9,
+                    guardian_epoch: "old-guardian".to_string(),
+                    session_epoch: "old-session".to_string(),
+                }),
+            ),
+        ] {
+            state.record_edit_mutation_receipt(EditMutationReceipt {
+                schema_version: 1,
+                fingerprint: fingerprint.to_string(),
+                receipt_id: format!("edit-{fingerprint}"),
+                tool: "EditFiles".to_string(),
+                status: "completed_with_issues".to_string(),
+                committed_at_unix_ms: 1_000,
+                postconditions: Vec::new(),
+                persisted: true,
+                verification_pending: true,
+                verification_id: Some(format!("verify-{fingerprint}")),
+                legacy_verification_id: None,
+                verification_state: Some(verification_state),
+                verification_execution: execution,
+                uncommitted_paths: Vec::new(),
+                next_undo_id: None,
+                undo_ids: Vec::new(),
+            });
+        }
+
+        let snapshot = state.snapshot();
+        let mut restored = BashState::new();
+        restored.apply_snapshot(&snapshot);
+        for fingerprint in ["reserved", "running"] {
+            let receipt = restored
+                .edit_mutation_receipt(fingerprint, 1_001, 10_000)
+                .expect("receipt survives restart");
+            assert_eq!(receipt.verification_state, Some(EditVerificationState::Interrupted));
+            assert!(receipt.verification_execution.is_none());
+            assert!(receipt.verification_pending);
+        }
     }
 }
