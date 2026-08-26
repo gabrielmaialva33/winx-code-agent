@@ -985,34 +985,39 @@ mod schema_tests {
     }
 
     #[test]
-    fn edit_schemas_advertise_bounded_inline_verification() {
-        for name in ["FileWriteOrEdit", "MultiFileEdit"] {
-            let tool = winx_tools()
-                .into_iter()
-                .find(|tool| tool.name == name)
-                .expect("edit catalog entry");
-            let properties = tool
-                .input_schema
-                .get("properties")
-                .and_then(serde_json::Value::as_object)
-                .expect("edit input properties");
-            assert_eq!(properties["verify_command"]["minLength"], 1, "{name}");
-            assert_eq!(properties["verify_wait_for_seconds"]["minimum"], 0, "{name}");
-            assert_eq!(properties["verify_wait_for_seconds"]["maximum"], 60, "{name}");
-        }
-        let verify = winx_tools()
+    fn edit_files_schema_is_bounded_and_explains_each_mode() {
+        let edit = winx_tools()
             .into_iter()
-            .find(|tool| tool.name == "VerifyEdit")
-            .expect("VerifyEdit catalog entry");
-        let properties = verify
+            .find(|tool| tool.name == "EditFiles")
+            .expect("EditFiles catalog entry");
+        let description = edit.description.as_deref().expect("EditFiles description");
+        for mode in ["search_replace", "line_patch", "replace", "undo"] {
+            assert!(description.contains(mode), "missing {mode}: {description}");
+        }
+        let properties = edit
             .input_schema
             .get("properties")
             .and_then(serde_json::Value::as_object)
-            .expect("VerifyEdit input properties");
-        assert_eq!(properties["command"]["minLength"], 1);
-        assert_eq!(properties["wait_for_seconds"]["minimum"], 0);
-        assert_eq!(properties["wait_for_seconds"]["maximum"], 60);
-        assert_eq!(properties["verification_id"]["pattern"], "^verify_[0-9a-f]{24}$");
+            .expect("EditFiles input properties");
+        assert_eq!(properties["files"]["minItems"], 1);
+        assert_eq!(properties["files"]["maxItems"], 100);
+        assert_eq!(properties["verify_command"]["minLength"], 1);
+        assert_eq!(properties["verify_wait_for_seconds"]["minimum"], 0);
+        assert_eq!(properties["verify_wait_for_seconds"]["maximum"], 60);
+        assert_eq!(properties["verify_wait_for_seconds"]["default"], 15);
+        let required = edit
+            .input_schema
+            .get("required")
+            .and_then(serde_json::Value::as_array)
+            .expect("EditFiles required fields");
+        assert!(!required.iter().any(|field| field == "operation"));
+        let serialized = serde_json::to_string(&*edit.input_schema).expect("serialize schema");
+        assert!(serialized.contains("small exact edits"), "{serialized}");
+        assert!(serialized.contains("<<<<<<< SEARCH"), "{serialized}");
+        assert!(serialized.contains("ReadFiles.files[].revision"), "{serialized}");
+        assert!(serialized.contains("returned by the edit being undone"), "{serialized}");
+        assert!(serialized.contains("^sha256:[0-9a-f]{64}$"), "{serialized}");
+        assert!(serialized.contains("\"maxItems\":256"), "{serialized}");
     }
 
     #[test]
@@ -1029,7 +1034,25 @@ mod schema_tests {
     #[test]
     fn every_tool_advertises_orchestration_output_schema() {
         let tools = winx_tools();
-        assert_eq!(tools.len(), crate::tool_registry::ToolKind::ALL.len());
+        let names = tools.iter().map(|tool| tool.name.as_ref()).collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "Initialize",
+                "BashCommand",
+                "ReadFiles",
+                "ContextSave",
+                "ReadImage",
+                "CodeMap",
+                "EditFiles",
+            ]
+        );
+        assert_eq!(tools.len(), crate::tool_policy::ToolPolicy::default().len());
+        for hidden_alias in
+            ["FileWriteOrEdit", "MultiFileEdit", "VerifyEdit", "UndoEdit", "ApplyPatch"]
+        {
+            assert!(!names.contains(&hidden_alias), "legacy alias leaked: {hidden_alias}");
+        }
         for tool in &tools {
             let output = tool.output_schema.as_ref().expect("tool outputSchema");
             let properties = output

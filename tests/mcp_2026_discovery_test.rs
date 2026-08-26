@@ -367,8 +367,16 @@ async fn assert_principal_tool_policies(address: std::net::SocketAddr) -> anyhow
     assert_eq!(tool_names(&left_tools), vec!["Initialize", "BashCommand"]);
     assert_eq!(left_tools["result"]["cacheScope"], "private", "{left_tools}");
     assert_eq!(
-        tool_names(&right_tools).len(),
-        winx_code_agent::tool_registry::ToolKind::ALL.len(),
+        tool_names(&right_tools),
+        vec![
+            "Initialize",
+            "BashCommand",
+            "ReadFiles",
+            "ContextSave",
+            "ReadImage",
+            "CodeMap",
+            "EditFiles",
+        ],
         "{right_tools}"
     );
     assert_eq!(right_tools["result"]["cacheScope"], "public", "{right_tools}");
@@ -1262,7 +1270,7 @@ async fn modern_client_can_discover_server_before_initialization() -> anyhow::Re
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn modern_stateless_tools_list_exposes_bash_command() -> anyhow::Result<()> {
+async fn modern_stateless_tools_list_exposes_compact_unified_catalog() -> anyhow::Result<()> {
     let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
 
     let response = post_json(
@@ -1281,7 +1289,23 @@ async fn modern_stateless_tools_list_exposes_bash_command() -> anyhow::Result<()
     let tools = response_json["result"]["tools"]
         .as_array()
         .ok_or_else(|| anyhow::anyhow!("tools/list response has no tools array: {response}"))?;
-    assert_eq!(tools.iter().filter(|tool| tool["name"] == "BashCommand").count(), 1, "{response}");
+    let names = tools.iter().filter_map(|tool| tool["name"].as_str()).collect::<Vec<_>>();
+    assert_eq!(
+        names,
+        vec![
+            "Initialize",
+            "BashCommand",
+            "ReadFiles",
+            "ContextSave",
+            "ReadImage",
+            "CodeMap",
+            "EditFiles",
+        ],
+        "{response}"
+    );
+    for legacy in ["FileWriteOrEdit", "MultiFileEdit", "VerifyEdit", "UndoEdit", "ApplyPatch"] {
+        assert!(!names.contains(&legacy), "legacy alias {legacy} leaked: {response}");
+    }
     for tool in tools {
         assert_eq!(
             tool.pointer("/outputSchema/properties/data/type").and_then(serde_json::Value::as_str),
@@ -1810,8 +1834,7 @@ async fn edit_can_run_a_bounded_verification_in_the_same_tool_call() -> anyhow::
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn dark_edit_files_uses_receipt_bound_bash_verification_without_rewriting(
-) -> anyhow::Result<()> {
+async fn edit_files_uses_receipt_bound_bash_verification_without_rewriting() -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
     let target = workspace.path().join("dark-edit.txt");
     let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
@@ -1832,7 +1855,6 @@ async fn dark_edit_files_uses_receipt_bound_bash_verification_without_rewriting(
             "_meta": modern_request_meta("dark-edit-files-client", false),
             "name": "EditFiles",
             "arguments": {
-                "operation": "apply",
                 "files": [{
                     "file_path": target,
                     "mode": "replace",
@@ -2014,7 +2036,7 @@ async fn custom_policy_never_emits_hidden_read_or_verification_actions() -> anyh
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn legacy_shadow_dark_replay_and_legacy_verify_share_one_canonical_receipt(
+async fn legacy_shadow_unified_replay_and_legacy_verify_share_one_canonical_receipt(
 ) -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
     let target = workspace.path().join("legacy-shadow.txt");
@@ -2102,7 +2124,7 @@ async fn legacy_shadow_dark_replay_and_legacy_verify_share_one_canonical_receipt
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn dark_receipt_synthesizes_a_resolvable_legacy_shadow() -> anyhow::Result<()> {
+async fn unified_receipt_synthesizes_a_resolvable_legacy_shadow() -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
     let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
     let initialize = initialize_modern_as(
@@ -2388,7 +2410,7 @@ async fn receipt_bound_verification_is_single_flight_through_running_and_complet
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn dark_undo_replay_pops_once_and_advances_exactly_one_checkpoint() -> anyhow::Result<()> {
+async fn unified_undo_replay_pops_once_and_advances_exactly_one_checkpoint() -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
     let target = workspace.path().join("undo-lifo.txt");
     std::fs::write(&target, "original\n")?;
