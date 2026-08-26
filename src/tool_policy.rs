@@ -11,7 +11,7 @@ pub use crate::tool_registry::ALL_TOOL_NAMES;
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, clap::ValueEnum)]
 #[serde(rename_all = "kebab-case")]
 pub enum ToolProfile {
-    /// Advertise and permit every Winx tool.
+    /// Complete unified catalog; legacy edit aliases remain callable but hidden.
     #[default]
     Full,
     /// Core repository exploration and editing without image or handoff helpers.
@@ -22,8 +22,8 @@ pub enum ToolProfile {
     Terminal,
 }
 
-/// Exact authority for normalized file mutations. Public tool names and edit
-/// authority are deliberately separate during the hidden-alias migration.
+/// Exact authority for normalized file mutations. Advertised tool names and
+/// compatibility-alias authority remain deliberately separate.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EditPermissionSet {
     bits: u16,
@@ -105,25 +105,17 @@ impl ToolProfile {
                 ToolKind::Initialize.bit()
                     | ToolKind::BashCommand.bit()
                     | ToolKind::ReadFiles.bit()
-                    | ToolKind::FileWriteOrEdit.bit()
-                    | ToolKind::MultiFileEdit.bit()
-                    | ToolKind::VerifyEdit.bit()
-                    | ToolKind::UndoEdit.bit()
                     | ToolKind::ContextSave.bit()
                     | ToolKind::ReadImage.bit()
                     | ToolKind::CodeMap.bit()
-                    | ToolKind::ApplyPatch.bit()
+                    | ToolKind::EditFiles.bit()
             }
             Self::Coding => {
                 ToolKind::Initialize.bit()
                     | ToolKind::BashCommand.bit()
                     | ToolKind::ReadFiles.bit()
-                    | ToolKind::FileWriteOrEdit.bit()
-                    | ToolKind::MultiFileEdit.bit()
-                    | ToolKind::VerifyEdit.bit()
-                    | ToolKind::UndoEdit.bit()
                     | ToolKind::CodeMap.bit()
-                    | ToolKind::ApplyPatch.bit()
+                    | ToolKind::EditFiles.bit()
             }
             Self::ReadOnly => {
                 ToolKind::Initialize.bit()
@@ -140,9 +132,6 @@ impl ToolProfile {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ToolPolicy {
     mask: u16,
-    /// Phase-1 capability flag. It is deliberately separate from the stable
-    /// public `ToolKind` enum and never contributes to `tools/list`.
-    dark_edit_files: bool,
 }
 
 impl Default for ToolPolicy {
@@ -154,10 +143,7 @@ impl Default for ToolPolicy {
 impl ToolPolicy {
     /// Build a policy from one curated profile.
     pub const fn from_profile(profile: ToolProfile) -> Self {
-        Self {
-            mask: profile.mask(),
-            dark_edit_files: matches!(profile, ToolProfile::Full | ToolProfile::Coding),
-        }
+        Self { mask: profile.mask() }
     }
 
     /// Build an exact allowlist. Names are case-sensitive and duplicates are harmless.
@@ -167,18 +153,13 @@ impl ToolPolicy {
         S: AsRef<str>,
     {
         let mut mask = 0_u16;
-        let mut dark_edit_files = false;
         let mut saw_name = false;
         for name in names {
             saw_name = true;
             let name = name.as_ref();
-            if name == "EditFiles" {
-                dark_edit_files = true;
-                continue;
-            }
             let kind = ToolKind::parse(name).ok_or_else(|| {
                 WinxError::ConfigurationError(format!(
-                    "unknown MCP tool {name:?}; expected one of {}, EditFiles",
+                    "unknown MCP tool {name:?}; expected one of {}",
                     ALL_TOOL_NAMES.join(", ")
                 ))
             })?;
@@ -194,7 +175,7 @@ impl ToolPolicy {
                 "VerifyEdit requires BashCommand in the same MCP tool allowlist".to_string(),
             ));
         }
-        Ok(Self { mask, dark_edit_files })
+        Ok(Self { mask })
     }
 
     /// Use an explicit allowlist when present, otherwise use the selected profile.
@@ -205,13 +186,9 @@ impl ToolPolicy {
         )
     }
 
-    /// Whether a tool may be advertised and called.
+    /// Whether a tool is advertised in `tools/list`.
     pub fn allows(self, name: &str) -> bool {
-        if name == "EditFiles" {
-            self.allows_dark_edit_files()
-        } else {
-            ToolKind::parse(name).is_some_and(|kind| self.allows_kind(kind))
-        }
+        ToolKind::parse(name).is_some_and(|kind| self.allows_kind(kind))
     }
 
     /// Typed policy check used after the wire name has been parsed once.
@@ -219,15 +196,42 @@ impl ToolPolicy {
         self.mask & kind.bit() != 0
     }
 
-    /// Whether the hidden unified edit alias may execute. Existing legacy edit
-    /// grants dark access only to the exact modes/cardinality they already own.
-    pub const fn allows_dark_edit_files(self) -> bool {
-        self.dark_edit_files || self.edit_permissions().has_mutation_authority()
+    /// Whether a registered name may execute. Unified profiles keep the five
+    /// former edit tools as hidden aliases so cached clients continue safely;
+    /// exact legacy allowlists conversely retain scoped access to `EditFiles`.
+    pub fn allows_call(self, name: &str) -> bool {
+        ToolKind::parse(name).is_some_and(|kind| self.allows_call_kind(kind))
+    }
+
+    pub const fn allows_call_kind(self, kind: ToolKind) -> bool {
+        if self.allows_kind(kind) {
+            return true;
+        }
+        let permissions = self.edit_permissions();
+        match kind {
+            ToolKind::EditFiles => permissions.has_mutation_authority(),
+            ToolKind::FileWriteOrEdit => {
+                permissions.allows(crate::tools::edit_files::EditMode::Replace, 1)
+                    && permissions.allows(crate::tools::edit_files::EditMode::SearchReplace, 1)
+            }
+            ToolKind::MultiFileEdit => {
+                permissions.allows(crate::tools::edit_files::EditMode::Replace, 2)
+                    && permissions.allows(crate::tools::edit_files::EditMode::SearchReplace, 2)
+            }
+            ToolKind::ApplyPatch => {
+                permissions.allows(crate::tools::edit_files::EditMode::LinePatch, 1)
+            }
+            ToolKind::UndoEdit => permissions.allows(crate::tools::edit_files::EditMode::Undo, 1),
+            ToolKind::VerifyEdit => {
+                self.allows_kind(ToolKind::EditFiles) && self.allows_kind(ToolKind::BashCommand)
+            }
+            _ => false,
+        }
     }
 
     pub const fn edit_permissions(self) -> EditPermissionSet {
         let mut permissions = EditPermissionSet { bits: 0 };
-        if self.dark_edit_files {
+        if self.allows_kind(ToolKind::EditFiles) {
             permissions = permissions.union(EditPermissionSet::ALL);
         }
         if self.allows_kind(ToolKind::FileWriteOrEdit) {
@@ -271,25 +275,27 @@ impl ToolPolicy {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use super::{ToolPolicy, ToolProfile, ALL_TOOL_NAMES};
+    use super::{ToolPolicy, ToolProfile};
+    use crate::tool_registry::ToolKind;
     use crate::tools::edit_files::EditMode;
 
     #[test]
     fn profiles_have_stable_expected_catalogs() {
-        assert_eq!(ToolPolicy::default().names().collect::<Vec<_>>(), ALL_TOOL_NAMES);
         assert_eq!(
-            ToolPolicy::from_profile(ToolProfile::Coding).names().collect::<Vec<_>>(),
+            ToolPolicy::default().names().collect::<Vec<_>>(),
             vec![
                 "Initialize",
                 "BashCommand",
                 "ReadFiles",
-                "FileWriteOrEdit",
-                "MultiFileEdit",
-                "VerifyEdit",
-                "UndoEdit",
+                "ContextSave",
+                "ReadImage",
                 "CodeMap",
-                "ApplyPatch",
+                "EditFiles",
             ]
+        );
+        assert_eq!(
+            ToolPolicy::from_profile(ToolProfile::Coding).names().collect::<Vec<_>>(),
+            vec!["Initialize", "BashCommand", "ReadFiles", "CodeMap", "EditFiles"]
         );
         assert_eq!(
             ToolPolicy::from_profile(ToolProfile::ReadOnly).names().collect::<Vec<_>>(),
@@ -327,11 +333,21 @@ mod tests {
             .edit_permissions();
         assert!(verified.allows_verification());
 
-        let dark = ToolPolicy::from_allowed_tools(["EditFiles"]).expect("valid dark policy");
-        assert!(dark.names().next().is_none());
-        assert!(dark.is_empty());
-        assert!(dark.edit_permissions().allows(EditMode::LinePatch, 2));
-        assert!(!dark.edit_permissions().allows_verification());
+        let unified =
+            ToolPolicy::from_allowed_tools(["EditFiles"]).expect("valid unified edit policy");
+        assert_eq!(unified.names().collect::<Vec<_>>(), vec!["EditFiles"]);
+        assert!(!unified.is_empty());
+        assert!(unified.edit_permissions().allows(EditMode::LinePatch, 2));
+        assert!(!unified.edit_permissions().allows_verification());
+        assert!(unified.allows_call_kind(ToolKind::FileWriteOrEdit));
+        assert!(unified.allows_call_kind(ToolKind::MultiFileEdit));
+        assert!(unified.allows_call_kind(ToolKind::ApplyPatch));
+        assert!(unified.allows_call_kind(ToolKind::UndoEdit));
+        assert!(!unified.allows_call_kind(ToolKind::VerifyEdit));
+
+        let unified_with_bash =
+            ToolPolicy::from_allowed_tools(["EditFiles", "BashCommand"]).expect("valid policy");
+        assert!(unified_with_bash.allows_call_kind(ToolKind::VerifyEdit));
 
         for (name, allowed_mode, count) in [
             ("FileWriteOrEdit", EditMode::Replace, 1),
@@ -339,12 +355,12 @@ mod tests {
             ("MultiFileEdit", EditMode::SearchReplace, 2),
         ] {
             let policy = ToolPolicy::from_allowed_tools([name]).expect("valid legacy policy");
-            assert!(policy.allows_dark_edit_files());
+            assert!(policy.allows_call_kind(ToolKind::EditFiles));
             assert!(policy.edit_permissions().allows(allowed_mode, count));
             assert!(!policy.edit_permissions().allows_verification());
         }
 
         let bash_only = ToolPolicy::from_allowed_tools(["BashCommand"]).expect("valid policy");
-        assert!(!bash_only.allows_dark_edit_files());
+        assert!(!bash_only.allows_call_kind(ToolKind::EditFiles));
     }
 }
