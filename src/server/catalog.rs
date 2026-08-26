@@ -7,6 +7,7 @@ use serde_json::Value;
 use super::outcomes::{CodeMapToolResultEnvelope, ToolResultEnvelope};
 use crate::tool_policy::ToolPolicy;
 use crate::tool_registry::{ToolAccess, ToolKind, ToolOutputContract, ToolWorld};
+use crate::tools::edit_files::EditFilesWire;
 use crate::types::{
     ApplyPatch, BashCommand, CodeMap, ContextSave, FileWriteOrEdit, Initialize, MultiFileEdit,
     ReadFiles, ReadImage, UndoEdit, VerifyEdit,
@@ -213,6 +214,46 @@ fn edit_input_schema<T: schemars::JsonSchema>() -> Arc<serde_json::Map<String, V
     with_workspace_binding(Arc::new(schema))
 }
 
+fn edit_files_input_schema() -> Arc<serde_json::Map<String, Value>> {
+    let mut schema = Arc::unwrap_or_clone(schema_to_input_schema::<EditFilesWire>());
+    if let Some(Value::Object(properties)) = schema.get_mut("properties") {
+        if let Some(Value::Object(files)) = properties.get_mut("files") {
+            files.insert("minItems".to_string(), Value::from(1));
+            files.insert("maxItems".to_string(), Value::from(100));
+        }
+        if let Some(Value::Object(command)) = properties.get_mut("verify_command") {
+            command.insert("minLength".to_string(), Value::from(1));
+        }
+        if let Some(Value::Object(wait)) = properties.get_mut("verify_wait_for_seconds") {
+            wait.insert("minimum".to_string(), Value::from(0));
+            wait.insert("maximum".to_string(), Value::from(60));
+            wait.insert("default".to_string(), Value::from(15));
+        }
+    }
+    if let Some(properties) = schema
+        .get_mut("$defs")
+        .and_then(Value::as_object_mut)
+        .and_then(|definitions| definitions.get_mut("EditFileWire"))
+        .and_then(|entry| entry.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+    {
+        if let Some(Value::Object(path)) = properties.get_mut("file_path") {
+            path.insert("minLength".to_string(), Value::from(1));
+        }
+        if let Some(Value::Object(revision)) = properties.get_mut("expected_revision") {
+            revision.insert("pattern".to_string(), Value::String("^sha256:[0-9a-f]{64}$".into()));
+        }
+        if let Some(Value::Object(patches)) = properties.get_mut("patches") {
+            patches.insert("minItems".to_string(), Value::from(1));
+            patches.insert("maxItems".to_string(), Value::from(256));
+        }
+        if let Some(Value::Object(undo_id)) = properties.get_mut("undo_id") {
+            undo_id.insert("minLength".to_string(), Value::from(1));
+        }
+    }
+    with_workspace_binding(Arc::new(schema))
+}
+
 fn apply_patch_input_schema() -> Arc<serde_json::Map<String, Value>> {
     let mut schema = Arc::unwrap_or_clone(edit_input_schema::<ApplyPatch>());
     if let Some(Value::Object(properties)) = schema.get_mut("properties") {
@@ -260,7 +301,10 @@ const BASH_COMMAND_DESCRIPTION: &str =
     "Run commands, tests, builds, servers, and TUIs after Initialize. Combine finite checks with &&. adaptive is default; until_complete is for finite foreground commands, return_early gives prompt control. For running results, wait retry_after_ms and execute next_action/status_check; never resubmit the command. Use background/interactive actions for long-lived work and file tools for canonical reads/edits. Keep helpers under $WINX_TEMP_DIR, reuse names, never create CodeMap-only carriers, and clean obsolete helpers when directed.";
 
 const READ_FILES_DESCRIPTION: &str =
-    "Read exact canonical text and record visible edit coverage. Prefer this over cat/head/tail. Use :start-end targeted ranges; bounds may be omitted. Each file returns a path/revision/visibleRanges receipt for ApplyPatch. Truncation never records unseen lines. Use ReadImage for images.";
+    "Read exact canonical text and record visible edit coverage. Prefer this over cat/head/tail. Use :start-end targeted ranges; bounds may be omitted. Each file returns path, revision, and visibleRanges for EditFiles line_patch. Truncation never records unseen lines. Use ReadImage for images.";
+
+const EDIT_FILES_DESCRIPTION: &str =
+    "Create, change, or undo one or many files. Provide one unique files entry per target: search_replace for small exact edits after ReadFiles; line_patch when using its revision and visible line coordinates; replace for new files or intentional whole-file rewrites. Omit operation for normal edits; exactly one mode=undo entry with its exact undo_id infers undo. Every existing target must be freshly read and every apply entry validates before writing. verify_command runs once after commit; if it fails, keep the edit and follow nextAction instead of repeating it.";
 
 const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
     "Edit one read file; use MultiFileEdit for batches. For <=50%, use exact SEARCH/REPLACE blocks (optional @line); otherwise read and send the complete file. A SEARCH conflict revokes the read permit: execute its ReadFiles next_action (shell reads do not count), rebuild SEARCH, and retry once. Put helpers in temporary_artifact_dir. verify_command is post-commit; completed_with_issues means the edit remains applied - diagnose it, never repeat it.";
@@ -287,7 +331,7 @@ static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
 static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();
 
 pub(super) fn winx_tools() -> Vec<Tool> {
-    WINX_TOOLS.get_or_init(build_winx_tools).clone()
+    winx_tools_for_policy(ToolPolicy::default())
 }
 
 pub(super) fn winx_tools_for_policy(policy: ToolPolicy) -> Vec<Tool> {
@@ -371,6 +415,12 @@ fn build_winx_tool(kind: ToolKind) -> Tool {
             kind.as_str(),
             APPLY_PATCH_DESCRIPTION,
             apply_patch_input_schema(),
+        )
+        .with_annotations(annotations(kind)),
+        ToolKind::EditFiles => Tool::new(
+            kind.as_str(),
+            EDIT_FILES_DESCRIPTION,
+            edit_files_input_schema(),
         )
         .with_annotations(annotations(kind)),
     };
