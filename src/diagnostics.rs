@@ -51,8 +51,15 @@ pub async fn doctor_report() -> Value {
 }
 
 #[cfg(unix)]
+#[allow(clippy::too_many_lines)] // one bounded pass builds the complete per-socket doctor report
 async fn add_unix_runtime_report(report: &mut Value) {
+    use std::time::Duration;
+
     use crate::daemon::{socket_candidates, DaemonClient};
+
+    // `doctor` is observational and must never wait indefinitely on a stale
+    // socket that accepts a connection but no longer serves frames.
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
     let expected = crate::build_info::BuildIdentity::current();
     let candidates = socket_candidates();
@@ -67,26 +74,39 @@ async fn add_unix_runtime_report(report: &mut Value) {
 
     for candidate in candidates {
         let client = DaemonClient::new(&candidate.path);
-        let entry = match client.hello().await {
-            Ok(hello) => {
+        let entry = match tokio::time::timeout(PROBE_TIMEOUT, client.hello()).await {
+            Ok(Ok(hello)) => {
                 reachable += 1;
                 let build_compatible = hello.build_matches(&expected);
                 compatible += u64::from(build_compatible);
-                let sessions = match client.list_sessions().await {
-                    Ok(sessions) => sessions,
-                    Err(error) => {
-                        entries.push(json!({
-                            "path": candidate.path.display().to_string(),
-                            "sources": candidate.sources,
-                            "selected": candidate.selected,
-                            "reachable": true,
-                            "build_compatible": build_compatible,
-                            "hello": hello,
-                            "sessions_error": error.to_string()
-                        }));
-                        continue;
-                    }
-                };
+                let sessions =
+                    match tokio::time::timeout(PROBE_TIMEOUT, client.list_sessions()).await {
+                        Ok(Ok(sessions)) => sessions,
+                        Ok(Err(error)) => {
+                            entries.push(json!({
+                                "path": candidate.path.display().to_string(),
+                                "sources": candidate.sources,
+                                "selected": candidate.selected,
+                                "reachable": true,
+                                "build_compatible": build_compatible,
+                                "hello": hello,
+                                "sessions_error": error.to_string()
+                            }));
+                            continue;
+                        }
+                        Err(_) => {
+                            entries.push(json!({
+                                "path": candidate.path.display().to_string(),
+                                "sources": candidate.sources,
+                                "selected": candidate.selected,
+                                "reachable": true,
+                                "build_compatible": build_compatible,
+                                "hello": hello,
+                                "sessions_error": "timed out waiting for winxd"
+                            }));
+                            continue;
+                        }
+                    };
                 let session_entries = sessions
                     .into_iter()
                     .map(|session| {
@@ -117,12 +137,19 @@ async fn add_unix_runtime_report(report: &mut Value) {
                     "sessions": session_entries
                 })
             }
-            Err(error) => json!({
+            Ok(Err(error)) => json!({
                 "path": candidate.path.display().to_string(),
                 "sources": candidate.sources,
                 "selected": candidate.selected,
                 "reachable": false,
                 "error": error.to_string()
+            }),
+            Err(_) => json!({
+                "path": candidate.path.display().to_string(),
+                "sources": candidate.sources,
+                "selected": candidate.selected,
+                "reachable": false,
+                "error": "timed out waiting for winxd"
             }),
         };
         entries.push(entry);
