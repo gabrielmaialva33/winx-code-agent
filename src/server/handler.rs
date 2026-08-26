@@ -5,7 +5,7 @@ use rmcp::{
         Icon, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
         PaginatedRequestParams, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
         ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role,
-        ServerCapabilities, ServerInfo, TaskStatus, Tool, UpdateTaskParams,
+        ServerCapabilities, ServerInfo, Tool, UpdateTaskParams,
     },
     service::{NotificationContext, RequestContext, RoleServer},
     ErrorData as McpError, ServerHandler,
@@ -215,48 +215,7 @@ impl ServerHandler for WinxService {
                 None,
             ));
         }
-        let (abort_handle, thread_id, mut execution_token, execution_control) = {
-            let mut tasks = self.tasks.lock().await;
-            let entry = tasks.get_mut(&request.task_id).ok_or_else(|| {
-                McpError::invalid_request(
-                    format!("Unknown or expired task: {}", request.task_id),
-                    None,
-                )
-            })?;
-            if entry.task.status != TaskStatus::Working
-                && entry.task.status != TaskStatus::InputRequired
-            {
-                return Err(McpError::invalid_request(
-                    format!("Task {} is already terminal", request.task_id),
-                    None,
-                ));
-            }
-            entry.request_cancel();
-            let thread_id = entry.thread_id.clone();
-            let execution_token = entry.execution_token();
-            let execution_control = entry.execution_control();
-            // Before a generation exists the worker must stay alive long
-            // enough to publish it and interrupt that exact process. Once it
-            // exists, aborting the polling worker is safe.
-            let abort_handle = execution_token.as_ref().and(entry.abort_handle.take());
-            entry.finish(TaskStatus::Cancelled, Some("Cancelled by client".to_string()), None);
-            (abort_handle, thread_id, execution_token, execution_control)
-        };
-        if let Some(abort_handle) = abort_handle {
-            abort_handle.abort();
-        }
-        if execution_token.is_none() {
-            self.cancel_pending_task_action(&thread_id, &request.task_id).await;
-            execution_token = tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                execution_control.wait_for_execution(),
-            )
-            .await
-            .ok()
-            .flatten();
-        }
-        self.interrupt_task_execution(&thread_id, execution_token).await;
-        Ok(())
+        self.cancel_bash_task(&request.task_id).await
     }
 
     async fn list_tools(

@@ -21,6 +21,7 @@ use crate::types::{normalize_thread_id, BashCommand, BashCommandAction, BashWait
 const MAX_TASK_RUNTIME: Duration = Duration::from_secs(60 * 60);
 const MAX_TASK_OUTPUT_BYTES: usize = 1_000_000;
 const TASK_GENERATION_CAPTURE_SECONDS: f32 = 0.0;
+const TASK_CANCEL_SETTLE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) struct BashTaskReservation {
     pub(super) task_id: String,
@@ -29,6 +30,73 @@ pub(super) struct BashTaskReservation {
 }
 
 impl WinxService {
+    /// Mark a Task cancelled, then wait until its launch either publishes an
+    /// exact execution identity or proves that no command was launched. A
+    /// successful response must never leave an unbound process able to start
+    /// after the client submits its next command.
+    pub(super) async fn cancel_bash_task(&self, task_id: &str) -> Result<(), McpError> {
+        let (abort_handle, thread_id, mut execution_token, execution_control) = {
+            let mut tasks = self.tasks.lock().await;
+            let entry = tasks.get_mut(task_id).ok_or_else(|| {
+                McpError::invalid_request(format!("Unknown or expired task: {task_id}"), None)
+            })?;
+            if entry.task.status != TaskStatus::Working
+                && entry.task.status != TaskStatus::InputRequired
+            {
+                return Err(McpError::invalid_request(
+                    format!("Task {task_id} is already terminal"),
+                    None,
+                ));
+            }
+            entry.request_cancel();
+            let thread_id = entry.thread_id.clone();
+            let execution_token = entry.execution_token();
+            let execution_control = entry.execution_control();
+            let abort_handle = entry.abort_handle.take();
+            entry.finish(TaskStatus::Cancelled, Some("Cancelled by client".to_string()), None);
+            (abort_handle, thread_id, execution_token, execution_control)
+        };
+
+        if execution_token.is_none() {
+            let deadline = tokio::time::Instant::now() + TASK_CANCEL_SETTLE_TIMEOUT;
+            let _ = tokio::time::timeout_at(
+                deadline,
+                self.cancel_pending_task_action(&thread_id, task_id),
+            )
+            .await;
+            execution_token = if let Ok(execution) =
+                tokio::time::timeout_at(deadline, execution_control.wait_for_execution()).await
+            {
+                execution
+            } else {
+                self.shell_runtime.terminate_session(&thread_id).await.map_err(|error| {
+                    McpError::internal_error(
+                        format!(
+                            "Task {task_id} cancellation could not settle its launch or terminate the shell: {error}"
+                        ),
+                        None,
+                    )
+                })?;
+                if let Some(abort_handle) = abort_handle {
+                    abort_handle.abort();
+                }
+                execution_control.finish_launch();
+                warn!(
+                    task_id,
+                    thread_id,
+                    "terminated shell after an unbound Task launch failed to settle during cancellation"
+                );
+                return Ok(());
+            };
+        }
+
+        if let Some(abort_handle) = abort_handle {
+            abort_handle.abort();
+        }
+        self.interrupt_task_execution(&thread_id, execution_token).await;
+        Ok(())
+    }
+
     /// Poll one foreground command through to completion. Every status check is
     /// bound to the exact generation returned by the initial execution.
     #[allow(clippy::too_many_lines)]
@@ -507,10 +575,13 @@ impl WinxService {
         let _ = abort_cell.set(abort_handle.clone());
         drop(handle);
 
-        // Promoted tasks already know their generation and can be aborted now.
+        // Store the worker immediately, but cancellation only aborts it after
+        // the launch has published an exact generation or finished without
+        // launching. Retaining the handle also lets the fail-closed timeout
+        // terminate the shell before releasing a stuck worker.
         let mut tasks = self.tasks.lock().await;
         if let Some(entry) = tasks.get_mut(&reservation.task_id) {
-            if entry.task.status == TaskStatus::Working && entry.command_generation().is_some() {
+            if entry.task.status == TaskStatus::Working {
                 entry.abort_handle = Some(abort_handle);
             }
         }
