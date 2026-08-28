@@ -553,21 +553,69 @@ async fn repeated_first_call_attaches_without_resetting_the_guardian_pty() -> an
     .await?;
     let before = client.session_info(thread_id).await?;
 
-    let second = Arc::new(Mutex::new(None::<BashState>));
-    let response = tools::initialize::handle_tool_call_with_runtime(
-        &runtime,
-        &second,
-        Initialize {
-            init_type: InitializeType::FirstCall,
-            mode_name: ModeName::Wcgw,
-            any_workspace_path: workspace.path().to_string_lossy().into_owned(),
-            thread_id: thread_id.to_string(),
-            code_writer_config: None,
-            initial_files_to_read: vec![],
-            task_id_to_resume: String::new(),
-        },
+    // Keep one action RPC and the guardian operation barrier occupied. A
+    // reconnecting adapter must still attach immediately on an independent
+    // channel instead of waiting for the foreground command to finish.
+    let marker = workspace.path().join("active-command.marker");
+    let active_runtime = runtime.clone();
+    let active_state = Arc::clone(&first);
+    let active = tokio::spawn(async move {
+        tools::bash_command::handle_tool_call_with_runtime(
+            &active_runtime,
+            &active_state,
+            command(thread_id, format!("touch {}; sleep 2", marker.display()), 3.0),
+        )
+        .await
+    });
+    let marker = workspace.path().join("active-command.marker");
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !marker.exists() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("foreground command did not reach the PTY"))?;
+
+    let local_response = tokio::time::timeout(
+        Duration::from_secs(1),
+        tools::initialize::handle_tool_call_with_runtime(
+            &runtime,
+            &first,
+            Initialize {
+                init_type: InitializeType::FirstCall,
+                mode_name: ModeName::Wcgw,
+                any_workspace_path: workspace.path().to_string_lossy().into_owned(),
+                thread_id: thread_id.to_string(),
+                code_writer_config: None,
+                initial_files_to_read: vec![],
+                task_id_to_resume: String::new(),
+            },
+        ),
     )
-    .await?;
+    .await
+    .map_err(|_| anyhow::anyhow!("local reattach waited for the foreground command"))??;
+    assert!(local_response.contains("Attached to the existing durable Winx session"));
+
+    let second = Arc::new(Mutex::new(None::<BashState>));
+    let response = tokio::time::timeout(
+        Duration::from_secs(1),
+        tools::initialize::handle_tool_call_with_runtime(
+            &runtime,
+            &second,
+            Initialize {
+                init_type: InitializeType::FirstCall,
+                mode_name: ModeName::Wcgw,
+                any_workspace_path: workspace.path().to_string_lossy().into_owned(),
+                thread_id: thread_id.to_string(),
+                code_writer_config: None,
+                initial_files_to_read: vec![],
+                task_id_to_resume: String::new(),
+            },
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("fresh reattach waited for the foreground command"))??;
+    active.await??;
     let after = client.session_info(thread_id).await?;
     assert!(response.contains("Attached to the existing durable Winx session"), "{response}");
     assert!(response.contains("Context and instructions are unchanged"), "{response}");
@@ -581,6 +629,227 @@ async fn repeated_first_call_attaches_without_resetting_the_guardian_pty() -> an
     let attached_cwd =
         second.lock().await.as_ref().map(|state| state.cwd.canonicalize()).transpose()?;
     assert_eq!(attached_cwd, Some(nested.canonicalize()?));
+
+    assert!(client.kill_session(thread_id).await?);
+    daemon.kill()?;
+    let _ = daemon.wait()?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[allow(clippy::too_many_lines)] // One complete four-chat concurrency schedule is intentional.
+async fn four_parallel_chats_remain_fast_and_project_coherent() -> anyhow::Result<()> {
+    let workspaces = TempDir::new()?;
+    let project_a = workspaces.path().join("project-a");
+    let project_b = workspaces.path().join("project-b");
+    let project_c = workspaces.path().join("project-c");
+    let project_d = workspaces.path().join("project-d");
+    for workspace in [&project_a, &project_b, &project_c, &project_d] {
+        std::fs::create_dir_all(workspace)?;
+    }
+
+    let runtime_dir = TempDir::new()?;
+    let socket = runtime_dir.path().join("winxd.sock");
+    let mut daemon = spawn_daemon(&socket)?;
+    let client = DaemonClient::new(&socket);
+    wait_for_daemon(&client).await?;
+
+    // Model four ChatGPT conversations arriving together, each bound to a
+    // different canonical project. They share one control daemon but must get
+    // independent guardians and PTYs.
+    let (chat_a, chat_b, chat_c, chat_d) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::try_join!(
+            initialize_daemon_session(&socket, &project_a, "parallel_chat_a"),
+            initialize_daemon_session(&socket, &project_b, "parallel_chat_b"),
+            initialize_daemon_session(&socket, &project_c, "parallel_chat_c"),
+            initialize_daemon_session(&socket, &project_d, "parallel_chat_d"),
+        )
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("four concurrent chats did not initialize promptly"))??;
+
+    let initial = tokio::try_join!(
+        client.session_info("parallel_chat_a"),
+        client.session_info("parallel_chat_b"),
+        client.session_info("parallel_chat_c"),
+        client.session_info("parallel_chat_d"),
+    )?;
+    let mut shell_pids =
+        vec![initial.0.shell_pid, initial.1.shell_pid, initial.2.shell_pid, initial.3.shell_pid];
+    shell_pids.sort_unstable();
+    shell_pids.dedup();
+    assert_eq!(shell_pids.len(), 4, "parallel projects shared a PTY: {initial:?}");
+
+    let runtime = DaemonShellRuntime::new(&socket);
+    let busy_marker = project_a.join("busy.marker");
+    let active_runtime = runtime.clone();
+    let active_state = Arc::clone(&chat_a);
+    let active_marker = busy_marker.clone();
+    let active = tokio::spawn(async move {
+        tools::bash_command::handle_tool_call_with_runtime(
+            &active_runtime,
+            &active_state,
+            command(
+                "parallel_chat_a",
+                format!(
+                    "touch {}; printf 'chat-a-start\\n'; sleep 4; printf 'chat-a-done\\n'",
+                    active_marker.display()
+                ),
+                5.0,
+            ),
+        )
+        .await
+    });
+    wait_for_file(&busy_marker, Duration::from_secs(2)).await?;
+
+    // A reconnect on the busy chat and useful work in the other three chats
+    // must not queue behind chat A's four-second foreground command.
+    let reattached_a = Arc::new(Mutex::new(None::<BashState>));
+    let (attach_output, output_b, output_c, output_d) =
+        tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::try_join!(
+                tools::initialize::handle_tool_call_with_runtime(
+                    &runtime,
+                    &reattached_a,
+                    Initialize {
+                        init_type: InitializeType::FirstCall,
+                        mode_name: ModeName::Wcgw,
+                        any_workspace_path: project_a.to_string_lossy().into_owned(),
+                        thread_id: "parallel_chat_a".to_string(),
+                        code_writer_config: None,
+                        initial_files_to_read: vec![],
+                        task_id_to_resume: String::new(),
+                    },
+                ),
+                tools::bash_command::handle_tool_call_with_runtime(
+                    &runtime,
+                    &chat_b,
+                    command("parallel_chat_b", "printf 'chat-b-only\\n'".to_string(), 1.0),
+                ),
+                tools::bash_command::handle_tool_call_with_runtime(
+                    &runtime,
+                    &chat_c,
+                    command("parallel_chat_c", "printf 'chat-c-only\\n'".to_string(), 1.0),
+                ),
+                tools::bash_command::handle_tool_call_with_runtime(
+                    &runtime,
+                    &chat_d,
+                    command("parallel_chat_d", "printf 'chat-d-only\\n'".to_string(), 1.0),
+                ),
+            )
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("one busy chat head-of-line blocked another project"))??;
+
+    assert!(attach_output.contains("Attached to the existing durable Winx session"));
+    for (output, own, foreign) in [
+        (&output_b, "chat-b-only", ["chat-c-only", "chat-d-only"]),
+        (&output_c, "chat-c-only", ["chat-b-only", "chat-d-only"]),
+        (&output_d, "chat-d-only", ["chat-b-only", "chat-c-only"]),
+    ] {
+        assert!(output.contains(own), "missing {own}: {output}");
+        assert!(
+            foreign.into_iter().all(|marker| !output.contains(marker)),
+            "cross-chat output leaked into {own}: {output}"
+        );
+    }
+
+    let while_busy = tokio::try_join!(
+        client.session_info("parallel_chat_a"),
+        client.session_info("parallel_chat_b"),
+        client.session_info("parallel_chat_c"),
+        client.session_info("parallel_chat_d"),
+    )?;
+    assert!(while_busy.0.running, "chat A stopped being busy too early: {while_busy:?}");
+    for (before, after, expected_workspace) in [
+        (&initial.0, &while_busy.0, &project_a),
+        (&initial.1, &while_busy.1, &project_b),
+        (&initial.2, &while_busy.2, &project_c),
+        (&initial.3, &while_busy.3, &project_d),
+    ] {
+        assert_eq!(before.shell_pid, after.shell_pid, "chat changed guardian: {after:?}");
+        assert_eq!(Path::new(&after.cwd).canonicalize()?, expected_workspace.canonicalize()?);
+    }
+
+    let active_output = active.await??;
+    assert!(active_output.contains("chat-a-start"), "{active_output}");
+    assert!(active_output.contains("chat-a-done"), "{active_output}");
+    assert!(!active_output.contains("chat-b-only"), "{active_output}");
+
+    for thread_id in ["parallel_chat_a", "parallel_chat_b", "parallel_chat_c", "parallel_chat_d"] {
+        assert!(client.kill_session(thread_id).await?);
+    }
+    daemon.kill()?;
+    let _ = daemon.wait()?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shared_workspace_chat_gets_fast_busy_result_instead_of_queuing() -> anyhow::Result<()> {
+    let workspace = TempDir::new()?;
+    let runtime_dir = TempDir::new()?;
+    let socket = runtime_dir.path().join("winxd.sock");
+    let mut daemon = spawn_daemon(&socket)?;
+    let client = DaemonClient::new(&socket);
+    wait_for_daemon(&client).await?;
+
+    let thread_id = "shared_workspace_chat";
+    let first_chat = initialize_daemon_session(&socket, workspace.path(), thread_id).await?;
+    let second_chat = Arc::new(Mutex::new(None::<BashState>));
+    let runtime = DaemonShellRuntime::new(&socket);
+    tools::initialize::handle_tool_call_with_runtime(
+        &runtime,
+        &second_chat,
+        Initialize {
+            init_type: InitializeType::FirstCall,
+            mode_name: ModeName::Wcgw,
+            any_workspace_path: workspace.path().to_string_lossy().into_owned(),
+            thread_id: thread_id.to_string(),
+            code_writer_config: None,
+            initial_files_to_read: vec![],
+            task_id_to_resume: String::new(),
+        },
+    )
+    .await?;
+
+    let busy_marker = workspace.path().join("shared-busy.marker");
+    let forbidden_marker = workspace.path().join("queued-command-must-not-run.marker");
+    let active_runtime = runtime.clone();
+    let active_state = Arc::clone(&first_chat);
+    let active_marker = busy_marker.clone();
+    let active = tokio::spawn(async move {
+        tools::bash_command::handle_tool_call_with_runtime(
+            &active_runtime,
+            &active_state,
+            command(thread_id, format!("touch {}; sleep 4", active_marker.display()), 5.0),
+        )
+        .await
+    });
+    wait_for_file(&busy_marker, Duration::from_secs(2)).await?;
+
+    let rejected = tokio::time::timeout(
+        Duration::from_secs(1),
+        tools::bash_command::handle_tool_call_with_runtime(
+            &runtime,
+            &second_chat,
+            command(thread_id, format!("touch {}", forbidden_marker.display()), 1.0),
+        ),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("shared-session command queued behind the active chat"))?;
+    let rejected = match rejected {
+        Err(error) => error,
+        Ok(output) => anyhow::bail!("second foreground command unexpectedly ran: {output}"),
+    };
+    assert!(
+        matches!(rejected, winx_code_agent::errors::WinxError::CommandAlreadyRunning { .. }),
+        "unexpected admission result: {rejected}"
+    );
+    assert!(!forbidden_marker.exists(), "rejected command was launched later");
+
+    active.await??;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(!forbidden_marker.exists(), "rejected command remained queued in the guardian");
 
     assert!(client.kill_session(thread_id).await?);
     daemon.kill()?;
