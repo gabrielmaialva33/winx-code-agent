@@ -11,7 +11,7 @@ use super::protocol::{
     read_json_frame, write_json_frame, CancelActionParams, ConfigureSessionParams,
     ConfigureSessionResult, ConfigureSessionTransition, HelloResult, JournalRead,
     JournalReadParams, PruneParams, PruneResult, RpcRequest, RpcResponse, RunActionParams,
-    RunActionResult, SessionInfo, SessionParams, WireShellError,
+    RunActionResult, SessionInfo, SessionParams, WireShellError, ATTACH_OR_CREATE_CAPABILITY,
     CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY, COMPACT_ACTION_OUTPUT_CAPABILITY,
     GENERATION_BOUND_ACTIONS_CAPABILITY, PROTOCOL_MAJOR, TYPED_ACTION_RESULT_CAPABILITY,
 };
@@ -60,12 +60,36 @@ struct LocalRevision {
 
 const MAX_NEGOTIATED_SESSIONS: usize = 64;
 const NEGOTIATION_TTL: Duration = Duration::from_secs(5 * 60);
+const DAEMON_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const SESSION_CONTROL_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 struct NegotiatedSession {
     control_epoch: String,
     guardian: HelloResult,
-    stream: UnixStream,
+    /// Idle negotiated connection used only to detect a control restart. Tool
+    /// RPCs use disposable connections so cancelled framing is never reused.
+    health_stream: UnixStream,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RemoteSessionTransition {
+    FirstCall,
+    Attach,
+    ModeChange,
+    Reset,
+    WorkspaceChange,
+}
+
+impl From<ShellSessionTransition> for RemoteSessionTransition {
+    fn from(transition: ShellSessionTransition) -> Self {
+        match transition {
+            ShellSessionTransition::FirstCall => Self::FirstCall,
+            ShellSessionTransition::ModeChange => Self::ModeChange,
+            ShellSessionTransition::Reset => Self::Reset,
+            ShellSessionTransition::WorkspaceChange => Self::WorkspaceChange,
+        }
+    }
 }
 
 /// Control-plane client used by the CLI and reconnection tests.
@@ -81,13 +105,20 @@ impl DaemonClient {
 
     async fn connected_with_hello(&self) -> Result<(UnixStream, HelloResult)> {
         let mut stream = self.connect_raw().await?;
-        let hello: HelloResult = DaemonShellRuntime::request(
-            &mut stream,
-            rand::random::<u64>(),
-            "winx.hello",
-            serde_json::json!({ "protocol_major": PROTOCOL_MAJOR }),
+        let hello: HelloResult = tokio::time::timeout(
+            SESSION_CONTROL_RPC_TIMEOUT,
+            DaemonShellRuntime::request(
+                &mut stream,
+                rand::random::<u64>(),
+                "winx.hello",
+                serde_json::json!({ "protocol_major": PROTOCOL_MAJOR }),
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| WinxError::CommandTimeout {
+            command: "winxd handshake".to_string(),
+            timeout_seconds: SESSION_CONTROL_RPC_TIMEOUT.as_secs(),
+        })??;
         if hello.protocol_major != PROTOCOL_MAJOR {
             return Err(WinxError::ConfigurationError(format!(
                 "winxd protocol major {} is incompatible with client {}",
@@ -98,12 +129,18 @@ impl DaemonClient {
     }
 
     async fn connect_raw(&self) -> Result<UnixStream> {
-        UnixStream::connect(&self.socket_path).await.map_err(|error| {
-            WinxError::ShellInitializationError(format!(
-                "cannot connect to winxd at {}: {error}",
-                self.socket_path.display()
-            ))
-        })
+        tokio::time::timeout(DAEMON_CONNECT_TIMEOUT, UnixStream::connect(&self.socket_path))
+            .await
+            .map_err(|_| WinxError::CommandTimeout {
+                command: format!("connect to winxd at {}", self.socket_path.display()),
+                timeout_seconds: DAEMON_CONNECT_TIMEOUT.as_secs(),
+            })?
+            .map_err(|error| {
+                WinxError::ShellInitializationError(format!(
+                    "cannot connect to winxd at {}: {error}",
+                    self.socket_path.display()
+                ))
+            })
     }
 
     async fn connected(&self) -> Result<UnixStream> {
@@ -212,8 +249,8 @@ impl DaemonClient {
         thread_id: &str,
         expected_execution: Option<ShellExecutionToken>,
     ) -> Result<bool> {
-        // Cancellation deliberately uses a fresh connection. A long-running
-        // status request on the negotiated action channel must never delay it.
+        // Cancellation deliberately uses its own connection. A long-running
+        // action or status request must never delay it.
         let (mut stream, _) = self.connected_with_hello().await?;
         let hello: HelloResult = DaemonShellRuntime::request(
             &mut stream,
@@ -339,23 +376,30 @@ impl DaemonShellRuntime {
             }
         }
 
-        // Do not hold the global cache mutex across socket I/O. Per-session
-        // channels serialize their own requests after publication.
+        // Do not hold the global cache mutex across socket I/O. The published
+        // connection is an idle liveness probe; tool RPCs never share it.
         let client = DaemonClient::new(&self.socket_path);
         let (mut stream, control) = client.connected_with_hello().await?;
-        let hello: HelloResult = Self::request(
-            &mut stream,
-            rand::random::<u64>(),
-            "session.negotiate",
-            serde_json::to_value(SessionParams {
-                thread_id: thread_id.to_string(),
-                expected_generation: None,
-                expected_execution: None,
-                expected_guardian_epoch: None,
-            })
-            .map_err(|error| WinxError::SerializationError(error.to_string()))?,
+        let hello: HelloResult = tokio::time::timeout(
+            SESSION_CONTROL_RPC_TIMEOUT,
+            Self::request(
+                &mut stream,
+                rand::random::<u64>(),
+                "session.negotiate",
+                serde_json::to_value(SessionParams {
+                    thread_id: thread_id.to_string(),
+                    expected_generation: None,
+                    expected_execution: None,
+                    expected_guardian_epoch: None,
+                })
+                .map_err(|error| WinxError::SerializationError(error.to_string()))?,
+            ),
         )
-        .await?;
+        .await
+        .map_err(|_| WinxError::CommandTimeout {
+            command: "negotiate a guardian session".to_string(),
+            timeout_seconds: SESSION_CONTROL_RPC_TIMEOUT.as_secs(),
+        })??;
         if hello.protocol_major != PROTOCOL_MAJOR {
             return Err(WinxError::ConfigurationError(format!(
                 "guardian protocol major {} is incompatible with adapter {}",
@@ -365,7 +409,7 @@ impl DaemonShellRuntime {
         let session = Arc::new(Mutex::new(NegotiatedSession {
             control_epoch: control.daemon_epoch,
             guardian: hello,
-            stream,
+            health_stream: stream,
         }));
         let now = Instant::now();
         let mut cache = self.negotiations.lock().await;
@@ -484,7 +528,7 @@ impl DaemonShellRuntime {
             let (alive, control_epoch) = {
                 let session_guard = session.lock().await;
                 let mut probe = [0_u8; 1];
-                match session_guard.stream.try_read(&mut probe) {
+                match session_guard.health_stream.try_read(&mut probe) {
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         (true, session_guard.control_epoch.clone())
                     }
@@ -521,28 +565,50 @@ impl DaemonShellRuntime {
     }
 
     async fn negotiated_request<T: serde::de::DeserializeOwned>(
-        session: &Arc<Mutex<NegotiatedSession>>,
+        &self,
         id: u64,
         method: &str,
         params: serde_json::Value,
     ) -> Result<T> {
-        let mut session = session.lock().await;
-        Self::request(&mut session.stream, id, method, params).await
+        match tokio::time::timeout(
+            SESSION_CONTROL_RPC_TIMEOUT,
+            self.isolated_request(id, method, params),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(WinxError::CommandTimeout {
+                command: format!("winxd {method} RPC"),
+                timeout_seconds: SESSION_CONTROL_RPC_TIMEOUT.as_secs(),
+            }),
+        }
     }
 
     async fn negotiated_action_request<T: serde::de::DeserializeOwned>(
-        session: &Arc<Mutex<NegotiatedSession>>,
+        &self,
         id: u64,
         params: serde_json::Value,
         options: &ShellActionOptions,
     ) -> Result<T> {
-        let mut session = session.lock().await;
         if options.is_launch_cancelled() {
             return Err(WinxError::CommandExecutionError(
                 "task was cancelled before the shell action launch gate".to_string(),
             ));
         }
-        Self::request(&mut session.stream, id, "shell.run_action", params).await
+        self.isolated_request(id, "shell.run_action", params).await
+    }
+
+    /// Run one framed RPC on a disposable connection. Tokio's framed
+    /// `read_exact`/`write_all` operations are not cancellation safe; never
+    /// expose a partially consumed transport to the next tool call.
+    async fn isolated_request<T: serde::de::DeserializeOwned>(
+        &self,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T> {
+        let mut stream = DaemonClient::new(&self.socket_path).connect_raw().await?;
+        Self::request(&mut stream, id, method, params).await
     }
 
     async fn request<T: serde::de::DeserializeOwned>(
@@ -609,17 +675,16 @@ impl DaemonShellRuntime {
             .map_err(|error| WinxError::SerializationError(error.to_string()))
         };
         let params = encode_params(options.clone())?;
-        let result: RunActionResult = match Self::negotiated_action_request(
-            &session, id, params, &options,
-        )
-        .await
+        let result: RunActionResult = match self
+            .negotiated_action_request(id, params, &options)
+            .await
         {
             Ok(result) => result,
             Err(first_error) => {
-                // A closed negotiated channel means the control epoch changed.
-                // Re-negotiate before retrying, then enforce the new guardian's
-                // capabilities. The stable request key makes a lost response
-                // safe without executing the command twice.
+                // A failed disposable request may mean the control or guardian
+                // epoch changed. Re-negotiate before retrying, then enforce the
+                // effective guardian's capabilities. The stable request key
+                // makes a lost response safe without executing twice.
                 self.invalidate_negotiation(&thread_id, &session).await;
                 session = self.live_negotiated_session(&thread_id).await?;
                 let retry_hello = session.lock().await.guardian.clone();
@@ -632,8 +697,7 @@ impl DaemonShellRuntime {
                 let (retry_options, retry_generation_bound) =
                     action_options_for_guardian(&retry_hello, requested_options.clone())?;
                 generation_bound_actions = retry_generation_bound;
-                Self::negotiated_action_request(
-                    &session,
+                self.negotiated_action_request(
                     id,
                     encode_params(retry_options)?,
                     &requested_options,
@@ -661,31 +725,62 @@ impl DaemonShellRuntime {
     async fn configure_remote(
         &self,
         bash_state: &mut BashState,
-        transition: ShellSessionTransition,
+        transition: RemoteSessionTransition,
     ) -> Result<ShellSessionConfiguration> {
-        let transition = match transition {
-            ShellSessionTransition::FirstCall => ConfigureSessionTransition::FirstCall,
-            ShellSessionTransition::ModeChange => ConfigureSessionTransition::ModeChange,
-            ShellSessionTransition::Reset => ConfigureSessionTransition::Reset,
-            ShellSessionTransition::WorkspaceChange => ConfigureSessionTransition::WorkspaceChange,
-        };
         let thread_id = bash_state.current_thread_id.clone();
         // The caller owns BashState for this entire future. Bump before any
         // remote I/O so every older action response is stale even when this
         // transition ultimately returns an error.
         self.local_revision(&thread_id).await?.fetch_add(1, Ordering::SeqCst);
-        let session = self.live_negotiated_session(&thread_id).await?;
-        let result: ConfigureSessionResult = Self::negotiated_request(
-            &session,
-            rand::random::<u64>(),
-            "session.configure",
+        let snapshot = bash_state.snapshot();
+        let encode_params = |wire_transition| {
             serde_json::to_value(ConfigureSessionParams {
-                snapshot: bash_state.snapshot(),
-                transition,
+                snapshot: snapshot.clone(),
+                transition: wire_transition,
             })
-            .map_err(|error| WinxError::SerializationError(error.to_string()))?,
-        )
-        .await?;
+            .map_err(|error| WinxError::SerializationError(error.to_string()))
+        };
+        let mut session = self.live_negotiated_session(&thread_id).await?;
+        let hello = session.lock().await.guardian.clone();
+        let wire_transition = configure_transition_for_guardian(transition, &hello);
+        let result: ConfigureSessionResult = match self
+            .negotiated_request(
+                rand::random::<u64>(),
+                "session.configure",
+                encode_params(wire_transition)?,
+            )
+            .await
+        {
+            Ok(result) => result,
+            Err(first_error)
+                if matches!(
+                    transition,
+                    RemoteSessionTransition::FirstCall | RemoteSessionTransition::Attach
+                ) =>
+            {
+                // Attach-or-create is idempotent. If delivery or the reply was
+                // lost, renegotiate and retry without resetting the PTY.
+                self.invalidate_negotiation(&thread_id, &session).await;
+                session = self.live_negotiated_session(&thread_id).await?;
+                let retry_hello = session.lock().await.guardian.clone();
+                let retry_transition = configure_transition_for_guardian(transition, &retry_hello);
+                self.negotiated_request(
+                    rand::random::<u64>(),
+                    "session.configure",
+                    encode_params(retry_transition)?,
+                )
+                .await
+                .map_err(|retry_error| {
+                    WinxError::CommandExecutionError(format!(
+                        "{first_error}; retry after guardian negotiation failed: {retry_error}"
+                    ))
+                })?
+            }
+            Err(error) => {
+                self.invalidate_negotiation(&thread_id, &session).await;
+                return Err(error);
+            }
+        };
         if let Some(snapshot) = result.snapshot {
             bash_state.apply_snapshot(&snapshot);
         }
@@ -693,6 +788,30 @@ impl DaemonShellRuntime {
             attach_hint: result.attach_hint,
             attached_existing: result.attached_existing,
         })
+    }
+}
+
+fn configure_transition_for_guardian(
+    transition: RemoteSessionTransition,
+    guardian: &HelloResult,
+) -> ConfigureSessionTransition {
+    match transition {
+        RemoteSessionTransition::FirstCall => ConfigureSessionTransition::FirstCall,
+        RemoteSessionTransition::Attach
+            if guardian
+                .capabilities
+                .iter()
+                .any(|capability| capability == ATTACH_OR_CREATE_CAPABILITY) =>
+        {
+            ConfigureSessionTransition::FirstCall
+        }
+        // Guardians predating attach-or-create preserve the live PTY when the
+        // adapter reapplies the current mode snapshot.
+        RemoteSessionTransition::Attach | RemoteSessionTransition::ModeChange => {
+            ConfigureSessionTransition::ModeChange
+        }
+        RemoteSessionTransition::Reset => ConfigureSessionTransition::Reset,
+        RemoteSessionTransition::WorkspaceChange => ConfigureSessionTransition::WorkspaceChange,
     }
 }
 
@@ -742,7 +861,14 @@ impl ShellRuntime for DaemonShellRuntime {
         bash_state: &'a mut BashState,
         transition: ShellSessionTransition,
     ) -> ShellRuntimeConfigureFuture<'a> {
-        Box::pin(self.configure_remote(bash_state, transition))
+        Box::pin(self.configure_remote(bash_state, transition.into()))
+    }
+
+    fn attach_session<'a>(
+        &'a self,
+        bash_state: &'a mut BashState,
+    ) -> ShellRuntimeConfigureFuture<'a> {
+        Box::pin(self.configure_remote(bash_state, RemoteSessionTransition::Attach))
     }
 
     fn run_action<'a>(
@@ -991,6 +1117,68 @@ mod tests {
     use crate::daemon::protocol::{RpcResponse, TYPED_ACTION_RESULT_CAPABILITY};
 
     #[tokio::test]
+    async fn cancelled_rpc_cannot_poison_the_next_tool_channel() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let socket = temp.path().join("cancel-safe.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind mock control");
+        let (first_seen_tx, first_seen_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut first_stream, _) = listener.accept().await.expect("accept first RPC");
+            let first_handler = tokio::spawn(async move {
+                let first: RpcRequest =
+                    read_json_frame(&mut first_stream).await.expect("read first RPC");
+                assert_eq!(first.method, "session.configure");
+                let _ = first_seen_tx.send(());
+                let closed = read_json_frame::<_, RpcRequest>(&mut first_stream).await;
+                assert!(
+                    closed
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::UnexpectedEof),
+                    "cancelled disposable connection must close cleanly: {closed:?}"
+                );
+            });
+
+            let (mut second_stream, _) = listener.accept().await.expect("accept second RPC");
+            let second: RpcRequest =
+                read_json_frame(&mut second_stream).await.expect("read second RPC");
+            assert_eq!(second.method, "session.configure");
+            write_json_frame(
+                &mut second_stream,
+                &RpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: second.id,
+                    result: Some(serde_json::json!(42)),
+                    error: None,
+                },
+            )
+            .await
+            .expect("write second response");
+            first_handler.await.expect("first connection handler");
+        });
+
+        let runtime = DaemonShellRuntime::new(&socket);
+        let first_runtime = runtime.clone();
+        let first = tokio::spawn(async move {
+            first_runtime
+                .isolated_request::<u64>(1, "session.configure", serde_json::json!({}))
+                .await
+        });
+        first_seen_rx.await.expect("first request reached server");
+        first.abort();
+        assert!(first.await.expect_err("first request was cancelled").is_cancelled());
+
+        let second = tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.isolated_request::<u64>(2, "session.configure", serde_json::json!({})),
+        )
+        .await
+        .expect("next RPC must not inherit cancelled framing")
+        .expect("second RPC succeeds");
+        assert_eq!(second, 42);
+        server.await.expect("mock server task");
+    }
+
+    #[tokio::test]
     #[allow(clippy::too_many_lines)] // full control/guardian wire exchange is intentional
     async fn generation_capability_comes_from_effective_guardian_and_is_cached() {
         let temp = tempfile::tempdir().expect("temporary directory");
@@ -1054,8 +1242,10 @@ mod tests {
             .await
             .expect("write guardian hello");
 
+            let (mut action_stream, _) = listener.accept().await.expect("accept isolated action");
+            observed.fetch_add(1, Ordering::SeqCst);
             let action: RpcRequest =
-                read_json_frame(&mut stream).await.expect("hot action request");
+                read_json_frame(&mut action_stream).await.expect("isolated action request");
             assert_eq!(action.method, "shell.run_action", "hot path must not send winx.hello");
             assert!(
                 action.params.get("options").is_none(),
@@ -1065,7 +1255,7 @@ mod tests {
                 serde_json::from_value(action.params).expect("run action params");
             let cwd = params.snapshot.cwd.clone();
             write_json_frame(
-                &mut stream,
+                &mut action_stream,
                 &RpcResponse {
                     jsonrpc: "2.0".to_string(),
                     id: action.id,
@@ -1135,7 +1325,7 @@ mod tests {
         assert_eq!(outcome.result.output, "guardian-14-output");
         assert_eq!(outcome.compact_output, None);
         server.await.expect("mock server task");
-        assert_eq!(connections.load(Ordering::SeqCst), 1);
+        assert_eq!(connections.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -1207,15 +1397,17 @@ mod tests {
                 .expect("guardian hello response");
 
                 if guardian_epoch == "guardian-one" {
+                    let (mut action_stream, _) =
+                        listener.accept().await.expect("accept isolated first action");
                     let action: RpcRequest =
-                        read_json_frame(&mut stream).await.expect("first action");
+                        read_json_frame(&mut action_stream).await.expect("first action");
                     assert_eq!(action.method, "shell.run_action");
                     observed.fetch_add(1, Ordering::SeqCst);
                     // Dropping without a response makes delivery ambiguous.
                 } else {
                     let repeated = tokio::time::timeout(
                         std::time::Duration::from_millis(100),
-                        read_json_frame::<_, RpcRequest>(&mut stream),
+                        listener.accept(),
                     )
                     .await;
                     assert!(repeated.is_err(), "action was resent to a different guardian epoch");
@@ -1268,7 +1460,7 @@ mod tests {
                     process_role: None,
                     build: None,
                 },
-                stream,
+                health_stream: stream,
             }));
             cache_negotiation(&mut cache, &format!("thread-{index}"), session, Instant::now())
                 .expect("inactive cache entry should be evictable");
@@ -1295,7 +1487,7 @@ mod tests {
                     process_role: None,
                     build: None,
                 },
-                stream,
+                health_stream: stream,
             }));
             cache_negotiation(
                 &mut cache,
@@ -1320,7 +1512,7 @@ mod tests {
                 process_role: None,
                 build: None,
             },
-            stream,
+            health_stream: stream,
         }));
         let error =
             cache_negotiation(&mut cache, "overflow", Arc::clone(&overflow), Instant::now())

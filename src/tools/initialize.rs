@@ -406,11 +406,9 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
                 let Some(state) = bash_state_guard.as_mut() else {
                     return Err(WinxError::BashStateNotInitialized);
                 };
-                // Refresh guardian activity without resetting the PTY. Reusing the
-                // current snapshot as a mode transition is also compatible with
-                // protocol-1.2 guardians that predate attach-or-create.
-                let mut configured =
-                    runtime.configure_session(state, ShellSessionTransition::ModeChange).await?;
+                // Refresh guardian activity without resetting the PTY or waiting
+                // behind an unrelated long-running shell action.
+                let mut configured = runtime.attach_session(state).await?;
                 configured.attached_existing = true;
                 configured
             } else {

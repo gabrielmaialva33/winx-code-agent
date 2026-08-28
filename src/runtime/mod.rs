@@ -183,6 +183,16 @@ pub trait ShellRuntime: Send + Sync {
         transition: ShellSessionTransition,
     ) -> ShellRuntimeConfigureFuture<'a>;
 
+    /// Reattach an adapter to its existing session. External runtimes retain
+    /// their historical mode-refresh behavior; native runtimes override this
+    /// with a non-mutating fast path.
+    fn attach_session<'a>(
+        &'a self,
+        bash_state: &'a mut BashState,
+    ) -> ShellRuntimeConfigureFuture<'a> {
+        self.configure_session(bash_state, ShellSessionTransition::ModeChange)
+    }
+
     fn run_action<'a>(
         &'a self,
         bash_state: &'a Arc<Mutex<Option<BashState>>>,
@@ -289,6 +299,15 @@ impl ShellRuntime for EmbeddedShellRuntime {
                 shell.as_ref().and_then(|shell| shell.attach_hint.clone())
             };
             Ok(ShellSessionConfiguration { attach_hint, attached_existing: false })
+        })
+    }
+
+    fn attach_session<'a>(
+        &'a self,
+        _bash_state: &'a mut BashState,
+    ) -> ShellRuntimeConfigureFuture<'a> {
+        Box::pin(async {
+            Ok(ShellSessionConfiguration { attach_hint: None, attached_existing: true })
         })
     }
 
