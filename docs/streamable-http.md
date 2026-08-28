@@ -160,7 +160,8 @@ Consequences:
   of regenerating unchanged guidelines, repository context, and orchestration instructions;
 - two different principals still receive different namespaces;
 - parallel conversations from the **same principal in the same workspace share one shell** and its foreground-command
-  lock;
+  lock; a concurrent foreground request fails fast with structured `command_already_running` instead of entering a hidden
+  queue, while reattach and other project sessions remain responsive;
 - first calls without a workspace share one scratch-session key per principal;
 - task resumption without a workspace is keyed by the saved task ID.
 

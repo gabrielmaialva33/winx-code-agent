@@ -668,6 +668,10 @@ share the same resource boundary. Under quota pressure, Winx first reclaims the 
 run a command; used or active shells are never sacrificed to admit a new session. If no disposable guardian exists, the
 error points to the effective force-prune command: `winx-code-agent prune --idle-seconds 0`.
 
+Adapter tool RPCs use disposable Unix connections while the negotiated channel remains an idle liveness probe. A
+cancelled or timed-out framed read/write therefore cannot corrupt the next tool call, and a session reattach does not
+wait behind an unrelated foreground command. Mode, workspace, and reset mutations keep bounded serialization.
+
 A newly installed adapter upgrades an older control plane automatically when it advertises safe planned restarts; the
 per-session guardians and their PTYs stay alive throughout. Protocol `1.3` introduced attach-or-create: repeating a first
 call for the same key preserves the PTY, cwd, output journal, and running command. Protocol `1.4` adds
@@ -692,6 +696,10 @@ conversations from the same principal in the same repository therefore share one
 conversation` to key by principal + conversation + workspace: Winx prefers `Mcp-Session-Id`, accepts a reviewed
 `X-Winx-Conversation-Id` gateway header, and falls back to the supplied first-call `thread_id`. Use `thread` only when the
 caller owns stable IDs and explicit cleanup.
+
+Shared-workspace concurrency is fail-fast: while one foreground command is active, another foreground request receives a
+structured `command_already_running` result instead of waiting in a hidden queue. Reattach and unrelated project sessions
+remain responsive, and a rejected command is never launched later.
 
 > [!TIP]
 > The full guide covers request headers, multi-principal configuration, private tunnels, operational limits, status codes,

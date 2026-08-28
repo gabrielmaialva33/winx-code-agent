@@ -151,7 +151,9 @@ Consequências:
 - Reconexões stateless reanexam à sessão existente em vez de criar um novo guardian;
 - Primeiras chamadas repetidas preservam o PTY, cwd, journal de saída e comandos em execução;
 - Principals diferentes mantêm namespaces totalmente isolados;
-- Conversas paralelas do **mesmo principal no mesmo workspace compartilham o mesmo shell** e seu lock de comandos em foreground;
+- Conversas paralelas do **mesmo principal no mesmo workspace compartilham o mesmo shell** e seu lock de comandos em
+  foreground; uma segunda tentativa em foreground falha rapidamente com `command_already_running`, sem entrar em uma fila
+  oculta nem executar mais tarde, enquanto reanexos e sessões de outros projetos continuam responsivos;
 - Chamadas sem workspace compartilham uma sessão scratch por principal;
 - Retomadas de tarefas são indexadas pelo ID de tarefa salvo.
 
