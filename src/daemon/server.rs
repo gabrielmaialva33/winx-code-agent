@@ -13,13 +13,14 @@ use super::protocol::{
     read_json_frame, write_json_frame, CancelActionParams, ConfigureSessionParams,
     ConfigureSessionResult, ConfigureSessionTransition, DaemonProcessRole, HelloResult,
     JournalRead, JournalReadParams, RpcError, RpcRequest, RpcResponse, RunActionParams,
-    RunActionResult, SessionInfo, SessionParams, WireShellError,
+    RunActionResult, SessionInfo, SessionParams, WireShellError, ATTACH_OR_CREATE_CAPABILITY,
     CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY, COMPACT_ACTION_OUTPUT_CAPABILITY,
     GENERATION_BOUND_ACTIONS_CAPABILITY, TYPED_ACTION_RESULT_CAPABILITY,
 };
 use crate::errors::{Result, WinxError};
 use crate::runtime::{lock_session_store, ShellExecutionToken, ShellTarget};
 use crate::state::bash_state::BashState;
+use crate::state::persistence::BashStateSnapshot;
 use crate::state::pty::SharedPtyShell;
 use crate::tools::bash_command::{guardian_foreground_shell_needs_reset, ShellDeliveryCursor};
 use crate::types::normalize_thread_id;
@@ -143,6 +144,9 @@ const MAX_SESSION_CACHE_ENTRIES: usize = 256;
 const MAX_IDENTIFIER_BYTES: usize = 256;
 const SESSION_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 const ACTION_OWNER_TIMEOUT: Duration = Duration::from_secs(11 * 60);
+const ATTACH_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(2);
+const CONFIGURE_BARRIER_TIMEOUT: Duration = Duration::from_secs(5);
+const FOREGROUND_ADMISSION_TIMEOUT: Duration = Duration::from_millis(100);
 const DRAIN_CHANGED_INTERVAL: Duration = Duration::from_millis(20);
 const DRAIN_ACTIVE_INTERVAL: Duration = Duration::from_millis(100);
 const DRAIN_IDLE_INTERVAL: Duration = Duration::from_secs(1);
@@ -417,7 +421,7 @@ async fn dispatch(
                     "multi_consumer_cursors".to_string(),
                     "idempotency".to_string(),
                     "session_activity_timestamps".to_string(),
-                    "attach_or_create".to_string(),
+                    ATTACH_OR_CREATE_CAPABILITY.to_string(),
                 ],
                 epoch,
             ),
@@ -555,6 +559,26 @@ async fn dispatch(
     }
 }
 
+/// Take the authoritative snapshot for an observational reattach without the
+/// operation barrier held by a long-running shell action.
+async fn attach_existing_session(
+    session: &Arc<DaemonSession>,
+) -> Result<Option<ConfigureSessionResult>> {
+    let snapshot = tokio::time::timeout(ATTACH_SNAPSHOT_TIMEOUT, session.state.lock())
+        .await
+        .map_err(|_| WinxError::CommandTimeout {
+            command: "attach to the durable shell session".to_string(),
+            timeout_seconds: ATTACH_SNAPSHOT_TIMEOUT.as_secs(),
+        })?
+        .as_ref()
+        .map(BashState::snapshot);
+    Ok(snapshot.map(|snapshot| ConfigureSessionResult {
+        attach_hint: None,
+        snapshot: Some(snapshot),
+        attached_existing: true,
+    }))
+}
+
 async fn configure_session(
     sessions: &Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     params: ConfigureSessionParams,
@@ -585,7 +609,25 @@ async fn configure_session(
     };
     ensure_drainer(&session);
     session.note_activity(false);
-    let _operation = session.operation_barrier.write().await;
+
+    // Reattaching is observational: it must not queue behind the operation
+    // writer held by a reset or behind the read guard held for a long-running
+    // shell action. The durable state is authoritative, and ordinary Bash
+    // actions hold this small state mutex only while taking or applying a snapshot.
+    if matches!(params.transition, ConfigureSessionTransition::FirstCall) && !entry_created {
+        if let Some(attached) = attach_existing_session(&session).await? {
+            session.activity.notify_one();
+            return Ok(attached);
+        }
+    }
+
+    let _operation =
+        tokio::time::timeout(CONFIGURE_BARRIER_TIMEOUT, session.operation_barrier.write())
+            .await
+            .map_err(|_| WinxError::CommandTimeout {
+                command: "configure the shell while another operation is active".to_string(),
+                timeout_seconds: CONFIGURE_BARRIER_TIMEOUT.as_secs(),
+            })?;
 
     let (attach_hint, snapshot, attached_existing) = {
         let mut guard = session.state.lock().await;
@@ -863,10 +905,22 @@ async fn execute_action(
         crate::types::BashCommandAction::Command { is_background: false, .. }
     );
     // Foreground preflight takes the writer before state, cursor, or command
-    // gates. Other actions take a reader. This global order avoids upgrading a
-    // reader while another reader is blocked on a lock held by this action.
+    // gates. Other actions take a reader. Never leave a second foreground
+    // command queued behind a long-running chat: after a tiny admission window
+    // return the typed running result so the caller can follow status_check.
+    // This also prevents a queued writer from head-of-line blocking observers.
     let (write_operation, read_operation) = if foreground_command {
-        (Some(Arc::clone(&session.operation_barrier).write_owned().await), None)
+        match tokio::time::timeout(
+            FOREGROUND_ADMISSION_TIMEOUT,
+            Arc::clone(&session.operation_barrier).write_owned(),
+        )
+        .await
+        {
+            Ok(operation) => (Some(operation), None),
+            Err(_) => {
+                return foreground_admission_busy_result(session, params.snapshot.clone()).await;
+            }
+        }
     } else {
         (None, Some(Arc::clone(&session.operation_barrier).read_owned().await))
     };
@@ -1017,6 +1071,48 @@ async fn execute_action(
 
     session.activity.notify_one();
     Ok(result)
+}
+
+async fn foreground_admission_busy_result(
+    session: &Arc<DaemonSession>,
+    fallback_snapshot: BashStateSnapshot,
+) -> Result<RunActionResult> {
+    let state = tokio::time::timeout(FOREGROUND_ADMISSION_TIMEOUT, async {
+        session.state.lock().await.as_ref().map(|state| (state.snapshot(), state.pty_shell.clone()))
+    })
+    .await
+    .ok()
+    .flatten();
+    let (snapshot, shell) =
+        state.map_or((fallback_snapshot, None), |(snapshot, shell)| (snapshot, Some(shell)));
+    let active = if let Some(shell) = shell {
+        tokio::time::timeout(FOREGROUND_ADMISSION_TIMEOUT, shell.lock()).await.ok().and_then(
+            |guard| {
+                guard.as_ref().filter(|shell| shell.command_running).map(|shell| {
+                    (
+                        shell.last_command.clone(),
+                        shell.command_elapsed().map_or(0.0, |elapsed| elapsed.as_secs_f64()),
+                    )
+                })
+            },
+        )
+    } else {
+        None
+    };
+    let (current_command, duration_seconds) = active
+        .unwrap_or_else(|| ("another operation in this shared workspace session".to_string(), 0.0));
+    session.note_activity(false);
+    Ok(RunActionResult {
+        output: None,
+        compact_output: None,
+        command_generation: None,
+        execution_token: None,
+        dropped_output_file: None,
+        output_truncated: false,
+        state: None,
+        snapshot,
+        error: Some(WireShellError::CommandAlreadyRunning { current_command, duration_seconds }),
+    })
 }
 
 fn prune_action_entries(entries: &mut HashMap<String, ActionEntry>, now: Instant) {
@@ -1349,6 +1445,37 @@ mod tests {
             consumer_id: "single-flight-test".to_string(),
             options: ShellActionOptions::default(),
         }
+    }
+
+    #[tokio::test]
+    async fn existing_session_attach_bypasses_busy_operation_barrier() {
+        let thread_id = "busy_attach";
+        let session = Arc::new(DaemonSession::new());
+        let mut state = BashState::new();
+        state.current_thread_id = thread_id.to_string();
+        state.initialized = true;
+        let snapshot = state.snapshot();
+        *session.state.lock().await = Some(state);
+
+        let sessions =
+            Arc::new(Mutex::new(HashMap::from([(thread_id.to_string(), Arc::clone(&session))])));
+        let _active_operation = session.operation_barrier.write().await;
+        let attached = tokio::time::timeout(
+            Duration::from_millis(250),
+            configure_session(
+                &sessions,
+                ConfigureSessionParams {
+                    snapshot,
+                    transition: ConfigureSessionTransition::FirstCall,
+                },
+            ),
+        )
+        .await
+        .expect("attach must not queue behind the active shell operation")
+        .expect("attach existing session");
+
+        assert!(attached.attached_existing);
+        assert_eq!(attached.snapshot.expect("authoritative daemon snapshot").chat_id, thread_id);
     }
 
     #[test]
