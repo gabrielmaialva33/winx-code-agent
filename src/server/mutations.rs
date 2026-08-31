@@ -672,9 +672,10 @@ impl WinxService {
         }
 
         let message = "SEARCH recovery exhausted after three conflicts on the same target. Stop \
-                       repeating edit/read cycles, inspect the exact current file and surrounding \
-                       context, then formulate a materially different edit or ask the user for \
-                       direction. No file was changed by this call.";
+                       repeating edit/read cycles. Inspect the exact current file and surrounding \
+                       context, then use a revision-bound line_patch or formulate another \
+                       materially different edit; do not fall back to shell editing. No file was \
+                       changed by this call.";
         envelope.insert("status".to_string(), json!(outcomes::ToolResultStatus::RecoveryExhausted));
         envelope.insert(
             "errorCode".to_string(),

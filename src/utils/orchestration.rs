@@ -5,18 +5,23 @@ const DEFAULT_INSTRUCTIONS: &str = concat!(
     "authoritative. Never repeat a failed tool call unchanged: execute next_action and every ",
     "required_read first. Keep the exact thread_id/workspace_root pair for the user's current ",
     "project; never borrow one from another chat. workspace_root identifies the session, not a ",
-    "path sandbox: allowed absolute targets outside it do not require rebinding. After an edit ",
-    "conflict, only ReadFiles refreshes the edit guard; rebuild SEARCH from its returned text. If ",
+    "path sandbox: allowed absolute targets outside it do not require rebinding. After a SEARCH ",
+    "conflict, only ReadFiles refreshes the edit guard: execute its exact next_action, then use the ",
+    "returned revision and visible lines in one corrected EditFiles line_patch. Never fall back to ",
+    "shell, sed, or Python for an ordinary source edit. If ",
     "edit_applied=true or status=completed_with_issues, never repeat the original edit: diagnose ",
     "verification and make only corrective changes. If Initialize ",
     "reports initialize_workspace_already_bound or workspace_change_requires_new_session, do not ",
     "call Initialize again in that conversation. If a reset or mode change follows adapter state ",
-    "loss, accept the recovered first_call result and continue with its returned pair. Use CodeMap ",
+    "loss, accept the recovered first_call result and continue with its returned pair. Request ",
+    "reset_shell only after BashCommand returns a shell-runtime failure; if Winx reports ",
+    "reset_skipped_healthy, continue with the preserved PTY instead of retrying. Use CodeMap ",
     "with a concise query to locate code, ",
     "then batch ReadFiles for exact text. Read existing targets before editing; use one EditFiles ",
-    "call for a single change or an atomic cross-file batch. Prefer search_replace for small exact ",
-    "changes, line_patch with a ReadFiles revision when coordinates are known, replace for new files ",
-    "or intentional whole-file rewrites, and undo only with the returned undo_id. Combine related ",
+    "call for a single change or an atomic cross-file batch. For an existing file read by ReadFiles, ",
+    "default to revision-bound line_patch; reserve search_replace for intentional text anchoring ",
+    "copied exactly from the current read, replace for new files or intentional whole-file rewrites, ",
+    "and undo only with the returned undo_id. Combine related ",
     "finite checks with && or EditFiles verify_command. For ",
     "BashCommand, follow next_action only while status is running and never auto-approve a prompt ",
     "that changes permissions, data, or system state. Use ReadFiles for unsupported CodeMap ",
@@ -24,6 +29,7 @@ const DEFAULT_INSTRUCTIONS: &str = concat!(
     "only in the temporary_artifact_dir returned by Initialize (exported as WINX_TEMP_DIR). Keep ",
     "a small stable set: overwrite or reuse the same descriptive helper per purpose, retain ",
     "source-path/line provenance, remove obsolete files, and treat helpers as non-canonical. Never turn ",
+    "TTL-expired helpers into durable state: Winx may reclaim them near the session quota. ",
     "command, lint, test, or search output into a parseable carrier merely to call CodeMap. CodeMap ",
     "on helpers accepts only an existing single file and has a smaller aggregate session budget; ",
     "canonical source maps remain available. Never encode payload in names or create .winx-* or ",
@@ -78,6 +84,7 @@ mod tests {
         assert!(instructions.contains("existing single file"));
         assert!(instructions.contains("Never encode payload in names"));
         assert!(instructions.contains(".winx-* or .winx_tmp artifacts"));
+        assert!(instructions.contains("Winx may reclaim them near the session quota"));
     }
 
     #[test]
@@ -87,12 +94,17 @@ mod tests {
         assert!(instructions.contains("workspace_change_requires_new_session"));
         assert!(instructions.contains("do not call Initialize again"));
         assert!(instructions.contains("allowed absolute targets outside it"));
+        assert!(instructions.contains("reset_shell only after BashCommand"));
+        assert!(instructions.contains("reset_skipped_healthy"));
     }
 
     #[test]
     fn default_contract_distinguishes_edit_conflicts_from_verification_follow_up() {
         let instructions = server_instructions();
         assert!(instructions.contains("only ReadFiles refreshes the edit guard"));
+        assert!(instructions.contains("one corrected EditFiles line_patch"));
+        assert!(instructions.contains("Never fall back to shell, sed, or Python"));
+        assert!(instructions.contains("default to revision-bound line_patch"));
         assert!(instructions.contains("edit_applied=true"));
         assert!(instructions.contains("status=completed_with_issues"));
         assert!(instructions.contains("never repeat the original edit"));

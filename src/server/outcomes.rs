@@ -141,6 +141,15 @@ pub(super) fn tool_failure(
                 workspace_root.display()
             )
         }
+        ("EditFiles", error) if error.is_search_match_conflict() => {
+            format!(
+                "{tool} failed: {error}\n\nNo file was changed by this call. Winx invalidated \
+                 the prior read permit for the conflicting target. Execute the exact ReadFiles \
+                 nextAction, then make one corrected EditFiles retry with mode=line_patch using \
+                 its returned revision and visible coordinates. Do not retry SEARCH or use \
+                 BashCommand, sed, or Python for the ordinary file edit."
+            )
+        }
         ("FileWriteOrEdit" | "MultiFileEdit", error) if error.is_search_match_conflict() => {
             format!(
                 "{tool} failed: {error}\n\nNo file was changed by this call. Winx invalidated \
@@ -621,14 +630,27 @@ pub(super) fn attach_temporary_artifact_usage(
     data.insert("temporary_artifact_cleanup_required".to_string(), Value::Bool(true));
     let background_id = data.get("bg_command_id").and_then(Value::as_str).map(str::to_string);
     let running = envelope.get("status").and_then(Value::as_str) == Some("running");
-    let instruction = if running {
-        "The running process has exceeded the managed temporary-artifact budget. Interrupt it, \
-         then inspect and remove obsolete files beneath $WINX_TEMP_DIR before starting another \
-         command. Winx did not delete files automatically."
+    let automatic_cleanup = if usage.stale_pruned_files > 0 {
+        format!(
+            "Winx already reclaimed {} TTL-expired helper(s) / {} bytes; fresh artifacts were \
+             preserved.",
+            usage.stale_pruned_files, usage.stale_pruned_bytes
+        )
     } else {
-        "Inspect and remove obsolete files beneath $WINX_TEMP_DIR with a cleanup-only BashCommand. \
-         Winx did not delete files automatically; ordinary Command actions remain blocked until \
-         this session is back under budget."
+        "No eligible TTL-expired helper was removed; fresh artifacts were preserved.".to_string()
+    };
+    let instruction = if running {
+        format!(
+            "The running process has exceeded the managed temporary-artifact budget. Interrupt it, \
+             then inspect and remove obsolete files beneath $WINX_TEMP_DIR before starting another \
+             command. {automatic_cleanup}"
+        )
+    } else {
+        format!(
+            "Inspect and remove obsolete files beneath $WINX_TEMP_DIR with a cleanup-only \
+             BashCommand. {automatic_cleanup} Ordinary Command actions remain blocked until this \
+             session is back under budget."
+        )
     };
     envelope.insert(
         "message".to_string(),
@@ -653,11 +675,8 @@ pub(super) fn attach_temporary_artifact_usage(
         }
         action
     });
-    let next_action = ToolNextAction {
-        tool: "BashCommand".to_string(),
-        instruction: instruction.to_string(),
-        arguments: next_arguments,
-    };
+    let next_action =
+        ToolNextAction { tool: "BashCommand".to_string(), instruction, arguments: next_arguments };
     if let Ok(value) = serde_json::to_value(next_action) {
         envelope.insert("nextAction".to_string(), value);
     }
@@ -665,8 +684,9 @@ pub(super) fn attach_temporary_artifact_usage(
     let thread_id = string_argument(arguments, "thread_id").unwrap_or_default();
     result.content.push(ContentBlock::text(format!(
         "Winx guard: temporary_artifact_dir={} now contains {} files / {} bytes (limits: {} \
-         files / {} bytes; largest file {} bytes, limit {}). No files were deleted. Inspect and \
-         remove obsolete helpers with a cleanup-only BashCommand using thread_id={thread_id}.",
+         files / {} bytes; largest file {} bytes, limit {}). Stale reclamation removed {} files / \
+         {} bytes while preserving fresh artifacts. Inspect and remove remaining obsolete helpers \
+         with a cleanup-only BashCommand using thread_id={thread_id}.",
         usage.temporary_artifact_dir.display(),
         usage.session_files,
         usage.session_bytes,
@@ -674,6 +694,8 @@ pub(super) fn attach_temporary_artifact_usage(
         usage.max_session_bytes,
         usage.largest_file_bytes,
         usage.max_file_bytes,
+        usage.stale_pruned_files,
+        usage.stale_pruned_bytes,
     )));
 }
 
@@ -1060,7 +1082,7 @@ fn error_envelope(
         _ => {}
     }
 
-    if let Some(plan) = super::recovery::classify(error, arguments) {
+    if let Some(plan) = super::recovery::classify(tool, error, arguments) {
         status = plan.status;
         error_code = plan.error_code.to_string();
         retryable = plan.retryable;
@@ -1161,6 +1183,13 @@ fn error_envelope(
         data.insert("edit_applied".to_string(), Value::Bool(false));
         data.insert("fresh_read_required".to_string(), Value::Bool(true));
         data.insert("read_permit_invalidated".to_string(), Value::Bool(true));
+        if tool == "EditFiles" {
+            data.insert(
+                "recommended_edit_mode".to_string(),
+                Value::String("line_patch".to_string()),
+            );
+            data.insert("ordinary_shell_edit_fallback".to_string(), Value::Bool(false));
+        }
     }
     ToolResultEnvelope {
         status,
@@ -1455,6 +1484,8 @@ mod tests {
             max_session_files: 128,
             largest_file_bytes: 2,
             max_file_bytes: 64,
+            stale_pruned_files: 0,
+            stale_pruned_bytes: 0,
             over_budget: true,
         };
 
@@ -1496,6 +1527,8 @@ mod tests {
             max_session_files: 128,
             largest_file_bytes: 2,
             max_file_bytes: 64,
+            stale_pruned_files: 0,
+            stale_pruned_bytes: 0,
             over_budget: true,
         };
 
@@ -1643,6 +1676,42 @@ mod tests {
         assert_eq!(structured["data"]["bound_workspace"], "/other");
         assert_eq!(structured["nextAction"]["tool"], "Initialize");
         assert_eq!(structured["nextAction"]["arguments"]["any_workspace_path"], "/intended");
+    }
+
+    #[test]
+    fn unified_search_conflict_points_to_line_patch_without_shell_fallback() {
+        let error = WinxError::IndexedEditError {
+            index: 1,
+            path: "/workspace/src/lib.rs".into(),
+            mode: "search_replace".to_string(),
+            source: Box::new(WinxError::SearchBlockNotFound("stale block".to_string())),
+        };
+        let arguments = json!({
+            "files": [{
+                "file_path": "/workspace/src/lib.rs",
+                "mode": "search_replace",
+                "content": "stale block"
+            }],
+            "thread_id": "thread",
+            "workspace_root": "/workspace"
+        });
+        let result =
+            tool_failure("EditFiles", &error, Some(&arguments)).expect("tool-level edit conflict");
+
+        assert_eq!(result.is_error, Some(true));
+        let text = result_text(&result);
+        assert!(text.contains("mode=line_patch"), "{text}");
+        assert!(text.contains("Do not retry SEARCH"), "{text}");
+        let structured = result.structured_content.expect("structured edit conflict");
+        assert_eq!(structured["status"], "conflict");
+        assert_eq!(structured["errorCode"], "search_block_not_found");
+        assert_eq!(structured["nextAction"]["tool"], "ReadFiles");
+        assert!(structured["nextAction"]["instruction"]
+            .as_str()
+            .is_some_and(|instruction| instruction.contains("mode=line_patch")));
+        assert_eq!(structured["data"]["recommended_edit_mode"], "line_patch");
+        assert_eq!(structured["data"]["ordinary_shell_edit_fallback"], false);
+        assert_eq!(structured["data"]["edit_applied"], false);
     }
 
     #[test]

@@ -41,7 +41,32 @@ impl ErrorRecoveryPlan {
         arguments: Option<&Value>,
     ) -> Self {
         let path = path.to_string_lossy().into_owned();
-        let next_action = read_action(arguments, &path, &ranges);
+        let next_action = read_action(arguments, &path, &ranges, ReadActionKind::Refresh);
+        Self {
+            status,
+            error_code,
+            retryable: true,
+            retry_after_ms: None,
+            next_action,
+            required_reads: vec![RequiredRead { path, ranges }],
+        }
+    }
+
+    fn search_conflict(
+        status: ToolResultStatus,
+        error_code: &'static str,
+        path: &Path,
+        prefer_line_patch: bool,
+        arguments: Option<&Value>,
+    ) -> Self {
+        let path = path.to_string_lossy().into_owned();
+        let ranges = Vec::new();
+        let action_kind = if prefer_line_patch {
+            ReadActionKind::SearchConflictLinePatch
+        } else {
+            ReadActionKind::SearchConflictText
+        };
+        let next_action = read_action(arguments, &path, &ranges, action_kind);
         Self {
             status,
             error_code,
@@ -53,15 +78,27 @@ impl ErrorRecoveryPlan {
     }
 }
 
+#[derive(Clone, Copy)]
+enum ReadActionKind {
+    Refresh,
+    SearchConflictLinePatch,
+    SearchConflictText,
+}
+
 /// Map a domain error to the exact recovery transition exposed over MCP.
 ///
 /// `MultiFilePlanError` supplies the request-resolved path for inner failures
 /// such as SEARCH conflicts, whose source variant intentionally has no path.
-pub(super) fn classify(error: &WinxError, arguments: Option<&Value>) -> Option<ErrorRecoveryPlan> {
-    classify_with_path(error, arguments, None)
+pub(super) fn classify(
+    tool: &str,
+    error: &WinxError,
+    arguments: Option<&Value>,
+) -> Option<ErrorRecoveryPlan> {
+    classify_with_path(tool, error, arguments, None)
 }
 
 fn classify_with_path(
+    tool: &str,
     error: &WinxError,
     arguments: Option<&Value>,
     contextual_path: Option<&Path>,
@@ -70,7 +107,7 @@ fn classify_with_path(
         WinxError::MultiFilePlanError { path, source, .. }
         | WinxError::EditContextError { path, source }
         | WinxError::IndexedEditError { path, source, .. } => {
-            classify_with_path(source, arguments, Some(path))
+            classify_with_path(tool, source, arguments, Some(path))
         }
         WinxError::FileReadRequired { path, ranges, .. } => Some(ErrorRecoveryPlan::read(
             ToolResultStatus::NeedsRead,
@@ -106,7 +143,7 @@ fn classify_with_path(
         )),
         WinxError::SearchBlockNotFound(_) | WinxError::SearchBlockAmbiguous { .. } => {
             let path = contextual_path.map(Path::to_path_buf)?;
-            Some(ErrorRecoveryPlan::read(
+            Some(ErrorRecoveryPlan::search_conflict(
                 ToolResultStatus::Conflict,
                 if matches!(error, WinxError::SearchBlockAmbiguous { .. }) {
                     "search_block_ambiguous"
@@ -114,7 +151,7 @@ fn classify_with_path(
                     "search_block_not_found"
                 },
                 &path,
-                Vec::new(),
+                tool == ToolKind::EditFiles.as_str(),
                 arguments,
             ))
         }
@@ -138,7 +175,12 @@ fn classify_with_path(
     }
 }
 
-fn read_action(arguments: Option<&Value>, path: &str, ranges: &[String]) -> Option<ToolNextAction> {
+fn read_action(
+    arguments: Option<&Value>,
+    path: &str,
+    ranges: &[String],
+    kind: ReadActionKind,
+) -> Option<ToolNextAction> {
     if path.is_empty() {
         return None;
     }
@@ -149,12 +191,23 @@ fn read_action(arguments: Option<&Value>, path: &str, ranges: &[String]) -> Opti
     };
     let mut value = json!({"file_paths": file_paths});
     copy_session_binding(arguments, &mut value);
+    let instruction = if matches!(kind, ReadActionKind::SearchConflictLinePatch) {
+        "Call ReadFiles exactly as specified; Bash/cat does not refresh the edit guard. Then make \
+         one corrected EditFiles retry with mode=line_patch, copying the returned revision and \
+         visible line coordinates. Do not retry SEARCH or fall back to shell, sed, or Python for \
+         the ordinary file edit."
+    } else if matches!(kind, ReadActionKind::SearchConflictText) {
+        "Call ReadFiles exactly as specified before another edit attempt. Bash/cat does not \
+         refresh the edit guard. Rebuild SEARCH from the returned current text, then make one \
+         corrected retry; never resend the failed edit unchanged."
+    } else {
+        "Call ReadFiles exactly as specified before another edit attempt. Bash/cat does not \
+         refresh the edit guard. Rebuild the intended edit from the returned current text and \
+         revision; never resend stale or failed input unchanged."
+    };
     Some(ToolNextAction {
         tool: ToolKind::ReadFiles.as_str().to_string(),
-        instruction: "Call ReadFiles exactly as specified before another edit attempt. Bash/cat \
-                      does not refresh the edit guard. Rebuild SEARCH from the returned current \
-                      text, then make one corrected retry; never resend the failed edit unchanged."
-            .to_string(),
+        instruction: instruction.to_string(),
         arguments: Some(value),
     })
 }
@@ -188,7 +241,7 @@ mod tests {
             "thread_id": "thread",
             "workspace_root": "/workspace"
         });
-        let plan = classify(&error, Some(&arguments)).ok_or_else(|| {
+        let plan = classify("ReadFiles", &error, Some(&arguments)).ok_or_else(|| {
             WinxError::ParseError("typed recovery plan was not produced".to_string())
         })?;
         assert_eq!(plan.status, ToolResultStatus::NeedsRead);
@@ -214,7 +267,7 @@ mod tests {
             path: "/workspace/src/main.rs".into(),
             source: Box::new(WinxError::SearchBlockNotFound("missing".into())),
         };
-        let plan = classify(&error, None).ok_or_else(|| {
+        let plan = classify("MultiFileEdit", &error, None).ok_or_else(|| {
             WinxError::ParseError("typed recovery plan was not produced".to_string())
         })?;
         assert_eq!(plan.error_code, "search_block_not_found");
@@ -229,13 +282,45 @@ mod tests {
             path: "/workspace/src/lib.rs".into(),
             source: Box::new(WinxError::SearchBlockNotFound("missing".into())),
         };
-        let plan =
-            classify(&error, Some(&json!({"thread_id": "thread", "workspace_root": "/workspace"})))
-                .ok_or_else(|| {
-                    WinxError::ParseError("typed recovery plan was not produced".to_string())
-                })?;
+        let plan = classify(
+            "FileWriteOrEdit",
+            &error,
+            Some(&json!({"thread_id": "thread", "workspace_root": "/workspace"})),
+        )
+        .ok_or_else(|| WinxError::ParseError("typed recovery plan was not produced".to_string()))?;
         assert_eq!(plan.error_code, "search_block_not_found");
         assert_eq!(plan.required_reads[0].path, "/workspace/src/lib.rs");
+        Ok(())
+    }
+
+    #[test]
+    fn unified_search_conflict_recovers_through_revision_bound_line_patch(
+    ) -> crate::errors::Result<()> {
+        let error = WinxError::IndexedEditError {
+            index: 1,
+            path: "/workspace/src/lib.rs".into(),
+            mode: "search_replace".to_string(),
+            source: Box::new(WinxError::SearchBlockNotFound("stale".to_string())),
+        };
+        let arguments = json!({
+            "files": [{
+                "file_path": "/workspace/src/lib.rs",
+                "mode": "search_replace",
+                "content": "stale"
+            }],
+            "thread_id": "thread",
+            "workspace_root": "/workspace"
+        });
+        let plan = classify("EditFiles", &error, Some(&arguments)).ok_or_else(|| {
+            WinxError::ParseError("typed recovery plan was not produced".to_string())
+        })?;
+        let action = plan.next_action.ok_or_else(|| {
+            WinxError::ParseError("typed recovery plan omitted next action".to_string())
+        })?;
+        assert!(action.instruction.contains("mode=line_patch"));
+        assert!(action.instruction.contains("returned revision"));
+        assert!(action.instruction.contains("Do not retry SEARCH"));
+        assert!(!action.instruction.contains("Rebuild SEARCH"));
         Ok(())
     }
 
@@ -245,7 +330,7 @@ mod tests {
             path: "/workspace/src/lib.rs".into(),
             undo_id: "undo_missing".to_string(),
         };
-        let plan = classify(&error, None)
+        let plan = classify("EditFiles", &error, None)
             .ok_or_else(|| WinxError::ParseError("typed undo plan missing".to_string()))?;
         assert_eq!(plan.status, ToolResultStatus::NotFound);
         assert_eq!(plan.error_code, "undo_expired");
@@ -260,6 +345,6 @@ mod tests {
             path: "/workspace/file".into(),
             message: "hasn't been read but this is only an opaque OS message".into(),
         };
-        assert!(classify(&error, None).is_none());
+        assert!(classify("ReadFiles", &error, None).is_none());
     }
 }
