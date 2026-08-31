@@ -1282,8 +1282,18 @@ mod tests {
         let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let pruned = prune_active_session_unlocked(&active, Duration::from_millis(5));
         assert_eq!(pruned.files, 40);
+        // Mirror production (`audit_session_impl`): the scan root must come
+        // from the canonicalized workspace, because `active` is canonical too.
+        // A literal root diverges when the temp dir sits behind a symlink
+        // (containerized CI), making `starts_with(active)` count zero session
+        // files while the helpers all still exist.
+        let usage_root = workspace
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.path().to_path_buf())
+            .join(TEMP_ROOT);
         assert_eq!(
-            temp_tree_usage(&workspace.path().join(TEMP_ROOT), &active).unwrap().session_files,
+            temp_tree_usage(&usage_root, &active).unwrap().session_files,
             ACTIVE_SESSION_PRUNE_TARGET_FILES
         );
         assert!(fresh.iter().all(|path| path.exists()), "fresh helpers must be retained");
