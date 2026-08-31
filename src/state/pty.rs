@@ -14,6 +14,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
@@ -35,6 +36,16 @@ const MAX_OUTPUT_SIZE: usize = 1_000_000;
 /// command emitting gigabytes cannot fill the disk. The head beyond this is
 /// dropped (the agent still gets the first 50 MB plus the live tail).
 const SCRATCH_MAX_BYTES: u64 = 50 * 1024 * 1024;
+
+/// Sleep injected between PTY reads once the current command's output is pure
+/// discard (scratch budget exhausted — only the live tail is still retained).
+/// With 4 KiB reads this caps consumption at roughly 2 MB/s, so a runaway
+/// producer (`head -c 5T /dev/zero | tr '\0' x` was the production incident)
+/// back-pressures against the kernel PTY buffer instead of pinning a core in
+/// the terminal parsers at full stream speed. A real TUI redraw burst
+/// (~40 KiB/frame) still renders at ~50 fps under this cap, so interactive
+/// piloting is unaffected.
+const DISCARD_READ_THROTTLE: Duration = Duration::from_millis(2);
 
 /// How many fully-formed lines to keep in the per-shell ringbuffer. Callers can
 /// ask for at most this many lines of historical context via
@@ -178,6 +189,68 @@ fn timestamp_millis() -> u128 {
         .map_or(0, |duration| duration.as_millis())
 }
 
+/// Background thread that pumps the PTY master into the output channel and the
+/// live emulator. Owns the blocking `read` loop so the async side never blocks.
+fn spawn_pty_reader(
+    mut reader: Box<dyn Read + Send>,
+    output_tx: mpsc::SyncSender<String>,
+    live: Arc<StdMutex<LiveTerminal>>,
+    discard_throttle: Arc<AtomicBool>,
+) {
+    thread::spawn(move || {
+        let mut buf = [0u8; 4096];
+        // Bytes of an incomplete trailing UTF-8 char held back for the next
+        // read. Without this, a multibyte glyph split across a 4096-byte read
+        // boundary would decode to two U+FFFDs — corrupting the output buffer
+        // and the prompt/CWD detection that runs over it.
+        let mut carry: Vec<u8> = Vec::new();
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    // EOF - PTY closed. Flush any held bytes lossily.
+                    if !carry.is_empty() {
+                        let _ = output_tx.send(String::from_utf8_lossy(&carry).into_owned());
+                    }
+                    break;
+                }
+                Ok(n) => {
+                    // Tap the raw bytes into the live emulator first (brief
+                    // lock; feed is O(chunk len)). Feeding bytes — not the
+                    // lossy String — keeps the persistent VTE parser exact
+                    // across chunk boundaries. Recover from a poisoned lock
+                    // instead of dropping the feed silently.
+                    {
+                        let mut emu =
+                            live.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                        emu.feed(&buf[..n]);
+                    }
+                    // Decode the longest valid prefix; carry an incomplete
+                    // trailing char into the next read.
+                    carry.extend_from_slice(&buf[..n]);
+                    let (chunk, rest) = decode_keep_incomplete(&carry);
+                    carry = rest;
+                    if !chunk.is_empty() && output_tx.send(chunk).is_err() {
+                        // Receiver dropped, exit thread
+                        break;
+                    }
+                    // Once the command's output is pure discard, stop
+                    // consuming at stream speed: the pause fills the kernel
+                    // PTY buffer and blocks the producer instead of burning
+                    // a core parsing bytes that are thrown away.
+                    if discard_throttle.load(AtomicOrdering::Relaxed) {
+                        thread::sleep(DISCARD_READ_THROTTLE);
+                    }
+                }
+                Err(e) => {
+                    debug!("PTY reader thread error: {}", e);
+                    break;
+                }
+            }
+        }
+        debug!("PTY reader thread exiting");
+    });
+}
+
 /// Real PTY-based interactive shell
 ///
 /// Uses portable-pty for true pseudo-terminal functionality,
@@ -254,6 +327,11 @@ pub struct PtyShell {
     scratch_path: Option<PathBuf>,
     /// Bytes already streamed to `scratch_path`, used to enforce `SCRATCH_MAX_BYTES`.
     scratch_bytes: u64,
+    /// Shared with the reader thread: when set, the current command's output
+    /// is pure discard (scratch budget exhausted), so the reader inserts
+    /// [`DISCARD_READ_THROTTLE`] between reads and lets the kernel PTY buffer
+    /// back-pressure the producer. Cleared on every new command.
+    discard_throttle: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for PtyShell {
@@ -406,7 +484,7 @@ impl PtyShell {
         let child = pair.slave.spawn_command(cmd).context("Failed to spawn bash in PTY")?;
 
         // Get reader and writer from master
-        let mut reader = pair.master.try_clone_reader().context("Failed to clone PTY reader")?;
+        let reader = pair.master.try_clone_reader().context("Failed to clone PTY reader")?;
         let writer = pair.master.take_writer().context("Failed to take PTY writer")?;
 
         // Bounded channel: if the consumer stalls, the reader thread blocks on
@@ -418,55 +496,10 @@ impl PtyShell {
         // grid stays current without any consumer needing to poll.
         let live = Arc::new(StdMutex::new(LiveTerminal::new(DEFAULT_ROWS, DEFAULT_COLS)));
         let live_reader = Arc::clone(&live);
+        let discard_throttle = Arc::new(AtomicBool::new(false));
+        let throttle_reader = Arc::clone(&discard_throttle);
 
-        // Spawn a background thread to read from the PTY
-        // This prevents blocking the main thread
-        thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            // Bytes of an incomplete trailing UTF-8 char held back for the next
-            // read. Without this, a multibyte glyph split across a 4096-byte read
-            // boundary would decode to two U+FFFDs — corrupting the output buffer
-            // and the prompt/CWD detection that runs over it.
-            let mut carry: Vec<u8> = Vec::new();
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) => {
-                        // EOF - PTY closed. Flush any held bytes lossily.
-                        if !carry.is_empty() {
-                            let _ = output_tx.send(String::from_utf8_lossy(&carry).into_owned());
-                        }
-                        break;
-                    }
-                    Ok(n) => {
-                        // Tap the raw bytes into the live emulator first (brief
-                        // lock; feed is O(chunk len)). Feeding bytes — not the
-                        // lossy String — keeps the persistent VTE parser exact
-                        // across chunk boundaries. Recover from a poisoned lock
-                        // instead of dropping the feed silently.
-                        {
-                            let mut emu = live_reader
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner);
-                            emu.feed(&buf[..n]);
-                        }
-                        // Decode the longest valid prefix; carry an incomplete
-                        // trailing char into the next read.
-                        carry.extend_from_slice(&buf[..n]);
-                        let (chunk, rest) = decode_keep_incomplete(&carry);
-                        carry = rest;
-                        if !chunk.is_empty() && output_tx.send(chunk).is_err() {
-                            // Receiver dropped, exit thread
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        debug!("PTY reader thread error: {}", e);
-                        break;
-                    }
-                }
-            }
-            debug!("PTY reader thread exiting");
-        });
+        spawn_pty_reader(reader, output_tx, live_reader, throttle_reader);
 
         // Create the shell instance
         let mut shell = Self {
@@ -494,6 +527,7 @@ impl PtyShell {
             scratch_workspace_root: None,
             scratch_path: None,
             scratch_bytes: 0,
+            discard_throttle,
         };
 
         // Initialize the shell with WCGW-style prompt
@@ -856,6 +890,7 @@ impl PtyShell {
     pub fn reset_scratch(&mut self) {
         self.scratch_path = None;
         self.scratch_bytes = 0;
+        self.discard_throttle.store(false, AtomicOrdering::Relaxed);
     }
 
     /// Append a just-dropped output `head` to the per-command scratch file so the
@@ -870,6 +905,10 @@ impl PtyShell {
         // boundary so we never slice mid-UTF-8.
         let remaining = SCRATCH_MAX_BYTES.saturating_sub(self.scratch_bytes);
         if remaining == 0 {
+            // From here on the head is discarded outright — reading faster
+            // only burns CPU. Engage reader back-pressure until the next
+            // command resets the scratch state.
+            self.discard_throttle.store(true, AtomicOrdering::Relaxed);
             return;
         }
         let head = match usize::try_from(remaining) {
@@ -886,6 +925,9 @@ impl PtyShell {
             Ok(0) if self.scratch_bytes == 0 => self.scratch_path = None,
             Ok(written) => {
                 self.scratch_bytes = self.scratch_bytes.saturating_add(written as u64);
+                if self.scratch_bytes >= SCRATCH_MAX_BYTES {
+                    self.discard_throttle.store(true, AtomicOrdering::Relaxed);
+                }
             }
             Err(e) => debug!("scratch: append to {} failed: {e}", path.display()),
         }
@@ -1243,6 +1285,37 @@ mod tests {
         let temp_dir = TempDir::new()?;
         let result = PtyShell::new(temp_dir.path(), false);
         assert!(result.is_ok(), "Failed to create PTY shell: {:?}", result.err());
+        Ok(())
+    }
+
+    #[test]
+    fn discard_throttle_engages_at_scratch_cap_and_resets_per_command() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut shell = PtyShell::new(temp_dir.path(), false)?;
+        assert!(!shell.discard_throttle.load(AtomicOrdering::Relaxed));
+
+        // Saturated scratch budget: the next dropped head is pure discard and
+        // must engage reader back-pressure.
+        shell.scratch_workspace_root = Some(temp_dir.path().to_path_buf());
+        shell.scratch_bytes = SCRATCH_MAX_BYTES;
+        shell.offload_dropped_head("dropped beyond the budget");
+        assert!(shell.discard_throttle.load(AtomicOrdering::Relaxed));
+
+        // A new command resets scratch state and releases the throttle.
+        shell.send_command("echo done")?;
+        assert!(!shell.discard_throttle.load(AtomicOrdering::Relaxed));
+        Ok(())
+    }
+
+    #[test]
+    fn discard_throttle_engages_when_a_write_reaches_the_cap() -> Result<()> {
+        let temp_dir = TempDir::new()?;
+        let mut shell = PtyShell::new(temp_dir.path(), false)?;
+        shell.scratch_workspace_root = Some(temp_dir.path().to_path_buf());
+        // One byte of budget left: this write saturates the cap exactly.
+        shell.scratch_bytes = SCRATCH_MAX_BYTES - 1;
+        shell.offload_dropped_head("xx");
+        assert!(shell.discard_throttle.load(AtomicOrdering::Relaxed));
         Ok(())
     }
 

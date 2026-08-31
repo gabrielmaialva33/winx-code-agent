@@ -155,8 +155,23 @@ impl GuardianLifecycle {
         thread_id: &str,
         socket: &Path,
     ) -> Result<HelloResult> {
-        let _gate = self.mutation_gate.lock().await;
+        // Probe the target guardian BEFORE taking the global mutation gate:
+        // the probe is read-only network I/O, and against a dead or slow
+        // socket `hello_with_retry` can burn ~9s in connect retries. Held
+        // under the gate, that stalls every other session's negotiation
+        // behind one busy guardian — observed in production as cross-session
+        // Initialize failures at exactly the 10s control-RPC timeout.
         if let Some(hello) = hello_with_retry(socket).await {
+            let _gate = self.mutation_gate.lock().await;
+            self.record_activity(socket, thread_id, hello.daemon_pid).await?;
+            return Ok(hello);
+        }
+
+        let _gate = self.mutation_gate.lock().await;
+        // Re-probe once under the gate: another caller may have spawned this
+        // guardian while we waited for the lock, and spawning a duplicate
+        // would orphan one of the two.
+        if let Ok(hello) = DaemonClient::new(socket).hello().await {
             self.record_activity(socket, thread_id, hello.daemon_pid).await?;
             return Ok(hello);
         }
