@@ -209,7 +209,17 @@ pub(super) async fn execute_wait_for_turn(
     let mut busy_since: Option<Instant> = None;
 
     loop {
-        let (snapshot, in_alt, alive, running, running_for, exit_code, cwd) = {
+        let (
+            snapshot,
+            osc_title,
+            osc_progress,
+            in_alt,
+            alive,
+            running,
+            running_for,
+            exit_code,
+            cwd,
+        ) = {
             let mut guard = shell.lock().await;
             match guard.as_mut() {
                 Some(shell) => {
@@ -217,6 +227,8 @@ pub(super) async fn execute_wait_for_turn(
                     let running = shell.command_running;
                     (
                         shell.live_snapshot(max_lines),
+                        shell.live_osc_title(),
+                        shell.live_osc_progress(),
                         shell.live_in_alt_screen(),
                         shell.is_alive(),
                         running,
@@ -225,7 +237,17 @@ pub(super) async fn execute_wait_for_turn(
                         Some(shell.current_cwd().to_path_buf()),
                     )
                 }
-                None => (Vec::new(), false, false, false, None, None, None),
+                None => (
+                    Vec::new(),
+                    String::new(),
+                    String::new(),
+                    false,
+                    false,
+                    false,
+                    None,
+                    None,
+                    None,
+                ),
             }
         };
 
@@ -238,7 +260,11 @@ pub(super) async fn execute_wait_for_turn(
             stable_since = Instant::now();
         }
 
-        let state = recognizer.detect(&snapshot);
+        let state = recognizer.detect_input(&crate::state::turn::TurnInput {
+            screen: &snapshot,
+            osc_title: &osc_title,
+            osc_progress: &osc_progress,
+        });
         if state == TurnState::Busy {
             seen_busy = true;
             if busy_since.is_none() {

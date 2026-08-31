@@ -48,6 +48,24 @@ impl TurnState {
     }
 }
 
+/// Everything a recognizer may read: the rendered, ANSI-stripped screen lines
+/// plus the latest OSC 0/2 title and OSC 9 progress payload captured from the
+/// raw PTY stream. OSC strings are empty when the tap has seen none — the
+/// manifest engine then behaves exactly like a screen-only detector.
+#[derive(Debug, Clone, Copy)]
+pub struct TurnInput<'a> {
+    pub screen: &'a [String],
+    pub osc_title: &'a str,
+    pub osc_progress: &'a str,
+}
+
+impl<'a> TurnInput<'a> {
+    /// A screen-only input (no OSC evidence).
+    pub fn screen_only(screen: &'a [String]) -> Self {
+        Self { screen, osc_title: "", osc_progress: "" }
+    }
+}
+
 /// Reads a rendered screen (ANSI already stripped, one `String` per line) and
 /// classifies the current turn state for a specific kind of TUI.
 pub trait TurnRecognizer: Send + Sync {
@@ -55,19 +73,60 @@ pub trait TurnRecognizer: Send + Sync {
     fn name(&self) -> &'static str;
     /// Classify the current screen.
     fn detect(&self, screen: &[String]) -> TurnState;
+    /// Classify with the full input (screen + OSC evidence). Screen-only
+    /// recognizers get this for free; the manifest recognizer overrides it to
+    /// use OSC title/progress rules.
+    fn detect_input(&self, input: &TurnInput<'_>) -> TurnState {
+        self.detect(input.screen)
+    }
 }
 
-/// Build the recognizer for a hint string (`auto` | `claude` | `codex` |
-/// `generic`). Unknown hints fall back to `auto`.
+/// Build the recognizer for a hint string. Hints resolve in this order:
+///   * `generic`/`none`/`off` and `configurable` keep their dedicated
+///     recognizers;
+///   * `auto` (and unknown hints) combine the claude + codex manifests with
+///     the legacy hand-written recognizers as fallback;
+///   * anything matching a bundled agent-manifest id or alias (`claude`,
+///     `codex`, `gemini`, `agy`, `cursor`, `opencode`, `grok`, `copilot`, ...)
+///     gets that manifest, with the legacy recognizer (where one exists)
+///     backing it up when no manifest rule fires.
 pub fn recognizer_for(hint: &str) -> Box<dyn TurnRecognizer> {
-    match hint.trim().to_ascii_lowercase().as_str() {
-        "claude" => Box::new(ClaudeRecognizer),
-        "codex" => Box::new(CodexRecognizer),
-        "antigravity" | "agy" | "gemini" => Box::new(AntigravityRecognizer),
-        "generic" | "none" | "off" => Box::new(GenericRecognizer),
-        "configurable" => configurable_from_env(),
-        _ => Box::new(AutoRecognizer),
+    let hint = hint.trim().to_ascii_lowercase();
+    match hint.as_str() {
+        "generic" | "none" | "off" => return Box::new(GenericRecognizer),
+        "configurable" => return configurable_from_env(),
+        "auto" => return auto_recognizer(),
+        _ => {}
     }
+    let legacy: Option<Box<dyn TurnRecognizer>> = match hint.as_str() {
+        "claude" => Some(Box::new(ClaudeRecognizer)),
+        "codex" => Some(Box::new(CodexRecognizer)),
+        // `gemini` was historically an alias for the antigravity recognizer;
+        // it now resolves to the gemini manifest but keeps those markers as
+        // the fallback layer.
+        "antigravity" | "agy" | "gemini" => Some(Box::new(AntigravityRecognizer)),
+        _ => None,
+    };
+    match crate::state::turn_manifest::manifest_for(&hint) {
+        Some(manifest) => Box::new(ManifestRecognizer { manifest, fallback: legacy }),
+        None => legacy.unwrap_or_else(auto_recognizer),
+    }
+}
+
+/// The `auto` recognizer: claude + codex manifests (each backed by its legacy
+/// recognizer), combined by priority. Falls back to the purely hand-written
+/// [`AutoRecognizer`] only if a bundled manifest failed to load.
+fn auto_recognizer() -> Box<dyn TurnRecognizer> {
+    use crate::state::turn_manifest::manifest_for;
+    let (Some(claude), Some(codex)) = (manifest_for("claude"), manifest_for("codex")) else {
+        return Box::new(AutoRecognizer);
+    };
+    Box::new(ManifestAutoRecognizer {
+        members: [
+            ManifestRecognizer { manifest: claude, fallback: Some(Box::new(ClaudeRecognizer)) },
+            ManifestRecognizer { manifest: codex, fallback: Some(Box::new(CodexRecognizer)) },
+        ],
+    })
 }
 
 /// Build a [`GenericConfigurable`] from the `WINX_TURN_RECOGNIZER_CONFIG` env var
@@ -331,6 +390,81 @@ impl TurnRecognizer for GenericConfigurable {
         }
         if self.input.iter().any(|re| re.is_match(&tail)) {
             return TurnState::AwaitingInput;
+        }
+        TurnState::Unknown
+    }
+}
+
+// --- Manifest-driven ---------------------------------------------------------
+
+/// A recognizer backed by a data-driven agent manifest (see
+/// [`crate::state::turn_manifest`]) with an optional legacy recognizer behind
+/// it. A matched manifest rule is authoritative — including an explicit
+/// `unknown` match (e.g. a transcript-viewer screen), which must NOT fall
+/// through to the legacy recognizer: those screens show stale content that
+/// legacy markers would misread. Only a complete manifest miss delegates.
+pub struct ManifestRecognizer {
+    manifest: &'static crate::state::turn_manifest::CompiledManifest,
+    fallback: Option<Box<dyn TurnRecognizer>>,
+}
+
+impl TurnRecognizer for ManifestRecognizer {
+    fn name(&self) -> &'static str {
+        let manifest: &'static crate::state::turn_manifest::CompiledManifest = self.manifest;
+        manifest.id()
+    }
+
+    fn detect(&self, screen: &[String]) -> TurnState {
+        self.detect_input(&TurnInput::screen_only(screen))
+    }
+
+    fn detect_input(&self, input: &TurnInput<'_>) -> TurnState {
+        let joined = input.screen.join("\n");
+        let verdict = self.manifest.detect(crate::state::turn_manifest::DetectionInput {
+            screen: &joined,
+            osc_title: input.osc_title,
+            osc_progress: input.osc_progress,
+        });
+        if let Some((rule_id, priority)) = verdict.rule {
+            tracing::trace!(
+                manifest = self.name(),
+                rule = rule_id,
+                priority,
+                state = verdict.state.as_str(),
+                "turn manifest rule matched"
+            );
+            return verdict.state;
+        }
+        match &self.fallback {
+            Some(fallback) => fallback.detect_input(input),
+            None => TurnState::Unknown,
+        }
+    }
+}
+
+/// Manifest-driven `auto`: claude + codex manifests evaluated side by side,
+/// verdicts combined by priority (`Busy` > `AwaitingApproval` >
+/// `AwaitingInput` > `Unknown`) — same arbitration as the legacy
+/// [`AutoRecognizer`], so a busy app always wins over a stale prompt glyph.
+struct ManifestAutoRecognizer {
+    members: [ManifestRecognizer; 2],
+}
+
+impl TurnRecognizer for ManifestAutoRecognizer {
+    fn name(&self) -> &'static str {
+        "auto"
+    }
+
+    fn detect(&self, screen: &[String]) -> TurnState {
+        self.detect_input(&TurnInput::screen_only(screen))
+    }
+
+    fn detect_input(&self, input: &TurnInput<'_>) -> TurnState {
+        let states = self.members.each_ref().map(|member| member.detect_input(input));
+        for want in [TurnState::Busy, TurnState::AwaitingApproval, TurnState::AwaitingInput] {
+            if states.contains(&want) {
+                return want;
+            }
         }
         TurnState::Unknown
     }
@@ -636,5 +770,98 @@ mod tests {
         assert!(TurnState::AwaitingApproval.is_ready());
         assert!(!TurnState::Busy.is_ready());
         assert!(!TurnState::Unknown.is_ready());
+    }
+
+    // --- manifest-driven recognizer_for wiring ------------------------------
+
+    #[test]
+    fn recognizer_for_resolves_manifest_hints() {
+        // Core hints resolve to their manifests (name = manifest id)...
+        assert_eq!(recognizer_for("claude").name(), "claude");
+        assert_eq!(recognizer_for("codex").name(), "codex");
+        assert_eq!(recognizer_for("gemini").name(), "gemini");
+        assert_eq!(recognizer_for("agy").name(), "agy");
+        // ...as do agents winx never had hand-written recognizers for.
+        assert_eq!(recognizer_for("cursor").name(), "cursor");
+        assert_eq!(recognizer_for("opencode").name(), "opencode");
+        assert_eq!(recognizer_for("ghcs").name(), "copilot");
+        // Non-manifest hints keep their historical routing.
+        assert_eq!(recognizer_for("auto").name(), "auto");
+        assert_eq!(recognizer_for("generic").name(), "generic");
+        assert_eq!(recognizer_for("something-else").name(), "auto");
+    }
+
+    #[test]
+    fn manifest_claude_falls_back_to_legacy_markers_on_a_miss() {
+        // No manifest rule fires on this minimal screen (no prompt box rules,
+        // no dialogs), so the legacy `❯` marker must still surface input.
+        let screen = lines(&["● answered", "❯"]);
+        let recognizer = recognizer_for("claude");
+        assert_eq!(recognizer.detect(&screen), TurnState::AwaitingInput);
+    }
+
+    #[test]
+    fn manifest_rules_beat_legacy_on_current_claude_screens() {
+        // The 2.x claude prompt box sits between two horizontal rules — a
+        // shape only the manifest knows. The legacy recognizer also says
+        // AwaitingInput here (via `❯`), but the manifest's approval/working
+        // coverage beyond this is what the fixture tests below rely on.
+        let screen = lines(&["●─PONG", "──────────", "❯ ", "──────────", "  ⏵⏵ accept edits on"]);
+        assert_eq!(recognizer_for("claude").detect(&screen), TurnState::AwaitingInput);
+
+        // A permission dialog the legacy phrase list misses ("Do you want to
+        // proceed?" + numbered menu after a horizontal rule).
+        let screen = lines(&[
+            "⏺ Bash(cargo test)",
+            "──────────",
+            "Do you want to proceed?",
+            "❯ 1. Yes",
+            "  2. No, and tell Claude what to do differently",
+            "Esc to cancel",
+        ]);
+        assert_eq!(recognizer_for("claude").detect(&screen), TurnState::AwaitingApproval);
+    }
+
+    #[test]
+    fn manifest_explicit_unknown_does_not_fall_through_to_legacy() {
+        // A transcript viewer shows STALE content — the legacy recognizer
+        // would read the old "esc to interrupt" as Busy, but the manifest's
+        // transcript_viewer rule (state=unknown) is authoritative: defer to
+        // quiescence instead.
+        let screen = lines(&[
+            "⏺ old tool output esc to interrupt",
+            "Showing detailed transcript",
+            "ctrl+o to toggle",
+        ]);
+        assert_eq!(ClaudeRecognizer.detect(&screen), TurnState::Busy);
+        assert_eq!(recognizer_for("claude").detect(&screen), TurnState::Unknown);
+    }
+
+    #[test]
+    fn osc_title_spinner_keeps_claude_busy_over_an_idle_looking_screen() {
+        // Screen alone looks idle (stale ❯), but the OSC title still carries
+        // the braille spinner claude renders while generating.
+        let screen = lines(&["❯ old prompt"]);
+        let recognizer = recognizer_for("claude");
+        let input = TurnInput { screen: &screen, osc_title: "⠋ claude", osc_progress: "" };
+        assert_eq!(recognizer.detect_input(&input), TurnState::Busy);
+        // Same screen without the title falls to the legacy `❯` marker.
+        assert_eq!(
+            recognizer.detect_input(&TurnInput::screen_only(&screen)),
+            TurnState::AwaitingInput
+        );
+    }
+
+    #[test]
+    fn auto_combines_manifest_and_legacy_verdicts() {
+        // Codex working footer → Busy through the manifest members.
+        let screen = lines(&["❯ old", "› old", "• Working (2s • esc to interrupt)"]);
+        assert_eq!(recognizer_for("auto").detect(&screen), TurnState::Busy);
+        // Codex idle prompt only the legacy fallback knows → AwaitingInput.
+        let screen = lines(&["• PONG", "› Run /review on my current changes"]);
+        assert_eq!(recognizer_for("auto").detect(&screen), TurnState::AwaitingInput);
+        // Plain shell → Unknown (quiescence decides).
+        let screen = lines(&["building...", "done", "user@host:~$"]);
+        assert_eq!(recognizer_for("auto").detect(&screen), TurnState::Unknown);
     }
 }
