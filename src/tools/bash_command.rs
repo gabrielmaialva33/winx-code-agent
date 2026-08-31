@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 pub use super::background_shell::{BackgroundShellManager, ExitedShellInfo};
 use crate::errors::{Result, WinxError};
@@ -422,6 +422,35 @@ async fn sync_embedded_cwd_if_current(
     }
 }
 
+/// Keep the durable agent-session record in lockstep with what the foreground
+/// PTY runs: a command that launches a known interactive agent overwrites the
+/// record; anything else clears it (the main PTY runs one foreground program
+/// at a time). The record is what lets a restart that lost the PTY surface a
+/// resume hint (`claude --continue`, ...) instead of losing the conversation
+/// silently. Best-effort — persistence failures never fail the command.
+fn record_foreground_agent_launch(bash_state: &BashState, command: &str) {
+    use crate::state::agent_resume;
+    let thread_id = &bash_state.current_thread_id;
+    match agent_resume::detect_agent_launch(command) {
+        Some(agent) => {
+            let record = agent_resume::AgentSessionRecord {
+                agent: agent.to_string(),
+                command: command.to_string(),
+                cwd: bash_state.cwd.to_string_lossy().into_owned(),
+                launched_at_unix_ms: agent_resume::now_unix_ms(),
+            };
+            if let Err(error) = agent_resume::save_agent_session(thread_id, &record) {
+                debug!(%error, agent, "failed to persist agent-session record");
+            }
+        }
+        None => {
+            if let Err(error) = agent_resume::clear_agent_session(thread_id) {
+                debug!(%error, "failed to clear agent-session record");
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 async fn execute_bash_action(
     bash_state: &mut BashState,
@@ -476,7 +505,7 @@ async fn execute_bash_action(
 
     match action {
         BashCommandAction::Command { command, is_background, allow_multi } => {
-            execute_command(
+            let result = execute_command(
                 bash_state,
                 command,
                 *is_background,
@@ -485,7 +514,11 @@ async fn execute_bash_action(
                 delivery_cursor,
                 CommandExecutionContext { options: &options, foreground_preflight_complete },
             )
-            .await
+            .await;
+            if result.is_ok() && !*is_background {
+                record_foreground_agent_launch(bash_state, command);
+            }
+            result
         }
         BashCommandAction::StatusCheck { scrollback_lines, verbose, .. } => {
             execute_status_check(

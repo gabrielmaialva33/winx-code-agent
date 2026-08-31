@@ -285,6 +285,11 @@ pub struct BashState {
     /// to a guardian: a process restart is already a new recovery boundary.
     last_shell_reset_at: Option<Instant>,
     shell_runtime_failure_since_reset: bool,
+    /// Adapter-local, show-once message set when this state was rebuilt from
+    /// its persisted snapshot after a restart (see `WinxService::tool_session_for`).
+    /// Surfaced ahead of the next `BashCommand` result, then cleared; never
+    /// persisted — a note about one recovery must not outlive it.
+    pub recovery_note: Option<String>,
 }
 
 impl Default for BashState {
@@ -321,6 +326,7 @@ impl BashState {
             edit_mutation_receipts: VecDeque::new(),
             last_shell_reset_at: None,
             shell_runtime_failure_since_reset: false,
+            recovery_note: None,
         }
     }
 
