@@ -981,13 +981,14 @@ async fn bash_dynamic_temp_overflow_is_reported_and_requires_explicit_cleanup() 
         "{overflow}"
     );
     assert_eq!(budget["over_budget"], true, "{overflow}");
+    assert_eq!(budget["stale_pruned_files"], 0, "{overflow}");
     assert_eq!(structured["data"]["temporary_artifact_cleanup_required"], true, "{overflow}");
     assert_eq!(structured["nextAction"]["tool"], "BashCommand", "{overflow}");
     assert!(
         overflow["result"]["content"].as_array().is_some_and(|content| content.iter().any(
             |entry| entry["text"]
                 .as_str()
-                .is_some_and(|text| text.contains("No files were deleted"))
+                .is_some_and(|text| text.contains("preserving fresh artifacts"))
         )),
         "{overflow}"
     );
@@ -1235,6 +1236,89 @@ async fn stale_reset_initialize_recovers_missing_session_over_http() -> anyhow::
     let bash = response_json(&bash)?;
     assert_eq!(bash["result"]["isError"], false, "{bash}");
     assert_eq!(bash["result"]["structuredContent"]["status"], "completed", "{bash}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_reset_without_runtime_failure_preserves_the_live_shell() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialized = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "reset-guard-seed",
+        "reset-guard-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialized)?;
+
+    let reset_request = |id: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "tools/call",
+            "params": {
+                "_meta": modern_request_meta("reset-guard-client", false),
+                "name": "Initialize",
+                "arguments": {
+                    "type": "reset_shell",
+                    "any_workspace_path": workspace.path(),
+                    "mode_name": "wcgw",
+                    "thread_id": thread_id.clone()
+                }
+            }
+        })
+    };
+
+    let first = post_json_as(
+        address,
+        "2026-07-28",
+        "tools/call",
+        &reset_request("reset-guard-first").to_string(),
+        TEST_TOKEN,
+    )
+    .await?;
+    let first = response_json(&first)?;
+    assert_eq!(
+        first["result"]["structuredContent"]["data"]["initialize_transition"], "shell_reset",
+        "{first}"
+    );
+    assert_eq!(
+        first["result"]["structuredContent"]["data"]["shell_reset_performed"], true,
+        "{first}"
+    );
+
+    let repeated = post_json_as(
+        address,
+        "2026-07-28",
+        "tools/call",
+        &reset_request("reset-guard-repeated").to_string(),
+        TEST_TOKEN,
+    )
+    .await?;
+    let repeated = response_json(&repeated)?;
+    let data = &repeated["result"]["structuredContent"]["data"];
+    assert_eq!(repeated["result"]["isError"], false, "{repeated}");
+    assert_eq!(data["initialize_transition"], "reset_skipped_healthy", "{repeated}");
+    assert_eq!(data["initialize_reused"], true, "{repeated}");
+    assert_eq!(data["initialize_response_mode"], "compact", "{repeated}");
+    assert_eq!(data["shell_reset_performed"], false, "{repeated}");
+    assert!(data["shell_reset_retry_after_seconds"].as_u64().is_some_and(|value| value > 0));
+
+    let bash = bash_as(
+        address,
+        TEST_TOKEN,
+        &thread_id,
+        "reset-guard-bash",
+        "printf reset-guard-preserved",
+    )
+    .await?;
+    let bash = response_json(&bash)?;
+    assert_eq!(bash["result"]["isError"], false, "{bash}");
+    assert!(bash["result"]["content"][0]["text"]
+        .as_str()
+        .is_some_and(|text| text.contains("reset-guard-preserved")));
     Ok(())
 }
 
@@ -1725,6 +1809,109 @@ async fn search_conflict_requires_readfiles_before_a_corrected_edit() -> anyhow:
     let corrected = edit_call("search-conflict-corrected", "current text");
     let corrected = post_json(address, "2026-07-28", "tools/call", &corrected.to_string()).await?;
     let corrected = response_json(&corrected)?;
+    assert_eq!(corrected["result"]["isError"], false, "{corrected}");
+    assert_eq!(corrected["result"]["structuredContent"]["status"], "completed", "{corrected}");
+    assert_eq!(std::fs::read_to_string(&target)?, "replacement\n");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unified_search_conflict_recovers_once_through_revision_bound_line_patch(
+) -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let target = workspace.path().join("unified-conflict.txt");
+    std::fs::write(&target, "current text\n")?;
+
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "unified-search-conflict",
+        "unified-search-conflict-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    let initial_read = read_files_request(
+        "unified-conflict-initial-read",
+        "unified-search-conflict-client",
+        &thread_id,
+        &[&target],
+    );
+    let initial_read = post_tool_value(address, &initial_read).await?;
+    assert_eq!(initial_read["result"]["isError"], false, "{initial_read}");
+    assert!(
+        initial_read["result"]["content"][0]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("prefer EditFiles mode=line_patch")),
+        "{initial_read}"
+    );
+
+    let conflict = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "unified-conflict-edit",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("unified-search-conflict-client", false),
+            "name": "EditFiles",
+            "arguments": {
+                "files": [{
+                    "file_path": target,
+                    "mode": "search_replace",
+                    "content": "<<<<<<< SEARCH\nstale text\n=======\nreplacement\n>>>>>>> REPLACE"
+                }],
+                "thread_id": thread_id
+            }
+        }
+    });
+    let conflict = post_tool_value(address, &conflict).await?;
+    assert_eq!(conflict["result"]["isError"], true, "{conflict}");
+    let structured = &conflict["result"]["structuredContent"];
+    assert_eq!(structured["errorCode"], "search_block_not_found", "{conflict}");
+    assert_eq!(structured["data"]["recommended_edit_mode"], "line_patch", "{conflict}");
+    assert_eq!(structured["data"]["ordinary_shell_edit_fallback"], false, "{conflict}");
+    assert!(
+        structured["nextAction"]["instruction"]
+            .as_str()
+            .is_some_and(|instruction| instruction.contains("mode=line_patch")),
+        "{conflict}"
+    );
+
+    let recovery_read = next_action_tool_request(
+        "unified-conflict-recovery-read",
+        "unified-search-conflict-client",
+        &structured["nextAction"],
+    );
+    let recovery_read = post_tool_value(address, &recovery_read).await?;
+    assert_eq!(recovery_read["result"]["isError"], false, "{recovery_read}");
+    let revision = recovery_read["result"]["structuredContent"]["data"]["files"][0]["revision"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("recovery read omitted revision: {recovery_read}"))?;
+
+    let corrected = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "unified-conflict-line-patch",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("unified-search-conflict-client", false),
+            "name": "EditFiles",
+            "arguments": {
+                "files": [{
+                    "file_path": target,
+                    "mode": "line_patch",
+                    "expected_revision": revision,
+                    "patches": [{
+                        "start_line": 1,
+                        "delete_lines": 1,
+                        "replacement": "replacement\n"
+                    }]
+                }],
+                "thread_id": thread_id
+            }
+        }
+    });
+    let corrected = post_tool_value(address, &corrected).await?;
     assert_eq!(corrected["result"]["isError"], false, "{corrected}");
     assert_eq!(corrected["result"]["structuredContent"]["status"], "completed", "{corrected}");
     assert_eq!(std::fs::read_to_string(&target)?, "replacement\n");
