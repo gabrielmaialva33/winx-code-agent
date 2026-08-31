@@ -844,7 +844,27 @@ impl WinxService {
                     let _ = write!(outcome.text, "\n\n{READ_EDIT_GUIDANCE}");
                 }
                 self.persist_state(&slot).await;
-                if let Some(error) = outcome.errors.first() {
+                // A batch is an exploratory instrument: remote models probe
+                // several candidate paths at once, and one wrong guess must
+                // not brand kilobytes of successfully read content as a
+                // failure (measured on the HTTP connector: 20 of 21 ReadFiles
+                // "errors" were exactly this, each costing the model a retry
+                // round-trip). Missing paths stay explicit — inline per-file
+                // error lines, a closing summary, and a machine-readable
+                // list — while a batch where NOTHING was read, or any error
+                // beyond a missing file (security, policy, session), still
+                // fails the call.
+                let missing_files: Vec<String> = outcome
+                    .errors
+                    .iter()
+                    .filter_map(|error| match error {
+                        WinxError::FileNotFound { path } => Some(path.display().to_string()),
+                        _ => None,
+                    })
+                    .collect();
+                let tolerable_partial =
+                    outcome.successful_files > 0 && missing_files.len() == outcome.errors.len();
+                if let Some(error) = outcome.errors.first().filter(|_| !tolerable_partial) {
                     let mut result =
                         outcomes::tool_failure("ReadFiles", error, Some(&recovery_args))?;
                     result.content = vec![ContentBlock::text(outcome.text)];
@@ -863,9 +883,26 @@ impl WinxService {
                     }
                     Ok(result)
                 } else {
+                    if !missing_files.is_empty() {
+                        let _ = write!(
+                            outcome.text,
+                            "\n\n{} of {} files read; {} path(s) do not exist (error lines \
+                             above). The content above is complete for every file that exists — \
+                             do not re-request them. Verify the missing paths (e.g. via CodeMap) \
+                             before retrying only those.",
+                            outcome.successful_files,
+                            outcome.successful_files + outcome.errors.len(),
+                            missing_files.len(),
+                        );
+                    }
                     let mut result =
                         CallToolResult::success(vec![ContentBlock::text(outcome.text)]);
-                    result.structured_content = Some(json!({"files": outcome.files}));
+                    let mut structured = serde_json::Map::new();
+                    structured.insert("files".to_string(), json!(outcome.files));
+                    if !missing_files.is_empty() {
+                        structured.insert("missing_files".to_string(), json!(missing_files));
+                    }
+                    result.structured_content = Some(Value::Object(structured));
                     Ok(result)
                 }
             }

@@ -154,9 +154,12 @@ impl ReadBatchState {
     }
 }
 
-/// Complete result of one batched read. The MCP adapter uses the per-file
-/// errors to return an honest `isError: true` result while retaining any
-/// successfully read content in the same response.
+/// Complete result of one batched read. The MCP adapter keeps a batch with
+/// partial successes a SUCCESS when every per-file error is just a missing
+/// path (exploratory guesses are normal for remote models; the errors stay
+/// visible inline and in structured `missing_files`), and returns an honest
+/// `isError: true` only when nothing was read or an error goes beyond a
+/// missing file (security, policy, session).
 #[derive(Debug)]
 pub struct ReadFilesOutcome {
     pub text: String,

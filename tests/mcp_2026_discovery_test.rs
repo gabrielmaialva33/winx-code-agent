@@ -1816,6 +1816,63 @@ async fn search_conflict_requires_readfiles_before_a_corrected_edit() -> anyhow:
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn read_files_batch_tolerates_missing_paths_but_fails_on_total_miss() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let existing_one = workspace.path().join("real-one.txt");
+    let existing_two = workspace.path().join("real-two.txt");
+    std::fs::write(&existing_one, "alpha content\n")?;
+    std::fs::write(&existing_two, "beta content\n")?;
+    let missing = workspace.path().join("guessed/does-not-exist.txt");
+
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "partial-read-batch",
+        "partial-read-batch-client",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    // An exploratory batch with one wrong guess keeps its useful content and
+    // reads as a SUCCESS: the model must not burn a retry round-trip to
+    // recover two good files from one bad path.
+    let read = read_files_request(
+        "partial-batch-read",
+        "partial-read-batch-client",
+        &thread_id,
+        &[&existing_one, &missing, &existing_two],
+    );
+    let read = post_tool_value(address, &read).await?;
+    assert_eq!(read["result"]["isError"], false, "{read}");
+    let text = read["result"]["content"][0]["text"].as_str().unwrap_or_default();
+    assert!(text.contains("alpha content"), "{read}");
+    assert!(text.contains("beta content"), "{read}");
+    assert!(text.contains("Error reading"), "missing inline error line: {read}");
+    assert!(text.contains("2 of 3 files read"), "missing partial summary: {read}");
+    let data = &read["result"]["structuredContent"]["data"];
+    assert_eq!(data["missing_files"].as_array().map(Vec::len), Some(1), "{read}");
+    // The read guard still registered both real files for later edits.
+    assert_eq!(data["files"].as_array().map(Vec::len), Some(2), "{read}");
+
+    // A batch where nothing exists is still an honest failure.
+    let all_missing = read_files_request(
+        "all-missing-read",
+        "partial-read-batch-client",
+        &thread_id,
+        &[&workspace.path().join("nope-a.txt"), &workspace.path().join("nope-b.txt")],
+    );
+    let all_missing = post_tool_value(address, &all_missing).await?;
+    assert_eq!(all_missing["result"]["isError"], true, "{all_missing}");
+    assert_eq!(
+        all_missing["result"]["structuredContent"]["errorCode"], "file_not_found",
+        "{all_missing}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn unified_search_conflict_recovers_once_through_revision_bound_line_patch(
 ) -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
@@ -3097,7 +3154,8 @@ async fn missing_read_file_is_a_tool_error_not_completed_success() -> anyhow::Re
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn partial_read_keeps_content_but_reports_batch_error() -> anyhow::Result<()> {
+async fn partial_read_keeps_content_and_reports_missing_paths_without_failing() -> anyhow::Result<()>
+{
     let workspace = tempfile::tempdir()?;
     let existing = workspace.path().join("existing.txt");
     let missing = workspace.path().join("missing.txt");
@@ -3129,16 +3187,20 @@ async fn partial_read_keeps_content_but_reports_batch_error() -> anyhow::Result<
     });
     let response = post_json(address, "2026-07-28", "tools/call", &call.to_string()).await?;
     let response = response_json(&response)?;
-    assert_eq!(response["result"]["isError"], true, "{response}");
+    // Contract change (measured on the HTTP connector): a batch that read at
+    // least one file and only missed non-existent paths is a SUCCESS — the
+    // missing paths stay explicit in the text and in structured
+    // `missing_files`, so the model keeps the content without burning a retry.
+    assert_eq!(response["result"]["isError"], false, "{response}");
     let rendered = response["result"]["content"]
         .as_array()
         .and_then(|content| content.iter().find_map(|item| item["text"].as_str()))
         .ok_or_else(|| anyhow::anyhow!("partial read has no text: {response}"))?;
     assert!(rendered.contains("visible content"), "{response}");
+    assert!(rendered.contains("Error reading"), "{response}");
     let structured = &response["result"]["structuredContent"];
-    assert_eq!(structured["status"], "not_found", "{response}");
-    assert_eq!(structured["data"]["successful_files"], 1, "{response}");
-    assert_eq!(structured["data"]["failed_files"], 1, "{response}");
+    assert_eq!(structured["status"], "completed", "{response}");
+    assert_eq!(structured["data"]["missing_files"].as_array().map(Vec::len), Some(1), "{response}");
     Ok(())
 }
 

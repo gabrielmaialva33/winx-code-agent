@@ -51,6 +51,28 @@ async fn run_command(
     tools::bash_command::handle_tool_call(bash_state_arc, bash_cmd).await
 }
 
+/// Foreground helper for tests that assert COMPLETED output. The generous cap
+/// exists for cold CI runners; the call returns as soon as the command
+/// finishes, so it costs nothing locally. Tests that deliberately observe a
+/// still-running command keep using [`run_command`]'s short wait.
+async fn run_command_to_completion(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    thread_id: &str,
+    command: &str,
+) -> Result<String> {
+    let bash_cmd = BashCommand {
+        action_json: BashCommandAction::Command {
+            command: command.to_string(),
+            is_background: false,
+            allow_multi: false,
+        },
+        wait_for_seconds: Some(10.0),
+        thread_id: thread_id.to_string(),
+    };
+
+    tools::bash_command::handle_tool_call(bash_state_arc, bash_cmd).await
+}
+
 async fn run_command_from_json(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     thread_id: &str,
@@ -61,7 +83,9 @@ async fn run_command_from_json(
             "type": "command",
             "command": command
         },
-        "wait_for_seconds": 0.2,
+        // Completion-asserting caller: generous cap for cold CI runners; the
+        // call returns as soon as the command finishes.
+        "wait_for_seconds": 10.0,
         "thread_id": thread_id
     }))
     .map_err(|error| WinxError::ArgumentParseError(error.to_string()))?;
@@ -105,7 +129,8 @@ async fn tail_pipe_stripped_by_default() -> Result<()> {
     let thread_id = "pty-tail-regression";
     let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
 
-    let response = run_command(&bash_state_arc, thread_id, "seq 1 5 | tail -2", false).await?;
+    let response =
+        run_command_to_completion(&bash_state_arc, thread_id, "seq 1 5 | tail -2").await?;
 
     // Stripped → `seq 1 5`, so all five lines show, not just the last two.
     assert_eq!(numeric_output_lines(&response), vec!["1", "2", "3", "4", "5"]);
@@ -214,7 +239,7 @@ async fn completed_background_shell_is_pruned_from_main_status() -> Result<()> {
 
     sleep(Duration::from_millis(300)).await;
 
-    let response = run_command(&bash_state_arc, thread_id, "echo foreground", false).await?;
+    let response = run_command_to_completion(&bash_state_arc, thread_id, "echo foreground").await?;
 
     assert!(
         !response.contains(&bg_id),
@@ -687,7 +712,8 @@ async fn cd_updates_status_and_persisted_cwd() -> Result<()> {
     let target = std::env::temp_dir().canonicalize()?;
 
     let response =
-        run_command(&bash_state_arc, thread_id, &format!("cd {}", target.display()), false).await?;
+        run_command_to_completion(&bash_state_arc, thread_id, &format!("cd {}", target.display()))
+            .await?;
 
     assert!(
         response.contains(&format!("cwd = {}", target.display())),
