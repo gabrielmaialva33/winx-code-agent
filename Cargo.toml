@@ -1,7 +1,7 @@
 [package]
 name = "winx-code-agent"
 default-run = "winx-code-agent"
-version = "0.2.347"
+version = "0.2.348"
 edition = "2021"
 rust-version = "1.88"
 description = "Remote-first Rust MCP runtime with Streamable HTTP, durable PTYs, and guarded agent tools"
