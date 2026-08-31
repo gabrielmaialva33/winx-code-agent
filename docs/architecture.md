@@ -56,6 +56,12 @@ The adapter registry is bounded and pins in-flight sessions against eviction. Th
 cwd, command generation, output journal, activity clock, and runtime state. Model-controlled terminal text is never
 parsed to infer whether a command is running, awaiting input, or completed.
 
+Shell recovery is evidence-bound in the adapter. One explicit reset is permitted, then a five-minute live-session
+cooldown preserves the replacement PTY unless `BashCommand` returned a typed runtime/infrastructure failure. A redundant
+request completes as `reset_skipped_healthy` rather than destroying useful cwd, terminal, or process context. The guard is
+intentionally not persisted: losing adapter state is itself a new recovery boundary, and guardian attach remains
+observational.
+
 Task cancellation is bound to that exact runtime identity. A cancellation that races a launch waits for either the
 published generation token or proof that launch finished without a process. If the handshake cannot settle within its
 bounded deadline, Winx terminates the affected session before acknowledging cancellation. It never lets a stale,
@@ -89,11 +95,19 @@ claiming cross-file rollback after a write already became durable.
 `EditFiles` mode `line_patch` is the preferred compare-and-swap path when the model already has line coordinates. All
 patches refer to one original revision, are ordered and non-overlapping, and may touch only visible ranges. A stale replay returns an
 exact `ReadFiles` recovery action and cannot mutate the newer file. SEARCH/REPLACE remains available for text-anchored
-work and invalidates its read permit after a conflict.
+work and invalidates its read permit after a conflict. Because `ReadFiles` already returns both coordinates and a
+revision, `line_patch` is the default existing-file path. SEARCH conflict recovery performs the exact structured read
+and switches the corrected retry to `line_patch` instead of escaping to an untracked shell edit.
 
 Successful mutations receive bounded persisted receipts. Identical concurrent calls are single-flight, and a lost
 response may be replayed without repeating the write only while target postconditions still match. Verification is a
 separate receipt-bound operation: a failed check never tells the model to repeat a committed edit.
+
+Workspace-local derived helpers live only in `.winx/tmp/session-…`. Hard byte/file limits remain fail-closed. A separate
+high-water policy controls long-lived active sessions: at 75% of either session limit, Winx may unlink only managed
+artifacts whose metadata has been inactive for the full 24-hour TTL, oldest first, until 50% headroom is restored. The
+bounded walk never follows symlinks; an unreadable or excessive tree is retained. Fresh helpers and canonical project
+files are never candidates, and any remaining hard-limit overage still requires explicit cleanup.
 
 ## Errors and agent recovery
 

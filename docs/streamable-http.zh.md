@@ -255,7 +255,7 @@ winx-code-agent serve --http --token-file ~/.config/winx-http-token \
 
 ## LLM 编排规范 (Orchestration Contract)
 
-MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、用 `&&` 合并相关的快速失败检查，并且绝不原样重复已被拒绝的调用。`Initialize` 还会返回一个受限的 `<workspace_root>/.winx/tmp/session-…/` 目录，供确有独立用途的派生辅助文件使用。这些文件不是权威源，必须保留原始源码路径和行号来源，并复用稳定文件名；不得仅为了调用 `CodeMap` 而把源码或命令输出转换为载体。辅助文件映射只接受一个已存在的文件，单次响应上限为 12 KiB，每个活动会话最多映射 24 个不同文件、调用 64 次；规范源码映射不受此聚合配额限制。临时存储每个会话限制为 64 MiB / 128 个文件，每个工作区限制为 256 MiB，闲置会话会在 24 小时后清理。禁止把内容编码进文件名或目录名，也禁止用 `.winx-*`/`.winx_tmp` 文件污染项目根目录。每个前台或后台 PTY 都会把这个精确目录导出为 `WINX_TEMP_DIR`；若 Shell 写入的静态目标绕过该目录，调用会以 `temporary_artifact_policy` 被拒绝。Winx 还会在每次 Bash 操作后审计实际用量，包括静态分析无法预测的动态写入；结果会报告字节数和文件数。超出配额后，普通命令将被阻止，直到代理显式检查并删除过时辅助文件。超额本身不会触发自动删除；原有的 24 小时闲置会话清理规则保持不变。若 `Initialize` 返回 `initialize_workspace_already_bound` 或 `workspace_change_requires_new_session`，则当前对话不得重试该调用：访问策略允许的绝对路径时继续使用现有绑定，真正切换项目时应开启新的对话。`EditFiles` 可通过 `verify_command` 在同一次调用中执行有限的编辑后检查，从而节省一次网络和模型往返。
+MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、保留返回的 `thread_id`、优先使用 `CodeMap` 获取概览、使用 `ReadFiles` 批量读取、编辑前必须先读取、用 `&&` 合并相关的快速失败检查，并且绝不原样重复已被拒绝的调用。`Initialize` 还会返回一个受限的 `<workspace_root>/.winx/tmp/session-…/` 目录，供确有独立用途的派生辅助文件使用。这些文件不是权威源，必须保留原始源码路径和行号来源，并复用稳定文件名；不得仅为了调用 `CodeMap` 而把源码或命令输出转换为载体。辅助文件映射只接受一个已存在的文件，单次响应上限为 12 KiB，每个活动会话最多映射 24 个不同文件、调用 64 次；规范源码映射不受此聚合配额限制。临时存储每个会话限制为 64 MiB / 128 个文件，每个工作区限制为 256 MiB，闲置会话会在 24 小时后清理。活动会话达到 96 个文件或 48 MiB 时，Winx 只会按从旧到新的顺序回收已连续闲置满 24 小时的辅助文件，目标恢复到 64 个文件 / 32 MiB；它不会跟随符号链接，也不会自动删除新鲜文件。禁止把内容编码进文件名或目录名，也禁止用 `.winx-*`/`.winx_tmp` 文件污染项目根目录。每个前台或后台 PTY 都会把这个精确目录导出为 `WINX_TEMP_DIR`；若 Shell 写入的静态目标绕过该目录，调用会以 `temporary_artifact_policy` 被拒绝。Winx 还会在每次 Bash 操作后审计实际用量，包括静态分析无法预测的动态写入；结果会报告字节数、文件数和旧文件回收计数。若清理后仍超出配额，普通命令将被阻止，直到代理显式检查并删除剩余的过时辅助文件。只有在 `BashCommand` 返回类型明确的 Shell 运行时故障后才应请求 `reset_shell`；五分钟内若无新的故障证据而重复重置，Winx 会返回 `reset_skipped_healthy` 并保留现有 PTY。若 `Initialize` 返回 `initialize_workspace_already_bound` 或 `workspace_change_requires_new_session`，则当前对话不得重试该调用：访问策略允许的绝对路径时继续使用现有绑定，真正切换项目时应开启新的对话。`EditFiles` 可通过 `verify_command` 在同一次调用中执行有限的编辑后检查，从而节省一次网络和模型往返。
 
 `ReadFiles` 批次中的文件会在受限并行池中处理（`WINX_READ_PARALLELISM`，默认 `4`，最大 `32`），但响应内容和读取保护范围始终严格按请求顺序发布。
 
@@ -300,6 +300,10 @@ Task 取消同样绑定到精确执行代次。若取消与启动并发，Winx �
 `EditFiles` 是强类型变更引擎唯一的公共入口。它的每文件显式模式为 `replace`、`search_replace`、`line_patch`
 和 `undo`；一次编辑调用可接收 1 到 100 个唯一目标，并在写入前验证整个批次。旧名称保留为隐藏兼容
 别名，不能扩大等价 `EditFiles` 模式已授予的权限。
+
+对于现有文件，默认的确定性流程是先调用 `ReadFiles`，再使用绑定该修订版本的 `line_patch`。
+`search_replace` 仅保留给有意使用的精确文本锚定。发生 SEARCH 冲突后，结构化恢复要求执行其指定的
+`ReadFiles` 操作，并将修正后的重试切换为 `line_patch`；普通源码修改不应退回到 shell、`sed` 或 Python。
 
 `EditFiles` 接受可选的 `verify_command` 与 `verify_wait_for_seconds`（默认 `15`，最大
 `60`）。验证仅在提交成功后运行，并以前台命令形式遵循与 `BashCommand` 相同的模式白名单。退出码为零时组合结果成功；非零退出码保留 `isError: false`，并返回 `status: completed_with_issues`、`errorCode: verification_failed` 和

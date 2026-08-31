@@ -325,12 +325,16 @@ for independently useful derived helpers. Those helpers remain non-canonical, pr
 reuse stable names instead of materializing source or command output solely for `CodeMap`. Helper maps accept one existing
 file, cap their navigation payload at 12 KiB, and allow 24 unique files / 64 calls per live session; canonical maps do not share that
 aggregate budget. Temporary storage is capped at 64 MiB / 128 files per session (and 256 MiB per workspace), with stale
-sessions pruned after 24 hours. Helpers never encode payload in filesystem names or pollute the project root with
+sessions pruned after 24 hours. At 96 files or 48 MiB, an active session also reclaims only helpers inactive for the full
+24-hour TTL, oldest first, toward 64 files / 32 MiB; it never follows symlinks or deletes fresh helpers. Helpers never
+encode payload in filesystem names or pollute the project root with
 `.winx-*`/`.winx_tmp` artifacts. Every foreground and background PTY exports the exact directory as `WINX_TEMP_DIR`;
 statically visible shell writes that bypass it are rejected with `temporary_artifact_policy`. Winx audits the managed
 directory after every Bash action as well, so dynamic writes are included in the byte/file budget. The result reports
-actual usage; after an overage, ordinary commands are blocked until the agent explicitly inspects and removes obsolete
-helpers. An overage never triggers automatic deletion; the 24-hour stale-session pruning remains unchanged. If `Initialize` returns `initialize_workspace_already_bound` or
+actual usage and stale-reclamation counters; after a remaining overage, ordinary commands are blocked until the agent
+explicitly inspects and removes obsolete helpers. Request `reset_shell` only after `BashCommand` reports a typed
+shell-runtime failure. A repeated reset within five minutes and without new failure evidence returns
+`reset_skipped_healthy` while preserving the live PTY. If `Initialize` returns `initialize_workspace_already_bound` or
 `workspace_change_requires_new_session`, that call is terminal for the current conversation: keep its bound pair for
 allowed absolute targets, or start a new conversation for a genuinely different project. A finite post-edit check can be
 supplied as `verify_command` on `EditFiles`, saving one network/model round trip. Extra
@@ -390,6 +394,11 @@ compact structured reference; `force=true` is the explicit escape hatch when a c
 `search_replace`, `line_patch`, and `undo`; one edit call accepts one through 100 unique targets and validates the batch
 before writing. The former edit names remain hidden compatibility aliases and cannot grant authority beyond the
 equivalent `EditFiles` modes.
+
+For an existing file, `ReadFiles` followed by revision-bound `line_patch` is the default deterministic flow.
+`search_replace` remains available for intentional exact text anchoring. On a SEARCH conflict, the structured recovery
+requires its exact `ReadFiles` action and directs the corrected retry to `line_patch`; ordinary source mutation must not
+fall back to shell, `sed`, or Python.
 
 `EditFiles` accepts optional `verify_command` and `verify_wait_for_seconds` (default `15`, maximum
 `60`). Verification runs only after a successful commit, as a foreground command under the same mode allowlist as
