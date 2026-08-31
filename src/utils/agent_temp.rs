@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::errors::{Result, WinxError};
 
@@ -34,6 +34,14 @@ pub const MAX_SESSION_BYTES: u64 = 64 * 1024 * 1024;
 pub const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// Hundreds of one-shot carriers are almost always an orchestration failure.
 pub const MAX_SESSION_FILES: usize = 128;
+/// Start reclaiming old active-session helpers before the hard file cap.
+pub const ACTIVE_SESSION_PRUNE_TRIGGER_FILES: usize = MAX_SESSION_FILES * 3 / 4;
+/// Stop file-count reclamation once the session has comfortable headroom.
+pub const ACTIVE_SESSION_PRUNE_TARGET_FILES: usize = MAX_SESSION_FILES / 2;
+/// Start reclaiming old active-session helpers before the hard byte cap.
+pub const ACTIVE_SESSION_PRUNE_TRIGGER_BYTES: u64 = MAX_SESSION_BYTES * 3 / 4;
+/// Stop byte reclamation once the session has comfortable headroom.
+pub const ACTIVE_SESSION_PRUNE_TARGET_BYTES: u64 = MAX_SESSION_BYTES / 2;
 /// Derived syntax maps are intentionally much smaller than canonical maps.
 pub const MAX_DERIVED_CODE_MAP_PAYLOAD_BYTES: usize = 12 * 1024;
 /// A session should reuse a small working set instead of minting new carriers.
@@ -60,6 +68,8 @@ pub struct AgentTempInfo {
     pub max_session_bytes: u64,
     pub max_file_bytes: u64,
     pub max_session_files: usize,
+    pub stale_pruned_files: usize,
+    pub stale_pruned_bytes: u64,
 }
 
 /// Bounded filesystem audit attached to Bash results. It contains counts and
@@ -75,6 +85,8 @@ pub struct TemporaryArtifactUsage {
     pub max_session_files: usize,
     pub largest_file_bytes: u64,
     pub max_file_bytes: u64,
+    pub stale_pruned_files: usize,
+    pub stale_pruned_bytes: u64,
     pub over_budget: bool,
 }
 
@@ -138,16 +150,23 @@ pub fn session_info(workspace_root: &Path, thread_id: &str) -> AgentTempInfo {
         max_session_bytes: MAX_SESSION_BYTES,
         max_file_bytes: MAX_FILE_BYTES,
         max_session_files: MAX_SESSION_FILES,
+        stale_pruned_files: 0,
+        stale_pruned_bytes: 0,
     }
 }
 
-/// Return the session policy and best-effort prune expired sibling sessions.
+/// Return the session policy and best-effort prune expired sibling sessions and
+/// stale active-session helpers when the active session crosses a high-water mark.
 /// The active directory is not created here; `FileWriteOrEdit` creates it on
 /// demand through its normal parent-directory path.
 pub fn prepare_session(workspace_root: &Path, thread_id: &str) -> AgentTempInfo {
-    let info = session_info(workspace_root, thread_id);
+    let mut info = session_info(workspace_root, thread_id);
     let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     prune_sessions_unlocked(workspace_root, &info.directory, MAX_AGE);
+    let pruned = prune_active_session_unlocked(&info.directory, MAX_AGE);
+    info.stale_pruned_files = pruned.files;
+    info.stale_pruned_bytes = pruned.bytes;
+    log_active_prune(&info.directory, pruned);
     info
 }
 
@@ -155,9 +174,33 @@ pub fn prepare_session(workspace_root: &Path, thread_id: &str) -> AgentTempInfo 
 /// left by dynamic loops, scripts, and generated filenames that static command
 /// inspection cannot project before the shell runs.
 pub fn audit_session(workspace_root: &Path, thread_id: &str) -> Result<TemporaryArtifactUsage> {
+    audit_session_impl(workspace_root, thread_id, false)
+}
+
+/// Reclaim stale active-session helpers at the configured high-water mark,
+/// then return the same bounded audit used after Bash execution.
+pub fn maintain_and_audit_session(
+    workspace_root: &Path,
+    thread_id: &str,
+) -> Result<TemporaryArtifactUsage> {
+    audit_session_impl(workspace_root, thread_id, true)
+}
+
+fn audit_session_impl(
+    workspace_root: &Path,
+    thread_id: &str,
+    maintain: bool,
+) -> Result<TemporaryArtifactUsage> {
     let info = session_info(workspace_root, thread_id);
     let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
     let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pruned = if maintain {
+        prune_sessions_unlocked(workspace_root, &info.directory, MAX_AGE);
+        prune_active_session_unlocked(&info.directory, MAX_AGE)
+    } else {
+        PrunedArtifacts::default()
+    };
+    log_active_prune(&info.directory, pruned);
     let usage = temp_tree_usage(&workspace.join(TEMP_ROOT), &info.directory).ok_or_else(|| {
         policy_error(
             &info.directory,
@@ -181,6 +224,8 @@ pub fn audit_session(workspace_root: &Path, thread_id: &str) -> Result<Temporary
         max_session_files: MAX_SESSION_FILES,
         largest_file_bytes: usage.largest_file_bytes,
         max_file_bytes: MAX_FILE_BYTES,
+        stale_pruned_files: pruned.files,
+        stale_pruned_bytes: pruned.bytes,
         over_budget,
     })
 }
@@ -255,7 +300,7 @@ pub fn validate_bash_command(
 ) -> Result<()> {
     let info = session_info(workspace_root, thread_id);
     let recovery_command = is_explicit_temp_recovery(command, &info);
-    let usage = match audit_session(workspace_root, thread_id) {
+    let usage = match maintain_and_audit_session(workspace_root, thread_id) {
         Ok(usage) => usage,
         // A bounded scan can deliberately fail closed for a malformed or
         // excessively large tree. Keep the narrow recovery path available or
@@ -577,6 +622,8 @@ pub fn validate_batch_quota(
 
     let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
     let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let pruned = prune_active_session_unlocked(&info.directory, MAX_AGE);
+    log_active_prune(&info.directory, pruned);
     let current =
         temp_tree_usage(&workspace.join(TEMP_ROOT), &info.directory).ok_or_else(|| {
             policy_error(
@@ -857,6 +904,167 @@ fn temp_tree_usage(root: &Path, active_session: &Path) -> Option<TempTreeUsage> 
     Some(usage)
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PrunedArtifacts {
+    files: usize,
+    bytes: u64,
+}
+
+#[derive(Debug)]
+struct PrunableArtifact {
+    path: PathBuf,
+    modified: SystemTime,
+    bytes: u64,
+    is_file: bool,
+    is_symlink: bool,
+    device: u64,
+    inode: u64,
+}
+
+#[cfg(unix)]
+fn artifact_identity(metadata: &fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+
+    (metadata.dev(), metadata.ino())
+}
+
+#[cfg(not(unix))]
+fn artifact_identity(_metadata: &fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+fn still_matches_prunable_artifact(candidate: &PrunableArtifact, cutoff: SystemTime) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(&candidate.path) else { return false };
+    let Ok(modified) = metadata.modified() else { return false };
+    let (device, inode) = artifact_identity(&metadata);
+    modified == candidate.modified
+        && modified < cutoff
+        && metadata.len() == candidate.bytes
+        && metadata.is_file() == candidate.is_file
+        && metadata.file_type().is_symlink() == candidate.is_symlink
+        && device == candidate.device
+        && inode == candidate.inode
+}
+
+/// Reclaim only old, server-managed artifacts from the active session. The
+/// high-water/target split avoids scanning-triggered deletion churn near the
+/// hard cap. Symlinks and special nodes are unlinked but never followed; any
+/// uncertain or excessive tree is retained unchanged.
+fn prune_active_session_unlocked(active: &Path, max_age: Duration) -> PrunedArtifacts {
+    let metadata = match fs::symlink_metadata(active) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return PrunedArtifacts::default();
+        }
+        Err(_) => return PrunedArtifacts::default(),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return PrunedArtifacts::default();
+    }
+
+    let cutoff = SystemTime::now().checked_sub(max_age).unwrap_or(UNIX_EPOCH);
+    let mut seen = 0usize;
+    let mut stack = vec![(active.to_path_buf(), 0usize)];
+    let mut candidates = Vec::new();
+    let mut session_files = 0usize;
+    let mut session_bytes = 0u64;
+    let mut largest_file_bytes = 0u64;
+
+    while let Some((path, depth)) = stack.pop() {
+        if seen >= MAX_SCAN_ENTRIES || depth > MAX_SCAN_DEPTH {
+            return PrunedArtifacts::default();
+        }
+        seen += 1;
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return PrunedArtifacts::default(),
+        };
+        if metadata.is_dir() && !metadata.file_type().is_symlink() {
+            let entries = match fs::read_dir(&path) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(_) => return PrunedArtifacts::default(),
+            };
+            for entry in entries {
+                match entry {
+                    Ok(entry) => stack.push((entry.path(), depth + 1)),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return PrunedArtifacts::default(),
+                }
+            }
+            continue;
+        }
+
+        session_files = session_files.saturating_add(1);
+        session_bytes = session_bytes.saturating_add(metadata.len());
+        largest_file_bytes = largest_file_bytes.max(metadata.len());
+        if let Ok(modified) = metadata.modified() {
+            if modified < cutoff {
+                let (device, inode) = artifact_identity(&metadata);
+                candidates.push(PrunableArtifact {
+                    path,
+                    modified,
+                    bytes: metadata.len(),
+                    is_file: metadata.is_file(),
+                    is_symlink: metadata.file_type().is_symlink(),
+                    device,
+                    inode,
+                });
+            }
+        }
+    }
+
+    let crossed_high_water = session_files >= ACTIVE_SESSION_PRUNE_TRIGGER_FILES
+        || session_bytes >= ACTIVE_SESSION_PRUNE_TRIGGER_BYTES
+        || largest_file_bytes > MAX_FILE_BYTES;
+    if !crossed_high_water || candidates.is_empty() {
+        return PrunedArtifacts::default();
+    }
+
+    candidates.sort_by(|left, right| {
+        left.modified.cmp(&right.modified).then_with(|| left.path.cmp(&right.path))
+    });
+    let mut pruned = PrunedArtifacts::default();
+    for candidate in candidates {
+        let needs_headroom = session_files > ACTIVE_SESSION_PRUNE_TARGET_FILES
+            || session_bytes > ACTIVE_SESSION_PRUNE_TARGET_BYTES;
+        if !needs_headroom && candidate.bytes <= MAX_FILE_BYTES {
+            continue;
+        }
+        if !still_matches_prunable_artifact(&candidate, cutoff) {
+            continue;
+        }
+        match fs::remove_file(&candidate.path) {
+            Ok(()) => {
+                session_files = session_files.saturating_sub(1);
+                session_bytes = session_bytes.saturating_sub(candidate.bytes);
+                pruned.files = pruned.files.saturating_add(1);
+                pruned.bytes = pruned.bytes.saturating_add(candidate.bytes);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => debug!(
+                path = %candidate.path.display(),
+                %error,
+                "failed to prune stale active-session helper"
+            ),
+        }
+    }
+
+    pruned
+}
+
+fn log_active_prune(active: &Path, pruned: PrunedArtifacts) {
+    if pruned.files > 0 {
+        info!(
+            temporary_artifact_dir = %active.display(),
+            stale_pruned_files = pruned.files,
+            stale_pruned_bytes = pruned.bytes,
+            "pruned stale active-session temporary artifacts at high water mark"
+        );
+    }
+}
+
 fn prune_sessions_unlocked(workspace_root: &Path, active: &Path, max_age: Duration) {
     let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
     let root = workspace.join(TEMP_ROOT);
@@ -1054,6 +1262,92 @@ mod tests {
         assert!(active.exists());
         assert!(!expired.exists());
         assert!(unmanaged.exists());
+    }
+
+    #[test]
+    fn active_session_prunes_only_stale_helpers_after_high_water_mark() {
+        let workspace = TempDir::new().unwrap();
+        let active = session_info(workspace.path(), "active").directory;
+        fs::create_dir_all(active.join("old/nested")).unwrap();
+        for index in 0..ACTIVE_SESSION_PRUNE_TRIGGER_FILES {
+            fs::write(active.join("old/nested").join(format!("old-{index}.txt")), "old").unwrap();
+        }
+        sleep(Duration::from_millis(15));
+        let fresh =
+            (0..8).map(|index| active.join(format!("fresh-{index}.txt"))).collect::<Vec<_>>();
+        for path in &fresh {
+            fs::write(path, "fresh").unwrap();
+        }
+
+        let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pruned = prune_active_session_unlocked(&active, Duration::from_millis(5));
+        assert_eq!(pruned.files, 40);
+        assert_eq!(
+            temp_tree_usage(&workspace.path().join(TEMP_ROOT), &active).unwrap().session_files,
+            ACTIVE_SESSION_PRUNE_TARGET_FILES
+        );
+        assert!(fresh.iter().all(|path| path.exists()), "fresh helpers must be retained");
+    }
+
+    #[test]
+    fn active_session_does_not_prune_stale_helpers_below_high_water_mark() {
+        let workspace = TempDir::new().unwrap();
+        let active = session_info(workspace.path(), "active").directory;
+        fs::create_dir_all(&active).unwrap();
+        for index in 0..(ACTIVE_SESSION_PRUNE_TRIGGER_FILES - 1) {
+            fs::write(active.join(format!("helper-{index}.txt")), "old").unwrap();
+        }
+        sleep(Duration::from_millis(10));
+
+        let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pruned = prune_active_session_unlocked(&active, Duration::from_millis(1));
+        assert_eq!(pruned, PrunedArtifacts::default());
+        assert_eq!(fs::read_dir(active).unwrap().count(), ACTIVE_SESSION_PRUNE_TRIGGER_FILES - 1);
+    }
+
+    #[test]
+    fn stale_candidate_revalidation_rejects_a_fresh_replacement() {
+        let workspace = TempDir::new().unwrap();
+        let path = workspace.path().join("helper.txt");
+        fs::write(&path, "old").unwrap();
+        let metadata = fs::symlink_metadata(&path).unwrap();
+        let modified = metadata.modified().unwrap();
+        let (device, inode) = artifact_identity(&metadata);
+        let candidate = PrunableArtifact {
+            path: path.clone(),
+            modified,
+            bytes: metadata.len(),
+            is_file: metadata.is_file(),
+            is_symlink: metadata.file_type().is_symlink(),
+            device,
+            inode,
+        };
+        sleep(Duration::from_millis(10));
+        fs::write(&path, "fresh replacement").unwrap();
+
+        assert!(!still_matches_prunable_artifact(&candidate, SystemTime::now()));
+        assert_eq!(fs::read_to_string(path).unwrap(), "fresh replacement");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn active_session_pruning_never_follows_symlink_helpers() {
+        use std::os::unix::fs::symlink;
+
+        let workspace = TempDir::new().unwrap();
+        let active = session_info(workspace.path(), "active").directory;
+        let outside = workspace.path().join("canonical.txt");
+        fs::create_dir_all(&active).unwrap();
+        fs::write(&outside, "keep").unwrap();
+        for index in 0..ACTIVE_SESSION_PRUNE_TRIGGER_FILES {
+            symlink(&outside, active.join(format!("link-{index}"))).unwrap();
+        }
+        sleep(Duration::from_millis(10));
+
+        let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let pruned = prune_active_session_unlocked(&active, Duration::from_millis(1));
+        assert!(pruned.files > 0);
+        assert_eq!(fs::read_to_string(outside).unwrap(), "keep");
     }
 
     #[test]
