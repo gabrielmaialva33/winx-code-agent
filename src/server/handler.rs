@@ -726,12 +726,16 @@ mod tests {
             "data": {
                 "session_files": 129,
                 "session_bytes": 4096,
+                "stale_pruned_files": 32,
+                "stale_pruned_bytes": 2048,
                 "temporary_artifact_cleanup_required": true
             }
         }));
         let metadata = usage_result_metadata(Some(&temporary));
         assert_eq!(metadata.temporary_session_files, 129);
         assert_eq!(metadata.temporary_session_bytes, 4096);
+        assert_eq!(metadata.temporary_stale_pruned_files, 32);
+        assert_eq!(metadata.temporary_stale_pruned_bytes, 2048);
         assert!(metadata.temporary_over_budget);
 
         let edit_follow_up = result_with(serde_json::json!({

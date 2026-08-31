@@ -89,8 +89,9 @@ pub enum InitializeType {
 
     /// Reset the shell environment due to issues
     ///
-    /// This should be used when the shell environment appears to be in a bad state
-    /// and needs to be reset to continue properly.
+    /// This should be used only after `BashCommand` reports a shell-runtime failure.
+    /// A repeated reset inside the recovery cooldown preserves the current PTY
+    /// unless a new runtime failure was observed.
     ResetShell,
 
     /// User requested to change the workspace

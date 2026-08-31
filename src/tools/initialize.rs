@@ -5,6 +5,7 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
+use std::time::Instant;
 use tokio::sync::Mutex;
 use tracing::{info, instrument, warn};
 
@@ -27,6 +28,7 @@ pub(crate) enum InitializeTransition {
     AttachedExisting,
     ModeChanged,
     ShellReset,
+    ResetSkippedHealthy,
     WorkspaceChanged,
 }
 
@@ -37,8 +39,13 @@ impl InitializeTransition {
             Self::AttachedExisting => "attached_existing",
             Self::ModeChanged => "mode_changed",
             Self::ShellReset => "shell_reset",
+            Self::ResetSkippedHealthy => "reset_skipped_healthy",
             Self::WorkspaceChanged => "workspace_changed",
         }
+    }
+
+    pub(crate) const fn reused(self) -> bool {
+        matches!(self, Self::AttachedExisting | Self::ResetSkippedHealthy)
     }
 }
 
@@ -53,12 +60,15 @@ pub(crate) struct InitializeOutcome {
     pub(crate) compact_response: bool,
     pub(crate) code_writer_policy_strength: Option<&'static str>,
     pub(crate) shell_spawners_present: bool,
+    pub(crate) shell_reset_retry_after_seconds: Option<u64>,
     pub(crate) temporary_artifact_dir: PathBuf,
     pub(crate) temporary_artifact_ttl_seconds: u64,
     pub(crate) temporary_artifact_max_bytes: u64,
     pub(crate) temporary_artifact_max_session_bytes: u64,
     pub(crate) temporary_artifact_max_file_bytes: u64,
     pub(crate) temporary_artifact_max_files: usize,
+    pub(crate) temporary_artifact_stale_pruned_files: usize,
+    pub(crate) temporary_artifact_stale_pruned_bytes: u64,
     pub(crate) temporary_code_map_max_calls: usize,
     pub(crate) temporary_code_map_max_unique_files: usize,
 }
@@ -399,6 +409,7 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
 
     let transition;
     let mut compact_response = false;
+    let mut shell_reset_retry_after_seconds = None;
 
     match initialize.init_type {
         InitializeType::FirstCall => {
@@ -586,14 +597,34 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
             }
         }
         InitializeType::ResetShell => {
-            transition = InitializeTransition::ShellReset;
             if let Some(state) = bash_state_guard.as_mut() {
-                state.mode = mode;
-                state.bash_command_mode = bash_command_mode;
-                state.file_edit_mode = file_edit_mode;
-                state.write_if_empty_mode = write_if_empty_mode;
-                runtime.configure_session(state, ShellSessionTransition::Reset).await?;
-                response.push_str("Reset shell (new PTY created)\n");
+                if let Some(retry_after) = state.shell_reset_retry_after(Instant::now()) {
+                    transition = InitializeTransition::ResetSkippedHealthy;
+                    compact_response = true;
+                    let retry_after_seconds = retry_after.as_secs().max(1);
+                    shell_reset_retry_after_seconds = Some(retry_after_seconds);
+                    let _ = writeln!(
+                        response,
+                        "Skipped redundant reset_shell: the PTY was replaced recently and no \
+                         shell-runtime failure has occurred since. The existing PTY, cwd, mode, \
+                         and context were preserved. Continue with BashCommand; retry reset_shell \
+                         only after a shell-runtime failure or in {retry_after_seconds} seconds."
+                    );
+                } else {
+                    state.mode = mode;
+                    state.bash_command_mode = bash_command_mode;
+                    state.file_edit_mode = file_edit_mode;
+                    state.write_if_empty_mode = write_if_empty_mode;
+                    if let Err(error) =
+                        runtime.configure_session(state, ShellSessionTransition::Reset).await
+                    {
+                        state.record_shell_runtime_failure();
+                        return Err(error);
+                    }
+                    state.record_shell_reset(Instant::now());
+                    transition = InitializeTransition::ShellReset;
+                    response.push_str("Reset shell (new PTY created)\n");
+                }
             } else {
                 return Err(WinxError::BashStateNotInitialized);
             }
@@ -623,18 +654,16 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
     }
 
     let state = bash_state_guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-    let temporary_artifact = if compact_response {
-        crate::utils::agent_temp::session_info(&state.workspace_root, &state.current_thread_id)
-    } else {
-        crate::utils::agent_temp::prepare_session(&state.workspace_root, &state.current_thread_id)
-    };
+    let temporary_artifact =
+        crate::utils::agent_temp::prepare_session(&state.workspace_root, &state.current_thread_id);
     let temporary_artifact_instruction = if compact_response {
         format!(
             "Use temporary_artifact_dir={} for a small stable set of session-local derived \
              helpers; BashCommand exports the same path as WINX_TEMP_DIR. Reuse helpers instead \
              of creating CodeMap carriers; helper maps accept one existing file and are limited \
-             to {} unique files / {} calls. Winx audits the directory after Bash; if it exceeds \
-             budget, explicitly remove obsolete helpers before running ordinary commands.",
+             to {} unique files / {} calls. Near its quota Winx reclaims only helpers inactive for \
+             the advertised TTL; if it remains over budget, explicitly remove obsolete helpers \
+             before running ordinary commands.",
             temporary_artifact.directory.display(),
             crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
             crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_CALLS,
@@ -647,8 +676,9 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
              directory is created on demand, limited to {} files / {} bytes for this session, and \
              expired after {} seconds of inactivity. Every BashCommand PTY exports the same path \
              as WINX_TEMP_DIR; shell-generated helpers must stay beneath it. Winx audits actual \
-             usage after Bash; an overage never triggers deletion automatically. If exceeded, \
-             explicitly inspect and remove obsolete helpers before ordinary commands can continue. \
+             usage after Bash. At a high-water mark it reclaims only helpers inactive for the full \
+             TTL, never fresh artifacts; if the hard limit remains exceeded, explicitly inspect and \
+             remove obsolete helpers before ordinary commands can continue. \
              Helper CodeMap accepts one existing file and is limited to {} unique files / {} calls \
              in this live session.",
             temporary_artifact.directory.display(),
@@ -693,12 +723,15 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
         compact_response,
         code_writer_policy_strength,
         shell_spawners_present: !bypass.is_empty(),
+        shell_reset_retry_after_seconds,
         temporary_artifact_dir: temporary_artifact.directory,
         temporary_artifact_ttl_seconds: temporary_artifact.ttl_seconds,
         temporary_artifact_max_bytes: temporary_artifact.max_total_bytes,
         temporary_artifact_max_session_bytes: temporary_artifact.max_session_bytes,
         temporary_artifact_max_file_bytes: temporary_artifact.max_file_bytes,
         temporary_artifact_max_files: temporary_artifact.max_session_files,
+        temporary_artifact_stale_pruned_files: temporary_artifact.stale_pruned_files,
+        temporary_artifact_stale_pruned_bytes: temporary_artifact.stale_pruned_bytes,
         temporary_code_map_max_calls: crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_CALLS,
         temporary_code_map_max_unique_files:
             crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES,

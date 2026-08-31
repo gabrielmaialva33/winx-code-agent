@@ -335,6 +335,23 @@ impl From<anyhow::Error> for WinxError {
 }
 
 impl WinxError {
+    /// Whether a failed `BashCommand` is evidence that replacing the PTY may be
+    /// useful. Expected command-domain outcomes (nonzero exits are successful
+    /// runtime results), policy denials, invalid actions, and idle status/input
+    /// calls deliberately do not qualify.
+    pub(crate) fn is_shell_runtime_failure(&self) -> bool {
+        matches!(
+            self,
+            Self::ShellInitializationError(_)
+                | Self::BashStateLockError(_)
+                | Self::BashStateNotInitialized
+                | Self::CommandExecutionError(_)
+                | Self::CommandTimeout { .. }
+                | Self::ProcessCleanupError { .. }
+                | Self::SessionRecoveryError { .. }
+        )
+    }
+
     /// A SEARCH conflict means the caller's exact-text evidence was insufficient.
     /// File tools use this classification to invalidate the prior read permit and
     /// force a visible `ReadFiles` refresh before another edit attempt.

@@ -23,6 +23,10 @@ use crate::types::{
 };
 
 const MAX_VERIFY_WAIT_SECONDS: f32 = 60.0;
+const READ_EDIT_GUIDANCE: &str =
+    "Edit guidance: for an existing file above, prefer EditFiles mode=line_patch with its \
+     structuredContent.data.files[].revision and visibleRanges. Use BashCommand for commands, not \
+     ordinary source mutation.";
 
 pub(super) struct ToolCallExecution {
     pub result: CallToolResult,
@@ -558,8 +562,7 @@ impl WinxService {
                 result.structured_content = Some(json!({
                     "workspace_root": workspace_root,
                     "initialize_transition": outcome.transition.as_str(),
-                    "initialize_reused": outcome.transition
-                        == crate::tools::initialize::InitializeTransition::AttachedExisting,
+                    "initialize_reused": outcome.transition.reused(),
                     "initialize_recovered_missing_session": outcome.recovered_missing_session,
                     "initialize_response_mode": if outcome.compact_response {
                         "compact"
@@ -572,6 +575,9 @@ impl WinxService {
                     "instructions_unchanged": outcome.compact_response,
                     "code_writer_policy_strength": outcome.code_writer_policy_strength,
                     "shell_spawners_present": outcome.shell_spawners_present,
+                    "shell_reset_performed": outcome.transition
+                        == crate::tools::initialize::InitializeTransition::ShellReset,
+                    "shell_reset_retry_after_seconds": outcome.shell_reset_retry_after_seconds,
                     "temporary_artifact_dir": outcome.temporary_artifact_dir,
                     "temporary_artifact_env": "WINX_TEMP_DIR",
                     "temporary_artifact_ttl_seconds": outcome.temporary_artifact_ttl_seconds,
@@ -579,6 +585,8 @@ impl WinxService {
                     "temporary_artifact_max_session_bytes": outcome.temporary_artifact_max_session_bytes,
                     "temporary_artifact_max_file_bytes": outcome.temporary_artifact_max_file_bytes,
                     "temporary_artifact_max_files": outcome.temporary_artifact_max_files,
+                    "temporary_artifact_stale_pruned_files": outcome.temporary_artifact_stale_pruned_files,
+                    "temporary_artifact_stale_pruned_bytes": outcome.temporary_artifact_stale_pruned_bytes,
                     "temporary_code_map_max_calls": outcome.temporary_code_map_max_calls,
                     "temporary_code_map_max_unique_files": outcome.temporary_code_map_max_unique_files,
                 }));
@@ -742,7 +750,10 @@ impl WinxService {
                 let temporary_artifact_usage =
                     if let Some((workspace_root, thread_id)) = audit_target {
                         match tokio::task::spawn_blocking(move || {
-                            crate::utils::agent_temp::audit_session(&workspace_root, &thread_id)
+                            crate::utils::agent_temp::maintain_and_audit_session(
+                                &workspace_root,
+                                &thread_id,
+                            )
                         })
                         .await
                         {
@@ -782,11 +793,18 @@ impl WinxService {
                     generation_bound_actions,
                 }
             }
-            Err(error) => BashCallExecution::legacy(outcomes::tool_failure(
-                "BashCommand",
-                &error,
-                Some(&recovery_args),
-            )?),
+            Err(error) => {
+                if error.is_shell_runtime_failure() {
+                    if let Some(state) = slot.lock().await.as_mut() {
+                        state.record_shell_runtime_failure();
+                    }
+                }
+                BashCallExecution::legacy(outcomes::tool_failure(
+                    "BashCommand",
+                    &error,
+                    Some(&recovery_args),
+                )?)
+            }
         };
         if let Some(owner) = receipt_bound_verification {
             bind_receipt_verification_follow_up(&mut execution.result, &recovery_args);
@@ -811,7 +829,10 @@ impl WinxService {
         let (slot, _session_guard) =
             self.session_for(&normalize_thread_id(&read_files.thread_id)).await;
         match crate::tools::read_files::handle_tool_call_detailed(&slot, read_files).await {
-            Ok(outcome) => {
+            Ok(mut outcome) => {
+                if outcome.successful_files > 0 {
+                    let _ = write!(outcome.text, "\n\n{READ_EDIT_GUIDANCE}");
+                }
                 self.persist_state(&slot).await;
                 if let Some(error) = outcome.errors.first() {
                     let mut result =
@@ -1307,11 +1328,21 @@ mod verification_tests {
 
     use std::sync::Arc;
 
-    use super::{audit_summary, is_expected_recovery_status, partial_edit_result, RequestedTool};
+    use super::{
+        audit_summary, is_expected_recovery_status, partial_edit_result, RequestedTool,
+        READ_EDIT_GUIDANCE,
+    };
     use crate::runtime::ShellActionOptions;
     use crate::server::WinxService;
     use crate::state::BashState;
     use serde_json::json;
+
+    #[test]
+    fn read_guidance_leads_existing_file_edits_to_revision_bound_line_patch() {
+        assert!(READ_EDIT_GUIDANCE.contains("mode=line_patch"));
+        assert!(READ_EDIT_GUIDANCE.contains("data.files[].revision"));
+        assert!(READ_EDIT_GUIDANCE.contains("Use BashCommand for commands"));
+    }
 
     #[test]
     fn edit_verification_fields_are_removed_before_stable_struct_deserialization() {

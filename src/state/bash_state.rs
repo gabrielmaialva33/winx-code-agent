@@ -7,6 +7,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::info;
 
@@ -170,6 +171,9 @@ const IMAGE_DELIVERY_CACHE_CAP: usize = 32;
 /// contain only request/file fingerprints and are persisted so an MCP adapter
 /// restart cannot blindly repeat a mutation whose response was lost.
 const EDIT_MUTATION_RECEIPT_CAP: usize = 64;
+/// A model may retry one recovery reset, but repeated resets in a short window
+/// need fresh runtime-failure evidence so a healthy PTY is not churned.
+pub(crate) const SHELL_RESET_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct EditMutationPostcondition {
@@ -277,6 +281,10 @@ pub struct BashState {
     pub derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage,
     image_deliveries: VecDeque<String>,
     edit_mutation_receipts: VecDeque<EditMutationReceipt>,
+    /// Adapter-local reset evidence. It intentionally is not persisted or sent
+    /// to a guardian: a process restart is already a new recovery boundary.
+    last_shell_reset_at: Option<Instant>,
+    shell_runtime_failure_since_reset: bool,
 }
 
 impl Default for BashState {
@@ -311,6 +319,31 @@ impl BashState {
             derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage::default(),
             image_deliveries: VecDeque::new(),
             edit_mutation_receipts: VecDeque::new(),
+            last_shell_reset_at: None,
+            shell_runtime_failure_since_reset: false,
+        }
+    }
+
+    /// Remaining cooldown when another reset would only churn a recently
+    /// replaced shell. `None` means the reset is currently justified.
+    pub(crate) fn shell_reset_retry_after(&self, now: Instant) -> Option<Duration> {
+        if self.shell_runtime_failure_since_reset {
+            return None;
+        }
+        let last_reset = self.last_shell_reset_at?;
+        SHELL_RESET_COOLDOWN
+            .checked_sub(now.saturating_duration_since(last_reset))
+            .filter(|remaining| !remaining.is_zero())
+    }
+
+    pub(crate) fn record_shell_reset(&mut self, now: Instant) {
+        self.last_shell_reset_at = Some(now);
+        self.shell_runtime_failure_since_reset = false;
+    }
+
+    pub(crate) fn record_shell_runtime_failure(&mut self) {
+        if self.last_shell_reset_at.is_some() {
+            self.shell_runtime_failure_since_reset = true;
         }
     }
 
@@ -965,16 +998,39 @@ mod whitelist_range_tests {
     #![allow(clippy::expect_used)]
 
     use std::collections::HashMap;
+    use std::time::{Duration, Instant};
 
     use super::{
         BashState, EditCheckpoint, EditMutationPostcondition, EditMutationReceipt,
         EditVerificationState, FileWhitelistData, EDIT_CHECKPOINT_CAP,
         EDIT_CHECKPOINT_CONTENT_BYTES_CAP, EDIT_CHECKPOINT_MAX_READ_RANGES,
         EDIT_CHECKPOINT_METADATA_BYTES_CAP, EDIT_MUTATION_RECEIPT_CAP, MAX_WHITELIST_FILES,
+        SHELL_RESET_COOLDOWN,
     };
 
     fn wl(ranges: &[(usize, usize)], total: usize) -> FileWhitelistData {
         FileWhitelistData::new("h".to_string(), ranges.to_vec(), total)
+    }
+
+    #[test]
+    fn repeated_shell_reset_needs_failure_evidence_until_cooldown_expires() {
+        let mut state = BashState::new();
+        let first_reset = Instant::now();
+        assert!(state.shell_reset_retry_after(first_reset).is_none());
+
+        state.record_shell_reset(first_reset);
+        assert_eq!(
+            state.shell_reset_retry_after(first_reset + Duration::from_secs(30)),
+            Some(SHELL_RESET_COOLDOWN.saturating_sub(Duration::from_secs(30)))
+        );
+
+        state.record_shell_runtime_failure();
+        assert!(state.shell_reset_retry_after(first_reset + Duration::from_secs(31)).is_none());
+
+        state.record_shell_reset(first_reset + Duration::from_secs(31));
+        assert!(state
+            .shell_reset_retry_after(first_reset + Duration::from_secs(31) + SHELL_RESET_COOLDOWN)
+            .is_none());
     }
 
     #[test]

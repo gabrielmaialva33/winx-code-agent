@@ -65,6 +65,8 @@ pub(super) struct UsageResultMetadata<'a> {
     pub image_deduplicated: bool,
     pub temporary_session_files: u64,
     pub temporary_session_bytes: u64,
+    pub temporary_stale_pruned_files: u64,
+    pub temporary_stale_pruned_bytes: u64,
     pub temporary_over_budget: bool,
     pub edit_file_count: u64,
 }
@@ -115,6 +117,14 @@ pub(super) fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageRes
             .unwrap_or(0),
         temporary_session_bytes: temporary
             .and_then(|temporary| temporary.get("session_bytes"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        temporary_stale_pruned_files: temporary
+            .and_then(|temporary| temporary.get("stale_pruned_files"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        temporary_stale_pruned_bytes: temporary
+            .and_then(|temporary| temporary.get("stale_pruned_bytes"))
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
         temporary_over_budget: temporary
@@ -331,6 +341,10 @@ impl UsageEvent {
         let initial_files_count = u64_field(data, "initial_files_count");
         let code_writer_policy_strength = string_field(data, "code_writer_policy_strength");
         let shell_spawners_present = bool_field(data, "shell_spawners_present");
+        let shell_reset_performed = bool_field(data, "shell_reset_performed");
+        let shell_reset_retry_after_seconds = u64_field(data, "shell_reset_retry_after_seconds");
+        let temporary_stale_pruned_files = u64_field(data, "temporary_artifact_stale_pruned_files");
+        let temporary_stale_pruned_bytes = u64_field(data, "temporary_artifact_stale_pruned_bytes");
         let error_code = usage_result_metadata(result).error_code;
         tracing::info!(
             target: "winx::usage",
@@ -366,6 +380,10 @@ impl UsageEvent {
             initial_files_count,
             code_writer_policy_strength,
             shell_spawners_present,
+            shell_reset_performed,
+            shell_reset_retry_after_seconds,
+            temporary_stale_pruned_files,
+            temporary_stale_pruned_bytes,
             error_code,
             result_status,
             response_bytes,
@@ -430,6 +448,8 @@ impl UsageEvent {
             image_deduplicated = metadata.image_deduplicated,
             temporary_session_files = metadata.temporary_session_files,
             temporary_session_bytes = metadata.temporary_session_bytes,
+            temporary_stale_pruned_files = metadata.temporary_stale_pruned_files,
+            temporary_stale_pruned_bytes = metadata.temporary_stale_pruned_bytes,
             temporary_over_budget = metadata.temporary_over_budget,
             result_status,
             response_bytes,

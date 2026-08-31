@@ -161,6 +161,122 @@ mod session_registry_tests {
     }
 }
 
+mod shell_reset_guard_tests {
+    #![allow(clippy::expect_used)]
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use rmcp::model::CallToolResult;
+    use serde_json::json;
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct FailingShellRuntime {
+        configure_calls: Arc<AtomicUsize>,
+    }
+
+    impl ShellRuntime for FailingShellRuntime {
+        fn configure_session<'a>(
+            &'a self,
+            _bash_state: &'a mut BashState,
+            _transition: crate::runtime::ShellSessionTransition,
+        ) -> crate::runtime::ShellRuntimeConfigureFuture<'a> {
+            self.configure_calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(crate::runtime::ShellSessionConfiguration::default()) })
+        }
+
+        fn run_action<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+            _command: BashCommand,
+        ) -> crate::runtime::ShellRuntimeFuture<'a> {
+            Box::pin(async {
+                Err(WinxError::CommandExecutionError("simulated PTY transport failure".to_string()))
+            })
+        }
+
+        fn interrupt<'a>(
+            &'a self,
+            _bash_state: &'a SharedBashState,
+        ) -> crate::runtime::ShellRuntimeUnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn terminate_session<'a>(
+            &'a self,
+            _thread_id: &'a str,
+        ) -> crate::runtime::ShellRuntimeUnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn initialize_arguments(kind: &str, workspace: &std::path::Path) -> serde_json::Value {
+        json!({
+            "type": kind,
+            "any_workspace_path": workspace,
+            "mode_name": "wcgw",
+            "thread_id": "reset-evidence"
+        })
+    }
+
+    fn initialize_transition(result: &CallToolResult) -> &str {
+        result
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("data").unwrap_or(value).get("initialize_transition"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn runtime_failure_reenables_one_reset_after_a_redundant_reset_was_suppressed() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let runtime = FailingShellRuntime::default();
+        let configure_calls = runtime.configure_calls.clone();
+        let service = WinxService::with_runtime(SessionIsolation::Lenient, Arc::new(runtime));
+
+        let created = service
+            .handle_initialize(Some(initialize_arguments("first_call", workspace.path())))
+            .await
+            .expect("first call");
+        assert_eq!(initialize_transition(&created), "created");
+
+        let first_reset = service
+            .handle_initialize(Some(initialize_arguments("reset_shell", workspace.path())))
+            .await
+            .expect("first reset");
+        assert_eq!(initialize_transition(&first_reset), "shell_reset");
+
+        let redundant = service
+            .handle_initialize(Some(initialize_arguments("reset_shell", workspace.path())))
+            .await
+            .expect("redundant reset result");
+        assert_eq!(initialize_transition(&redundant), "reset_skipped_healthy");
+        assert_eq!(configure_calls.load(Ordering::SeqCst), 2);
+
+        let failed_bash = service
+            .handle_bash_command(Some(json!({
+                "action_json": {
+                    "type": "command",
+                    "command": "printf unreachable",
+                    "is_background": false
+                },
+                "thread_id": "reset-evidence"
+            })))
+            .await
+            .expect("typed Bash failure");
+        assert_eq!(failed_bash.is_error, Some(true));
+
+        let recovery_reset = service
+            .handle_initialize(Some(initialize_arguments("reset_shell", workspace.path())))
+            .await
+            .expect("evidence-bound reset");
+        assert_eq!(initialize_transition(&recovery_reset), "shell_reset");
+        assert_eq!(configure_calls.load(Ordering::SeqCst), 3);
+    }
+}
+
 mod task_lifecycle_tests {
     #![allow(clippy::expect_used)]
 
@@ -994,6 +1110,8 @@ mod schema_tests {
         for mode in ["search_replace", "line_patch", "replace", "undo"] {
             assert!(description.contains(mode), "missing {mode}: {description}");
         }
+        assert!(description.contains("line_patch is the default"), "{description}");
+        assert!(description.contains("never shell editing"), "{description}");
         let properties = edit
             .input_schema
             .get("properties")
@@ -1012,7 +1130,7 @@ mod schema_tests {
             .expect("EditFiles required fields");
         assert!(!required.iter().any(|field| field == "operation"));
         let serialized = serde_json::to_string(&*edit.input_schema).expect("serialize schema");
-        assert!(serialized.contains("small exact edits"), "{serialized}");
+        assert!(serialized.contains("default for an existing file"), "{serialized}");
         assert!(serialized.contains("<<<<<<< SEARCH"), "{serialized}");
         assert!(serialized.contains("ReadFiles.files[].revision"), "{serialized}");
         assert!(serialized.contains("returned by the edit being undone"), "{serialized}");
