@@ -220,7 +220,7 @@ impl WinxService {
             }
         };
         let thread_id = normalize_thread_id(&normalized.thread_id);
-        let (slot, session_guard) = self.session_for(&thread_id).await;
+        let (slot, session_guard) = self.tool_session_for(&thread_id).await;
         if let Some(verification) = normalized.verification.as_ref() {
             if let Err(error) = Self::validate_edit_verification(&slot, verification).await {
                 return Ok(Err(outcomes::tool_failure(requested_tool.name(), &error, args_value)?));
@@ -617,7 +617,7 @@ impl WinxService {
         let verification_id = verify_action.verification_id;
         let command = verify_action.command.trim().to_string();
         let thread_id = normalize_thread_id(&bash_command.thread_id);
-        let (slot, _guard) = self.session_for(&thread_id).await;
+        let (slot, _guard) = self.tool_session_for(&thread_id).await;
         let verification = EditVerification {
             command: command.clone(),
             wait_for_seconds: bash_command.wait_for_seconds,
@@ -729,7 +729,7 @@ impl WinxService {
         };
 
         let requested_thread_id = normalize_thread_id(&bash_command.thread_id);
-        let (slot, _session_guard) = self.session_for(&requested_thread_id).await;
+        let (slot, _session_guard) = self.tool_session_for(&requested_thread_id).await;
         if requested_thread_id.is_empty() {
             if let Some(thread_id) =
                 slot.lock().await.as_ref().map(|state| state.current_thread_id.clone())
@@ -779,6 +779,16 @@ impl WinxService {
                     outcome,
                     options.compact_output,
                 )?;
+                // Show-once recovery note from a rehydrated session (restart
+                // that lost the live shell, agent resume hint). Lead with it so
+                // the model sees the recovery before the command output.
+                let recovery_note =
+                    slot.lock().await.as_mut().and_then(|state| state.recovery_note.take());
+                if let Some(note) = recovery_note {
+                    result
+                        .content
+                        .insert(0, ContentBlock::text(format!("[session recovery] {note}")));
+                }
                 if let Some(usage) = temporary_artifact_usage.as_ref() {
                     outcomes::attach_temporary_artifact_usage(
                         &mut result,
@@ -827,7 +837,7 @@ impl WinxService {
         })?;
 
         let (slot, _session_guard) =
-            self.session_for(&normalize_thread_id(&read_files.thread_id)).await;
+            self.tool_session_for(&normalize_thread_id(&read_files.thread_id)).await;
         match crate::tools::read_files::handle_tool_call_detailed(&slot, read_files).await {
             Ok(mut outcome) => {
                 if outcome.successful_files > 0 {

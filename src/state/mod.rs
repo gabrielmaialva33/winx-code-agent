@@ -1,3 +1,4 @@
+pub mod agent_resume;
 pub mod ansi_codes;
 pub mod bash_state;
 pub mod line_ring;
@@ -7,5 +8,6 @@ pub mod pty;
 pub mod task_state;
 pub mod terminal;
 pub mod turn;
+pub mod turn_manifest;
 
 pub use bash_state::BashState;

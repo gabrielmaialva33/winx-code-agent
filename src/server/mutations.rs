@@ -200,7 +200,7 @@ impl WinxService {
         thread_id: &str,
         verification_id: &str,
     ) -> Result<String> {
-        let (slot, _guard) = self.session_for(thread_id).await;
+        let (slot, _guard) = self.tool_session_for(thread_id).await;
         let mut state = slot.lock().await;
         let state = state.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
         let shadow = state
@@ -235,7 +235,7 @@ impl WinxService {
             .mutations
             .acquire_verification(verification_id.to_string(), thread_id.clone())
             .await;
-        let (slot, _guard) = self.session_for(&thread_id).await;
+        let (slot, _guard) = self.tool_session_for(&thread_id).await;
         let mut state_guard = slot.lock().await;
         let state = state_guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
         let receipt = state

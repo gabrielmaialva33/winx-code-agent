@@ -179,6 +179,88 @@ impl WinxService {
         (slot, pin.acquire())
     }
 
+    /// [`Self::session_for`] plus transparent rehydration: the entry point for
+    /// every tool EXCEPT `Initialize`. After an adapter restart the registry is
+    /// empty, but the per-thread snapshot survives on disk and (daemon runtime)
+    /// the guardian may still own the live PTY — so a tool call carrying a
+    /// known `thread_id` self-heals here instead of failing with
+    /// `BashStateNotInitialized` and burning a model round-trip on re-Initialize.
+    ///
+    /// `Initialize` deliberately keeps the raw [`Self::session_for`]: its
+    /// recovery semantics (downgrading `reset_shell`/`user_asked_mode_change`
+    /// to `first_call`) depend on observing the missing live state.
+    pub(super) async fn tool_session_for(
+        &self,
+        thread_id: &str,
+    ) -> (SharedBashState, SessionGuard) {
+        let (slot, guard) = self.session_for(thread_id).await;
+        self.rehydrate_slot_if_persisted(&slot, thread_id).await;
+        (slot, guard)
+    }
+
+    /// Rebuild a missing adapter-side `BashState` from its persisted snapshot
+    /// and attach-or-create the runtime session behind it. No-op when the slot
+    /// is live, the `thread_id` is empty/anonymous, or nothing was persisted.
+    /// Failure leaves the slot empty so callers fail exactly as before.
+    async fn rehydrate_slot_if_persisted(&self, slot: &SharedBashState, thread_id: &str) {
+        use crate::runtime::ShellSessionTransition;
+
+        let thread_id = crate::types::normalize_thread_id(thread_id);
+        if thread_id.is_empty() {
+            return;
+        }
+        let mut state_guard = slot.lock().await;
+        if state_guard.is_some() {
+            return;
+        }
+        let snapshot = match crate::state::persistence::load_bash_state(&thread_id) {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return,
+            Err(error) => {
+                warn!(%error, thread_id, "failed to read persisted session snapshot");
+                return;
+            }
+        };
+
+        let mut state = crate::state::bash_state::BashState::new();
+        state.apply_snapshot(&snapshot);
+        // The registry key is authoritative for which session this is.
+        state.current_thread_id.clone_from(&thread_id);
+        if !state.workspace_root.exists() {
+            warn!(
+                thread_id,
+                workspace_root = %state.workspace_root.display(),
+                "not rehydrating session: persisted workspace no longer exists"
+            );
+            return;
+        }
+
+        // FirstCall is attach-or-create in both runtimes: the daemon guardian
+        // that survived the adapter restart hands back its authoritative
+        // snapshot with the live PTY untouched; a dead guardian (or the
+        // embedded runtime) gets a fresh PTY at the persisted cwd/mode.
+        match self
+            .shell_runtime
+            .configure_session(&mut state, ShellSessionTransition::FirstCall)
+            .await
+        {
+            Ok(configured) => {
+                info!(
+                    thread_id,
+                    attached_existing = configured.attached_existing,
+                    "rehydrated session from persisted state after adapter restart"
+                );
+                if !configured.attached_existing {
+                    state.recovery_note = Some(lost_shell_recovery_note(&thread_id, &state));
+                }
+                *state_guard = Some(state);
+            }
+            Err(error) => {
+                warn!(%error, thread_id, "failed to rehydrate persisted session");
+            }
+        }
+    }
+
     /// The most recently active session slot, optionally confined to one HTTP
     /// principal's internal thread-id prefix.
     pub(super) async fn active_slot(
@@ -289,6 +371,34 @@ impl WinxService {
     }
 }
 
+/// The show-once note for a session whose live shell did NOT survive the
+/// restart (a fresh PTY was created). When an interactive agent was running
+/// in the lost PTY, include how to resume its conversation.
+fn lost_shell_recovery_note(
+    thread_id: &str,
+    state: &crate::state::bash_state::BashState,
+) -> String {
+    let base = format!(
+        "Recovered session {thread_id} from its persisted snapshot after a restart: mode, \
+         permissions, and edit receipts were restored, and a fresh shell was started at {}.",
+        state.cwd.display()
+    );
+    match crate::state::agent_resume::load_agent_session(thread_id) {
+        Ok(Some(record)) => format!(
+            "{base} The interactive `{}` session running before the restart did not survive — \
+             resume its conversation with `{}` (cwd {}).",
+            record.agent,
+            record.resume_command(),
+            record.cwd
+        ),
+        Ok(None) => base,
+        Err(error) => {
+            warn!(%error, thread_id, "failed to read agent-session record");
+            base
+        }
+    }
+}
+
 pub(super) fn root_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
     let encoded = uri.strip_prefix("file://")?;
     let encoded = if let Some(path) = encoded.strip_prefix("localhost/") {
@@ -302,4 +412,151 @@ pub(super) fn root_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
     let decoded = percent_encoding::percent_decode_str(&encoded).decode_utf8().ok()?;
     let path = std::path::PathBuf::from(decoded.as_ref());
     path.is_absolute().then_some(path)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod rehydration_tests {
+    use std::sync::Arc;
+
+    use super::SessionIsolation;
+    use crate::errors::WinxError;
+    use crate::runtime::{
+        ShellRuntime, ShellRuntimeConfigureFuture, ShellRuntimeFuture, ShellRuntimeUnitFuture,
+        ShellSessionConfiguration, ShellSessionTransition,
+    };
+    use crate::server::WinxService;
+    use crate::state::agent_resume::{save_agent_session, AgentSessionRecord};
+    use crate::state::bash_state::BashState;
+    use crate::state::persistence::{delete_bash_state, save_bash_state};
+
+    /// Runtime double: attach-or-create succeeds without a real PTY and
+    /// reports whether the "live" session survived.
+    struct StubRuntime {
+        attached_existing: bool,
+    }
+
+    impl ShellRuntime for StubRuntime {
+        fn configure_session<'a>(
+            &'a self,
+            _bash_state: &'a mut BashState,
+            _transition: ShellSessionTransition,
+        ) -> ShellRuntimeConfigureFuture<'a> {
+            let attached_existing = self.attached_existing;
+            Box::pin(async move {
+                Ok(ShellSessionConfiguration { attach_hint: None, attached_existing })
+            })
+        }
+
+        fn run_action<'a>(
+            &'a self,
+            _bash_state: &'a Arc<tokio::sync::Mutex<Option<BashState>>>,
+            _command: crate::types::BashCommand,
+        ) -> ShellRuntimeFuture<'a> {
+            Box::pin(async { Err(WinxError::CommandExecutionError("stub".to_string())) })
+        }
+
+        fn interrupt<'a>(
+            &'a self,
+            _bash_state: &'a Arc<tokio::sync::Mutex<Option<BashState>>>,
+        ) -> ShellRuntimeUnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn terminate_session<'a>(&'a self, _thread_id: &'a str) -> ShellRuntimeUnitFuture<'a> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn service(attached_existing: bool) -> WinxService {
+        WinxService::with_runtime(
+            SessionIsolation::Strict,
+            Arc::new(StubRuntime { attached_existing }),
+        )
+    }
+
+    fn unique_thread_id(tag: &str) -> String {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        // Alphanumeric + underscore only, so `normalize_thread_id` keeps the
+        // id verbatim and the on-disk snapshot file matches.
+        format!("winxtest_rehydrate_{tag}_{}_{nanos}", std::process::id())
+    }
+
+    fn persist_snapshot(thread_id: &str, workspace: &std::path::Path) {
+        let mut state = BashState::new();
+        state.current_thread_id = thread_id.to_string();
+        state.workspace_root = workspace.to_path_buf();
+        state.cwd = workspace.to_path_buf();
+        state.initialized = true;
+        save_bash_state(thread_id, &state.snapshot()).expect("persist snapshot");
+    }
+
+    #[tokio::test]
+    async fn tool_call_rehydrates_a_persisted_session_transparently() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let thread_id = unique_thread_id("attach");
+        persist_snapshot(&thread_id, workspace.path());
+
+        // Fresh service = adapter restart: empty registry, snapshot on disk.
+        let (slot, _guard) = service(true).tool_session_for(&thread_id).await;
+        {
+            let state = slot.lock().await;
+            let state = state.as_ref().expect("session should rehydrate from disk");
+            assert!(state.initialized);
+            assert_eq!(state.current_thread_id, thread_id);
+            assert_eq!(state.workspace_root, workspace.path());
+            // The live session survived (guardian attach) — nothing to report.
+            assert!(state.recovery_note.is_none());
+        }
+        delete_bash_state(&thread_id).ok();
+    }
+
+    #[tokio::test]
+    async fn lost_shell_rehydration_surfaces_the_agent_resume_hint() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let thread_id = unique_thread_id("resume");
+        persist_snapshot(&thread_id, workspace.path());
+        save_agent_session(
+            &thread_id,
+            &AgentSessionRecord {
+                agent: "claude".to_string(),
+                command: "claude".to_string(),
+                cwd: workspace.path().to_string_lossy().into_owned(),
+                launched_at_unix_ms: 1,
+            },
+        )
+        .expect("persist agent record");
+
+        // attached_existing=false = the PTY did not survive (reboot / dead
+        // guardian): the note must carry the resume command.
+        let (slot, _guard) = service(false).tool_session_for(&thread_id).await;
+        {
+            let state = slot.lock().await;
+            let note = state
+                .as_ref()
+                .expect("session should rehydrate")
+                .recovery_note
+                .clone()
+                .expect("lost shell must set a recovery note");
+            assert!(note.contains("claude --continue"), "note missing resume hint: {note}");
+        }
+        delete_bash_state(&thread_id).ok();
+        crate::state::agent_resume::clear_agent_session(&thread_id).ok();
+    }
+
+    #[tokio::test]
+    async fn without_a_persisted_snapshot_the_slot_stays_empty() {
+        let thread_id = unique_thread_id("missing");
+        let (slot, _guard) = service(true).tool_session_for(&thread_id).await;
+        assert!(slot.lock().await.is_none(), "no snapshot on disk must not fabricate state");
+    }
+
+    #[tokio::test]
+    async fn empty_thread_id_never_rehydrates() {
+        let (slot, _guard) = service(true).tool_session_for("").await;
+        assert!(slot.lock().await.is_none());
+    }
 }

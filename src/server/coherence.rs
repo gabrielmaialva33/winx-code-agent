@@ -73,10 +73,19 @@ impl WinxService {
             }
         }
 
-        let bound_workspace = self
-            .bound_workspace(&internal_thread_id)
-            .await
-            .ok_or(WinxError::BashStateNotInitialized)?;
+        let bound_workspace =
+            if let Some(workspace) = self.bound_workspace(&internal_thread_id).await {
+                workspace
+            } else {
+                // After an adapter restart the registry is empty even though the
+                // session's snapshot (and possibly its guardian PTY) survived.
+                // Rehydrate before rejecting so a remote tool call carrying a
+                // known thread_id/workspace pair keeps working across restarts.
+                drop(self.tool_session_for(&internal_thread_id).await);
+                self.bound_workspace(&internal_thread_id)
+                    .await
+                    .ok_or(WinxError::BashStateNotInitialized)?
+            };
         let bound_workspace = canonical_workspace_identity(&bound_workspace.to_string_lossy());
         if requested_workspace != bound_workspace {
             return Err(WinxError::WorkspaceBindingMismatch {

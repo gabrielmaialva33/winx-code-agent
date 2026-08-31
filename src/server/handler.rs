@@ -474,7 +474,7 @@ impl ServerHandler for WinxService {
                 .and_then(|arguments| arguments.get("thread_id"))
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            let (slot, session_guard) = self.session_for(thread_id).await;
+            let (slot, session_guard) = self.tool_session_for(thread_id).await;
             let supported = self
                 .shell_runtime
                 .supports_generation_bound_actions_for(&slot)
