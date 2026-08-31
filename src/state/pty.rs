@@ -595,6 +595,9 @@ impl PtyShell {
         // shows up — drop the dedup hash so we don't elide the first response.
         self.last_returned_hash = None;
         self.delivered_output.clear();
+        // Drop retained OSC title/progress so the previous foreground
+        // program's last title can't masquerade as this command's turn state.
+        self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clear_osc();
 
         // Write the command
         self.write_command(command)?;
@@ -1001,6 +1004,23 @@ impl PtyShell {
     /// (a full-screen app like vim/htop/less is running).
     pub fn live_in_alt_screen(&self) -> bool {
         self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).in_alt_screen()
+    }
+
+    /// The latest OSC 0/2 window title emitted by the foreground program (`""`
+    /// when none) — an out-of-band turn signal for the manifest recognizers
+    /// (claude/codex render a spinner glyph in the title while generating).
+    pub fn live_osc_title(&self) -> String {
+        self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).osc_title().to_string()
+    }
+
+    /// The latest OSC 9 payload after `9;` (`""` when none) — ConEmu-style
+    /// progress reads `4;<state>;<percent>`.
+    pub fn live_osc_progress(&self) -> String {
+        self.live
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .osc_progress()
+            .to_string()
     }
 
     /// Cursor position `(row, col)` on the live screen (0-based), so a piloting

@@ -36,6 +36,41 @@ pub enum ScreenUpdate {
     Unchanged,
 }
 
+/// The latest OSC title/progress evidence scraped from the raw PTY stream.
+/// Coding-agent TUIs signal their state out-of-band here — claude/codex put a
+/// spinner glyph in the OSC 0/2 window title while generating, and several
+/// agents emit `ConEmu`-style OSC 9;4 progress — and the manifest-driven turn
+/// recognizers ([`crate::state::turn_manifest`]) read both as detection
+/// regions. vt100 exposes neither, so a second, OSC-only `vte` pass collects
+/// them. Mirrors herdr's retention semantics: the latest update wins, and an
+/// empty title update clears (`""` also means "never seen").
+#[derive(Debug, Default, Clone)]
+struct OscSignals {
+    /// Payload of the last OSC 0/2 (icon+title / title) sequence.
+    title: String,
+    /// Payload of the last OSC 9 sequence after the `9;` prefix — `ConEmu`
+    /// progress arrives as `4;<state>;<percent>` (manifest rules anchor on
+    /// `^4;...`), other OSC 9 notifications keep their raw text.
+    progress: String,
+}
+
+impl vte::Perform for OscSignals {
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        let Some(&code) = params.first() else { return };
+        if code == b"0" || code == b"2" {
+            self.title = join_osc_params(&params[1..]);
+        } else if code == b"9" {
+            self.progress = join_osc_params(&params[1..]);
+        }
+    }
+}
+
+/// Re-join OSC parameters that `vte` split on `;` — titles may legitimately
+/// contain semicolons.
+fn join_osc_params(params: &[&[u8]]) -> String {
+    params.iter().map(|param| String::from_utf8_lossy(param)).collect::<Vec<_>>().join(";")
+}
+
 /// A continuously-fed terminal emulator with a fixed viewport. Wraps a
 /// `vt100::Parser` and exposes just what the PTY live tap needs.
 pub struct LiveTerminal {
@@ -43,6 +78,11 @@ pub struct LiveTerminal {
     /// Snapshot the client saw on its last look — the baseline the next
     /// [`LiveTerminal::snapshot_diff`] diffs against.
     last_snapshot: Option<Vec<String>>,
+    /// OSC-only second parser: persistent so sequences split across feed
+    /// chunks decode correctly, and deliberately NOT rebuilt on `resize` —
+    /// the retained title/progress must survive viewport changes.
+    osc_parser: vte::Parser,
+    osc: OscSignals,
 }
 
 impl LiveTerminal {
@@ -54,13 +94,35 @@ impl LiveTerminal {
         Self {
             parser: Parser::new(rows.max(MIN_VIEWPORT), cols.max(MIN_VIEWPORT), 0),
             last_snapshot: None,
+            osc_parser: vte::Parser::new(),
+            osc: OscSignals::default(),
         }
     }
 
     /// Feed raw PTY bytes. The parser is persistent, so escape sequences split
     /// across chunk boundaries decode correctly.
     pub fn feed(&mut self, bytes: &[u8]) {
+        self.osc_parser.advance(&mut self.osc, bytes);
         self.parser.process(bytes);
+    }
+
+    /// The latest OSC 0/2 title, or `""` when none was seen (or the last
+    /// update was an empty clear).
+    pub fn osc_title(&self) -> &str {
+        &self.osc.title
+    }
+
+    /// The latest OSC 9 payload (after `9;`), or `""` when none was seen.
+    /// `ConEmu` progress reads `4;<state>;<percent>`.
+    pub fn osc_progress(&self) -> &str {
+        &self.osc.progress
+    }
+
+    /// Drop retained OSC title/progress evidence. Called when a new command is
+    /// submitted so a stale title from the previous foreground program can't
+    /// leak into the next program's turn detection.
+    pub fn clear_osc(&mut self) {
+        self.osc = OscSignals::default();
     }
 
     /// Whether the alternate screen buffer is currently active (vim, htop, and
@@ -189,6 +251,51 @@ mod tests {
         assert!(t.in_alt_screen());
         t.feed(b"\x1b[?1049l");
         assert!(!t.in_alt_screen());
+    }
+
+    #[test]
+    fn osc_title_and_progress_are_captured_and_cleared() {
+        let mut t = LiveTerminal::new(10, 40);
+        assert_eq!(t.osc_title(), "");
+        assert_eq!(t.osc_progress(), "");
+
+        // OSC 0 (BEL-terminated) — the claude spinner-in-title pattern.
+        t.feed(b"\x1b]0;\xe2\xa0\x8b claude \x07");
+        assert_eq!(t.osc_title(), "⠋ claude ");
+
+        // OSC 2 (ST-terminated) replaces it; semicolons in the title survive.
+        t.feed(b"\x1b]2;a;b\x1b\\");
+        assert_eq!(t.osc_title(), "a;b");
+
+        // `ConEmu` progress: OSC 9;4;<state>;<percent> retains "4;...".
+        t.feed(b"\x1b]9;4;1;42\x07");
+        assert_eq!(t.osc_progress(), "4;1;42");
+
+        // An empty title update clears (herdr retention semantics).
+        t.feed(b"\x1b]0;\x07");
+        assert_eq!(t.osc_title(), "");
+
+        t.feed(b"\x1b]2;back\x07");
+        t.clear_osc();
+        assert_eq!(t.osc_title(), "");
+        assert_eq!(t.osc_progress(), "");
+    }
+
+    #[test]
+    fn osc_sequence_split_across_feeds_decodes() {
+        let mut t = LiveTerminal::new(10, 40);
+        t.feed(b"\x1b]2;spl");
+        t.feed(b"it title\x07");
+        assert_eq!(t.osc_title(), "split title");
+    }
+
+    #[test]
+    fn osc_state_survives_resize() {
+        let mut t = LiveTerminal::new(10, 40);
+        t.feed(b"\x1b]2;kept\x07\x1b]9;4;0\x07");
+        t.resize(20, 80);
+        assert_eq!(t.osc_title(), "kept");
+        assert_eq!(t.osc_progress(), "4;0");
     }
 
     #[test]
