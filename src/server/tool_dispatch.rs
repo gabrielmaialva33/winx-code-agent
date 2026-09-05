@@ -262,7 +262,10 @@ impl WinxService {
             .await?
         {
             Ok(prepared) => prepared,
-            Err(result) => return Ok(ToolCallExecution::legacy(result)),
+            Err(mut result) => {
+                outcomes::finalize_tool_result(&mut result);
+                return Ok(ToolCallExecution::legacy(result));
+            }
         };
         let raw_summary = prepared_edit.as_ref().map_or_else(
             || audit_summary(tool, args_value.as_ref()),
@@ -278,7 +281,7 @@ impl WinxService {
             MutationStart::Bypass => None,
             MutationStart::Owner(owner) => Some(owner),
             MutationStart::Replay(mut result) => {
-                redact_result(&mut result);
+                outcomes::finalize_tool_result(&mut result);
                 info!(
                     tool = %tool,
                     ms = started.elapsed().as_millis(),
@@ -307,7 +310,9 @@ impl WinxService {
                 if let Some(owner) = mutation_owner.take() {
                     self.finish_edit_mutation(owner, &mut call).await;
                 }
-                redact_result(&mut call);
+                // Last step on purpose: every content rewrite above (partial
+                // ReadFiles text, verification presentation) is now final.
+                outcomes::finalize_tool_result(&mut call);
                 Ok(call)
             }
             Err(mut error) => {
@@ -547,11 +552,16 @@ impl WinxService {
         {
             Ok(outcome) => {
                 self.persist_state(&slot).await;
-                let workspace_root = slot
+                let (workspace_root, bound_thread_id) = slot
                     .lock()
                     .await
                     .as_ref()
-                    .map(|state| state.workspace_root.to_string_lossy().into_owned())
+                    .map(|state| {
+                        (
+                            state.workspace_root.to_string_lossy().into_owned(),
+                            state.current_thread_id.clone(),
+                        )
+                    })
                     .ok_or_else(|| {
                         McpError::internal_error(
                             "Initialize completed without a bound workspace",
@@ -559,7 +569,11 @@ impl WinxService {
                         )
                     })?;
                 let mut result = CallToolResult::success(vec![ContentBlock::text(outcome.text)]);
+                // The generated thread_id used to live only in the text; a
+                // client that reads just structuredContent could not bind the
+                // session without it.
                 result.structured_content = Some(json!({
+                    "thread_id": bound_thread_id,
                     "workspace_root": workspace_root,
                     "initialize_transition": outcome.transition.as_str(),
                     "initialize_reused": outcome.transition.reused(),
@@ -1333,19 +1347,6 @@ fn bind_receipt_verification_follow_up(result: &mut CallToolResult, arguments: &
         );
     } else {
         envelope.remove("nextAction");
-    }
-}
-
-fn redact_result(result: &mut CallToolResult) {
-    for content in &mut result.content {
-        if let ContentBlock::Text(text) = content {
-            if let std::borrow::Cow::Owned(scrubbed) = crate::utils::redact::redact(&text.text) {
-                text.text = scrubbed;
-            }
-        }
-    }
-    if let Some(structured) = result.structured_content.as_mut() {
-        crate::utils::redact::redact_json(structured);
     }
 }
 

@@ -51,12 +51,24 @@ pub(super) struct RequiredRead {
 ///
 /// Text content remains the backwards-compatible human-readable result. This
 /// object gives an LLM an unambiguous state transition and safe next action.
+/// Some clients expose only this object to the model once a tool advertises an
+/// `outputSchema` (observed with the `ChatGPT` MCP connector and Claude Code),
+/// so `output` carries the delivered text as well instead of leaving the model
+/// with byte counts alone.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ToolResultEnvelope {
     pub status: ToolResultStatus,
     pub tool: String,
     pub message: String,
+    /// Delivered text for this invocation, after output limits, redaction and
+    /// response transformations: the text content blocks joined in order with
+    /// a single newline. Read it for command output, file text and
+    /// diagnostics. Omitted when no text block is returned (image-only
+    /// results) and for `CodeMap`, whose navigation fields already carry the
+    /// complete result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     pub retryable: bool,
@@ -181,7 +193,8 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
     }
 
     let existing = result.structured_content.take();
-    let text = result_text(result);
+    let output = content_text(result);
+    let text = output.clone().unwrap_or_default();
     let mut data = safe_success_data(tool, arguments, &text, false);
     if let Some(existing) = existing.as_ref() {
         if matches!(
@@ -196,7 +209,15 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
         ) {
             if let Value::Object(metadata) = existing {
                 for (key, value) in metadata {
-                    data.entry(key.clone()).or_insert_with(|| value.clone());
+                    if tool == "Initialize" && matches!(key.as_str(), "thread_id" | "workspace_root")
+                    {
+                        // The handler reports the bound session identity
+                        // (normalized thread_id, canonical workspace_root);
+                        // it must beat the raw argument echo copied above.
+                        data.insert(key.clone(), value.clone());
+                    } else {
+                        data.entry(key.clone()).or_insert_with(|| value.clone());
+                    }
                 }
             } else {
                 data.insert("result".to_string(), existing.clone());
@@ -210,6 +231,7 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
         status: ToolResultStatus::Completed,
         tool: tool.to_string(),
         message: success_message(tool, ToolResultStatus::Completed),
+        output: output.filter(|_| tool != "CodeMap"),
         error_code: None,
         retryable: false,
         retry_same_call: false,
@@ -590,6 +612,7 @@ pub(super) fn bash_success_result(
         status,
         tool: "BashCommand".to_string(),
         message: success_message("BashCommand", status),
+        output: Some(rendered_output.clone()),
         error_code: None,
         retryable: false,
         retry_same_call: false,
@@ -771,15 +794,72 @@ pub(super) fn enforce_next_action_policy(
         .to_string();
     envelope.insert("message".to_string(), Value::String(format!("{message}{suffix}")));
     result.content.insert(0, ContentBlock::text(format!("POLICY BLOCKED.{suffix}")));
+    mirror_text_output(result);
 }
 
 fn result_text(result: &CallToolResult) -> String {
-    result
+    content_text(result).unwrap_or_default()
+}
+
+/// Joined text of every text content block, or `None` when the result carries
+/// no text block at all (for example an image-only `ReadImage` delivery). An
+/// empty command output is still `Some("")`: the block exists, it is just empty.
+fn content_text(result: &CallToolResult) -> Option<String> {
+    let mut blocks = result
         .content
         .iter()
         .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
-        .collect::<Vec<_>>()
-        .join("\n")
+        .peekable();
+    blocks.peek()?;
+    Some(blocks.collect::<Vec<_>>().join("\n"))
+}
+
+/// Keep `structuredContent.output` in sync with the text content.
+///
+/// Typed constructors set `output` eagerly, but the guarantee lives at the
+/// delivery boundary: later steps may rewrite the text blocks (policy banners,
+/// `ReadFiles` partial output, Task aggregation, redaction) and manual JSON
+/// envelopes never set it. Run this after the last such step so a client that
+/// reads only `structuredContent` sees what a text-only client sees. The
+/// joined text is redacted once more as a whole, so `output` is never less
+/// redacted than `content` even when a secret straddles two blocks. Idempotent.
+pub(super) fn mirror_text_output(result: &mut CallToolResult) {
+    let text = content_text(result);
+    let Some(Value::Object(envelope)) = result.structured_content.as_mut() else { return };
+    if envelope.get("tool").and_then(Value::as_str) == Some("CodeMap") {
+        // CodeMap's text is a rendering of `files`/`hits`/`fallback`, which
+        // stay in the envelope; mirroring it would double the model-visible
+        // payload without adding information.
+        envelope.remove("output");
+        return;
+    }
+    match text {
+        Some(text) => {
+            let text = crate::utils::redact::redact(&text).into_owned();
+            envelope.insert("output".to_string(), Value::String(text));
+        }
+        None => {
+            envelope.remove("output");
+        }
+    }
+}
+
+/// Single delivery boundary for a tool result: redact the text blocks and the
+/// structured payload, then mirror the final text into `structuredContent`.
+/// Every `CallToolResult` that leaves the server passes through here, including
+/// the early returns that bypass the ordinary dispatch pipeline.
+pub(super) fn finalize_tool_result(result: &mut CallToolResult) {
+    for content in &mut result.content {
+        if let ContentBlock::Text(text) = content {
+            if let std::borrow::Cow::Owned(scrubbed) = crate::utils::redact::redact(&text.text) {
+                text.text = scrubbed;
+            }
+        }
+    }
+    if let Some(structured) = result.structured_content.as_mut() {
+        crate::utils::redact::redact_json(structured);
+    }
+    mirror_text_output(result);
 }
 
 fn bash_success_status(state: &BashCommandState) -> ToolResultStatus {
@@ -1194,6 +1274,7 @@ fn error_envelope(
     ToolResultEnvelope {
         status,
         tool: tool.to_string(),
+        output: Some(text.clone()),
         message: text,
         error_code: Some(error_code),
         retryable,
@@ -1312,6 +1393,195 @@ fn string_argument(arguments: Option<&Value>, key: &str) -> Option<String> {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::*;
+
+    fn exited_bash_result(output: &str) -> BashCommandRuntimeResult {
+        BashCommandRuntimeResult {
+            result: crate::tools::bash_command::BashCommandResult {
+                output: output.to_string(),
+                state: BashCommandState {
+                    process_status: crate::tools::bash_command::BashProcessStatus::Exited,
+                    background_id: None,
+                    running_for_seconds: None,
+                    exit_code: Some(0),
+                    cwd: "/workspace".into(),
+                    turn_state: None,
+                },
+            },
+            compact_output: None,
+            command_generation: Some(1),
+            execution_token: None,
+            generation_bound_actions: false,
+            dropped_output_file: None,
+            output_truncated: false,
+        }
+    }
+
+    #[test]
+    fn bash_success_mirrors_rendered_output_for_structured_only_clients() {
+        let result = bash_success_result(
+            Some(&json!({
+                "thread_id": "thread",
+                "workspace_root": "/workspace",
+                "action_json": {"type": "command", "command": "printf WINX_OK"}
+            })),
+            exited_bash_result("WINX_OK"),
+            false,
+        )
+        .expect("typed BashCommand result");
+        let text = result.content[0].as_text().expect("text block").text.clone();
+        let structured = result.structured_content.expect("structured success");
+        assert_eq!(structured["status"], "completed");
+        assert_eq!(structured["output"], "WINX_OK");
+        assert_eq!(structured["output"], text);
+        assert_eq!(structured["data"]["output_bytes"], 7);
+    }
+
+    #[test]
+    fn empty_command_output_is_mirrored_as_an_empty_string() {
+        let result = bash_success_result(None, exited_bash_result(""), false)
+            .expect("typed BashCommand result");
+        let structured = result.structured_content.expect("structured success");
+        assert_eq!(structured["output"], "");
+    }
+
+    #[test]
+    fn decorate_success_mirrors_joined_text_and_omits_output_for_images() {
+        let mut result = CallToolResult::success(vec![
+            ContentBlock::text("first"),
+            ContentBlock::text("second"),
+        ]);
+        decorate_success("ReadFiles", Some(&json!({"thread_id": "thread"})), &mut result);
+        let structured = result.structured_content.expect("structured success");
+        assert_eq!(structured["output"], "first\nsecond");
+        assert_eq!(structured["data"]["output_bytes"], "first\nsecond".len());
+
+        let mut image = CallToolResult::success(vec![ContentBlock::image("AAAA", "image/png")]);
+        image.structured_content = Some(json!({"content_fingerprint": "abc"}));
+        decorate_success("ReadImage", None, &mut image);
+        let structured = image.structured_content.expect("structured image result");
+        assert_eq!(structured["status"], "completed");
+        assert!(structured.get("output").is_none(), "{structured}");
+        assert_eq!(structured["data"]["result"]["content_fingerprint"], "abc");
+    }
+
+    #[test]
+    fn initialize_reports_the_bound_session_identity_over_argument_echoes() {
+        let mut result = CallToolResult::success(vec![ContentBlock::text(
+            "Use thread_id=ws_bound for all winx tool calls.",
+        )]);
+        result.structured_content = Some(json!({
+            "thread_id": "ws_bound",
+            "workspace_root": "/canonical/workspace",
+            "initialize_transition": "created"
+        }));
+        decorate_success(
+            "Initialize",
+            Some(&json!({
+                "thread_id": " client-thread ",
+                "workspace_root": "/requested/workspace",
+                "any_workspace_path": "/requested/workspace"
+            })),
+            &mut result,
+        );
+        let structured = result.structured_content.expect("structured Initialize result");
+        assert_eq!(structured["data"]["thread_id"], "ws_bound");
+        assert_eq!(structured["data"]["workspace_root"], "/canonical/workspace");
+        assert_eq!(structured["data"]["any_workspace_path"], "/requested/workspace");
+        assert_eq!(structured["data"]["initialize_transition"], "created");
+        assert_eq!(structured["output"], "Use thread_id=ws_bound for all winx tool calls.");
+    }
+
+    #[test]
+    fn tool_failure_mirrors_its_text_into_output() {
+        let result = tool_failure(
+            "BashCommand",
+            &WinxError::BashStateNotInitialized,
+            Some(&json!({"thread_id": "thread"})),
+        )
+        .expect("tool-level error");
+        let text = result.content[0].as_text().expect("text block").text.clone();
+        let structured = result.structured_content.expect("structured error");
+        assert_eq!(structured["status"], "needs_initialize");
+        assert_eq!(structured["output"], text);
+        assert_eq!(structured["message"], text);
+    }
+
+    #[test]
+    fn code_map_results_never_carry_an_output_mirror() {
+        let mut result = CallToolResult::success(vec![ContentBlock::text("src/lib.rs\n  1 fn main")]);
+        result.structured_content = Some(json!({"mode": "file", "files": [], "payload_bytes": 1}));
+        decorate_success("CodeMap", None, &mut result);
+        let structured = result.structured_content.as_ref().expect("structured CodeMap result");
+        assert_eq!(structured["status"], "completed");
+        assert!(structured.get("output").is_none(), "{structured}");
+        assert_eq!(structured["mode"], "file");
+
+        let mut failure = tool_failure("CodeMap", &WinxError::BashStateNotInitialized, None)
+            .expect("tool-level error");
+        finalize_tool_result(&mut failure);
+        let structured = failure.structured_content.expect("structured CodeMap error");
+        assert!(structured.get("output").is_none(), "{structured}");
+        assert!(structured["message"].as_str().is_some_and(|text| !text.is_empty()));
+    }
+
+    #[test]
+    fn finalize_redacts_text_and_mirror_identically() {
+        let token = format!("ghp_{}", "a".repeat(40));
+        let mut result =
+            CallToolResult::success(vec![ContentBlock::text(format!("token={token} ok"))]);
+        result.structured_content = Some(json!({
+            "status": "completed",
+            "tool": "BashCommand",
+            "output": format!("token={token} ok"),
+            "data": {"note": format!("saw {token}")}
+        }));
+        finalize_tool_result(&mut result);
+        let text = result_text(&result);
+        assert_eq!(text, "token=[REDACTED:github-token] ok");
+        let structured = result.structured_content.expect("structured result");
+        assert_eq!(structured["output"], text);
+        assert_eq!(structured["data"]["note"], "saw [REDACTED:github-token]");
+        assert!(!serde_json::to_string(&structured).expect("json").contains(&token));
+    }
+
+    #[test]
+    fn mirror_is_never_less_redacted_than_the_text_blocks() {
+        // Per-block redaction cannot see a key that straddles two blocks; the
+        // joined mirror is redacted as a whole, so it must scrub it anyway.
+        let mut result = CallToolResult::success(vec![
+            ContentBlock::text("-----BEGIN PRIVATE KEY-----\nsecret-head"),
+            ContentBlock::text("secret-tail\n-----END PRIVATE KEY-----"),
+        ]);
+        result.structured_content = Some(json!({"status": "completed", "tool": "BashCommand"}));
+        finalize_tool_result(&mut result);
+        let output = result.structured_content.expect("structured")["output"]
+            .as_str()
+            .expect("mirrored output")
+            .to_string();
+        assert!(!output.contains("secret-head"), "{output}");
+        assert!(output.contains("[REDACTED:"), "{output}");
+    }
+
+    #[test]
+    fn mirror_text_output_tracks_content_rewrites() {
+        let mut result = CallToolResult::success(vec![ContentBlock::text("before")]);
+        result.structured_content =
+            Some(json!({"status": "completed", "tool": "ReadFiles", "output": "before"}));
+        result.content = vec![ContentBlock::text("after"), ContentBlock::text("more")];
+        mirror_text_output(&mut result);
+        assert_eq!(
+            result.structured_content.as_ref().expect("structured")["output"],
+            "after\nmore"
+        );
+
+        result.content = vec![ContentBlock::image("AAAA", "image/png")];
+        mirror_text_output(&mut result);
+        assert!(result.structured_content.as_ref().expect("structured").get("output").is_none());
+
+        let mut plain = CallToolResult::success(vec![ContentBlock::text("no envelope")]);
+        mirror_text_output(&mut plain);
+        assert!(plain.structured_content.is_none());
+    }
 
     #[test]
     fn code_map_navigation_payload_is_not_duplicated_inside_data_result() {
@@ -2114,11 +2384,14 @@ mod tests {
             .expect("custom policy");
         enforce_next_action_policy(&mut result, policy);
 
+        let text = result_text(&result);
         let structured = result.structured_content.expect("structured result");
         assert_eq!(structured["status"], "denied");
         assert_eq!(structured["errorCode"], "policy_blocked");
         assert!(structured.get("nextAction").is_none());
         assert_eq!(structured["requiredReads"], json!([]));
+        assert!(text.starts_with("POLICY BLOCKED."), "{text}");
+        assert_eq!(structured["output"], text, "policy banner must be mirrored");
     }
 
     #[test]

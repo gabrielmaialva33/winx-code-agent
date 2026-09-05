@@ -358,6 +358,7 @@ impl ServerHandler for WinxService {
                     let mut result =
                         outcomes::tool_failure(request.name.as_ref(), &error, Some(&arguments))?;
                     outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
+                outcomes::finalize_tool_result(&mut result);
                     return Ok(result.into());
                 }
             }
@@ -404,6 +405,7 @@ impl ServerHandler for WinxService {
                 let mut result =
                     outcomes::tool_failure(request.name.as_ref(), &error, arguments.as_ref())?;
                 outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
+                outcomes::finalize_tool_result(&mut result);
                 scope.unscope_result(&mut result);
                 let status = outcomes::result_status(&result);
                 usage.emit(
@@ -453,6 +455,7 @@ impl ServerHandler for WinxService {
                     let mut result =
                         outcomes::tool_failure("BashCommand", &error, arguments.as_ref())?;
                     outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
+                outcomes::finalize_tool_result(&mut result);
                     scope.unscope_result(&mut result);
                     let status = outcomes::result_status(&result);
                     usage.emit(

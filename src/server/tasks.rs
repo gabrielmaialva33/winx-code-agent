@@ -675,13 +675,13 @@ fn update_aggregate_metadata(result: &mut CallToolResult, output_truncated: bool
         .filter_map(|content| content.as_text())
         .map(|text| text.text.len())
         .sum::<usize>();
-    let Some(serde_json::Value::Object(data)) =
+    if let Some(serde_json::Value::Object(data)) =
         result.structured_content.as_mut().and_then(|structured| structured.get_mut("data"))
-    else {
-        return;
-    };
-    data.insert("output_bytes".to_string(), serde_json::json!(output_bytes));
-    data.insert("output_truncated".to_string(), serde_json::json!(output_truncated));
+    {
+        data.insert("output_bytes".to_string(), serde_json::json!(output_bytes));
+        data.insert("output_truncated".to_string(), serde_json::json!(output_truncated));
+    }
+    super::outcomes::mirror_text_output(result);
 }
 
 fn refresh_aggregate_metadata(result: &mut CallToolResult) {
@@ -712,10 +712,12 @@ mod tests {
         }));
 
         update_aggregate_metadata(&mut result, true);
-        let data = &result.structured_content.expect("structured content")["data"];
+        let structured = result.structured_content.expect("structured content");
+        let data = &structured["data"];
         assert_eq!(data["output_bytes"], output.len());
         assert_eq!(data["output_truncated"], true);
         assert!(output.starts_with("(...earlier task output truncated...)"));
+        assert_eq!(structured["output"], output, "aggregated text must be mirrored");
     }
 
     #[test]

@@ -1189,6 +1189,12 @@ mod schema_tests {
                 "{} advertises a client-incompatible data schema: {output:?}",
                 tool.name
             );
+            let output_schema = properties.get("output").expect("tool outputSchema output");
+            assert!(
+                output_schema.to_string().contains("\"string\""),
+                "{} output must be a string mirror of the text content: {output_schema}",
+                tool.name
+            );
             assert_eq!(
                 output
                     .get("$defs")
