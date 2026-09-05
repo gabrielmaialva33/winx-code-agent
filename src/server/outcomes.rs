@@ -65,8 +65,8 @@ pub(super) struct ToolResultEnvelope {
     /// response transformations: the text content blocks joined in order with
     /// a single newline. Read it for command output, file text and
     /// diagnostics. Omitted when no text block is returned (image-only
-    /// results) and for `CodeMap`, whose navigation fields already carry the
-    /// complete result.
+    /// results) and for `CodeMap` results whose `files`/`hits` already carry
+    /// the symbols; `CodeMap` diagnostics without symbols keep it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -193,7 +193,12 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
     }
 
     let existing = result.structured_content.take();
-    let output = content_text(result);
+    let output = content_text(result).filter(|_| {
+        !existing
+            .as_ref()
+            .and_then(Value::as_object)
+            .is_some_and(|navigation| code_map_symbols_are_structured(tool, navigation))
+    });
     let text = output.clone().unwrap_or_default();
     let mut data = safe_success_data(tool, arguments, &text, false);
     if let Some(existing) = existing.as_ref() {
@@ -209,7 +214,8 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
         ) {
             if let Value::Object(metadata) = existing {
                 for (key, value) in metadata {
-                    if tool == "Initialize" && matches!(key.as_str(), "thread_id" | "workspace_root")
+                    if tool == "Initialize"
+                        && matches!(key.as_str(), "thread_id" | "workspace_root")
                     {
                         // The handler reports the bound session identity
                         // (normalized thread_id, canonical workspace_root);
@@ -231,7 +237,7 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
         status: ToolResultStatus::Completed,
         tool: tool.to_string(),
         message: success_message(tool, ToolResultStatus::Completed),
-        output: output.filter(|_| tool != "CodeMap"),
+        output,
         error_code: None,
         retryable: false,
         retry_same_call: false,
@@ -826,10 +832,8 @@ fn content_text(result: &CallToolResult) -> Option<String> {
 pub(super) fn mirror_text_output(result: &mut CallToolResult) {
     let text = content_text(result);
     let Some(Value::Object(envelope)) = result.structured_content.as_mut() else { return };
-    if envelope.get("tool").and_then(Value::as_str) == Some("CodeMap") {
-        // CodeMap's text is a rendering of `files`/`hits`/`fallback`, which
-        // stay in the envelope; mirroring it would double the model-visible
-        // payload without adding information.
+    let tool = envelope.get("tool").and_then(Value::as_str).unwrap_or_default();
+    if code_map_symbols_are_structured(tool, envelope) {
         envelope.remove("output");
         return;
     }
@@ -842,6 +846,18 @@ pub(super) fn mirror_text_output(result: &mut CallToolResult) {
             envelope.remove("output");
         }
     }
+}
+
+/// A `CodeMap` result whose `files`/`hits` already carry symbols does not
+/// mirror its text: that text is a rendering of the same symbols, and the
+/// duplicate would double the model-visible payload of the largest responses.
+/// Results without symbols keep the mirror, because only the text carries the
+/// diagnostic (an unreadable file, an oversized first result, a failure).
+fn code_map_symbols_are_structured(tool: &str, structured: &Map<String, Value>) -> bool {
+    tool == "CodeMap"
+        && ["files", "hits"].iter().any(|key| {
+            structured.get(*key).and_then(Value::as_array).is_some_and(|items| !items.is_empty())
+        })
 }
 
 /// Single delivery boundary for a tool result: redact the text blocks and the
@@ -1507,21 +1523,36 @@ mod tests {
     }
 
     #[test]
-    fn code_map_results_never_carry_an_output_mirror() {
-        let mut result = CallToolResult::success(vec![ContentBlock::text("src/lib.rs\n  1 fn main")]);
-        result.structured_content = Some(json!({"mode": "file", "files": [], "payload_bytes": 1}));
-        decorate_success("CodeMap", None, &mut result);
-        let structured = result.structured_content.as_ref().expect("structured CodeMap result");
+    fn code_map_omits_output_only_when_its_symbols_are_structured() {
+        let mut symbols =
+            CallToolResult::success(vec![ContentBlock::text("src/lib.rs\n  1 fn main")]);
+        symbols.structured_content = Some(json!({
+            "mode": "file",
+            "files": [{"file": "src/lib.rs", "symbols": [{"name": "main", "kind": "fn", "line": 1}]}],
+            "payload_bytes": 1
+        }));
+        decorate_success("CodeMap", None, &mut symbols);
+        let structured = symbols.structured_content.as_ref().expect("structured CodeMap result");
         assert_eq!(structured["status"], "completed");
         assert!(structured.get("output").is_none(), "{structured}");
         assert_eq!(structured["mode"], "file");
+        finalize_tool_result(&mut symbols);
+        assert!(symbols.structured_content.expect("structured")["output"].is_null());
+
+        let diagnostic = "Could not outline src/broken.rs: permission denied";
+        let mut unreadable = CallToolResult::success(vec![ContentBlock::text(diagnostic)]);
+        unreadable.structured_content =
+            Some(json!({"mode": "file", "files": [], "payload_bytes": 1}));
+        decorate_success("CodeMap", None, &mut unreadable);
+        finalize_tool_result(&mut unreadable);
+        let structured = unreadable.structured_content.expect("structured CodeMap diagnostic");
+        assert_eq!(structured["output"], diagnostic, "{structured}");
 
         let mut failure = tool_failure("CodeMap", &WinxError::BashStateNotInitialized, None)
             .expect("tool-level error");
         finalize_tool_result(&mut failure);
         let structured = failure.structured_content.expect("structured CodeMap error");
-        assert!(structured.get("output").is_none(), "{structured}");
-        assert!(structured["message"].as_str().is_some_and(|text| !text.is_empty()));
+        assert_eq!(structured["output"], structured["message"], "{structured}");
     }
 
     #[test]
