@@ -1654,6 +1654,14 @@ mod tests {
             "shared-cancel-request",
         );
         params.options.cancellation_key = Some("shared-cancel-key".to_string());
+        // The owner consumes its reservation as soon as `execute_action`
+        // returns, which also happens when the inline wait expires with the
+        // command still running. The default 2s window coincides with the
+        // startup timeout below, so a cold CI runner could expire it right
+        // after the marker appeared and the mid-flight assertion would find
+        // the reservation already released. The command only ends when this
+        // test writes the release marker, so a long inline wait is safe.
+        params.command.wait_for_seconds = Some(30.0);
 
         let owner_sessions = Arc::clone(&sessions);
         let owner_params = params.clone();
@@ -1661,7 +1669,7 @@ mod tests {
             tokio::spawn(
                 async move { run_action(&owner_sessions, owner_params, "guardian-a").await },
             );
-        tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::time::timeout(Duration::from_secs(10), async {
             while !started.exists() {
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
