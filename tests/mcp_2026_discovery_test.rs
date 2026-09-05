@@ -767,13 +767,16 @@ fn initialized_thread_id(response: &str) -> anyhow::Result<String> {
         .as_array()
         .and_then(|content| content.iter().find_map(|item| item["text"].as_str()))
         .ok_or_else(|| anyhow::anyhow!("Initialize response has no text content: {response}"))?;
-    text.lines()
-        .find_map(|line| {
-            line.strip_prefix("Use thread_id=")
-                .and_then(|value| value.strip_suffix(" for all winx tool calls."))
-                .map(str::to_string)
-        })
+    thread_id_instruction(text)
         .ok_or_else(|| anyhow::anyhow!("Initialize response has no thread_id instruction: {text}"))
+}
+
+fn thread_id_instruction(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        line.strip_prefix("Use thread_id=")
+            .and_then(|value| value.strip_suffix(" for all winx tool calls."))
+            .map(str::to_string)
+    })
 }
 
 fn initialized_workspace_root(response: &str) -> anyhow::Result<String> {
@@ -3599,6 +3602,141 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
     assert_usage_entries(&contents)
 }
 
+/// Post one `tools/call` request and parse the JSON-RPC response body.
+async fn call_tool_json(
+    address: std::net::SocketAddr,
+    request_meta: &serde_json::Value,
+    id: &str,
+    name: &str,
+    arguments: serde_json::Value,
+) -> anyhow::Result<serde_json::Value> {
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": { "_meta": request_meta, "name": name, "arguments": arguments }
+    });
+    let response = post_json(address, "2026-07-28", "tools/call", &request.to_string()).await?;
+    if !response.starts_with("HTTP/1.1 200") {
+        anyhow::bail!("{name} call failed: {response}");
+    }
+    response_json(&response)
+}
+
+/// Assert that `structuredContent.output` is byte-identical to the first text
+/// block and return that text.
+fn assert_output_mirrors_text(response: &serde_json::Value) -> anyhow::Result<String> {
+    let text = response["result"]["content"][0]["text"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("tool result omitted text: {response}"))?;
+    assert_eq!(response["result"]["structuredContent"]["output"], text, "{response}");
+    Ok(text.to_string())
+}
+
+/// Clients that honor `outputSchema` (the `ChatGPT` MCP connector, Claude Code)
+/// show the model only `structuredContent`. Every text result must therefore
+/// carry its complete text in `structuredContent.output`, and a generated
+/// Initialize `thread_id` must be readable without parsing the text.
+#[tokio::test(flavor = "multi_thread")]
+async fn structured_content_mirrors_text_for_schema_only_clients() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let request_meta = modern_request_meta("mirror-client", false);
+
+    let catalog = list_tools_as(address, TEST_TOKEN, "mirror-client").await?;
+    let tools = catalog["result"]["tools"].as_array().cloned().unwrap_or_default();
+    assert!(!tools.is_empty(), "empty tool catalog: {catalog}");
+    for tool in &tools {
+        let output = tool["outputSchema"]["properties"]["output"].to_string();
+        assert!(output.contains("string"), "{} lacks a string output mirror: {tool}", tool["name"]);
+    }
+
+    let initialize = call_tool_json(
+        address,
+        &request_meta,
+        "mirror-init",
+        "Initialize",
+        serde_json::json!({
+            "type": "first_call",
+            "any_workspace_path": workspace.path(),
+            "mode_name": "wcgw"
+        }),
+    )
+    .await?;
+    let initialize_text = assert_output_mirrors_text(&initialize)?;
+    let thread_id = thread_id_instruction(&initialize_text)
+        .ok_or_else(|| anyhow::anyhow!("Initialize has no thread_id instruction: {initialize}"))?;
+    let data = &initialize["result"]["structuredContent"]["data"];
+    assert_eq!(data["thread_id"], thread_id, "{data}");
+    let workspace_root = data["workspace_root"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Initialize omitted workspace_root: {data}"))?
+        .to_string();
+    let binding = serde_json::json!({ "thread_id": thread_id, "workspace_root": workspace_root });
+    let with_binding = |mut arguments: serde_json::Value| {
+        if let (Some(target), Some(source)) = (arguments.as_object_mut(), binding.as_object()) {
+            target.extend(source.clone());
+        }
+        arguments
+    };
+
+    let marker = "WINX_STRUCTURED_MIRROR_OK";
+    let bash = call_tool_json(
+        address,
+        &request_meta,
+        "mirror-bash",
+        "BashCommand",
+        with_binding(serde_json::json!({
+            "action_json": {
+                "type": "command",
+                "command": format!("printf {marker}"),
+                "is_background": false
+            }
+        })),
+    )
+    .await?;
+    let bash_text = assert_output_mirrors_text(&bash)?;
+    assert!(bash_text.contains(marker), "{bash}");
+    assert_eq!(
+        bash["result"]["structuredContent"]["data"]["output_bytes"],
+        bash_text.len(),
+        "{bash}"
+    );
+
+    let present = workspace.path().join("mirror.txt");
+    std::fs::write(&present, "mirror line one\nmirror line two\n")?;
+    let missing = workspace.path().join("mirror-missing.txt");
+    let partial = call_tool_json(
+        address,
+        &request_meta,
+        "mirror-read",
+        "ReadFiles",
+        with_binding(serde_json::json!({ "file_paths": [present, missing] })),
+    )
+    .await?;
+    assert_ne!(partial["result"]["isError"], true, "{partial}");
+    let partial_text = assert_output_mirrors_text(&partial)?;
+    assert!(partial_text.contains("mirror line two"), "{partial}");
+    assert!(partial_text.contains("do not exist"), "partial-read summary missing: {partial}");
+    assert_eq!(
+        partial["result"]["structuredContent"]["data"]["missing_files"].as_array().map(Vec::len),
+        Some(1),
+        "{partial}"
+    );
+
+    let failing = call_tool_json(
+        address,
+        &request_meta,
+        "mirror-read-missing",
+        "ReadFiles",
+        with_binding(serde_json::json!({ "file_paths": [missing] })),
+    )
+    .await?;
+    assert_eq!(failing["result"]["isError"], true, "{failing}");
+    assert_output_mirrors_text(&failing)?;
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn modern_bash_command_task_completes_through_tasks_get() -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
@@ -3687,6 +3825,10 @@ async fn modern_bash_command_task_completes_through_tasks_get() -> anyhow::Resul
                     response["result"]["result"]["structuredContent"]["data"]["output_truncated"],
                     false,
                     "{response}"
+                );
+                assert_eq!(
+                    response["result"]["result"]["structuredContent"]["output"], text,
+                    "aggregated Task text must be mirrored into structuredContent: {response}"
                 );
                 break;
             }
