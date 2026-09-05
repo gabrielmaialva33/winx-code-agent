@@ -242,8 +242,9 @@ Winx advertises MCP `2026-07-28`. Every tool publishes an `outputSchema` and ret
 `structuredContent` orchestration envelope while preserving its existing text or image content for older clients.
 Some clients expose only the structured object to the model once a tool advertises an `outputSchema` (observed with
 the ChatGPT MCP connector and Claude Code), so `structuredContent.output` carries the delivered text as well: the text
-blocks joined in order after output limits and redaction. Image-only results omit it, and so does `CodeMap`, whose
-`files`/`hits`/`fallback` fields already carry the complete result. The
+blocks joined in order after output limits and redaction. Image-only results omit it, and so does a `CodeMap` result
+whose `files`/`hits` already carry symbols (its text is a rendering of them); `CodeMap` diagnostics without symbols
+keep it. The
 `status` field is authoritative (`completed`, `running`, `awaiting_input`, `awaiting_approval`, `needs_read`,
 `needs_initialize`, `conflict`, `recovery_exhausted`, `not_found`, `denied`, `invalid_input`, or `failed`). Recoverable failures are normal MCP
 tool results with `isError: true`, `retrySameCall: false`, and (when Winx can infer one safely) a concrete `nextAction` plus

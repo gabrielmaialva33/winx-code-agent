@@ -283,7 +283,7 @@ O handshake inicial do MCP estabelece um contrato de orquestração sequencial d
 
 Os arquivos de um lote `ReadFiles` são processados em um pool paralelo limitado (`WINX_READ_PARALLELISM`, padrão `4`, máximo `32`). A resposta e a cobertura do guard rail continuam seguindo exatamente a ordem solicitada.
 
-Cada ferramenta define um `outputSchema` e retorna um envelope `structuredContent`. Alguns clientes mostram ao modelo apenas o objeto estruturado quando a ferramenta anuncia `outputSchema` (observado no conector MCP do ChatGPT e no Claude Code); por isso `output` também carrega o texto entregue: os blocos de texto unidos em ordem, já após limites de saída e redaction. Resultados somente de imagem o omitem, assim como `CodeMap`, cujos campos `files`/`hits`/`fallback` já trazem o resultado completo:
+Cada ferramenta define um `outputSchema` e retorna um envelope `structuredContent`. Alguns clientes mostram ao modelo apenas o objeto estruturado quando a ferramenta anuncia `outputSchema` (observado no conector MCP do ChatGPT e no Claude Code); por isso `output` também carrega o texto entregue: os blocos de texto unidos em ordem, já após limites de saída e redaction. Resultados somente de imagem o omitem, assim como um resultado de `CodeMap` cujos `files`/`hits` já trazem símbolos (o texto é apenas a renderização deles); diagnósticos de `CodeMap` sem símbolos o mantêm, de modo que um cliente que consome `structuredContent` lê símbolos em `files`/`hits` e todo o resto em `output`:
 
 ```json
 {

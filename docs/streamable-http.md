@@ -344,8 +344,10 @@ clients that do not expose handshake instructions to the model.
 Every tool advertises an `outputSchema` and returns a common `structuredContent` envelope. Existing text and image content
 remain unchanged for older clients. Some clients expose only the structured object to the model once a tool advertises
 an `outputSchema` (observed with the ChatGPT MCP connector and Claude Code), so `output` carries the delivered text as
-well: the text blocks joined in order after output limits and redaction. Image-only results omit it, and so does
-`CodeMap`, whose `files`/`hits`/`fallback` fields already carry the complete result. The main fields are:
+well: the text blocks joined in order after output limits and redaction. Image-only results omit it, and so does a
+`CodeMap` result whose `files`/`hits` already carry symbols (its text is a rendering of them); `CodeMap` diagnostics
+without symbols keep it, so a client that consumes `structuredContent` reads symbols from `files`/`hits` and everything
+else from `output`. The main fields are:
 
 ```json
 {
