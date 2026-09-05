@@ -275,6 +275,76 @@ mod shell_reset_guard_tests {
         assert_eq!(initialize_transition(&recovery_reset), "shell_reset");
         assert_eq!(configure_calls.load(Ordering::SeqCst), 3);
     }
+
+    /// A stdio client that reads only `structuredContent` must be able to bind
+    /// the session from `data.thread_id`, even when its own `thread_id` argument
+    /// normalizes to empty and Winx generates the real identity.
+    #[tokio::test]
+    async fn initialize_structured_identity_survives_an_unnormalizable_thread_id() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let service = WinxService::new();
+        let edit_permissions = crate::tool_policy::ToolPolicy::default().edit_permissions();
+        let request = rmcp::model::CallToolRequestParams::new("Initialize").with_arguments(
+            serde_json::json!({
+                "type": "first_call",
+                "any_workspace_path": workspace.path(),
+                "mode_name": "wcgw",
+                "thread_id": "---"
+            })
+            .as_object()
+            .expect("request object")
+            .clone(),
+        );
+        let result = service
+            .execute_tool_call(
+                request,
+                crate::runtime::ShellActionOptions::default(),
+                edit_permissions,
+            )
+            .await
+            .expect("Initialize execution")
+            .result;
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let text = result.content[0].as_text().expect("Initialize text").text.clone();
+        let structured = result.structured_content.expect("structured Initialize result");
+        let bound = structured["data"]["thread_id"].as_str().expect("bound thread_id").to_string();
+        assert!(!bound.is_empty() && bound != "---", "{structured}");
+        assert!(
+            text.contains(&format!("Use thread_id={bound} for all winx tool calls.")),
+            "{text}"
+        );
+        assert_eq!(structured["output"], text);
+        let workspace_root =
+            structured["data"]["workspace_root"].as_str().expect("workspace_root").to_string();
+
+        let request = rmcp::model::CallToolRequestParams::new("BashCommand").with_arguments(
+            serde_json::json!({
+                "action_json": {
+                    "type": "command",
+                    "command": "printf structured-identity-ok",
+                    "is_background": false
+                },
+                "thread_id": bound,
+                "workspace_root": workspace_root
+            })
+            .as_object()
+            .expect("request object")
+            .clone(),
+        );
+        let bash = service
+            .execute_tool_call(
+                request,
+                crate::runtime::ShellActionOptions::default(),
+                edit_permissions,
+            )
+            .await
+            .expect("BashCommand execution")
+            .result;
+        assert_ne!(bash.is_error, Some(true), "{bash:?}");
+        let bash_text = bash.content[0].as_text().expect("Bash text").text.clone();
+        assert!(bash_text.contains("structured-identity-ok"), "{bash_text}");
+        assert_eq!(bash.structured_content.expect("structured Bash result")["output"], bash_text);
+    }
 }
 
 mod task_lifecycle_tests {
