@@ -259,13 +259,14 @@ MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、�
 
 `ReadFiles` 批次中的文件会在受限并行池中处理（`WINX_READ_PARALLELISM`，默认 `4`，最大 `32`），但响应内容和读取保护范围始终严格按请求顺序发布。
 
-每个工具均声明了 `outputSchema` 并返回统一的 `structuredContent` 封装：
+每个工具均声明了 `outputSchema` 并返回统一的 `structuredContent` 封装。某些客户端在工具声明 `outputSchema` 后只向模型展示结构化对象（在 ChatGPT MCP 连接器和 Claude Code 中观察到），因此 `output` 也会携带实际交付的文本：按顺序拼接的文本块，且已经过输出限制和脱敏处理。仅包含图片的结果会省略该字段，`CodeMap` 也会省略，因为其 `files`/`hits`/`fallback` 字段已包含完整结果：
 
 ```json
 {
   "status": "needs_read",
   "tool": "EditFiles",
   "message": "EditFiles failed: ...",
+  "output": "EditFiles failed: ...",
   "errorCode": "read_required",
   "retryable": true,
   "retrySameCall": false,

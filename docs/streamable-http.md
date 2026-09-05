@@ -342,13 +342,17 @@ supplied as `verify_command` on `EditFiles`, saving one network/model round trip
 clients that do not expose handshake instructions to the model.
 
 Every tool advertises an `outputSchema` and returns a common `structuredContent` envelope. Existing text and image content
-remain unchanged for older clients. The main fields are:
+remain unchanged for older clients. Some clients expose only the structured object to the model once a tool advertises
+an `outputSchema` (observed with the ChatGPT MCP connector and Claude Code), so `output` carries the delivered text as
+well: the text blocks joined in order after output limits and redaction. Image-only results omit it, and so does
+`CodeMap`, whose `files`/`hits`/`fallback` fields already carry the complete result. The main fields are:
 
 ```json
 {
   "status": "needs_read",
   "tool": "EditFiles",
   "message": "EditFiles failed: ...",
+  "output": "EditFiles failed: ...",
   "errorCode": "read_required",
   "retryable": true,
   "retrySameCall": false,
