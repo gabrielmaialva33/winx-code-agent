@@ -373,6 +373,79 @@ async fn status_check_returns_output_emitted_after_initial_response() -> Result<
     Ok(())
 }
 
+/// Measured on the HTTP connector: a foreground command exited in the seconds
+/// between two `status_check` polls, the daemon journal drained its prompt,
+/// and the next poll was rejected with "No command is currently running" even
+/// though no response had ever carried the exit code or the final output.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_check_after_an_unobserved_exit_delivers_the_final_result() -> Result<()> {
+    let thread_id = "pty-unobserved-exit";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+
+    let initial = tools::bash_command::handle_tool_call(
+        &bash_state_arc,
+        BashCommand {
+            action_json: BashCommandAction::Command {
+                command: "sleep 0.5; printf 'POST_EXIT_MARKER\\n'; sh -c 'exit 3'".to_string(),
+                is_background: false,
+                allow_multi: true,
+            },
+            wait_for_seconds: Some(0.1),
+            thread_id: thread_id.to_string(),
+        },
+    )
+    .await?;
+    assert!(initial.contains("status = still running"), "{initial}");
+    assert!(!initial.contains("POST_EXIT_MARKER"), "{initial}");
+
+    // Another reader drains the prompt before the next MCP poll, exactly like
+    // the guardian's journal reader does. The shell is now idle with an
+    // unreported exit.
+    let shell = bash_state_arc
+        .lock()
+        .await
+        .as_ref()
+        .map(|state| state.pty_shell.clone())
+        .ok_or(WinxError::BashStateNotInitialized)?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let finished = shell
+            .lock()
+            .await
+            .as_mut()
+            .is_none_or(winx_code_agent::state::pty::PtyShell::poll_output_nonblocking);
+        if finished {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "command never finished");
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    let status_check = || {
+        serde_json::from_value::<BashCommand>(json!({
+            "action_json": { "type": "status_check" },
+            "wait_for_seconds": 1.0,
+            "thread_id": thread_id
+        }))
+        .map_err(|error| WinxError::ArgumentParseError(error.to_string()))
+    };
+    let status = tools::bash_command::handle_tool_call(&bash_state_arc, status_check()?).await?;
+    assert!(status.contains("POST_EXIT_MARKER"), "final output must be delivered: {status}");
+    assert!(status.contains("status = process exited"), "{status}");
+    assert!(status.contains("exit code = 3"), "exit code must be delivered: {status}");
+
+    // Once reported, the idle shell has nothing left to check.
+    let again = tools::bash_command::handle_tool_call(&bash_state_arc, status_check()?).await;
+    assert!(
+        again
+            .as_ref()
+            .err()
+            .is_some_and(|error| { error.to_string().contains("No command is currently running") }),
+        "a second poll must not repeat the completion: {again:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn first_background_completion_poll_keeps_final_output() -> Result<()> {
     let thread_id = "pty-reaper-reader-race";
