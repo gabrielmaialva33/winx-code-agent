@@ -301,6 +301,12 @@ pub struct PtyShell {
     /// Cumulative PTY snapshot already delivered to the caller. Incremental
     /// status polling diffs against this value, then advances it after rendering.
     delivered_output: String,
+    /// True from a foreground command's start until a response has reported
+    /// its exit. The prompt can be drained by another reader (the daemon
+    /// journal) between two status polls; the next poll then finds the shell
+    /// idle and must still deliver the final output and exit code instead of
+    /// rejecting the call as if nothing had run.
+    pending_completion_report: bool,
     /// Optional command a human can run to attach to the same terminal session.
     pub attach_hint: Option<String>,
     /// The exact suffix that ends this shell's prompt: `──➤<nonce>`. The nonce is
@@ -521,6 +527,7 @@ impl PtyShell {
             ring: LineRing::new(RING_BUFFER_LINES, MAX_PARTIAL_LINE_BYTES),
             last_returned_hash: None,
             delivered_output: String::new(),
+            pending_completion_report: false,
             attach_hint,
             prompt_end_marker: format!("{WCGW_PROMPT_END}{nonce}"),
             live,
@@ -643,6 +650,18 @@ impl PtyShell {
     pub fn mark_command_started(&mut self) {
         self.command_generation = self.command_generation.saturating_add(1);
         self.command_started_at = Some(Instant::now());
+        self.pending_completion_report = true;
+    }
+
+    /// Whether the most recent foreground command has finished without any
+    /// response having reported its exit yet.
+    pub fn completion_report_pending(&self) -> bool {
+        !self.command_running && self.pending_completion_report
+    }
+
+    /// Record that a response reported the current command as finished.
+    pub fn mark_completion_reported(&mut self) {
+        self.pending_completion_report = false;
     }
 
     pub fn command_generation(&self) -> u64 {

@@ -390,6 +390,14 @@ pub(super) async fn wait_for_output(
             shell.mark_output_delivered(&output);
         }
     }
+    if complete && !is_background {
+        // This response carries the exit code, so a later status poll on the
+        // idle shell has nothing left to deliver.
+        let mut guard = shell.lock().await;
+        if let Some(shell) = guard.as_mut() {
+            shell.mark_completion_reported();
+        }
+    }
 
     let rendered = {
         let before_lines = rendered.lines().count();
@@ -521,11 +529,11 @@ pub(super) async fn execute_status_check(
     } else {
         None
     };
-    let (is_running, generation) = {
+    let (is_running, generation, completion_pending) = {
         let guard = shell.lock().await;
-        guard
-            .as_ref()
-            .map_or((false, 0), |shell| (shell.command_running, shell.command_generation()))
+        guard.as_ref().map_or((false, 0, false), |shell| {
+            (shell.command_running, shell.command_generation(), shell.completion_report_pending())
+        })
     };
 
     if options.expected_generation.is_some_and(|expected| expected != generation) {
@@ -535,7 +543,11 @@ pub(super) async fn execute_status_check(
         )));
     }
 
-    if !is_running && !is_background && options.expected_generation.is_none() {
+    // A command that exited between two polls (its prompt drained by the daemon
+    // journal or the reaper) still owes the caller its final output and exit
+    // code: fall through to the normal path, which completes immediately.
+    if !is_running && !is_background && options.expected_generation.is_none() && !completion_pending
+    {
         let mut manager = lock_session_store();
         let error = format!(
             "No command is currently running, so there's nothing to check. The previous \
