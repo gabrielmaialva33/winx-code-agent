@@ -10,6 +10,7 @@ pub struct DaemonSocketCandidate {
     pub selected: bool,
 }
 
+#[cfg(unix)]
 fn socket_under(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("winx/winxd.sock")
 }
