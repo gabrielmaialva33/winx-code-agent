@@ -10,7 +10,6 @@
 
 pub mod build_info;
 pub mod config;
-#[cfg(unix)]
 pub mod daemon;
 pub mod diagnostics;
 pub mod errors;

@@ -5,13 +5,10 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-#[cfg(unix)]
 use std::time::Duration;
 
 use clap::Parser;
-#[cfg(unix)]
 use winx_code_agent::daemon::{default_socket_path, DaemonClient};
-#[cfg(unix)]
 use winx_code_agent::runtime::{configured_daemon_binary, restart_control_daemon_at};
 use winx_code_agent::{start_winx_server, Result, WinxError};
 
@@ -130,14 +127,12 @@ enum Commands {
     },
 
     /// List shell sessions owned by winxd
-    #[cfg(unix)]
     List {
         #[arg(long)]
         socket: Option<PathBuf>,
     },
 
     /// Read a session's output using an independent consumer cursor
-    #[cfg(unix)]
     Attach {
         thread_id: String,
         #[arg(long, default_value = "cli")]
@@ -149,7 +144,6 @@ enum Commands {
     },
 
     /// Stop and remove one or every daemon-owned shell session
-    #[cfg(unix)]
     Kill {
         #[arg(required_unless_present = "all")]
         thread_id: Option<String>,
@@ -160,7 +154,6 @@ enum Commands {
     },
 
     /// Remove idle or unreachable daemon-owned shell sessions
-    #[cfg(unix)]
     Prune {
         /// Override the configured idle TTL for this run. Zero prunes every idle session.
         #[arg(long)]
@@ -170,7 +163,6 @@ enum Commands {
     },
 
     /// Restart winxd without terminating per-session guardians or PTYs
-    #[cfg(unix)]
     RestartDaemon {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -253,17 +245,12 @@ async fn async_main(cli: Cli) -> Result<()> {
             )
             .await
         }
-        #[cfg(unix)]
         Some(Commands::List { socket }) => run_list(socket).await,
-        #[cfg(unix)]
         Some(Commands::Attach { thread_id, consumer, follow, socket }) => {
             run_attach(socket, thread_id, consumer, follow).await
         }
-        #[cfg(unix)]
         Some(Commands::Kill { thread_id, all, socket }) => run_kill(socket, thread_id, all).await,
-        #[cfg(unix)]
         Some(Commands::Prune { idle_seconds, socket }) => run_prune(socket, idle_seconds).await,
-        #[cfg(unix)]
         Some(Commands::RestartDaemon { socket }) => run_restart_daemon(socket).await,
         Some(Commands::Doctor) => run_doctor().await,
         Some(Commands::Report { log, last, since_minutes, build }) => {
@@ -274,12 +261,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     }
 }
 
-#[cfg(unix)]
 fn daemon_client(socket: Option<PathBuf>) -> DaemonClient {
     DaemonClient::new(socket.unwrap_or_else(default_socket_path))
 }
 
-#[cfg(unix)]
 async fn run_list(socket: Option<PathBuf>) -> Result<()> {
     let sessions = daemon_client(socket).list_sessions().await?;
     serde_json::to_writer_pretty(std::io::stdout().lock(), &sessions)
@@ -288,7 +273,6 @@ async fn run_list(socket: Option<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-#[cfg(unix)]
 async fn run_attach(
     socket: Option<PathBuf>,
     thread_id: String,
@@ -313,7 +297,6 @@ async fn run_attach(
     }
 }
 
-#[cfg(unix)]
 async fn run_kill(socket: Option<PathBuf>, thread_id: Option<String>, all: bool) -> Result<()> {
     let client = daemon_client(socket);
     if all {
@@ -335,7 +318,6 @@ async fn run_kill(socket: Option<PathBuf>, thread_id: Option<String>, all: bool)
     Ok(())
 }
 
-#[cfg(unix)]
 async fn run_prune(socket: Option<PathBuf>, idle_seconds: Option<u64>) -> Result<()> {
     let result = daemon_client(socket).prune_sessions(idle_seconds).await?;
     serde_json::to_writer_pretty(std::io::stdout().lock(), &result)
@@ -344,7 +326,6 @@ async fn run_prune(socket: Option<PathBuf>, idle_seconds: Option<u64>) -> Result
     Ok(())
 }
 
-#[cfg(unix)]
 async fn run_restart_daemon(socket: Option<PathBuf>) -> Result<()> {
     let socket = socket.unwrap_or_else(default_socket_path);
     let binary = configured_daemon_binary()?;
