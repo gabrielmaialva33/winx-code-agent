@@ -1133,6 +1133,7 @@ mod tests {
     use super::*;
     use crate::daemon::protocol::{RpcResponse, TYPED_ACTION_RESULT_CAPABILITY};
 
+    #[cfg(unix)] // mocks the control plane with a raw UnixListener/pair
     #[tokio::test]
     async fn cancelled_rpc_cannot_poison_the_next_tool_channel() {
         let temp = tempfile::tempdir().expect("temporary directory");
@@ -1459,6 +1460,7 @@ mod tests {
         assert_eq!(action_count.load(Ordering::SeqCst), 1);
     }
 
+    #[cfg(unix)] // mocks the control plane with a raw UnixListener/pair
     #[tokio::test]
     async fn adapter_negotiation_cache_is_bounded_under_session_churn() {
         let mut cache = NegotiationCache::default();
@@ -1485,6 +1487,7 @@ mod tests {
         assert_eq!(cache.sessions.len(), MAX_NEGOTIATED_SESSIONS);
     }
 
+    #[cfg(unix)] // mocks the control plane with a raw UnixListener/pair
     #[tokio::test]
     async fn adapter_negotiation_cache_never_evicts_active_sessions() {
         let mut cache = NegotiationCache::default();

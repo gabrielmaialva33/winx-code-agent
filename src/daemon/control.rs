@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -490,15 +489,40 @@ async fn cache_guardian(
     cache.insert(socket, CachedGuardian { hello, last_seen: now, socket_identity });
 }
 
+/// Identity of the socket artifact, used to notice a guardian that was
+/// recreated behind the same path. Unix reads the inode; Windows uses the
+/// marker file's creation time and size, which change on every re-bind.
 async fn socket_identity(socket: &Path) -> Option<SocketIdentity> {
-    tokio::fs::metadata(socket).await.ok().map(|metadata| SocketIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-        ctime_seconds: metadata.ctime(),
-        ctime_nanoseconds: metadata.ctime_nsec(),
-        mtime_seconds: metadata.mtime(),
-        mtime_nanoseconds: metadata.mtime_nsec(),
-    })
+    let metadata = tokio::fs::metadata(socket).await.ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        Some(SocketIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            ctime_seconds: metadata.ctime(),
+            ctime_nanoseconds: metadata.ctime_nsec(),
+            mtime_seconds: metadata.mtime(),
+            mtime_nanoseconds: metadata.mtime_nsec(),
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        let modified = metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok());
+        Some(SocketIdentity {
+            device: 0,
+            inode: metadata.file_size(),
+            ctime_seconds: i64::try_from(metadata.creation_time()).unwrap_or(i64::MAX),
+            ctime_nanoseconds: 0,
+            mtime_seconds: modified
+                .map_or(0, |duration| i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)),
+            mtime_nanoseconds: modified.map_or(0, |duration| i64::from(duration.subsec_nanos())),
+        })
+    }
 }
 
 fn normalize_guardian_request(request: &mut RpcRequest, hello: &HelloResult) -> Result<()> {
@@ -712,8 +736,11 @@ fn guardian_binary() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     let executable = std::env::current_exe()?;
-    let sibling =
-        executable.with_file_name(if cfg!(windows) { "winx-guardian.exe" } else { "winx-guardian" });
+    let sibling = executable.with_file_name(if cfg!(windows) {
+        "winx-guardian.exe"
+    } else {
+        "winx-guardian"
+    });
     if sibling.is_file() {
         Ok(sibling)
     } else {
