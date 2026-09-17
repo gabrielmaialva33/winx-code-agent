@@ -545,6 +545,7 @@ async fn wait_for_process_exit(pid: u32, budget: Duration) -> bool {
 /// Politely ask a guardian to exit: SIGTERM on Unix, the `winx.shutdown` RPC
 /// on Windows (which has no signals). A guardian that is already gone or too
 /// old to know the RPC simply falls through to the forced path.
+#[cfg_attr(unix, allow(clippy::unused_async))] // only the Windows branch awaits
 async fn request_graceful_exit(socket: &Path, pid: u32) -> Result<()> {
     #[cfg(unix)]
     {

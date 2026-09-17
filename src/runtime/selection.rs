@@ -214,6 +214,7 @@ async fn restart_control_daemon_from_hello(
 /// Planned control restart: SIGTERM on Unix, the `winx.shutdown` RPC on
 /// Windows. Either way guardians are separate detached processes and keep
 /// their PTYs.
+#[cfg_attr(unix, allow(clippy::unused_async))] // only the Windows branch awaits
 async fn signal_control_shutdown(socket: &Path, pid: u32) -> Result<()> {
     #[cfg(unix)]
     {
