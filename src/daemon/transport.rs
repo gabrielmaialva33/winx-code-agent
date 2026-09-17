@@ -97,6 +97,7 @@ mod windows_impl {
     }
 
     /// One accepted or dialed pipe connection.
+    #[derive(Debug)]
     pub enum DaemonStream {
         Server(NamedPipeServer),
         Client(NamedPipeClient),

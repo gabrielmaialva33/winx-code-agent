@@ -777,6 +777,8 @@ mod tests {
     use crate::runtime::ShellActionOptions;
     use crate::state::bash_state::BashState;
     use crate::types::BashCommand;
+    #[cfg(unix)]
+    use tokio::net::UnixListener;
 
     fn guardian_1_4() -> HelloResult {
         HelloResult {
@@ -851,6 +853,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)] // mocks a guardian with a raw UnixListener
     #[tokio::test]
     async fn stale_1_5_precondition_sends_zero_action_frames_to_1_4_guardian() {
         let temp = tempfile::tempdir().expect("temporary directory");
@@ -950,6 +953,7 @@ mod tests {
         assert_eq!(gates.lock().await.len(), MAX_GUARDIAN_NEGOTIATIONS);
     }
 
+    #[cfg(unix)] // mocks a guardian with a raw UnixListener
     #[tokio::test]
     async fn recreated_guardian_socket_invalidates_negotiation_cache() {
         let temp = tempfile::tempdir().expect("temporary directory");

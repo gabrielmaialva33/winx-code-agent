@@ -1132,6 +1132,8 @@ mod tests {
 
     use super::*;
     use crate::daemon::protocol::{RpcResponse, TYPED_ACTION_RESULT_CAPABILITY};
+    #[cfg(unix)]
+    use tokio::net::UnixStream;
 
     #[cfg(unix)] // mocks the control plane with a raw UnixListener/pair
     #[tokio::test]
