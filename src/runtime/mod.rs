@@ -19,7 +19,6 @@ use crate::state::pty::SharedPtyShell;
 use crate::tools::bash_command::BashCommandResult;
 use crate::types::BashCommand;
 
-#[cfg(unix)]
 pub use selection::{
     configured_daemon_binary, ensure_control_daemon_at, ensure_daemon_at, restart_control_daemon_at,
 };
@@ -114,7 +113,6 @@ pub struct ShellActionOptions {
 }
 
 impl ShellActionOptions {
-    #[cfg(unix)] // consulted by the daemon wire format only
     pub(crate) fn is_default(&self) -> bool {
         let is_default = !self.compact_output
             && self.expected_generation.is_none()

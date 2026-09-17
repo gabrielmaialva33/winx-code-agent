@@ -1,13 +1,9 @@
 use std::sync::Arc;
 
-#[cfg(unix)]
 use std::path::{Path, PathBuf};
-#[cfg(unix)]
 use std::process::{Command, Stdio};
-#[cfg(unix)]
 use std::time::{Duration, Instant};
 
-#[cfg(unix)]
 use crate::daemon::{
     default_socket_path, DaemonClient, DaemonProcessRole, DaemonShellRuntime, HelloResult,
     BUILD_IDENTITY_CAPABILITY, TYPED_ACTION_RESULT_CAPABILITY,
@@ -16,13 +12,9 @@ use crate::errors::{Result, WinxError};
 
 use super::{EmbeddedShellRuntime, ShellRuntime};
 
-#[cfg(unix)]
 const GUARDIAN_LIFECYCLE_CAPABILITY: &str = "guardian_activity_clock";
-#[cfg(unix)]
 const PLANNED_CONTROL_RESTART_CAPABILITY: &str = "planned_control_restart";
-#[cfg(unix)]
 const SESSION_NEGOTIATE_CAPABILITY: &str = "session.negotiate";
-#[cfg(unix)]
 const DAEMON_TRANSITION_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -42,7 +34,7 @@ pub fn select_runtime_mode(
     runtime: Option<&str>,
     sandbox: Option<&str>,
 ) -> Result<RuntimeMode> {
-    select_runtime_mode_for_platform(cfg!(unix), embedded, runtime, sandbox)
+    select_runtime_mode_for_platform(cfg!(any(unix, windows)), embedded, runtime, sandbox)
 }
 
 fn select_runtime_mode_for_platform(
@@ -58,7 +50,7 @@ fn select_runtime_mode_for_platform(
         None | Some("" | "daemon") if daemon_supported => Ok(RuntimeMode::Daemon),
         None | Some("" | "embedded") => Ok(RuntimeMode::Embedded),
         Some("daemon") => Err(WinxError::ConfigurationError(
-            "WINX_RUNTIME=\"daemon\" requires a Unix platform; use `embedded` on this OS"
+            "WINX_RUNTIME=\"daemon\" requires Unix or Windows; use `embedded` on this OS"
                 .to_string(),
         )),
         Some(other) => Err(WinxError::ConfigurationError(format!(
@@ -77,21 +69,15 @@ pub fn configured_runtime_mode() -> Result<RuntimeMode> {
 pub async fn configured_shell_runtime() -> Result<Arc<dyn ShellRuntime>> {
     match configured_runtime_mode()? {
         RuntimeMode::Embedded => Ok(Arc::new(EmbeddedShellRuntime)),
-        #[cfg(unix)]
         RuntimeMode::Daemon => {
             let socket = default_socket_path();
             let binary = configured_daemon_binary()?;
             ensure_control_daemon_at(&socket, &binary).await?;
             Ok(Arc::new(DaemonShellRuntime::new(socket)))
         }
-        #[cfg(not(unix))]
-        RuntimeMode::Daemon => Err(WinxError::ConfigurationError(
-            "the daemon runtime requires a Unix platform".to_string(),
-        )),
     }
 }
 
-#[cfg(unix)]
 pub fn configured_daemon_binary() -> Result<PathBuf> {
     if let Some(path) = std::env::var_os("WINXD_BIN") {
         return Ok(PathBuf::from(path));
@@ -99,7 +85,7 @@ pub fn configured_daemon_binary() -> Result<PathBuf> {
     let executable = std::env::current_exe().map_err(|error| {
         WinxError::ConfigurationError(format!("cannot locate current Winx executable: {error}"))
     })?;
-    let sibling = executable.with_file_name("winxd");
+    let sibling = executable.with_file_name(if cfg!(windows) { "winxd.exe" } else { "winxd" });
     if sibling.is_file() {
         Ok(sibling)
     } else {
@@ -110,12 +96,10 @@ pub fn configured_daemon_binary() -> Result<PathBuf> {
     }
 }
 
-#[cfg(unix)]
 fn has_capability(hello: &HelloResult, name: &str) -> bool {
     hello.capabilities.iter().any(|capability| capability == name)
 }
 
-#[cfg(unix)]
 fn control_is_current(hello: &HelloResult) -> bool {
     hello.process_role == Some(DaemonProcessRole::Control)
         && [
@@ -132,7 +116,6 @@ fn control_is_current(hello: &HelloResult) -> bool {
 /// Ensure the current control-plane feature set is reachable. An older `winxd`
 /// that advertises safe planned restarts is replaced in place; per-session
 /// guardians keep owning their PTYs throughout the control-plane transition.
-#[cfg(unix)]
 pub async fn ensure_control_daemon_at(socket: &Path, daemon_binary: &Path) -> Result<()> {
     ensure_daemon_at(socket, daemon_binary).await?;
     let client = DaemonClient::new(socket);
@@ -180,13 +163,11 @@ pub async fn ensure_control_daemon_at(socket: &Path, daemon_binary: &Path) -> Re
 }
 
 /// Safely restart only `winxd`; guardian processes and their PTYs remain alive.
-#[cfg(unix)]
 pub async fn restart_control_daemon_at(socket: &Path, daemon_binary: &Path) -> Result<HelloResult> {
     let hello = DaemonClient::new(socket).hello().await?;
     restart_control_daemon_from_hello(socket, daemon_binary, hello).await
 }
 
-#[cfg(unix)]
 async fn restart_control_daemon_from_hello(
     socket: &Path,
     daemon_binary: &Path,
@@ -198,7 +179,7 @@ async fn restart_control_daemon_from_hello(
             previous.daemon_pid
         )));
     }
-    signal_control_shutdown(previous.daemon_pid)?;
+    signal_control_shutdown(socket, previous.daemon_pid).await?;
 
     let client = DaemonClient::new(socket);
     let deadline = Instant::now() + DAEMON_TRANSITION_TIMEOUT;
@@ -230,15 +211,62 @@ async fn restart_control_daemon_from_hello(
     Ok(restarted)
 }
 
-#[cfg(unix)]
-fn signal_control_shutdown(pid: u32) -> Result<()> {
-    crate::os::unix::signal_process(pid, libc::SIGTERM).map_err(Into::into)
+/// Planned control restart: SIGTERM on Unix, the `winx.shutdown` RPC on
+/// Windows. Either way guardians are separate detached processes and keep
+/// their PTYs.
+async fn signal_control_shutdown(socket: &Path, pid: u32) -> Result<()> {
+    {
+        let _ = socket;
+        crate::os::unix::signal_process(pid, libc::SIGTERM).map_err(Into::into)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        DaemonClient::new(socket).shutdown().await
+    }
+}
+
+/// Start a daemon process that outlives this one: a new session on Unix, a
+/// detached process outside our console and job on Windows. Windows job
+/// objects may forbid breakaway (MCP clients often wrap servers in one), so a
+/// refused breakaway retries without it and the daemon then lives as long as
+/// that job does.
+fn spawn_detached(daemon_binary: &Path, socket: &Path) -> Result<std::process::Child> {
+    let build = |breakaway: bool| {
+        let mut command = Command::new(daemon_binary);
+        command
+            .arg("--socket")
+            .arg(socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        {
+            let _ = breakaway;
+            crate::os::unix::configure_detached(&mut command);
+        }
+        #[cfg(windows)]
+        crate::os::windows::configure_detached(&mut command, breakaway);
+        command
+    };
+    let failure = |error: std::io::Error| {
+        WinxError::ShellInitializationError(format!(
+            "failed to auto-start {}: {error}",
+            daemon_binary.display()
+        ))
+    };
+    match build(true).spawn() {
+        Ok(child) => Ok(child),
+        Err(error) if cfg!(windows) => {
+            tracing::debug!(%error, "detached spawn with job breakaway refused; retrying inside the job");
+            build(false).spawn().map_err(failure)
+        }
+        Err(error) => Err(failure(error)),
+    }
 }
 
 /// Ensure a compatible daemon is reachable, starting `daemon_binary` only when
 /// the socket cannot be reached. A reachable incompatible daemon is never
 /// replaced or killed.
-#[cfg(unix)]
 pub async fn ensure_daemon_at(socket: &Path, daemon_binary: &Path) -> Result<()> {
     let client = DaemonClient::new(socket);
     match client.hello().await {
@@ -247,20 +275,7 @@ pub async fn ensure_daemon_at(socket: &Path, daemon_binary: &Path) -> Result<()>
         Err(_) => {}
     }
 
-    let mut command = Command::new(daemon_binary);
-    command
-        .arg("--socket")
-        .arg(socket)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    crate::os::unix::configure_detached(&mut command);
-    let mut child = command.spawn().map_err(|error| {
-        WinxError::ShellInitializationError(format!(
-            "failed to auto-start {}: {error}",
-            daemon_binary.display()
-        ))
-    })?;
+    let mut child = spawn_detached(daemon_binary, socket)?;
 
     let deadline = Instant::now() + DAEMON_TRANSITION_TIMEOUT;
     while Instant::now() < deadline {
@@ -300,7 +315,6 @@ mod tests {
         assert!(select_runtime_mode_for_platform(false, None, Some("daemon"), None).is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn protocol_1_4_control_without_session_negotiate_requires_upgrade() {
         let hello = crate::daemon::HelloResult {
@@ -321,7 +335,6 @@ mod tests {
         assert!(super::has_capability(&hello, super::PLANNED_CONTROL_RESTART_CAPABILITY));
     }
 
-    #[cfg(unix)]
     #[test]
     fn current_control_requires_the_exact_role_and_build() {
         let capabilities = vec![

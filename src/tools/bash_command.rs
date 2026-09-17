@@ -164,7 +164,6 @@ fn effective_wait_for_seconds(wait_for_seconds: Option<f32>) -> f64 {
 /// Guardian foreground preflight. The caller owns the session operation
 /// writer, so this never races token validation and runs before delivery cursor
 /// or foreground-command gates are acquired.
-#[cfg(unix)]
 pub(crate) async fn guardian_foreground_shell_needs_reset(
     bash_state: &mut BashState,
     options: &ShellActionOptions,
@@ -257,7 +256,6 @@ pub(crate) async fn handle_embedded_tool_call_detailed(
     handle_embedded_tool_call_inner(bash_state, command, None, options, false).await
 }
 
-#[cfg(unix)] // daemon guardians own delivery cursors; the embedded runtime does not
 pub(crate) async fn handle_embedded_tool_call_with_cursor_detailed(
     bash_state: &Arc<Mutex<Option<BashState>>>,
     command: BashCommand,
