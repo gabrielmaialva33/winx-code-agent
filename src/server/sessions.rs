@@ -410,8 +410,19 @@ pub(super) fn root_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
         return None;
     };
     let decoded = percent_encoding::percent_decode_str(&encoded).decode_utf8().ok()?;
-    let path = std::path::PathBuf::from(decoded.as_ref());
+    // `file:///C:/dir` carries the drive after the authority slash on Windows.
+    let decoded: &str = if cfg!(windows) {
+        decoded.strip_prefix('/').filter(|rest| is_drive_prefixed(rest)).unwrap_or(&decoded)
+    } else {
+        &decoded
+    };
+    let path = std::path::PathBuf::from(decoded);
     path.is_absolute().then_some(path)
+}
+
+fn is_drive_prefixed(path: &str) -> bool {
+    let mut chars = path.chars();
+    matches!((chars.next(), chars.next()), (Some(drive), Some(':')) if drive.is_ascii_alphabetic())
 }
 
 #[cfg(test)]

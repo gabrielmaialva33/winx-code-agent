@@ -2168,9 +2168,9 @@ mod tests {
         let structured = result.structured_content.expect("structured success");
         assert_eq!(structured["data"]["temporary_artifact_env"], "WINX_TEMP_DIR");
         assert!(
-            structured["data"]["temporary_artifact_dir"]
-                .as_str()
-                .is_some_and(|path| path.starts_with("/workspace/.winx/tmp/session-")),
+            structured["data"]["temporary_artifact_dir"].as_str().is_some_and(|path| {
+                path.replace('\\', "/").starts_with("/workspace/.winx/tmp/session-")
+            }),
             "{structured}"
         );
     }

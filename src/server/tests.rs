@@ -279,6 +279,7 @@ mod shell_reset_guard_tests {
     /// A stdio client that reads only `structuredContent` must be able to bind
     /// the session from `data.thread_id`, even when its own `thread_id` argument
     /// normalizes to empty and Winx generates the real identity.
+    #[cfg(unix)] // spawns a real shell
     #[tokio::test]
     async fn initialize_structured_identity_survives_an_unnormalizable_thread_id() {
         let workspace = tempfile::tempdir().expect("workspace");
@@ -990,6 +991,7 @@ mod task_lifecycle_tests {
         assert!(terminated[0].starts_with("unboundrunning_"), "{terminated:?}");
     }
 
+    #[cfg(unix)] // spawns a real shell
     #[tokio::test]
     async fn interrupt_waits_until_main_shell_is_reusable() {
         let service = WinxService::new();
@@ -1338,14 +1340,23 @@ mod schema_tests {
 
     #[test]
     fn local_root_uri_decoding_rejects_remote_authorities() {
-        assert_eq!(
-            root_uri_to_path("file:///tmp/a%20project"),
-            Some(PathBuf::from("/tmp/a project"))
-        );
-        assert_eq!(
-            root_uri_to_path("file://localhost/tmp/project"),
-            Some(PathBuf::from("/tmp/project"))
-        );
+        if cfg!(windows) {
+            assert_eq!(
+                root_uri_to_path("file:///C:/tmp/a%20project"),
+                Some(PathBuf::from("C:/tmp/a project"))
+            );
+        } else {
+            assert_eq!(
+                root_uri_to_path("file:///tmp/a%20project"),
+                Some(PathBuf::from("/tmp/a project"))
+            );
+        }
+        if cfg!(unix) {
+            assert_eq!(
+                root_uri_to_path("file://localhost/tmp/project"),
+                Some(PathBuf::from("/tmp/project"))
+            );
+        }
         assert_eq!(root_uri_to_path("file://remote.example/tmp/project"), None);
         assert_eq!(root_uri_to_path("https://example.com/project"), None);
     }

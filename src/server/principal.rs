@@ -218,7 +218,7 @@ pub(super) fn canonical_workspace_identity(workspace: &str) -> PathBuf {
     if path.is_file() {
         path = path.parent().unwrap_or(Path::new(".")).to_path_buf();
     }
-    path.canonicalize().unwrap_or(path)
+    path.canonicalize().map_or(path, crate::utils::path::simplified)
 }
 
 fn workspace_label(value: &str) -> String {
