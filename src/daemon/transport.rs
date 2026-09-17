@@ -16,6 +16,7 @@ pub use windows_impl::{connect, peer_is_same_user, pipe_name, DaemonListener, Da
 
 /// Restrict a filesystem artifact to its owner. Unix applies `mode`; Windows
 /// relies on the per-user ACL that `%LOCALAPPDATA%` already carries.
+#[cfg_attr(not(unix), allow(clippy::unused_async))] // only the Unix branch awaits
 pub async fn restrict_to_owner(path: &Path, mode: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -203,7 +204,7 @@ mod windows_impl {
             match ClientOptions::new().open(&name) {
                 Ok(client) => return Ok(DaemonStream::Client(client)),
                 Err(error)
-                    if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32)
+                    if error.raw_os_error() == Some(ERROR_PIPE_BUSY.cast_signed())
                         && Instant::now() < deadline =>
                 {
                     tokio::time::sleep(Duration::from_millis(20)).await;
