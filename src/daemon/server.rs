@@ -1434,6 +1434,13 @@ mod tests {
     use crate::state::bash_state::BashState;
     use crate::types::BashCommand;
 
+    /// Spell a fixture path for the shell under test. Git for Windows bash
+    /// treats `\` in an unquoted word as an escape, so Windows paths are
+    /// handed over with forward slashes, which every MSYS tool accepts.
+    fn shell_path(path: &std::path::Path) -> String {
+        crate::utils::path::display_relative(path)
+    }
+
     fn action_params(state: &BashState, command: &str, request_key: &str) -> RunActionParams {
         let command: BashCommand = serde_json::from_value(serde_json::json!({
             "action_json": {
@@ -1533,7 +1540,7 @@ mod tests {
         state.cwd = temp.path().to_path_buf();
         state.workspace_root = temp.path().to_path_buf();
         state.current_thread_id = "single_flight".to_string();
-        let command = format!("printf x >> {}; sleep 0.1", marker.display());
+        let command = format!("printf x >> '{}'; sleep 0.1", shell_path(&marker));
         let params = action_params(&state, &command, "same-request");
         let sessions = Arc::new(Mutex::new(HashMap::<String, Arc<DaemonSession>>::new()));
 
@@ -1655,9 +1662,9 @@ mod tests {
         let mut params = action_params(
             &state,
             &format!(
-                "sh -c 'touch {}; while [ ! -e {} ]; do sleep 0.01; done'",
-                started.display(),
-                release.display()
+                "sh -c 'touch \"{}\"; while [ ! -e \"{}\" ]; do sleep 0.01; done'",
+                shell_path(&started),
+                shell_path(&release)
             ),
             "shared-cancel-request",
         );
@@ -1852,7 +1859,7 @@ mod tests {
 
         let mut params = action_params(
             &state,
-            &format!("printf forbidden > {}", marker.display()),
+            &format!("printf forbidden > '{}'", shell_path(&marker)),
             "cancelled-action-request",
         );
         params.options.cancellation_key = Some("cancel-before-action".to_string());
@@ -1895,9 +1902,9 @@ mod tests {
         let mut forced = action_params(
             &state,
             &format!(
-                "sh -c 'touch {}; sleep 0.4; printf completed > {}'",
-                marker.display(),
-                completed_marker.display()
+                "sh -c 'touch \"{}\"; sleep 0.4; printf completed > \"{}\"'",
+                shell_path(&marker),
+                shell_path(&completed_marker)
             ),
             "forced-auto-reset",
         );
