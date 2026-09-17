@@ -282,13 +282,14 @@ pub(crate) mod windows {
         #[test]
         fn job_object_can_be_created_and_owns_a_child() {
             let job = super::ProcessTreeJob::new().expect("job object");
-            let child = std::process::Command::new("cmd.exe")
+            let mut child = std::process::Command::new("cmd.exe")
                 .args(["/c", "ping -n 30 127.0.0.1 >nul"])
                 .spawn()
                 .expect("spawn child");
             job.assign(child.id()).expect("assign child to job");
             job.terminate();
-            std::thread::sleep(std::time::Duration::from_millis(200));
+            let status = child.wait().expect("child reaped after job termination");
+            assert!(!status.success());
             assert!(!super::process_exists(child.id()));
         }
     }
