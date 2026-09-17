@@ -1,3 +1,7 @@
+// Windows: these tests drive a real Unix shell or PTY session. They return
+// once native Windows shell support lands with the daemon port.
+#![cfg(unix)]
+
 use std::sync::Arc;
 
 use tempfile::TempDir;

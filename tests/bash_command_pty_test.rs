@@ -1,3 +1,7 @@
+// Windows: these tests drive a real Unix shell or PTY session. They return
+// once native Windows shell support lands with the daemon port.
+#![cfg(unix)]
+
 //! PTY-based `BashCommand` tests
 //!
 //! These tests use the PTY shell directly to verify functionality

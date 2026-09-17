@@ -1,3 +1,7 @@
+// Windows: these tests drive a real Unix shell or PTY session. They return
+// once native Windows shell support lands with the daemon port.
+#![cfg(unix)]
+
 //! Live-TUI piloting integration tests.
 //!
 //! These exercise the full wiring added for interactive-terminal piloting:

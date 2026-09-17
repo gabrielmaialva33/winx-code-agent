@@ -1,3 +1,7 @@
+// Windows: these tests drive a real Unix shell or PTY session. They return
+// once native Windows shell support lands with the daemon port.
+#![cfg(unix)]
+
 //! Integration tests for the `MultiFileEdit` tool.
 //!
 //! Focus: the all-or-nothing batch behavior AND that the tool restores the

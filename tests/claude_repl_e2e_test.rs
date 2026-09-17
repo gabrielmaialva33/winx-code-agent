@@ -1,3 +1,7 @@
+// Windows: these tests drive a real Unix shell or PTY session. They return
+// once native Windows shell support lands with the daemon port.
+#![cfg(unix)]
+
 //! End-to-end test of the anchor use case: piloting the real `claude` TUI
 //! through winx's new interactive-terminal actions.
 //!
