@@ -200,7 +200,7 @@ fn process_exists(pid: u32) -> bool {
 
 #[cfg(not(unix))]
 fn process_exists(pid: u32) -> bool {
-    std::path::Path::new("/proc").join(pid.to_string()).exists()
+    crate::os::process_exists(pid)
 }
 
 /// Git for Windows bash reports its cwd in MSYS form (`/c/Users/x`, or
