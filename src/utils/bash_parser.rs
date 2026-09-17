@@ -94,7 +94,10 @@ fn rescued_by_shell_probe(command: &str, allow_shell_probe: bool) -> bool {
 }
 
 fn bash_accepts_syntax(command: &str) -> bool {
-    std::process::Command::new("bash")
+    // Without a usable bash (native Windows without Git for Windows) the
+    // grammar's verdict stands: never rescue a rejected command blindly.
+    let Some(bash) = crate::utils::executable::bash_executable() else { return false };
+    std::process::Command::new(bash)
         .arg("-n")
         .arg("-c")
         .arg(command)
@@ -703,6 +706,7 @@ mod tests {
         assert!(assert_single_statement(command, true).is_ok());
     }
 
+    #[cfg(unix)] // probes with a real bash
     #[test]
     fn shell_probe_is_gated_to_trusted_mode() {
         use super::rescued_by_shell_probe;

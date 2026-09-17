@@ -88,10 +88,7 @@ fn create_playground_dir(thread_id: &str) -> Result<PathBuf> {
 
 /// Whether `cmd` is on PATH (best-effort, used only for advisory hints).
 fn command_exists(cmd: &str) -> bool {
-    std::process::Command::new("sh")
-        .args(["-c", &format!("command -v {cmd}")])
-        .output()
-        .is_ok_and(|o| o.status.success())
+    crate::utils::executable::is_available(cmd)
 }
 
 fn code_writer_state(
@@ -274,7 +271,7 @@ fn prepare_workspace(
     // paths that were canonicalized via fs::canonicalize — important on macOS where
     // /var, /tmp etc. are symlinks to /private/var, /private/tmp.
     if folder_to_start.exists() {
-        if let Ok(canonical) = folder_to_start.canonicalize() {
+        if let Ok(canonical) = folder_to_start.canonicalize().map(crate::utils::path::simplified) {
             folder_to_start = canonical;
         }
     }

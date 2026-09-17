@@ -7,6 +7,7 @@ pub mod agent_temp;
 pub mod bash_parser;
 pub mod display_tree;
 pub mod encoder;
+pub mod executable;
 pub mod mmap;
 pub mod mode_prompts;
 pub mod orchestration;
