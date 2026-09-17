@@ -99,28 +99,44 @@ fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>,
     if restricted_mode && !is_zsh {
         cmd.arg("-r");
     }
+    // Operator-supplied extra shell arguments (`WINX_SHELL_ARGS="-i --login"`):
+    // whitespace-separated, applied to the direct shell path only.
+    if let Some(extra) = crate::config::env_text("WINX_SHELL_ARGS") {
+        for arg in extra.split_whitespace() {
+            cmd.arg(arg);
+        }
+    }
     (cmd, None, is_zsh)
 }
 
 /// Shell to spawn directly. Defaults to bash; honors `WINX_SHELL=zsh` when zsh is
 /// on PATH and we're not in restricted mode (zsh's restricted mode differs from
-/// `bash -r`, so restricted falls back to bash).
+/// `bash -r`, so restricted falls back to bash). On Windows the Git for Windows
+/// `bash.exe` is resolved to an absolute path so the `ConPTY` child never lands
+/// on the WSL launcher in `System32`.
 fn preferred_shell(restricted_mode: bool) -> String {
     if !restricted_mode {
         if let Ok(requested) = std::env::var("WINX_SHELL") {
             if requested == "zsh" && command_available("zsh") {
                 return "zsh".to_string();
             }
+            // An absolute path selects that exact shell binary (a specific
+            // bash.exe on Windows, a custom build elsewhere).
+            if Path::new(&requested).is_absolute() && Path::new(&requested).is_file() {
+                return requested;
+            }
+        }
+    }
+    if cfg!(windows) {
+        if let Some(bash) = crate::utils::executable::bash_executable() {
+            return bash.to_string_lossy().into_owned();
         }
     }
     "bash".to_string()
 }
 
 fn command_available(command: &str) -> bool {
-    Command::new("sh")
-        .args(["-c", &format!("command -v {command}")])
-        .output()
-        .is_ok_and(|output| output.status.success())
+    crate::utils::executable::is_available(command)
 }
 
 /// Create `~/.screenrc` with a large scrollback if the user has none, matching
@@ -183,6 +199,32 @@ fn process_exists(pid: u32) -> bool {
     std::path::Path::new("/proc").join(pid.to_string()).exists()
 }
 
+/// Git for Windows bash reports its cwd in MSYS form (`/c/Users/x`, or
+/// `/cygdrive/c/...` under Cygwin). On Windows, convert it back to the native
+/// `C:\Users\x` spelling so relative file targets and `cd` tracking resolve
+/// against a directory that exists for the rest of Winx.
+pub(crate) fn native_cwd_from_prompt(cwd: &str) -> PathBuf {
+    if cfg!(windows) {
+        if let Some(native) = msys_to_native(cwd) {
+            return native;
+        }
+    }
+    PathBuf::from(cwd)
+}
+
+fn msys_to_native(cwd: &str) -> Option<PathBuf> {
+    let rest = cwd.strip_prefix("/cygdrive").unwrap_or(cwd);
+    let mut parts = rest.strip_prefix('/')?.splitn(2, '/');
+    let drive = parts.next()?;
+    if drive.len() != 1 || !drive.chars().all(|character| character.is_ascii_alphabetic()) {
+        return None;
+    }
+    let tail = parts.next().unwrap_or("");
+    let mut native = format!("{}:\\", drive.to_ascii_uppercase());
+    native.push_str(&tail.replace('/', "\\"));
+    Some(PathBuf::from(native))
+}
+
 fn timestamp_millis() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -207,6 +249,7 @@ fn spawn_pty_reader(
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => {
+                    debug!("PTY reader reached EOF");
                     // EOF - PTY closed. Flush any held bytes lossily.
                     if !carry.is_empty() {
                         let _ = output_tx.send(String::from_utf8_lossy(&carry).into_owned());
@@ -214,6 +257,7 @@ fn spawn_pty_reader(
                     break;
                 }
                 Ok(n) => {
+                    debug!(bytes = n, "PTY reader chunk");
                     // Tap the raw bytes into the live emulator first (brief
                     // lock; feed is O(chunk len)). Feeding bytes — not the
                     // lossy String — keeps the persistent VTE parser exact
@@ -571,9 +615,33 @@ impl PtyShell {
 
         // Wait for prompt to be ready
         std::thread::sleep(Duration::from_millis(100));
-        let _ = self.drain_output();
+        let bootstrap = self.drain_output();
+        debug!(
+            bytes = bootstrap.len(),
+            child_pid = ?self.child.process_id(),
+            "PTY prompt bootstrap drained"
+        );
 
         Ok(())
+    }
+
+    /// Answer terminal queries the console host blocks on.
+    ///
+    /// Windows `ConPTY` is created with `INHERIT_CURSOR` (portable-pty's default)
+    /// and then asks the "terminal" for the cursor position with `ESC[6n`
+    /// before rendering a single byte of the child's output. Winx is that
+    /// terminal, so it must reply with a cursor position report or every shell
+    /// stays silent forever. The reply is harmless on Unix, where no PTY layer
+    /// issues the query.
+    fn answer_terminal_queries(&mut self, chunk: &str) {
+        const CURSOR_POSITION_REQUEST: &str = "\x1b[6n";
+        if !chunk.contains(CURSOR_POSITION_REQUEST) {
+            return;
+        }
+        debug!("PTY answered a cursor position request");
+        if let Err(error) = self.writer.write_all(b"\x1b[1;1R").and_then(|()| self.writer.flush()) {
+            debug!("PTY cursor position report failed: {error}");
+        }
     }
 
     /// Write a command to the PTY, submitting it with a carriage return.
@@ -598,6 +666,7 @@ impl PtyShell {
         while Instant::now() < deadline {
             match self.output_rx.try_recv() {
                 Ok(chunk) => {
+                    self.answer_terminal_queries(&chunk);
                     output.push_str(&chunk);
 
                     // Prevent runaway reads
@@ -732,6 +801,7 @@ impl PtyShell {
         while start.elapsed() < timeout {
             match self.output_rx.try_recv() {
                 Ok(chunk) => {
+                    self.answer_terminal_queries(&chunk);
                     self.output_buffer.push_str(&chunk);
                     self.ring.push_chunk(&chunk);
                     no_data_count = 0;
@@ -804,6 +874,7 @@ impl PtyShell {
         loop {
             match self.output_rx.try_recv() {
                 Ok(chunk) => {
+                    self.answer_terminal_queries(&chunk);
                     let chunk_has_prompt =
                         Self::check_prompt_complete(&chunk, &self.prompt_end_marker);
                     self.output_buffer.push_str(&chunk);
@@ -850,7 +921,7 @@ impl PtyShell {
         };
         let cwd = cwd.trim();
         if !cwd.is_empty() {
-            self.current_cwd = PathBuf::from(cwd);
+            self.current_cwd = native_cwd_from_prompt(cwd);
         }
     }
 
@@ -1179,6 +1250,7 @@ fn decode_keep_incomplete(bytes: &[u8]) -> (String, Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)] // only the shell-spawning tests need a workspace
     use tempfile::TempDir;
 
     #[test]
@@ -1235,6 +1307,16 @@ mod tests {
         assert!(super::process_exists(std::process::id()));
         assert!(!super::process_exists(0));
         assert!(!super::process_exists(1));
+    }
+
+    #[test]
+    fn msys_paths_convert_to_native_drives() {
+        use super::msys_to_native;
+        assert_eq!(msys_to_native("/c/Users/x/ws"), Some(PathBuf::from("C:\\Users\\x\\ws")));
+        assert_eq!(msys_to_native("/cygdrive/d/work"), Some(PathBuf::from("D:\\work")));
+        assert_eq!(msys_to_native("/c"), Some(PathBuf::from("C:\\")));
+        assert_eq!(msys_to_native("/home/x"), None);
+        assert_eq!(msys_to_native("relative"), None);
     }
 
     #[test]
@@ -1299,6 +1381,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // spawns a real shell
     #[test]
     fn test_pty_shell_creation() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -1307,6 +1390,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // spawns a real shell
     #[test]
     fn discard_throttle_engages_at_scratch_cap_and_resets_per_command() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -1326,6 +1410,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // spawns a real shell
     #[test]
     fn discard_throttle_engages_when_a_write_reaches_the_cap() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -1338,6 +1423,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // spawns a real shell
     #[test]
     fn test_pty_shell_echo() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -1350,6 +1436,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // spawns a real shell
     #[test]
     fn agent_paths_are_exported_to_the_pty() -> Result<()> {
         let workspace = TempDir::new()?;
@@ -1369,6 +1456,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // spawns a real shell
     #[test]
     fn completed_nonblocking_poll_is_level_triggered() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -1388,6 +1476,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // spawns a real shell
     #[test]
     fn test_pty_shell_pwd() -> Result<()> {
         let temp_dir = TempDir::new()?;
@@ -1403,6 +1492,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // spawns a real shell
     #[test]
     fn test_pty_resize() -> Result<()> {
         let temp_dir = TempDir::new()?;

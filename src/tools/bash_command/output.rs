@@ -173,7 +173,7 @@ fn extract_prompt_cwd(output: &str) -> Option<PathBuf> {
         .filter_map(|captures| captures.name("cwd").map(|cwd| cwd.as_str().trim()))
         .filter(|cwd| !cwd.is_empty())
         .last()
-        .map(PathBuf::from)
+        .map(crate::state::pty::native_cwd_from_prompt)
 }
 
 fn rstrip_lines(lines: &[String]) -> String {
