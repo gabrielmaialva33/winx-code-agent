@@ -386,6 +386,11 @@ pub struct PtyShell {
     /// [`DISCARD_READ_THROTTLE`] between reads and lets the kernel PTY buffer
     /// back-pressure the producer. Cleared on every new command.
     discard_throttle: Arc<AtomicBool>,
+    /// Windows job object holding the shell and everything it spawns, so a
+    /// dropped shell takes its background children with it (the Unix path
+    /// signals the process group instead).
+    #[cfg(windows)]
+    job: Option<crate::os::windows::ProcessTreeJob>,
 }
 
 impl std::fmt::Debug for PtyShell {
@@ -454,6 +459,12 @@ impl Drop for PtyShell {
         #[cfg(unix)]
         if let Some(pgid) = pgid {
             signal_group(pgid, libc::SIGTERM);
+        }
+
+        // Windows: the job object takes the whole tree down at once.
+        #[cfg(windows)]
+        if let Some(job) = self.job.as_ref() {
+            job.terminate();
         }
 
         // SIGKILL the leader and close the PTY slave (unblocks the reader thread).
@@ -536,6 +547,16 @@ impl PtyShell {
 
         // Spawn bash in the PTY slave
         let child = pair.slave.spawn_command(cmd).context("Failed to spawn bash in PTY")?;
+        #[cfg(windows)]
+        let job = match crate::os::windows::ProcessTreeJob::new()
+            .and_then(|job| child.process_id().map_or(Ok(()), |pid| job.assign(pid)).map(|()| job))
+        {
+            Ok(job) => Some(job),
+            Err(error) => {
+                warn!(%error, "PTY child is not in a job object; background children may outlive the shell");
+                None
+            }
+        };
 
         // Get reader and writer from master
         let reader = pair.master.try_clone_reader().context("Failed to clone PTY reader")?;
@@ -583,6 +604,8 @@ impl PtyShell {
             scratch_path: None,
             scratch_bytes: 0,
             discard_throttle,
+            #[cfg(windows)]
+            job,
         };
 
         // Initialize the shell with WCGW-style prompt
