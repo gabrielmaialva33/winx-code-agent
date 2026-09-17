@@ -60,6 +60,10 @@ const MAX_PARTIAL_LINE_BYTES: usize = 64 * 1024;
 /// WCGW-style prompt pattern for command completion detection
 const WCGW_PROMPT_PATTERN: &str = "◉";
 const WCGW_PROMPT_END: &str = "──➤";
+/// Upper bound on waiting for a freshly spawned shell's first prompt. Linux bash
+/// answers in milliseconds; Git for Windows bash under `ConPTY` can take seconds
+/// on a cold start.
+const PROMPT_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(5);
 
 fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>, bool) {
     let requested = crate::config::env_text("WINX_ATTACH_TERMINAL")
@@ -613,11 +617,41 @@ impl PtyShell {
 
         self.write_command(&prompt_statement)?;
 
-        // Wait for prompt to be ready
-        std::thread::sleep(Duration::from_millis(100));
-        let bootstrap = self.drain_output();
+        // Wait for the first marker-bearing prompt instead of a fixed pause:
+        // everything before it (the shell's startup banner, the echoed
+        // bootstrap line) must never leak into the first command's output, and
+        // Git for Windows bash reaches its first prompt far later than Linux
+        // bash. Once the marker is seen, a short drain swallows the trailing
+        // bytes of that same prompt.
+        let deadline = Instant::now() + PROMPT_BOOTSTRAP_TIMEOUT;
+        let mut bootstrap = String::new();
+        let mut settled = false;
+        while Instant::now() < deadline {
+            match self.output_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(chunk) => {
+                    self.answer_terminal_queries(&chunk);
+                    bootstrap.push_str(&chunk);
+                    if Self::check_prompt_complete(&bootstrap, &self.prompt_end_marker) {
+                        settled = true;
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+        if settled {
+            std::thread::sleep(Duration::from_millis(30));
+        } else {
+            warn!(
+                timeout_ms = PROMPT_BOOTSTRAP_TIMEOUT.as_millis(),
+                "PTY shell did not print its first prompt in time; continuing anyway"
+            );
+        }
+        bootstrap.push_str(&self.drain_output());
         debug!(
             bytes = bootstrap.len(),
+            settled,
             child_pid = ?self.child.process_id(),
             "PTY prompt bootstrap drained"
         );
@@ -1430,9 +1464,15 @@ mod tests {
         let mut shell = PtyShell::new(temp_dir.path(), false)?;
 
         shell.send_command("echo 'hello pty'")?;
-        let (output, _complete) = shell.read_output(2.0)?;
+        let (output, complete) = shell.read_output(2.0)?;
 
         assert!(output.contains("hello pty"), "Output should contain 'hello pty': {output}");
+        // The bootstrap (prompt export line, shell banner) must have been
+        // consumed before the first command, and the first command must
+        // already report its exit code.
+        assert!(complete, "first command must complete: {output}");
+        assert!(!output.contains("PROMPT_COMMAND"), "bootstrap leaked into output: {output}");
+        assert_eq!(shell.last_exit_code, Some(0), "{output}");
         Ok(())
     }
 
