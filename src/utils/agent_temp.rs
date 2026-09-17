@@ -19,7 +19,11 @@ use tracing::{debug, info};
 
 use crate::errors::{Result, WinxError};
 
-const TEMP_ROOT: &str = ".winx/tmp";
+/// `<workspace>/.winx/tmp`, composed per platform so Windows never mixes
+/// separators inside `temporary_artifact_dir`.
+fn temp_root() -> PathBuf {
+    Path::new(".winx").join("tmp")
+}
 const SESSION_PREFIX: &str = "session-";
 const SESSION_HASH_BYTES: usize = 8;
 
@@ -142,9 +146,11 @@ pub struct TempEdit<'a> {
 
 /// Compute the stable session directory without touching the filesystem.
 pub fn session_info(workspace_root: &Path, thread_id: &str) -> AgentTempInfo {
-    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace = workspace_root
+        .canonicalize()
+        .map_or_else(|_| workspace_root.to_path_buf(), crate::utils::path::simplified);
     AgentTempInfo {
-        directory: workspace.join(TEMP_ROOT).join(session_name(thread_id)),
+        directory: workspace.join(temp_root()).join(session_name(thread_id)),
         ttl_seconds: MAX_AGE.as_secs(),
         max_total_bytes: MAX_TOTAL_BYTES,
         max_session_bytes: MAX_SESSION_BYTES,
@@ -192,7 +198,9 @@ fn audit_session_impl(
     maintain: bool,
 ) -> Result<TemporaryArtifactUsage> {
     let info = session_info(workspace_root, thread_id);
-    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace = workspace_root
+        .canonicalize()
+        .map_or_else(|_| workspace_root.to_path_buf(), crate::utils::path::simplified);
     let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let pruned = if maintain {
         prune_sessions_unlocked(workspace_root, &info.directory, MAX_AGE);
@@ -201,15 +209,16 @@ fn audit_session_impl(
         PrunedArtifacts::default()
     };
     log_active_prune(&info.directory, pruned);
-    let usage = temp_tree_usage(&workspace.join(TEMP_ROOT), &info.directory).ok_or_else(|| {
-        policy_error(
-            &info.directory,
-            &info,
-            "temporary storage could not be measured safely; remove malformed or excessive \
+    let usage =
+        temp_tree_usage(&workspace.join(temp_root()), &info.directory).ok_or_else(|| {
+            policy_error(
+                &info.directory,
+                &info,
+                "temporary storage could not be measured safely; remove malformed or excessive \
              artifacts before retrying"
-                .to_string(),
-        )
-    })?;
+                    .to_string(),
+            )
+        })?;
     let over_budget = usage.total_bytes > MAX_TOTAL_BYTES
         || usage.session_bytes > MAX_SESSION_BYTES
         || usage.session_files > MAX_SESSION_FILES
@@ -242,7 +251,9 @@ pub fn validate_edit_target(
     new_bytes: u64,
 ) -> Result<()> {
     let info = session_info(workspace_root, thread_id);
-    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace = workspace_root
+        .canonicalize()
+        .map_or_else(|_| workspace_root.to_path_buf(), crate::utils::path::simplified);
     // On macOS, tempfile and callers may spell the same workspace as `/var/...`
     // while canonicalization produces `/private/var/...`. Accept either spelling
     // at this boundary, then rebase policy checks onto the canonical workspace.
@@ -378,7 +389,9 @@ fn validate_bash_write_target(
         crate::utils::path::resolve_in_workspace(path, cwd, workspace_root)
             .unwrap_or_else(|_| requested.clone())
     };
-    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace = workspace_root
+        .canonicalize()
+        .map_or_else(|_| workspace_root.to_path_buf(), crate::utils::path::simplified);
 
     let requested_relative = workspace_relative(&requested, workspace_root, &workspace);
     let resolved_relative = workspace_relative(&resolved, workspace_root, &workspace);
@@ -515,7 +528,9 @@ pub fn validate_code_map_target(
     resolved_path: &Path,
 ) -> Result<bool> {
     let info = session_info(workspace_root, thread_id);
-    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace = workspace_root
+        .canonicalize()
+        .map_or_else(|_| workspace_root.to_path_buf(), crate::utils::path::simplified);
     let requested_relative = workspace_relative(requested_path, workspace_root, &workspace);
     let resolved_relative = workspace_relative(resolved_path, workspace_root, &workspace);
     let requested_temp = requested_relative.as_deref().is_some_and(is_temp_relative);
@@ -620,12 +635,14 @@ pub fn validate_batch_quota(
     }
     let representative = managed[0].path;
 
-    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
+    let workspace = workspace_root
+        .canonicalize()
+        .map_or_else(|_| workspace_root.to_path_buf(), crate::utils::path::simplified);
     let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let pruned = prune_active_session_unlocked(&info.directory, MAX_AGE);
     log_active_prune(&info.directory, pruned);
     let current =
-        temp_tree_usage(&workspace.join(TEMP_ROOT), &info.directory).ok_or_else(|| {
+        temp_tree_usage(&workspace.join(temp_root()), &info.directory).ok_or_else(|| {
             policy_error(
                 representative,
                 &info,
@@ -701,7 +718,7 @@ fn is_temp_relative(relative: &Path) -> bool {
 }
 
 fn reject_symlinked_temp_root(workspace: &Path, path: &Path, info: &AgentTempInfo) -> Result<()> {
-    let temp_root = workspace.join(TEMP_ROOT);
+    let temp_root = workspace.join(temp_root());
     if fs::symlink_metadata(&temp_root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return Err(policy_error(
             path,
@@ -1066,8 +1083,10 @@ fn log_active_prune(active: &Path, pruned: PrunedArtifacts) {
 }
 
 fn prune_sessions_unlocked(workspace_root: &Path, active: &Path, max_age: Duration) {
-    let workspace = workspace_root.canonicalize().unwrap_or_else(|_| workspace_root.to_path_buf());
-    let root = workspace.join(TEMP_ROOT);
+    let workspace = workspace_root
+        .canonicalize()
+        .map_or_else(|_| workspace_root.to_path_buf(), crate::utils::path::simplified);
+    let root = workspace.join(temp_root());
     if fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
         return;
     }
@@ -1135,7 +1154,9 @@ mod tests {
         let other = session_info(workspace.path(), "chat/project:two");
         assert_eq!(first, repeated);
         assert_ne!(first.directory, other.directory);
-        assert!(first.directory.starts_with(workspace.path().canonicalize().unwrap()));
+        assert!(first.directory.starts_with(
+            workspace.path().canonicalize().map(crate::utils::path::simplified).unwrap()
+        ));
         let name = first.directory.file_name().unwrap().to_string_lossy();
         assert_eq!(name.len(), SESSION_PREFIX.len() + SESSION_HASH_BYTES * 2);
     }
@@ -1230,7 +1251,8 @@ mod tests {
             .expect_err("a lexical workspace alias must not bypass root-artifact policy");
         assert!(error.to_string().contains("workspace root"), "{error}");
 
-        let canonical_workspace = alias_workspace.canonicalize().unwrap();
+        let canonical_workspace =
+            alias_workspace.canonicalize().map(crate::utils::path::simplified).unwrap();
         let canonical_session = session_info(&alias_workspace, "active").directory;
         let relative_session = canonical_session.strip_prefix(&canonical_workspace).unwrap();
         let aliased_helper = alias_workspace.join(relative_session).join("adapter.py");
@@ -1250,7 +1272,7 @@ mod tests {
         let workspace = TempDir::new().unwrap();
         let active = session_info(workspace.path(), "active").directory;
         let expired = session_info(workspace.path(), "expired").directory;
-        let unmanaged = workspace.path().join(TEMP_ROOT).join("manual-cache");
+        let unmanaged = workspace.path().join(temp_root()).join("manual-cache");
         fs::create_dir_all(&active).unwrap();
         fs::create_dir_all(&expired).unwrap();
         fs::create_dir_all(&unmanaged).unwrap();
@@ -1290,8 +1312,8 @@ mod tests {
         let usage_root = workspace
             .path()
             .canonicalize()
-            .unwrap_or_else(|_| workspace.path().to_path_buf())
-            .join(TEMP_ROOT);
+            .map_or_else(|_| workspace.path().to_path_buf(), crate::utils::path::simplified)
+            .join(temp_root());
         assert_eq!(
             temp_tree_usage(&usage_root, &active).unwrap().session_files,
             ACTIVE_SESSION_PRUNE_TARGET_FILES

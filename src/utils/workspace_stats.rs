@@ -177,7 +177,8 @@ fn data_base() -> PathBuf {
 /// Stable per-workspace filename: `<dir-name>_<hash-of-absolute-path>`.
 fn stats_key(root: &Path) -> String {
     use std::hash::{Hash, Hasher};
-    let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let abs =
+        root.canonicalize().map_or_else(|_| root.to_path_buf(), crate::utils::path::simplified);
     let name = abs.file_name().and_then(|n| n.to_str()).unwrap_or("workspace");
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     abs.to_string_lossy().hash(&mut hasher);

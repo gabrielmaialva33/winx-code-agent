@@ -134,7 +134,7 @@ fn get_all_files_max_depth(root: &Path, is_git_repo: bool) -> Vec<String> {
         }
         if entry.file_type().is_some_and(|file_type| file_type.is_file()) {
             if let Ok(relative) = entry.path().strip_prefix(root) {
-                files.push(relative.to_string_lossy().to_string());
+                files.push(crate::utils::path::display_relative(relative));
             }
         }
     }

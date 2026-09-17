@@ -52,17 +52,62 @@ impl std::error::Error for PathSecurityError {}
 /// that use this run with a per-session cwd) and must exist, so that the roots
 /// are canonical and comparable with `starts_with`. Anything else is dropped
 /// with a warning: a typo'd root silently widening nothing is the safe failure.
+/// Strip Windows' extended-length (`\\?\`) prefix from a canonical path.
+///
+/// `std::fs::canonicalize` returns the verbatim form on Windows. That form is
+/// rejected as a `cmd.exe` working directory, never appears in user-supplied
+/// paths, and gets copied by models into commands, so every canonical path Winx
+/// stores, compares, or shows is simplified to the plain `C:\…` spelling. Rust's
+/// std re-adds the prefix internally when a path exceeds `MAX_PATH`.
+pub fn simplified(path: PathBuf) -> PathBuf {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+        let mut components = path.components();
+        let Some(Component::Prefix(prefix)) = components.next() else { return path };
+        let root = match prefix.kind() {
+            Prefix::VerbatimDisk(drive) => format!("{}:\\", char::from(drive)),
+            Prefix::VerbatimUNC(server, share) => {
+                format!("\\\\{}\\{}\\", server.to_string_lossy(), share.to_string_lossy())
+            }
+            _ => return path,
+        };
+        let mut plain = PathBuf::from(root);
+        plain.extend(components.filter(|component| !matches!(component, Component::RootDir)));
+        plain
+    }
+    #[cfg(not(windows))]
+    {
+        path
+    }
+}
+
+/// Render a workspace-relative path for the model with `/` separators on every
+/// platform, so `CodeMap`/repo output stays stable across hosts.
+pub fn display_relative(path: &Path) -> String {
+    let rendered = path.to_string_lossy();
+    if cfg!(windows) {
+        rendered.replace('\\', "/")
+    } else {
+        rendered.into_owned()
+    }
+}
+
 fn parse_allow_paths(raw: &str) -> Vec<PathBuf> {
-    raw.split(':')
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .filter_map(|entry| {
-            let candidate = Path::new(entry);
+    // `std::env::split_paths` uses the platform list separator (`:` on Unix,
+    // `;` on Windows), so `C:\…` entries are not cut at the drive colon.
+    std::env::split_paths(raw)
+        .filter_map(|candidate| {
+            let entry = candidate.to_string_lossy().trim().to_string();
+            if entry.is_empty() {
+                return None;
+            }
+            let candidate = Path::new(&entry);
             if !candidate.is_absolute() {
                 warn!("WINX_ALLOW_PATHS: ignoring '{entry}' (must be an absolute path)");
                 return None;
             }
-            match candidate.canonicalize() {
+            match candidate.canonicalize().map(crate::utils::path::simplified) {
                 Ok(root) => Some(root),
                 Err(e) => {
                     warn!("WINX_ALLOW_PATHS: ignoring '{entry}' ({e})");
@@ -74,8 +119,8 @@ fn parse_allow_paths(raw: &str) -> Vec<PathBuf> {
 }
 
 /// Extra roots the file tools may reach outside the workspace, from
-/// `WINX_ALLOW_PATHS` (`:`-separated absolute paths, same convention as
-/// `WINX_SANDBOX_RW_PATHS`).
+/// `WINX_ALLOW_PATHS` (absolute paths separated by the platform list separator:
+/// `:` on Unix, `;` on Windows; same convention as `WINX_SANDBOX_RW_PATHS`).
 ///
 /// Read from the environment ONCE, at first use. That is deliberate: the
 /// containment policy is set by whoever starts the server, out of band, and is
@@ -141,9 +186,13 @@ pub(crate) fn validate_path_with_roots(
 ) -> Result<PathBuf, PathSecurityError> {
     // Resolve the workspace boundary once, up front; everything is checked
     // against this. Fail closed if the workspace itself can't be canonicalized.
-    let canonical_workspace = workspace_root.canonicalize().map_err(|e| {
-        PathSecurityError::CanonicalizationFailed { path: workspace_root.to_path_buf(), error: e }
-    })?;
+    let canonical_workspace = workspace_root
+        .canonicalize()
+        .map(crate::utils::path::simplified)
+        .map_err(|e| PathSecurityError::CanonicalizationFailed {
+            path: workspace_root.to_path_buf(),
+            error: e,
+        })?;
 
     // If `path` itself is a symlink, resolve its target and reject if it escapes.
     // Fail CLOSED: a target we can't resolve (e.g. dangling) is refused, not
@@ -158,12 +207,13 @@ pub(crate) fn validate_path_with_roots(
             } else {
                 path.parent().unwrap_or(Path::new("/")).join(&target)
             };
-            let canonical_target = absolute_target.canonicalize().map_err(|e| {
-                PathSecurityError::CanonicalizationFailed {
+            let canonical_target = absolute_target
+                .canonicalize()
+                .map(crate::utils::path::simplified)
+                .map_err(|e| PathSecurityError::CanonicalizationFailed {
                     path: absolute_target.clone(),
                     error: e,
-                }
-            })?;
+                })?;
             if !is_contained(&canonical_target, &canonical_workspace, extra_roots) {
                 return Err(PathSecurityError::SymlinkEscape {
                     path: path.to_path_buf(),
@@ -177,7 +227,7 @@ pub(crate) fn validate_path_with_roots(
     // Resolve `path`. If it exists, canonicalize() collapses `..`, resolves
     // symlinks, etc. If it doesn't (creating a new file/dir), fall back to a
     // lexical resolution of the not-yet-existing tail.
-    match path.canonicalize() {
+    match path.canonicalize().map(crate::utils::path::simplified) {
         Ok(canonical_path) => {
             if is_contained(&canonical_path, &canonical_workspace, extra_roots) {
                 Ok(canonical_path)
@@ -237,9 +287,10 @@ fn resolve_new_path(
 
     // The deepest existing ancestor must resolve (a dangling symlink here fails
     // closed) and anchor the resolution.
-    let canonical_base = existing.canonicalize().map_err(|e| {
-        PathSecurityError::CanonicalizationFailed { path: existing.to_path_buf(), error: e }
-    })?;
+    let canonical_base =
+        existing.canonicalize().map(crate::utils::path::simplified).map_err(|e| {
+            PathSecurityError::CanonicalizationFailed { path: existing.to_path_buf(), error: e }
+        })?;
 
     // Apply the components after `existing` lexically (they don't exist yet, so
     // there are no symlinks among them to follow).
@@ -359,7 +410,7 @@ mod tests {
                 0..10,
             )
         ) {
-            let ws = std::env::temp_dir().canonicalize().unwrap();
+            let ws = std::env::temp_dir().canonicalize().map(crate::utils::path::simplified).unwrap();
             let rel = segments.join("/");
             if let Ok(resolved) = resolve_in_workspace_with_roots(&rel, &ws, &ws, &[]) {
                 prop_assert!(
@@ -374,7 +425,7 @@ mod tests {
         /// path that escapes, and must never panic.
         #[test]
         fn validate_ok_implies_contained_any_input(s in ".*") {
-            let ws = std::env::temp_dir().canonicalize().unwrap();
+            let ws = std::env::temp_dir().canonicalize().map(crate::utils::path::simplified).unwrap();
             if let Ok(p) = validate_path_with_roots(Path::new(&s), &ws, &[]) {
                 prop_assert!(p.starts_with(&ws), "accepted escaping path {p:?} from input {s:?}");
             }
@@ -405,7 +456,9 @@ mod tests {
         let f = ws.path().join("a.txt");
         fs::write(&f, "x").unwrap();
         let v = validate_path_with_roots(&f, ws.path(), &[]).unwrap();
-        assert!(v.starts_with(ws.path().canonicalize().unwrap()));
+        assert!(
+            v.starts_with(ws.path().canonicalize().map(crate::utils::path::simplified).unwrap())
+        );
     }
 
     #[test]
@@ -415,7 +468,9 @@ mod tests {
         let ws = TempDir::new().unwrap();
         let f = ws.path().join("new/deep/dir/file.txt");
         let v = validate_path_with_roots(&f, ws.path(), &[]).unwrap();
-        assert!(v.starts_with(ws.path().canonicalize().unwrap()));
+        assert!(
+            v.starts_with(ws.path().canonicalize().map(crate::utils::path::simplified).unwrap())
+        );
         assert!(v.ends_with("new/deep/dir/file.txt"));
     }
 
@@ -473,13 +528,31 @@ mod tests {
         assert!(validate_path_with_roots(&f, ws.path(), &[]).is_err());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn simplified_strips_verbatim_prefixes() {
+        use super::simplified;
+        assert_eq!(simplified(PathBuf::from(r"\\?\C:\a\b")), PathBuf::from(r"C:\a\b"));
+        assert_eq!(
+            simplified(PathBuf::from(r"\\?\UNC\srv\share\x")),
+            PathBuf::from(r"\\srv\share\x")
+        );
+        assert_eq!(simplified(PathBuf::from(r"C:\plain")), PathBuf::from(r"C:\plain"));
+    }
+
     #[test]
     fn parse_allow_paths_keeps_absolute_existing_roots_only() {
         let existing = TempDir::new().unwrap();
         let existing_str = existing.path().to_string_lossy().to_string();
-        let raw = format!("{existing_str}: :relative/dir:/definitely/not/here/xyz");
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        let raw = format!(
+            "{existing_str}{separator} {separator}relative/dir{separator}/definitely/not/here/xyz"
+        );
         let roots = parse_allow_paths(&raw);
-        assert_eq!(roots, vec![existing.path().canonicalize().unwrap()]);
+        assert_eq!(
+            roots,
+            vec![existing.path().canonicalize().map(crate::utils::path::simplified).unwrap()]
+        );
     }
 
     #[test]
@@ -488,12 +561,15 @@ mod tests {
         let outside = TempDir::new().unwrap();
         let f = outside.path().join("note.md");
         fs::write(&f, "x").unwrap();
-        let roots = vec![outside.path().canonicalize().unwrap()];
+        let roots =
+            vec![outside.path().canonicalize().map(crate::utils::path::simplified).unwrap()];
 
         // Without the allowlist it is a traversal; with it, it resolves.
         assert!(validate_path_with_roots(&f, ws.path(), &[]).is_err());
         let v = validate_path_with_roots(&f, ws.path(), &roots).unwrap();
-        assert!(v.starts_with(outside.path().canonicalize().unwrap()));
+        assert!(v.starts_with(
+            outside.path().canonicalize().map(crate::utils::path::simplified).unwrap()
+        ));
     }
 
     #[test]
@@ -502,7 +578,8 @@ mod tests {
         let ws = TempDir::new().unwrap();
         let outside = TempDir::new().unwrap();
         let f = outside.path().join("new/deep/file.txt");
-        let roots = vec![outside.path().canonicalize().unwrap()];
+        let roots =
+            vec![outside.path().canonicalize().map(crate::utils::path::simplified).unwrap()];
 
         assert!(validate_path_with_roots(&f, ws.path(), &[]).is_err());
         let v = validate_path_with_roots(&f, ws.path(), &roots).unwrap();
@@ -517,7 +594,8 @@ mod tests {
         let other = TempDir::new().unwrap();
         let f = other.path().join("secret.txt");
         fs::write(&f, "s").unwrap();
-        let roots = vec![allowed.path().canonicalize().unwrap()];
+        let roots =
+            vec![allowed.path().canonicalize().map(crate::utils::path::simplified).unwrap()];
         assert!(matches!(
             validate_path_with_roots(&f, ws.path(), &roots),
             Err(PathSecurityError::PathTraversal { .. })
@@ -542,7 +620,7 @@ mod tests {
 
         assert!(validate_path_with_roots(&f, ws.path(), &[]).is_err());
         let v = validate_path_with_roots(&f, ws.path(), &roots).unwrap();
-        assert_eq!(v, f.canonicalize().unwrap());
+        assert_eq!(v, f.canonicalize().map(crate::utils::path::simplified).unwrap());
     }
 
     #[cfg(unix)]
@@ -557,7 +635,8 @@ mod tests {
         fs::write(&target, "d").unwrap();
         let link = ws.path().join("link.txt");
         symlink(&target, &link).unwrap();
-        let roots = vec![outside.path().canonicalize().unwrap()];
+        let roots =
+            vec![outside.path().canonicalize().map(crate::utils::path::simplified).unwrap()];
 
         assert!(matches!(
             validate_path_with_roots(&link, ws.path(), &[]),
@@ -579,6 +658,8 @@ mod tests {
         symlink(&real, &link).unwrap();
         let f = link.join("file.txt");
         let v = validate_path_with_roots(&f, ws.path(), &[]).unwrap();
-        assert!(v.starts_with(ws.path().canonicalize().unwrap()));
+        assert!(
+            v.starts_with(ws.path().canonicalize().map(crate::utils::path::simplified).unwrap())
+        );
     }
 }
