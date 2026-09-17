@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
@@ -13,21 +14,25 @@ fn socket_under(runtime_dir: &Path) -> PathBuf {
     runtime_dir.join("winx/winxd.sock")
 }
 
+#[cfg(unix)]
 fn fallback_socket(uid: u32) -> PathBuf {
     PathBuf::from(format!("/tmp/winx-{uid}/winxd.sock"))
 }
 
+#[cfg(unix)]
 fn canonical_user_runtime_dir(uid: u32) -> PathBuf {
     PathBuf::from(format!("/run/user/{uid}"))
 }
 
 /// Only trust an implicit runtime directory owned exclusively by this user.
+#[cfg(unix)]
 fn usable_runtime_dir(path: &Path, uid: u32) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else { return false };
     let mode = metadata.permissions().mode();
     metadata.is_dir() && metadata.uid() == uid && mode.trailing_zeros() >= 6
 }
 
+#[cfg(unix)]
 fn select_socket_path(
     explicit: Option<PathBuf>,
     xdg_runtime_dir: Option<PathBuf>,
@@ -46,6 +51,7 @@ fn select_socket_path(
 /// `/run/user/<uid>` when the private user runtime directory is available. This
 /// prevents one installation from silently creating independent daemons under
 /// both `/run/user` and `/tmp`.
+#[cfg(unix)]
 pub fn default_socket_path() -> PathBuf {
     let uid = crate::os::unix::effective_uid();
     let explicit =
@@ -80,7 +86,37 @@ fn push_candidate(
     });
 }
 
+/// Windows keeps the socket-path identity as a marker file under the per-user
+/// local application data directory; the named pipe is derived from it.
+#[cfg(windows)]
+fn windows_runtime_socket() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .or_else(|| home::home_dir().map(|home| home.join("AppData").join("Local")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("winx").join("run").join("winxd.sock")
+}
+
+#[cfg(windows)]
+pub fn default_socket_path() -> PathBuf {
+    std::env::var_os("WINX_SOCKET")
+        .filter(|value| !value.is_empty())
+        .map_or_else(windows_runtime_socket, PathBuf::from)
+}
+
+#[cfg(windows)]
+pub fn socket_candidates() -> Vec<DaemonSocketCandidate> {
+    let selected = default_socket_path();
+    let mut candidates = Vec::with_capacity(2);
+    if let Some(path) = std::env::var_os("WINX_SOCKET").filter(|value| !value.is_empty()) {
+        push_candidate(&mut candidates, PathBuf::from(path), "WINX_SOCKET", &selected);
+    }
+    push_candidate(&mut candidates, windows_runtime_socket(), "local_app_data", &selected);
+    candidates
+}
+
 /// Enumerate canonical and legacy socket locations for diagnostics.
+#[cfg(unix)]
 pub fn socket_candidates() -> Vec<DaemonSocketCandidate> {
     let uid = crate::os::unix::effective_uid();
     let selected = default_socket_path();
@@ -112,6 +148,7 @@ pub fn socket_candidates() -> Vec<DaemonSocketCandidate> {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     #[test]
     fn explicit_socket_always_wins() {
         let selected = select_socket_path(
@@ -123,12 +160,14 @@ mod tests {
         assert_eq!(selected, PathBuf::from("/custom/winx.sock"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn missing_xdg_converges_on_canonical_user_runtime() {
         let selected = select_socket_path(None, None, Some(PathBuf::from("/run/user/42")), 42);
         assert_eq!(selected, PathBuf::from("/run/user/42/winx/winxd.sock"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn tmp_is_only_the_last_resort() {
         assert_eq!(

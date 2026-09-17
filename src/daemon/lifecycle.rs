@@ -1,4 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -407,15 +406,12 @@ impl GuardianLifecycle {
     }
 
     async fn terminate_guardian_with_pid(&self, socket: &Path, pid: u32) -> Result<()> {
-        let pid_i32 = i32::try_from(pid).map_err(|_| {
-            WinxError::ConfigurationError(format!("guardian pid {pid} does not fit in pid_t"))
-        })?;
-        signal_process(pid_i32, libc::SIGTERM)?;
+        request_graceful_exit(socket, pid).await?;
         if !wait_for_process_exit(pid, TERMINATE_GRACE).await {
-            signal_process(pid_i32, libc::SIGKILL)?;
+            force_kill(pid)?;
             if !wait_for_process_exit(pid, TERMINATE_GRACE).await {
                 return Err(WinxError::CommandExecutionError(format!(
-                    "guardian process {pid} did not exit after SIGTERM/SIGKILL"
+                    "guardian process {pid} did not exit after graceful and forced termination"
                 )));
             }
         }
@@ -493,7 +489,7 @@ impl GuardianLifecycle {
         let data = serde_json::to_vec(metadata)
             .map_err(|error| WinxError::SerializationError(error.to_string()))?;
         tokio::fs::write(&temp, data).await?;
-        tokio::fs::set_permissions(&temp, std::fs::Permissions::from_mode(0o600)).await?;
+        crate::daemon::transport::restrict_to_owner(&temp, 0o600).await?;
         tokio::fs::rename(&temp, &path).await?;
         Ok(())
     }
@@ -546,12 +542,46 @@ async fn wait_for_process_exit(pid: u32, budget: Duration) -> bool {
     !process_exists(pid)
 }
 
-fn signal_process(pid: i32, signal: i32) -> Result<()> {
-    crate::os::unix::signal_raw(pid, signal).map_err(Into::into)
+/// Politely ask a guardian to exit: SIGTERM on Unix, the `winx.shutdown` RPC
+/// on Windows (which has no signals). A guardian that is already gone or too
+/// old to know the RPC simply falls through to the forced path.
+async fn request_graceful_exit(socket: &Path, pid: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let _ = socket;
+        let pid = i32::try_from(pid).map_err(|_| {
+            WinxError::ConfigurationError(format!("guardian pid {pid} does not fit in pid_t"))
+        })?;
+        crate::os::unix::signal_raw(pid, libc::SIGTERM).map_err(Into::into)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        let _ = DaemonClient::new(socket).shutdown().await;
+        Ok(())
+    }
+}
+
+fn force_kill(pid: u32) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let pid = i32::try_from(pid).map_err(|_| {
+            WinxError::ConfigurationError(format!("guardian pid {pid} does not fit in pid_t"))
+        })?;
+        crate::os::unix::signal_raw(pid, libc::SIGKILL).map_err(Into::into)
+    }
+    #[cfg(windows)]
+    {
+        crate::os::windows::terminate_process(pid).map_err(Into::into)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        Err(WinxError::ConfigurationError(format!("cannot terminate pid {pid} on this platform")))
+    }
 }
 
 fn process_exists(pid: u32) -> bool {
-    crate::os::unix::process_exists(pid)
+    crate::os::process_exists(pid)
 }
 
 fn metadata_path(socket: &Path) -> PathBuf {

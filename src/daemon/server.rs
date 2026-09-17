@@ -1,12 +1,10 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{watch, Mutex, Notify, RwLock};
 
 use super::protocol::{
@@ -319,9 +317,9 @@ impl OutputJournal {
     }
 }
 
-/// Long-lived JSON-RPC shell owner listening on a Unix-domain socket.
+/// Long-lived JSON-RPC shell owner listening on the daemon transport.
 pub struct DaemonServer {
-    listener: UnixListener,
+    listener: crate::daemon::transport::DaemonListener,
     socket_path: PathBuf,
     sessions: Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     epoch: String,
@@ -334,10 +332,10 @@ impl DaemonServer {
             WinxError::ConfigurationError("daemon socket must have a parent directory".to_string())
         })?;
         tokio::fs::create_dir_all(parent).await?;
-        tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
+        crate::daemon::transport::restrict_to_owner(parent, 0o700).await?;
 
         if tokio::fs::try_exists(&socket_path).await? {
-            if UnixStream::connect(&socket_path).await.is_ok() {
+            if crate::daemon::transport::connect(&socket_path).await.is_ok() {
                 return Err(WinxError::ConfigurationError(format!(
                     "a winxd instance is already listening at {}",
                     socket_path.display()
@@ -346,16 +344,16 @@ impl DaemonServer {
             tokio::fs::remove_file(&socket_path).await?;
         }
 
-        let listener = UnixListener::bind(&socket_path)?;
-        tokio::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).await?;
+        let listener = crate::daemon::transport::DaemonListener::bind(&socket_path)?;
+        crate::daemon::transport::restrict_to_owner(&socket_path, 0o600).await?;
         let epoch = format!("{:016x}", rand::random::<u64>());
         Ok(Self { listener, socket_path, sessions: Arc::new(Mutex::new(HashMap::new())), epoch })
     }
 
-    pub async fn serve(self) -> Result<()> {
+    pub async fn serve(mut self) -> Result<()> {
         loop {
-            let (stream, _) = self.listener.accept().await?;
-            if !same_uid(&stream)? {
+            let stream = self.listener.accept().await?;
+            if !crate::daemon::transport::peer_is_same_user(&stream)? {
                 tracing::warn!("Rejected winxd connection from a different uid");
                 continue;
             }
@@ -377,7 +375,7 @@ impl Drop for DaemonServer {
 }
 
 async fn serve_connection(
-    mut stream: UnixStream,
+    mut stream: crate::daemon::transport::DaemonStream,
     sessions: Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     epoch: String,
 ) -> Result<()> {
@@ -422,10 +420,15 @@ async fn dispatch(
                     "idempotency".to_string(),
                     "session_activity_timestamps".to_string(),
                     ATTACH_OR_CREATE_CAPABILITY.to_string(),
+                    crate::daemon::protocol::PROCESS_SHUTDOWN_CAPABILITY.to_string(),
                 ],
                 epoch,
             ),
         ),
+        "winx.shutdown" => {
+            schedule_process_exit("winx-guardian");
+            rpc_result(request.id, &serde_json::json!({ "shutting_down": true }))
+        }
         "session.configure" => {
             let params: ConfigureSessionParams = match serde_json::from_value(request.params) {
                 Ok(params) => params,
@@ -1396,9 +1399,14 @@ fn rpc_error(id: u64, code: i32, message: &str) -> RpcResponse {
     }
 }
 
-fn same_uid(stream: &UnixStream) -> Result<bool> {
-    let credentials = stream.peer_cred()?;
-    Ok(credentials.uid() == crate::os::unix::effective_uid())
+/// Answer the in-flight request, then exit. Guardians own PTYs that die with
+/// them, so this is only requested after `session.kill` drained the session.
+pub(crate) fn schedule_process_exit(role: &'static str) {
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        tracing::info!("{role} exiting on winx.shutdown request");
+        std::process::exit(0);
+    });
 }
 
 #[cfg(test)]

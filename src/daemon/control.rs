@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::os::unix::fs::MetadataExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::Mutex;
 
 use super::lifecycle::{GuardianLifecycle, GuardianLimits};
@@ -23,7 +21,7 @@ use crate::types::normalize_thread_id;
 /// Stable control plane. Each logical session is owned by a separate guardian
 /// process, so restarting this process does not close any PTY master.
 pub struct ControlServer {
-    listener: UnixListener,
+    listener: crate::daemon::transport::DaemonListener,
     socket_path: PathBuf,
     lifecycle: Arc<GuardianLifecycle>,
     guardian_capabilities: Arc<Mutex<HashMap<PathBuf, CachedGuardian>>>,
@@ -63,13 +61,13 @@ impl ControlServer {
             WinxError::ConfigurationError("daemon socket must have a parent directory".to_string())
         })?;
         tokio::fs::create_dir_all(parent).await?;
-        tokio::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).await?;
+        crate::daemon::transport::restrict_to_owner(parent, 0o700).await?;
         let guardian_dir = parent.join("guardians");
         tokio::fs::create_dir_all(&guardian_dir).await?;
-        tokio::fs::set_permissions(&guardian_dir, std::fs::Permissions::from_mode(0o700)).await?;
+        crate::daemon::transport::restrict_to_owner(&guardian_dir, 0o700).await?;
 
         if tokio::fs::try_exists(&socket_path).await? {
-            if UnixStream::connect(&socket_path).await.is_ok() {
+            if crate::daemon::transport::connect(&socket_path).await.is_ok() {
                 return Err(WinxError::ConfigurationError(format!(
                     "a winxd instance is already listening at {}",
                     socket_path.display()
@@ -77,8 +75,8 @@ impl ControlServer {
             }
             tokio::fs::remove_file(&socket_path).await?;
         }
-        let listener = UnixListener::bind(&socket_path)?;
-        tokio::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600)).await?;
+        let listener = crate::daemon::transport::DaemonListener::bind(&socket_path)?;
+        crate::daemon::transport::restrict_to_owner(&socket_path, 0o600).await?;
         let lifecycle = Arc::new(GuardianLifecycle::new(
             guardian_dir,
             guardian_binary()?,
@@ -95,11 +93,11 @@ impl ControlServer {
         })
     }
 
-    pub async fn serve(self) -> Result<()> {
+    pub async fn serve(mut self) -> Result<()> {
         self.lifecycle.clone().spawn_sweeper();
         loop {
-            let (stream, _) = self.listener.accept().await?;
-            if !same_uid(&stream)? {
+            let stream = self.listener.accept().await?;
+            if !crate::daemon::transport::peer_is_same_user(&stream)? {
                 tracing::warn!("Rejected winxd control connection from a different uid");
                 continue;
             }
@@ -131,7 +129,7 @@ impl Drop for ControlServer {
 }
 
 async fn serve_connection(
-    mut stream: UnixStream,
+    mut stream: crate::daemon::transport::DaemonStream,
     lifecycle: Arc<GuardianLifecycle>,
     guardian_capabilities: Arc<Mutex<HashMap<PathBuf, CachedGuardian>>>,
     guardian_negotiation_gates: Arc<Mutex<HashMap<PathBuf, GuardianNegotiationGate>>>,
@@ -192,10 +190,17 @@ async fn dispatch(
                     "session.prune".to_string(),
                     "multi_consumer_cursors".to_string(),
                     "idempotency".to_string(),
+                    crate::daemon::protocol::PROCESS_SHUTDOWN_CAPABILITY.to_string(),
                 ],
                 epoch,
             ),
         );
+    }
+    if request.method == "winx.shutdown" {
+        // Planned control restart: guardians are detached processes and keep
+        // their PTYs; only the control plane exits.
+        crate::daemon::server::schedule_process_exit("winxd");
+        return rpc_result(request.id, &serde_json::json!({ "shutting_down": true }));
     }
 
     if request.method == "session.list" {
@@ -607,7 +612,7 @@ fn request_requires_live_guardian(request: &RpcRequest) -> Result<bool> {
 }
 
 async fn relay(socket: &Path, mut request: RpcRequest) -> Result<(RpcResponse, HelloResult)> {
-    let mut stream = UnixStream::connect(socket).await.map_err(|error| {
+    let mut stream = crate::daemon::transport::connect(socket).await.map_err(|error| {
         WinxError::ShellInitializationError(format!(
             "guardian at {} is unavailable: {error}",
             socket.display()
@@ -653,7 +658,7 @@ async fn relay_negotiated(
     request: RpcRequest,
     hello: &HelloResult,
 ) -> Result<RpcResponse> {
-    let mut stream = UnixStream::connect(socket).await.map_err(|error| {
+    let mut stream = crate::daemon::transport::connect(socket).await.map_err(|error| {
         WinxError::ShellInitializationError(format!(
             "guardian at {} is unavailable: {error}",
             socket.display()
@@ -707,7 +712,8 @@ fn guardian_binary() -> Result<PathBuf> {
         return Ok(PathBuf::from(path));
     }
     let executable = std::env::current_exe()?;
-    let sibling = executable.with_file_name("winx-guardian");
+    let sibling =
+        executable.with_file_name(if cfg!(windows) { "winx-guardian.exe" } else { "winx-guardian" });
     if sibling.is_file() {
         Ok(sibling)
     } else {
@@ -734,11 +740,6 @@ fn rpc_error(id: u64, code: i32, message: &str) -> RpcResponse {
         result: None,
         error: Some(RpcError { code, message: message.to_string() }),
     }
-}
-
-fn same_uid(stream: &UnixStream) -> Result<bool> {
-    let credentials = stream.peer_cred()?;
-    Ok(credentials.uid() == crate::os::unix::effective_uid())
 }
 
 #[cfg(test)]

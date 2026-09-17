@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use tokio::net::UnixStream;
+use crate::daemon::transport::DaemonStream;
 use tokio::sync::Mutex;
 
 use super::protocol::{
@@ -69,7 +69,7 @@ struct NegotiatedSession {
     guardian: HelloResult,
     /// Idle negotiated connection used only to detect a control restart. Tool
     /// RPCs use disposable connections so cancelled framing is never reused.
-    health_stream: UnixStream,
+    health_stream: DaemonStream,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -103,7 +103,7 @@ impl DaemonClient {
         Self { socket_path: socket_path.as_ref().to_path_buf() }
     }
 
-    async fn connected_with_hello(&self) -> Result<(UnixStream, HelloResult)> {
+    async fn connected_with_hello(&self) -> Result<(DaemonStream, HelloResult)> {
         let mut stream = self.connect_raw().await?;
         let hello: HelloResult = tokio::time::timeout(
             SESSION_CONTROL_RPC_TIMEOUT,
@@ -128,22 +128,25 @@ impl DaemonClient {
         Ok((stream, hello))
     }
 
-    async fn connect_raw(&self) -> Result<UnixStream> {
-        tokio::time::timeout(DAEMON_CONNECT_TIMEOUT, UnixStream::connect(&self.socket_path))
-            .await
-            .map_err(|_| WinxError::CommandTimeout {
-                command: format!("connect to winxd at {}", self.socket_path.display()),
-                timeout_seconds: DAEMON_CONNECT_TIMEOUT.as_secs(),
-            })?
-            .map_err(|error| {
-                WinxError::ShellInitializationError(format!(
-                    "cannot connect to winxd at {}: {error}",
-                    self.socket_path.display()
-                ))
-            })
+    async fn connect_raw(&self) -> Result<DaemonStream> {
+        tokio::time::timeout(
+            DAEMON_CONNECT_TIMEOUT,
+            crate::daemon::transport::connect(&self.socket_path),
+        )
+        .await
+        .map_err(|_| WinxError::CommandTimeout {
+            command: format!("connect to winxd at {}", self.socket_path.display()),
+            timeout_seconds: DAEMON_CONNECT_TIMEOUT.as_secs(),
+        })?
+        .map_err(|error| {
+            WinxError::ShellInitializationError(format!(
+                "cannot connect to winxd at {}: {error}",
+                self.socket_path.display()
+            ))
+        })
     }
 
-    async fn connected(&self) -> Result<UnixStream> {
+    async fn connected(&self) -> Result<DaemonStream> {
         self.connected_with_hello().await.map(|(stream, _)| stream)
     }
 
@@ -192,6 +195,20 @@ impl DaemonClient {
             .map_err(|error| WinxError::SerializationError(error.to_string()))?,
         )
         .await
+    }
+
+    /// Ask the process behind this socket to exit after answering. Only
+    /// daemons advertising `process_shutdown` honor it.
+    pub async fn shutdown(&self) -> Result<()> {
+        let mut stream = self.connected().await?;
+        let _: serde_json::Value = DaemonShellRuntime::request(
+            &mut stream,
+            rand::random::<u64>(),
+            "winx.shutdown",
+            serde_json::json!({}),
+        )
+        .await?;
+        Ok(())
     }
 
     pub async fn kill_session(&self, thread_id: &str) -> Result<bool> {
@@ -612,7 +629,7 @@ impl DaemonShellRuntime {
     }
 
     async fn request<T: serde::de::DeserializeOwned>(
-        stream: &mut UnixStream,
+        stream: &mut DaemonStream,
         id: u64,
         method: &str,
         params: serde_json::Value,

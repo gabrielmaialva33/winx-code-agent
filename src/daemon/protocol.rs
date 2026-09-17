@@ -17,6 +17,9 @@ pub const GENERATION_BOUND_ACTIONS_CAPABILITY: &str = "generation_bound_actions"
 pub const CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY: &str = "cancellable_action_reservations";
 pub const ATTACH_OR_CREATE_CAPABILITY: &str = "attach_or_create";
 pub const BUILD_IDENTITY_CAPABILITY: &str = "build_identity";
+/// The process exits cleanly on a `winx.shutdown` request; Windows has no
+/// SIGTERM, so this is the only graceful stop there.
+pub const PROCESS_SHUTDOWN_CAPABILITY: &str = "process_shutdown";
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Process role advertised during daemon negotiation.
