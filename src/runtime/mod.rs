@@ -114,6 +114,7 @@ pub struct ShellActionOptions {
 }
 
 impl ShellActionOptions {
+    #[cfg(unix)] // consulted by the daemon wire format only
     pub(crate) fn is_default(&self) -> bool {
         let is_default = !self.compact_output
             && self.expected_generation.is_none()

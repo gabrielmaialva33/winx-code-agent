@@ -1312,10 +1312,12 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
+    #[cfg(unix)] // POSIX fixture helpers
     use crate::tools::edit_files::{
         EditChange, EditCommand, EditSurface, EditVerification, PreparedEditContext,
     };
 
+    #[cfg(unix)] // POSIX fixture paths
     fn prepared(content: &str, verification: bool) -> PreparedEditContext {
         let original_arguments = json!({
             "thread_id": "thread",
@@ -1350,6 +1352,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // POSIX fixture paths
     fn modern_prepared(command: &str) -> PreparedEditContext {
         let mut prepared = prepared("content", true);
         prepared.surface = EditSurface::EditFiles;
@@ -1395,6 +1398,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)] // fixture uses POSIX absolute paths; a per-platform fixture comes with the Windows edit port
     #[test]
     fn mutation_fingerprint_is_object_order_independent() {
         let left = prepared("a", false);
@@ -1412,6 +1416,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // fixture uses POSIX absolute paths; a per-platform fixture comes with the Windows edit port
     #[test]
     fn mutation_fingerprint_changes_with_payload() {
         let left = prepared("a", false);
@@ -1422,6 +1427,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)] // fixture uses POSIX absolute paths; a per-platform fixture comes with the Windows edit port
     #[test]
     fn schema_zero_legacy_receipt_migrates_to_atomic_canonical_shadow_pair() {
         let legacy = prepared("content", true);
@@ -1468,6 +1474,7 @@ mod tests {
         assert_eq!(shadow.verification_id.as_deref(), Some(verification.id.as_str()));
     }
 
+    #[cfg(unix)] // fixture uses POSIX absolute paths; a per-platform fixture comes with the Windows edit port
     #[test]
     fn distinct_mutations_with_same_verification_command_have_distinct_receipts() {
         let first = mutation_metadata(&prepared("first", true)).expect("first metadata");
@@ -1593,6 +1600,7 @@ mod tests {
         drop(owner);
     }
 
+    #[cfg(unix)] // fixture uses POSIX absolute paths; a per-platform fixture comes with the Windows edit port
     #[test]
     fn interrupted_verification_replay_points_only_to_verify_edit(
     ) -> std::result::Result<(), &'static str> {
@@ -1629,6 +1637,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // fixture uses POSIX absolute paths; a per-platform fixture comes with the Windows edit port
     #[test]
     fn changed_verification_replays_commit_into_receipt_bound_bash_only(
     ) -> std::result::Result<(), &'static str> {
@@ -1672,6 +1681,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // fixture uses POSIX absolute paths; a per-platform fixture comes with the Windows edit port
     #[test]
     fn changed_legacy_verification_rebuilds_a_resolvable_shadow(
     ) -> std::result::Result<(), &'static str> {
@@ -1724,6 +1734,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)] // fixture uses POSIX absolute paths; a per-platform fixture comes with the Windows edit port
     #[test]
     fn partial_receipt_replay_protects_committed_prefix_and_reads_only_suffix(
     ) -> std::result::Result<(), &'static str> {

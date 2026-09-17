@@ -366,7 +366,10 @@ fn parse_keep_days() -> Result<usize> {
 mod tests {
     #![allow(clippy::unwrap_used)]
 
-    use super::{SecureUsageWriter, UsageRotation};
+    #[cfg(unix)]
+    use super::SecureUsageWriter;
+    use super::UsageRotation;
+    #[cfg(unix)]
     use std::io::Write as _;
 
     #[test]

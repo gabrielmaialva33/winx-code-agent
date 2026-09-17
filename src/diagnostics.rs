@@ -3,6 +3,9 @@
 use serde_json::{json, Value};
 
 /// Build a redacted snapshot of configuration and live runtime topology.
+// Only the Unix daemon probe awaits; the signature stays async on every
+// platform so callers do not fork on cfg.
+#[cfg_attr(not(unix), allow(clippy::unused_async))]
 pub async fn doctor_report() -> Value {
     let runtime = crate::runtime::configured_runtime_mode().map_or_else(
         |error| format!("invalid: {error}"),
@@ -177,6 +180,6 @@ mod tests {
         let report = super::doctor_report().await.to_string();
         assert!(!report.contains("WINX_HTTP_TOKEN="));
         assert!(report.contains("http_token_configured"));
-        assert!(report.contains("daemon_topology"));
+        assert_eq!(report.contains("daemon_topology"), cfg!(unix));
     }
 }

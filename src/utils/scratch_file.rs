@@ -190,6 +190,7 @@ mod tests {
         assert!(fresh.exists(), "fresh scratch file must survive");
     }
 
+    #[cfg(unix)] // relies on /proc refusing child directories
     #[test]
     fn new_scratch_path_returns_none_on_unwritable_root() {
         // A workspace root that cannot hold a child dir must yield None, not panic.

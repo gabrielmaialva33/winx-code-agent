@@ -339,7 +339,9 @@ fn constant_time_digest_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use super::{load_http_principals, load_secret_file, parse_bool, HttpPrincipal};
+    #[cfg(unix)]
+    use super::{load_http_principals, load_secret_file};
+    use super::{parse_bool, HttpPrincipal};
 
     #[test]
     fn boolean_parser_is_consistent() {

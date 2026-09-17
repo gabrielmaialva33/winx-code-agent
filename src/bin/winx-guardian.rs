@@ -23,6 +23,7 @@ async fn main() -> anyhow::Result<()> {
 }
 
 #[cfg(not(unix))]
+#[allow(clippy::print_stderr)] // no logging subscriber exists in the fallback binary
 fn main() {
     eprintln!("winx-guardian requires a Unix platform");
     std::process::exit(1);

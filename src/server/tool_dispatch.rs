@@ -1376,10 +1376,9 @@ mod verification_tests {
 
     use std::sync::Arc;
 
-    use super::{
-        audit_summary, is_expected_recovery_status, partial_edit_result, RequestedTool,
-        READ_EDIT_GUIDANCE,
-    };
+    #[cfg(unix)] // only the POSIX-fixture partial-commit test uses it
+    use super::partial_edit_result;
+    use super::{audit_summary, is_expected_recovery_status, RequestedTool, READ_EDIT_GUIDANCE};
     use crate::runtime::ShellActionOptions;
     use crate::server::WinxService;
     use crate::state::BashState;
@@ -1460,6 +1459,7 @@ mod verification_tests {
         }
     }
 
+    #[cfg(unix)] // fixture uses POSIX absolute paths; a per-platform fixture comes with the Windows edit port
     #[test]
     fn partial_commit_is_a_successful_typed_outcome_for_only_the_uncommitted_suffix() {
         let prepared = crate::tools::edit_files::PreparedEditContext {
