@@ -3002,6 +3002,7 @@ dependencies = [
  "tree-sitter-typescript",
  "vt100",
  "vte",
+ "windows-sys",
 ]
 
 [[package]]
