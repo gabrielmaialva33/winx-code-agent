@@ -215,6 +215,7 @@ async fn restart_control_daemon_from_hello(
 /// Windows. Either way guardians are separate detached processes and keep
 /// their PTYs.
 async fn signal_control_shutdown(socket: &Path, pid: u32) -> Result<()> {
+    #[cfg(unix)]
     {
         let _ = socket;
         crate::os::unix::signal_process(pid, libc::SIGTERM).map_err(Into::into)
@@ -240,6 +241,7 @@ fn spawn_detached(daemon_binary: &Path, socket: &Path) -> Result<std::process::C
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        #[cfg(unix)]
         {
             let _ = breakaway;
             crate::os::unix::configure_detached(&mut command);
