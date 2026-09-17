@@ -1128,9 +1128,12 @@ fn from_wire_error(error: WireShellError) -> WinxError {
 mod tests {
     #![allow(clippy::expect_used)]
 
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(unix)]
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
 
     use super::*;
+    #[cfg(unix)]
     use crate::daemon::protocol::{RpcResponse, TYPED_ACTION_RESULT_CAPABILITY};
     #[cfg(unix)]
     use tokio::net::UnixStream;
@@ -1198,6 +1201,7 @@ mod tests {
         server.await.expect("mock server task");
     }
 
+    #[cfg(unix)] // mocks the control plane with a raw UnixListener
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // full control/guardian wire exchange is intentional
     async fn generation_capability_comes_from_effective_guardian_and_is_cached() {
@@ -1348,6 +1352,7 @@ mod tests {
         assert_eq!(connections.load(Ordering::SeqCst), 2);
     }
 
+    #[cfg(unix)] // mocks the control plane with a raw UnixListener
     #[tokio::test]
     #[allow(clippy::too_many_lines)] // two complete negotiated epochs are intentional
     async fn ambiguous_action_is_not_retried_after_guardian_epoch_changes() {
