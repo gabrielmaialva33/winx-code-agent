@@ -155,7 +155,7 @@ impl CanonicalEditTarget {
             return Err(self.binding_error("target existence changed after preflight"));
         }
         let current = if exists_now {
-            self.path.canonicalize().map_err(|error| {
+            self.path.canonicalize().map(crate::utils::path::simplified).map_err(|error| {
                 self.binding_error(&format!("cannot revalidate target: {error}"))
             })?
         } else {
@@ -186,7 +186,7 @@ fn resolve_missing_target(path: &Path) -> std::io::Result<PathBuf> {
             std::io::Error::new(std::io::ErrorKind::NotFound, "no existing target ancestor")
         })?;
     }
-    let mut resolved = existing.canonicalize()?;
+    let mut resolved = existing.canonicalize().map(crate::utils::path::simplified)?;
     let remainder = path.strip_prefix(existing).map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,

@@ -71,7 +71,8 @@ fn references_with_paths(
     workspace_root: PathBuf,
     payload_max_bytes: usize,
 ) -> Result<(String, serde_json::Value)> {
-    let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
+    let workspace_root =
+        workspace_root.canonicalize().map_or(workspace_root, crate::utils::path::simplified);
 
     if args.name.trim().is_empty() {
         return Err(WinxError::ArgumentParseError("Symbol name must not be empty.".to_string()));
@@ -271,7 +272,7 @@ mod tests {
 
     fn state_in(dir: &TempDir) -> Arc<Mutex<Option<BashState>>> {
         let mut bs = BashState::new();
-        let root = dir.path().canonicalize().unwrap();
+        let root = dir.path().canonicalize().map(crate::utils::path::simplified).unwrap();
         bs.cwd = root.clone();
         bs.workspace_root = root;
         Arc::new(Mutex::new(Some(bs)))

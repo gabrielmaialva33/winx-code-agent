@@ -223,7 +223,8 @@ fn outline_with_paths(
     thread_id: &str,
     payload_max_bytes: usize,
 ) -> Result<(String, serde_json::Value)> {
-    let workspace_root = workspace_root.canonicalize().unwrap_or(workspace_root);
+    let workspace_root =
+        workspace_root.canonicalize().map_or(workspace_root, crate::utils::path::simplified);
     let root = resolve_in_workspace(&args.path, cwd, &workspace_root).map_err(|e| {
         WinxError::PathSecurityError { path: PathBuf::from(&args.path), message: e.to_string() }
     })?;
@@ -285,7 +286,7 @@ fn ext_of(path: &Path) -> String {
 
 /// Workspace-relative display path.
 fn rel_of(path: &Path, workspace_root: &Path) -> String {
-    path.strip_prefix(workspace_root).unwrap_or(path).to_string_lossy().to_string()
+    crate::utils::path::display_relative(path.strip_prefix(workspace_root).unwrap_or(path))
 }
 
 /// Compile-once-per-language cached config lookup.
@@ -628,7 +629,7 @@ mod tests {
 
     fn state_in(dir: &TempDir) -> Arc<Mutex<Option<BashState>>> {
         let mut bs = BashState::new();
-        let root = dir.path().canonicalize().unwrap();
+        let root = dir.path().canonicalize().map(crate::utils::path::simplified).unwrap();
         bs.cwd = root.clone();
         bs.workspace_root = root;
         Arc::new(Mutex::new(Some(bs)))
@@ -758,11 +759,17 @@ mod tests {
         assert_eq!(structured["fallback"]["reason"], "unsupported_language");
         assert_eq!(
             structured["fallback"]["file_paths"][0],
-            dir.path().join("page.heex").canonicalize().unwrap().to_string_lossy().as_ref()
+            dir.path()
+                .join("page.heex")
+                .canonicalize()
+                .map(crate::utils::path::simplified)
+                .unwrap()
+                .to_string_lossy()
+                .as_ref()
         );
         assert!(structured["fallback"]["temporary_artifact_dir"]
             .as_str()
-            .is_some_and(|path| path.contains("/.winx/tmp/session-")));
+            .is_some_and(|path| path.replace('\\', "/").contains("/.winx/tmp/session-")));
     }
 
     #[tokio::test]
@@ -794,7 +801,7 @@ mod tests {
     #[tokio::test]
     async fn repo_map_prunes_winx_but_explicit_helper_outline_remains_available() {
         let dir = TempDir::new().unwrap();
-        let root = dir.path().canonicalize().unwrap();
+        let root = dir.path().canonicalize().map(crate::utils::path::simplified).unwrap();
         std::fs::write(root.join("main.py"), "def canonical():\n    pass\n").unwrap();
         let helper = crate::utils::agent_temp::session_info(&root, "helper-session")
             .directory

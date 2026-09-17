@@ -211,7 +211,7 @@ mod tests {
 
     fn state_in(dir: &TempDir, thread_id: &str) -> Arc<Mutex<Option<BashState>>> {
         let mut state = BashState::new();
-        let root = dir.path().canonicalize().unwrap();
+        let root = dir.path().canonicalize().map(crate::utils::path::simplified).unwrap();
         state.cwd = root.clone();
         state.workspace_root = root;
         state.current_thread_id = thread_id.to_string();
@@ -247,7 +247,11 @@ mod tests {
         assert_eq!(canonical["canonical"], true);
         assert!(canonical.get("temporary_helper_budget").is_none());
 
-        let relative = helper.strip_prefix(workspace.path().canonicalize().unwrap()).unwrap();
+        let relative = helper
+            .strip_prefix(
+                workspace.path().canonicalize().map(crate::utils::path::simplified).unwrap(),
+            )
+            .unwrap();
         let (text, derived) =
             handle_tool_call(&state, outline(relative.to_string_lossy())).await.unwrap();
         assert!(text.starts_with("Non-canonical temporary helper"), "{text}");
@@ -270,7 +274,11 @@ mod tests {
         }
         std::fs::write(&helper, source).unwrap();
         let state = state_in(&workspace, "active");
-        let relative = helper.strip_prefix(workspace.path().canonicalize().unwrap()).unwrap();
+        let relative = helper
+            .strip_prefix(
+                workspace.path().canonicalize().map(crate::utils::path::simplified).unwrap(),
+            )
+            .unwrap();
 
         let (text, structured) =
             handle_tool_call(&state, outline(relative.to_string_lossy())).await.unwrap();
@@ -289,8 +297,12 @@ mod tests {
         let info = crate::utils::agent_temp::session_info(workspace.path(), "active");
         std::fs::create_dir_all(&info.directory).unwrap();
         let state = state_in(&workspace, "active");
-        let directory =
-            info.directory.strip_prefix(workspace.path().canonicalize().unwrap()).unwrap();
+        let directory = info
+            .directory
+            .strip_prefix(
+                workspace.path().canonicalize().map(crate::utils::path::simplified).unwrap(),
+            )
+            .unwrap();
         let directory_error =
             handle_tool_call(&state, outline(directory.to_string_lossy())).await.unwrap_err();
         assert!(directory_error.to_string().contains("one existing"), "{directory_error}");
@@ -298,12 +310,20 @@ mod tests {
         for index in 0..crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES {
             let helper = info.directory.join(format!("carrier-{index}.py"));
             std::fs::write(&helper, format!("def helper_{index}():\n    pass\n")).unwrap();
-            let relative = helper.strip_prefix(workspace.path().canonicalize().unwrap()).unwrap();
+            let relative = helper
+                .strip_prefix(
+                    workspace.path().canonicalize().map(crate::utils::path::simplified).unwrap(),
+                )
+                .unwrap();
             handle_tool_call(&state, outline(relative.to_string_lossy())).await.unwrap();
         }
         let excess = info.directory.join("carrier-excess.py");
         std::fs::write(&excess, "def excess():\n    pass\n").unwrap();
-        let relative = excess.strip_prefix(workspace.path().canonicalize().unwrap()).unwrap();
+        let relative = excess
+            .strip_prefix(
+                workspace.path().canonicalize().map(crate::utils::path::simplified).unwrap(),
+            )
+            .unwrap();
         let error =
             handle_tool_call(&state, outline(relative.to_string_lossy())).await.unwrap_err();
         assert!(matches!(error, WinxError::DerivedCodeMapBudget { .. }));

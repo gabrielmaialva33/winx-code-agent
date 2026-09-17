@@ -185,7 +185,7 @@ fn change_summary_collapses_a_huge_diff() {
 #[test]
 fn file_tool_creates_a_helper_only_in_its_advertised_session_directory() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let root = workspace.path().canonicalize()?;
+    let root = workspace.path().canonicalize().map(crate::utils::path::simplified)?;
     let mut state = BashState::new();
     state.cwd.clone_from(&root);
     state.workspace_root.clone_from(&root);
@@ -210,7 +210,7 @@ fn file_tool_creates_a_helper_only_in_its_advertised_session_directory() -> Resu
 #[test]
 fn file_tool_rejects_cross_session_and_legacy_root_helpers() -> Result<()> {
     let workspace = tempfile::tempdir()?;
-    let root = workspace.path().canonicalize()?;
+    let root = workspace.path().canonicalize().map(crate::utils::path::simplified)?;
     let mut state = BashState::new();
     state.cwd.clone_from(&root);
     state.workspace_root.clone_from(&root);

@@ -11,6 +11,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 #[cfg(test)]
+#[cfg(all(test, unix))] // test fixtures build canonical targets from POSIX paths
 pub(crate) use domain::CanonicalEditTarget;
 pub use domain::{
     EditChange, EditCommand, EditMode, EditOperation, EditSurface, EditVerification,
@@ -501,7 +502,11 @@ mod tests {
     }
 
     fn canonical_identity(path: &std::path::Path) -> String {
-        path.canonicalize().expect("test edit target must exist").to_string_lossy().into_owned()
+        path.canonicalize()
+            .map(crate::utils::path::simplified)
+            .expect("test edit target must exist")
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn record_full_read(state: &mut BashState, path: &std::path::Path, content: &str) {

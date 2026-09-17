@@ -491,7 +491,7 @@ mod tests {
         let image = workspace.path().join("repeat.png");
         write_png(&image, 2, 2);
         let mut state = BashState::new();
-        state.cwd = workspace.path().canonicalize().unwrap();
+        state.cwd = workspace.path().canonicalize().map(crate::utils::path::simplified).unwrap();
         state.workspace_root = state.cwd.clone();
         state.current_thread_id = "image-cache".to_string();
         state.initialized = true;
