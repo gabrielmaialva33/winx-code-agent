@@ -139,6 +139,12 @@ pub(crate) mod windows {
     /// Kernel handle closed on drop.
     struct OwnedHandle(HANDLE);
 
+    // SAFETY: a Win32 handle is a process-wide token, not thread-affine memory;
+    // it may be used and closed from any thread.
+    unsafe impl Send for OwnedHandle {}
+    // SAFETY: the job/process calls made through the handle are thread-safe.
+    unsafe impl Sync for OwnedHandle {}
+
     impl Drop for OwnedHandle {
         fn drop(&mut self) {
             // SAFETY: the handle was returned by a successful Win32 call and is
@@ -171,10 +177,11 @@ pub(crate) mod windows {
             Ok(handle) => {
                 let mut code = 0u32;
                 // SAFETY: `code` outlives the call and the handle is valid.
-                let queried = unsafe { GetExitCodeProcess(handle.0, &mut code) } != 0;
+                let queried =
+                    unsafe { GetExitCodeProcess(handle.0, std::ptr::from_mut(&mut code)) } != 0;
                 queried && code == STILL_ACTIVE as u32
             }
-            Err(error) => error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32),
+            Err(error) => error.raw_os_error() == Some(ERROR_ACCESS_DENIED.cast_signed()),
         }
     }
 
@@ -264,6 +271,8 @@ pub(crate) mod windows {
 
     #[cfg(test)]
     mod tests {
+        #![allow(clippy::expect_used)]
+
         #[test]
         fn current_process_exists_and_pid_zero_does_not() {
             assert!(super::process_exists(std::process::id()));
