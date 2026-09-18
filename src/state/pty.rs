@@ -118,6 +118,29 @@ fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>,
 /// `bash -r`, so restricted falls back to bash). On Windows the Git for Windows
 /// `bash.exe` is resolved to an absolute path so the `ConPTY` child never lands
 /// on the WSL launcher in `System32`.
+/// On Windows the shell must be an absolute Git for Windows `bash.exe`; the
+/// `System32` WSL launcher is never used. If no usable bash is found, fail with
+/// an actionable message instead of an opaque spawn error later.
+#[cfg(windows)]
+fn ensure_windows_shell_available(restricted_mode: bool) -> Result<()> {
+    // An absolute `WINX_SHELL` (honored only outside restricted mode) wins.
+    if !restricted_mode {
+        if let Ok(requested) = std::env::var("WINX_SHELL") {
+            let path = Path::new(&requested);
+            if path.is_absolute() && path.is_file() {
+                return Ok(());
+            }
+        }
+    }
+    if crate::utils::executable::bash_executable().is_some() {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "no usable bash.exe found: install Git for Windows (the System32 WSL launcher is not \
+         used), or set WINX_SHELL to an absolute bash.exe path"
+    ))
+}
+
 fn preferred_shell(restricted_mode: bool) -> String {
     if !restricted_mode {
         if let Ok(requested) = std::env::var("WINX_SHELL") {
@@ -505,6 +528,12 @@ impl PtyShell {
             restricted_mode,
             initial_dir.display()
         );
+
+        // On Windows, fail fast with an actionable message if no Git for Windows
+        // bash is available, rather than letting `CommandBuilder::new("bash")`
+        // fail later with an opaque OS error.
+        #[cfg(windows)]
+        ensure_windows_shell_available(restricted_mode)?;
 
         // Initialize the native PTY system
         let pty_system = native_pty_system();
