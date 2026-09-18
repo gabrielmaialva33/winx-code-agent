@@ -53,12 +53,12 @@ check.call(commands(ci_jobs.fetch("rust", {})).include?("cargo bench --bench per
 
 windows_commands = commands(ci_jobs.fetch("windows", {}))
 check.call(
-  windows_commands.include?("cargo check --all-features --locked --bin winx-code-agent"),
-  "Windows CI must check the supported client binary"
+  windows_commands.include?("cargo check --all-features --locked --bins"),
+  "Windows CI must check every daemon binary"
 )
 check.call(
-  windows_commands.include?("cargo build --release --locked --bin winx-code-agent"),
-  "Windows CI must build the supported release binary"
+  windows_commands.include?("cargo build --release --locked --bins"),
+  "Windows CI must build the complete release bundle"
 )
 
 release = workflow(".github/workflows/release.yml")
@@ -74,7 +74,7 @@ artifacts = jobs.dig("build", "strategy", "matrix", "include") || []
 expected_targets = {
   "x86_64-unknown-linux-gnu" => "winx-linux-amd64.tar.gz",
   "aarch64-apple-darwin" => "winx-macos-arm64.tar.gz",
-  "x86_64-pc-windows-msvc" => "winx-windows-amd64.exe",
+  "x86_64-pc-windows-msvc" => "winx-windows-amd64.zip",
 }
 expected_targets.each do |target, asset|
   entry = artifacts.find { |candidate| candidate["target"] == target }
@@ -92,7 +92,9 @@ check.call(
 )
 %w[winx-code-agent winxd winx-guardian].each do |binary|
   check.call(build_commands.include?(binary), "Unix bundle must include #{binary}")
+  check.call(build_commands.include?("#{binary}.exe"), "Windows bundle must include #{binary}.exe")
 end
+check.call(build_commands.include?("Compress-Archive"), "Windows release must ship a zip bundle")
 check.call(
   build_commands.include?("sha256sum") && build_commands.include?("shasum -a 256"),
   "Release build must generate portable artifact checksums"
