@@ -172,7 +172,7 @@ jobs:
         run: cargo +nightly fuzz build
 
   windows:
-    name: Windows standalone binary
+    name: Windows release bundle
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -187,8 +187,8 @@ jobs:
         with:
           key: windows-ci
 
-      - name: Check supported binary
-        run: cargo check --all-features --locked --bin winx-code-agent
+      - name: Check all binaries
+        run: cargo check --all-features --locked --bins
 
-      - name: Build supported release binary
-        run: cargo build --release --locked --bin winx-code-agent
+      - name: Build release bundle
+        run: cargo build --release --locked --bins

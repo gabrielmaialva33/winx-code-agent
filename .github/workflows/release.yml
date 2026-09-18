@@ -38,8 +38,8 @@ jobs:
             bundle: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            asset_name: winx-windows-amd64.exe
-            bundle: false
+            asset_name: winx-windows-amd64.zip
+            bundle: true
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -55,16 +55,11 @@ jobs:
         with:
           key: ${{ matrix.target }}-release
 
-      - name: Build Unix release bundle
-        if: matrix.bundle
+      - name: Build release bundle
         run: cargo build --release --locked --target ${{ matrix.target }} --bins
 
-      - name: Build Windows standalone binary
-        if: ${{ !matrix.bundle }}
-        run: cargo build --release --locked --target ${{ matrix.target }} --bin winx-code-agent
-
       - name: Stage Unix release bundle
-        if: matrix.bundle
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -73,13 +68,15 @@ jobs:
           cp "$release_dir/winx-code-agent" "$release_dir/winxd" "$release_dir/winx-guardian" dist/stage/
           tar -C dist/stage -czf "dist/${{ matrix.asset_name }}" winx-code-agent winxd winx-guardian
 
-      - name: Stage Windows standalone binary
-        if: ${{ !matrix.bundle }}
-        shell: bash
+      - name: Stage Windows release bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          set -euo pipefail
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/winx-code-agent.exe" "dist/${{ matrix.asset_name }}"
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path dist/stage | Out-Null
+          $release = "target/${{ matrix.target }}/release"
+          Copy-Item "$release/winx-code-agent.exe", "$release/winxd.exe", "$release/winx-guardian.exe" dist/stage/
+          Compress-Archive -Path dist/stage/* -DestinationPath "dist/${{ matrix.asset_name }}" -Force
 
       - name: Generate artifact checksum
         shell: bash
