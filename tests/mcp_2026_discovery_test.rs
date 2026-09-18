@@ -3893,6 +3893,24 @@ async fn immediate_task_cancel_stops_process_and_never_interrupts_following_comm
         .as_str()
         .ok_or_else(|| anyhow::anyhow!("missing task id: {call}"))?;
 
+    // Wait until the command has actually started running in the PTY (it writes
+    // `started` before its `sleep 1`) before cancelling. On slow, oversubscribed
+    // CI runners the task response can return before the shell has launched the
+    // command; cancelling in that window tests the pre-launch tombstone path
+    // (covered elsewhere) instead of the intended "cancel a running process",
+    // which made this assertion flaky. Cancelling once the process is provably
+    // mid-`sleep` makes the interruption deterministic.
+    let started = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if std::fs::read_to_string(&marker).unwrap_or_default().contains("started") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(started.is_ok(), "cancelled command never started within 10s");
+
     let cancel = serde_json::json!({
         "jsonrpc": "2.0",
         "id": "task-immediate-cancel-request",
