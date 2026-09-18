@@ -45,6 +45,18 @@ pub async fn doctor_report() -> Value {
             .collect::<Vec<_>>()
     });
 
+    report["shell"] = match crate::utils::executable::bash_executable() {
+        Some(path) => json!({"available": true, "bash": path.display().to_string()}),
+        None => json!({
+            "available": false,
+            "hint": if cfg!(windows) {
+                "no bash.exe found: install Git for Windows (the System32 WSL launcher is not used), or set WINX_SHELL to an absolute bash.exe"
+            } else {
+                "bash not found on PATH"
+            }
+        }),
+    };
+
     add_runtime_report(&mut report).await;
     report
 }
