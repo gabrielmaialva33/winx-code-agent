@@ -1370,7 +1370,7 @@ mod discovery_protocol_tests {
     use serde_json::Value;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    async fn stdio_tools_list(protocol_version: &str) -> Value {
+    async fn stdio_tools_list(requested: &str, expected_negotiated: &str) -> Value {
         let (client, server) = tokio::io::duplex(256 * 1024);
         let (server_read, server_write) = tokio::io::split(server);
         let transport = AsyncRwTransport::new_server(server_read, server_write);
@@ -1389,7 +1389,7 @@ mod discovery_protocol_tests {
             "id": 1,
             "method": "initialize",
             "params": {
-                "protocolVersion": protocol_version,
+                "protocolVersion": requested,
                 "capabilities": {},
                 "clientInfo": { "name": "stdio-compat-test", "version": "1" }
             }
@@ -1404,7 +1404,7 @@ mod discovery_protocol_tests {
         let initialize_response: Value =
             serde_json::from_str(&line).expect("valid initialize response");
         assert_eq!(initialize_response["id"], 1);
-        assert_eq!(initialize_response["result"]["protocolVersion"], protocol_version);
+        assert_eq!(initialize_response["result"]["protocolVersion"], expected_negotiated);
 
         client_write
             .write_all(
@@ -1424,13 +1424,17 @@ mod discovery_protocol_tests {
     }
 
     #[tokio::test]
-    async fn modern_stdio_tools_list_serializes_required_cache_hints() {
-        let response = stdio_tools_list("2026-07-28").await;
+    async fn stdio_initialize_downgrades_header_only_version_to_legacy_handshake() {
+        // The 2026-07-28 revision negotiates its version through HTTP standard
+        // headers, not the stdio `initialize` handshake, so rmcp downgrades a
+        // stdio client that asks for it to the newest handshake-negotiable
+        // version (2025-11-25). The modern cache-hint envelope is therefore
+        // reachable over HTTP only; the HTTP discovery tests cover it there.
+        let response = stdio_tools_list("2026-07-28", "2025-11-25").await;
 
         assert_eq!(response["id"], 2);
-        assert_eq!(response["result"]["resultType"], "complete");
-        assert_eq!(response["result"]["ttlMs"], 0);
-        assert_eq!(response["result"]["cacheScope"], "public");
+        assert!(response["result"].get("ttlMs").is_none(), "{response}");
+        assert!(response["result"].get("cacheScope").is_none(), "{response}");
         assert!(response["result"]["tools"]
             .as_array()
             .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "BashCommand")));
@@ -1439,7 +1443,7 @@ mod discovery_protocol_tests {
     #[tokio::test]
     async fn legacy_stdio_tools_list_omits_modern_cache_hints() {
         for protocol_version in ["2025-11-25", "2025-06-18", "2025-03-26"] {
-            let response = stdio_tools_list(protocol_version).await;
+            let response = stdio_tools_list(protocol_version, protocol_version).await;
 
             assert_eq!(response["id"], 2, "protocol {protocol_version}: {response}");
             assert!(
