@@ -57,9 +57,7 @@ Winx 同时支持现代无状态 MCP 调用与传统的 HTTP 会话初始化流�
                          └─ 真实 PTY / Bash 或 zsh / 前台与后台任务
 ```
 
-在 Linux、macOS 和 WSL2 上，`winx-code-agent` 仅作为 MCP 适配层。`winxd` 管理控制平面，每个 `winx-guardian` 独立控制一个 PTY。断开 HTTP 连接或重启适配层不会终止后台 PTY。
-
-原生 Windows 环境使用内置运行时（Embedded），会话生命周期与服务器进程相同。需要持久化远程会话时推荐使用 WSL2。
+在 Linux、macOS、WSL2 和原生 Windows 上，`winx-code-agent` 仅作为 MCP 适配层。`winxd` 管理控制平面，每个 `winx-guardian` 独立控制一个 PTY。断开 HTTP 连接或重启适配层不会终止后台 PTY。Unix 使用用户运行时目录下的 Unix 域套接字；Windows 使用由 `%LOCALAPPDATA%\winx\run` 下的标记文件派生的命名管道，并把每个 shell 放进作业对象，使整棵进程树随会话一起结束。设置 `WINX_RUNTIME=embedded` 可改为全部在服务器进程内运行。
 
 ## 快速上手
 

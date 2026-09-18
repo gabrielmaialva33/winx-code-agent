@@ -37,8 +37,9 @@ code navigation, and sessions that survive dropped connections. Its primary depl
 **Streamable HTTP** endpoint for ChatGPT and other cloud or networked MCP clients; stdio remains fully supported for
 Claude Code, Codex CLI, Cursor, VS Code, and other local clients.
 
-On Unix, Winx separates the MCP adapter from the processes that own each PTY. `winxd` manages the control plane and one
-`winx-guardian` per logical session keeps the shell alive across HTTP disconnects, client restarts, and adapter upgrades.
+On Linux, macOS, and native Windows, Winx separates the MCP adapter from the processes that own each PTY. `winxd`
+manages the control plane and one `winx-guardian` per logical session keeps the shell alive across HTTP disconnects,
+client restarts, and adapter upgrades (Unix-domain sockets on Unix, named pipes plus job objects on Windows).
 It started as a Rust port of [WCGW](https://github.com/rusiaaman/wcgw), but it is not a Python wrapper: `cd` persists,
 `Ctrl+C` interrupts the real process, interactive TUIs work, and large terminal output is rendered and token-budgeted
 before reaching the model.
@@ -79,7 +80,7 @@ an OpenAI-hosted MCP endpoint.
 
 ## Why Winx for remote agents
 
-- **Durable sessions:** HTTP is stateless from the client's point of view, but Unix PTYs live in per-session guardians and
+- **Durable sessions:** HTTP is stateless from the client's point of view, but PTYs live in per-session guardians and
   can be resumed with the same `thread_id`.
 - **Identity-aware isolation:** one token per principal; thread IDs and MCP Task IDs are scoped internally and translated
   back before the response leaves the server. Workspace affinity absorbs unstable model-generated thread IDs.
@@ -100,7 +101,7 @@ an OpenAI-hosted MCP endpoint.
 | Transport           | Best for                                                               | Endpoint / launch                                                        | Authentication                                     | Session model                                                                |
 |---------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------|----------------------------------------------------|------------------------------------------------------------------------------|
 | **Streamable HTTP** | ChatGPT, hosted agents, remote automation, multiple MCP clients        | `https://host/mcp` through a tunnel/proxy, with Winx on `127.0.0.1:8000` | Strong bearer token; optional multi-principal TOML | Stateless requests mapped to durable principal/workspace sessions by default |
-| **stdio**           | Claude Code, Codex CLI, Cursor, VS Code, desktop and local IDE clients | client launches `winx-code-agent`                                        | Local process boundary                             | One local client, using the same durable daemon runtime on Unix              |
+| **stdio**           | Claude Code, Codex CLI, Cursor, VS Code, desktop and local IDE clients | client launches `winx-code-agent`                                        | Local process boundary                             | One local client, using the same durable daemon runtime                      |
 
 ## Remote architecture
 
@@ -322,17 +323,17 @@ installation and local stdio client recipes.
 cargo install winx-code-agent
 ```
 
-On Linux/macOS/WSL2 this installs `winx-code-agent`, `winxd`, and `winx-guardian` together in
-`~/.cargo/bin`. Keep the three binaries together: the adapter auto-starts `winxd`, which starts one guardian per shell
-session. Every config snippet below assumes that directory is on `$PATH`; with a sterile client environment, use the
-absolute path returned by `which winx-code-agent`.
+On every platform this installs `winx-code-agent`, `winxd`, and `winx-guardian` together in `~/.cargo/bin`
+(`%USERPROFILE%\.cargo\bin` on Windows). Keep the three binaries together: the adapter auto-starts `winxd`, which
+starts one guardian per shell session. Every config snippet below assumes that directory is on `$PATH`; with a sterile
+client environment, use the absolute path returned by `which winx-code-agent`.
 
-Needs Rust 1.88+, bash, and a real terminal. The durable daemon runtime is supported on Linux/macOS/WSL2. Native
-Windows uses the embedded runtime, so its shell sessions remain tied to the MCP server process; WSL2 is recommended.
-On native Windows the shell is the Git for Windows `bash.exe` (resolved from the standard install locations or
-`PATH`; the WSL launcher in `System32` is never used), so install Git for Windows before running `BashCommand`.
-GitHub Release downloads for Unix are `.tar.gz` bundles containing all three sibling binaries, while the Windows asset
-remains a standalone embedded-runtime executable.
+Needs Rust 1.88+, bash, and a real terminal. The durable daemon runtime runs on Linux, macOS, WSL2, and native
+Windows 10/11 (named pipes under `%LOCALAPPDATA%\winx\run`, job objects for the shell tree, no WSL involved). On
+native Windows the shell is the Git for Windows `bash.exe` (resolved from the standard install locations or `PATH`;
+the WSL launcher in `System32` is never used), so install Git for Windows before running `BashCommand`. GitHub
+Release downloads are `.tar.gz` bundles on Unix and a `.zip` bundle on Windows, each containing all three sibling
+binaries.
 
 <details>
 <summary><b>Claude Code (CLI)</b></summary>
@@ -809,7 +810,7 @@ All optional - Winx works out of the box without any of these. Boolean variables
 | `WINX_USAGE_LOG_ROTATION`                                  | Usage-log rotation: `daily` (default), `hourly`, or `never`. Daily/hourly filenames receive UTC timestamps.                                                                                                                                                                                                                                                                                                                                              |
 | `WINX_USAGE_LOG_KEEP_DAYS`                                 | Approximate retention window for daily/hourly usage logs. Defaults to `7`; `0` disables pruning. Ignored with `never`.                                                                                                                                                                                                                                                                                                                                    |
 | `WINX_HTTP_TOKEN`                                          | Single-principal HTTP bearer token used when `--token`, `--token-file`, and `--principal-config` are absent. Prefer a token file for long-lived deployments; see the [Streamable HTTP guide](docs/streamable-http.md).                                                                                                                                                                                                                                  |
-| `WINX_RUNTIME`                                             | Runtime selection on Unix: `daemon` (default) or `embedded`. Native Windows is embedded-only.                                                                                                                                                                                                                                                                                                                                                           |
+| `WINX_RUNTIME`                                             | Runtime selection: `daemon` (default) or `embedded`. Linux, macOS, WSL2, and native Windows all support `daemon`.                                                                                                                                                                                                                                                                                                                                                           |
 | `WINX_EMBEDDED`                                            | Truthy value (`1`, `true`, `yes`, `on`) forcing the in-process runtime; useful as a fail-safe kill switch.                                                                                                                                                                                                                                                                                                                                              |
 | `WINX_SOCKET`                                              | Override the Unix socket used to reach `winxd`.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `WINXD_BIN` / `WINX_GUARDIAN_BIN`                          | Override daemon/guardian executable discovery. Normally unnecessary when the three release binaries remain together.                                                                                                                                                                                                                                                                                                                                    |

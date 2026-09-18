@@ -57,9 +57,7 @@ Túnel privado / VPN / Proxy reverso HTTPS autenticado
                          └─ PTY real / bash ou zsh / tarefas em primeiro e segundo plano
 ```
 
-No Linux, macOS e WSL2, o `winx-code-agent` atua apenas como o adaptador MCP. O `winxd` gerencia o plano de controle, enquanto cada `winx-guardian` controla um PTY independente. Encerrar a conexão HTTP ou reiniciar o adaptador não encerra o PTY.
-
-No Windows nativo utiliza-se o runtime embutido (embedded), logo as sessões duram apenas enquanto o processo do servidor estiver ativo. Recomenda-se o WSL2 quando forem necessárias sessões remotas duráveis.
+No Linux, macOS, WSL2 e Windows nativo, o `winx-code-agent` atua apenas como o adaptador MCP. O `winxd` gerencia o plano de controle, enquanto cada `winx-guardian` controla um PTY independente. Encerrar a conexão HTTP ou reiniciar o adaptador não encerra o PTY. No Unix o transporte são sockets Unix no diretório de runtime do usuário; no Windows são named pipes derivados de arquivos-marcadores em `%LOCALAPPDATA%\winx\run`, e cada shell roda dentro de um job object para que toda a árvore de processos termine com a sessão. Use `WINX_RUNTIME=embedded` para manter tudo dentro do processo do servidor.
 
 ## Início Rápido
 

@@ -61,11 +61,11 @@ Private tunnel / VPN / authenticated HTTPS reverse proxy
                          └─ real PTY / bash or zsh / foreground and background work
 ```
 
-On Linux, macOS, and WSL2, `winx-code-agent` is only the MCP adapter. `winxd` owns the control plane, while each
-`winx-guardian` owns one PTY. Dropping an HTTP connection or restarting the adapter does not terminate that PTY.
-
-Native Windows uses the embedded runtime, so sessions last only as long as the server process. WSL2 is recommended when
-durable remote sessions are required.
+On Linux, macOS, WSL2, and native Windows, `winx-code-agent` is only the MCP adapter. `winxd` owns the control plane,
+while each `winx-guardian` owns one PTY. Dropping an HTTP connection or restarting the adapter does not terminate that
+PTY. Unix uses Unix-domain sockets under the user runtime directory; Windows uses named pipes named after marker files
+under `%LOCALAPPDATA%\winx\run`, and each shell runs inside a job object so its whole process tree ends with the
+session. Set `WINX_RUNTIME=embedded` to keep everything inside the server process instead.
 
 ## Quick start
 
