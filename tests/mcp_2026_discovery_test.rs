@@ -3862,17 +3862,17 @@ async fn immediate_task_cancel_stops_process_and_never_interrupts_following_comm
     )
     .await?;
     let thread_id = initialized_thread_id(&initialize)?;
-    // The interrupted sleep is deliberately long: cancellation travels
-    // adapter -> winxd -> guardian -> Ctrl-C to the PTY process group, and on a
-    // loaded CI runner that whole chain can take a second or more. With a short
-    // sleep the sleep could finish (writing `continued`) before the Ctrl-C
-    // lands, which is a test-timing artifact, not a cancellation failure. A wide
-    // window makes the interrupt deterministic; a real cancellation still stops
-    // the process in well under a second, so the test stays fast (the sleep is
-    // interrupted, never waited out) while a genuine regression still leaves the
-    // shell busy and fails the "following command" assertion below.
+    // `&&`, not `;`, chains the steps: cancellation interrupts `sleep`, which
+    // then exits non-zero, so the trailing `printf continued` is short-circuited
+    // whether the shell aborts the whole command line (Linux) or resumes the
+    // list after the killed child (observed on macOS). Only a `sleep` that runs
+    // to completion (exit 0, i.e. cancellation never landed) writes `continued`,
+    // so a genuine cancellation regression still fails this assertion. The sleep
+    // is generous because cancellation travels adapter -> winxd -> guardian ->
+    // Ctrl-C on a loaded runner; a working cancel interrupts it in well under a
+    // second, so the successful path never waits it out.
     let command = format!(
-        "printf started > '{}'; sleep 20; printf continued >> '{}'",
+        "printf started > '{}' && sleep 20 && printf continued >> '{}'",
         marker.display(),
         marker.display()
     );
