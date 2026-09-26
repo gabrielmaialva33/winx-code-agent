@@ -142,6 +142,28 @@ async fn tail_pipe_stripped_by_default() -> Result<()> {
     Ok(())
 }
 
+// Agent shells must not write to the user's ~/.bash_history: every session used
+// to leave its prompt bootstrap line (and the agent's commands) there.
+#[tokio::test(flavor = "multi_thread")]
+async fn shell_history_is_not_persisted() -> Result<()> {
+    let thread_id = "pty-histfile-regression";
+    let (bash_state_arc, _temp_dir) = setup_bash_state(thread_id).await?;
+
+    let response = run_command_to_completion(
+        &bash_state_arc,
+        thread_id,
+        r#"printf 'histfile=[%s]\n' "${HISTFILE-unset}""#,
+    )
+    .await?;
+
+    assert!(
+        response.lines().any(|line| line.trim() == "histfile=[]"),
+        "HISTFILE should be empty in the agent shell, got: {response}"
+    );
+
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn tail_pipe_stripped_from_json() -> Result<()> {
     let thread_id = "pty-tail-json-regression";

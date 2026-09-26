@@ -553,6 +553,11 @@ impl PtyShell {
         cmd.env("COLORTERM", "truecolor");
         cmd.env("PAGER", "cat");
         cmd.env("GIT_PAGER", "cat");
+        // Agent commands (and the prompt bootstrap line) must not end up in the
+        // user's ~/.bash_history: bash skips saving history when HISTFILE is
+        // empty. Set before exec so it also holds under `bash -r`, which forbids
+        // changing HISTFILE afterwards.
+        cmd.env("HISTFILE", "");
         cmd.env("COLUMNS", DEFAULT_COLS.to_string());
         cmd.env("ROWS", DEFAULT_ROWS.to_string());
         if let Some(workspace_root) = workspace_root {
