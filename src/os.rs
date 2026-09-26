@@ -124,7 +124,13 @@ pub(crate) mod windows {
     use std::ffi::c_void;
     use std::io;
 
-    use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, HANDLE, STILL_ACTIVE};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, SetHandleInformation, ERROR_ACCESS_DENIED, HANDLE, HANDLE_FLAG_INHERIT,
+        INVALID_HANDLE_VALUE, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::System::Console::{
+        GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+    };
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
         SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -206,11 +212,39 @@ pub(crate) mod windows {
         Ok(())
     }
 
+    /// Stop this process's standard handles from being inherited by children.
+    ///
+    /// `std::process::Command` calls `CreateProcessW` with `bInheritHandles`
+    /// set, so every inheritable handle leaks into the child even when its own
+    /// stdio is `Stdio::null()`. A detached daemon that inherits the pipes an
+    /// MCP client or a shell gave this process keeps their write ends open,
+    /// and the parent waiting for EOF hangs until the daemon exits. Children
+    /// that should inherit stdio still do: `Stdio::inherit` re-duplicates the
+    /// handle as inheritable at spawn time.
+    pub(crate) fn disable_std_handle_inheritance() {
+        for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+            // SAFETY: GetStdHandle takes a constant and returns a handle or a
+            // sentinel; the sentinels are filtered before the handle is used.
+            let handle = unsafe { GetStdHandle(id) };
+            if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                continue;
+            }
+            // SAFETY: the handle is one this process owns; clearing a flag on
+            // it is not destructive, and a failure is deliberately ignored
+            // (a console handle without the flag reports an error).
+            unsafe {
+                SetHandleInformation(handle, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+
     /// Detach a child from this console, process group, and, when the job
     /// permits it, from the job object that may kill this process's children
-    /// (MCP clients commonly wrap servers in such a job).
+    /// (MCP clients commonly wrap servers in such a job). Also stops the
+    /// child from inheriting this process's stdio pipes.
     pub(crate) fn configure_detached(command: &mut std::process::Command, breakaway: bool) {
         use std::os::windows::process::CommandExt as _;
+        disable_std_handle_inheritance();
         let mut flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW;
         if breakaway {
             flags |= CREATE_BREAKAWAY_FROM_JOB;
@@ -291,6 +325,34 @@ pub(crate) mod windows {
             let status = child.wait().expect("child reaped after job termination");
             assert!(!status.success());
             assert!(!super::process_exists(child.id()));
+        }
+
+        #[test]
+        fn std_handles_stop_being_inheritable() {
+            use windows_sys::Win32::Foundation::{
+                GetHandleInformation, HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE,
+            };
+            use windows_sys::Win32::System::Console::{
+                GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
+            };
+
+            super::disable_std_handle_inheritance();
+            for id in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+                // SAFETY: constant argument; sentinels are filtered below.
+                let handle = unsafe { GetStdHandle(id) };
+                if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+                    continue;
+                }
+                let mut flags = 0u32;
+                // SAFETY: valid handle and a live out-pointer for the flags.
+                let queried =
+                    unsafe { GetHandleInformation(handle, std::ptr::from_mut(&mut flags)) };
+                if queried == 0 {
+                    // Console handles on some hosts reject the query; nothing to assert.
+                    continue;
+                }
+                assert_eq!(flags & HANDLE_FLAG_INHERIT, 0, "std handle {id} still inheritable");
+            }
         }
     }
 }
