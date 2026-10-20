@@ -39,13 +39,25 @@ setup-windows-lint:
 # Fast local lint: formatting + host clippy (what the pre-commit hook runs)
 lint: fmt-check clippy
 
-# Full normal test suite
+# Full normal test suite. The usage-log variables are cleared so a developer
+# shell that exports WINX_USAGE_LOG does not get synthetic test events in its
+# real telemetry.
+[unix]
 test:
-    cargo test --all-features --locked
+    env -u WINX_USAGE_LOG -u WINX_USAGE_LOG_ROTATION cargo test --all-features --locked
+
+[windows]
+test:
+    Remove-Item Env:\WINX_USAGE_LOG,Env:\WINX_USAGE_LOG_ROTATION -ErrorAction SilentlyContinue; cargo test --all-features --locked; exit $LASTEXITCODE
 
 # Run one test filter, e.g. `just test-one status_check`
+[unix]
 test-one filter:
-    cargo test --all-features --locked {{filter}}
+    env -u WINX_USAGE_LOG -u WINX_USAGE_LOG_ROTATION cargo test --all-features --locked {{filter}}
+
+[windows]
+test-one filter:
+    Remove-Item Env:\WINX_USAGE_LOG,Env:\WINX_USAGE_LOG_ROTATION -ErrorAction SilentlyContinue; cargo test --all-features --locked {{filter}}; exit $LASTEXITCODE
 
 # Opt-in loom concurrency model checks
 test-loom:
