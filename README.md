@@ -152,8 +152,8 @@ Secure MCP Tunnel / VPN / authenticated reverse proxy
   verification. A planning failure writes nothing. A rare mid-commit I/O failure stops immediately and reports the
   committed prefix instead of pretending the whole batch rolled back.
 - Tree-sitter code navigation via `CodeMap`: a token-budgeted symbol map of a file or the whole repo, or a
-  definition/reference lookup for a symbol name - the semantic view that plain `grep` can't give you, across 13
-  languages.
+  definition/reference lookup by symbol name across 13 languages. It is syntax-aware name matching, not resolved
+  symbol identity: two types with the same method name both match, so treat it as a fast map, not a rename oracle.
 - `ContextSave` for handing a task summary plus its files to the next session - including workspace context, active
   files, git status/diff, and terminal sharing for proper resumption. Resuming reopens the saved project root and
   token-caps the restored memory so it never overflows the context window.
@@ -328,7 +328,9 @@ On every platform this installs `winx-code-agent`, `winxd`, and `winx-guardian` 
 starts one guardian per shell session. Every config snippet below assumes that directory is on `$PATH`; with a sterile
 client environment, use the absolute path returned by `which winx-code-agent`.
 
-Needs Rust 1.90+, bash, and a real terminal. The durable daemon runtime runs on Linux, macOS, WSL2, and native
+Needs Rust 1.90+, bash, and a real terminal. The C#, C++, Ruby, PHP, Elixir, and Lua grammars are behind the
+default-on `languages-extra` feature; `cargo install winx-code-agent --no-default-features` drops about 13 MB from
+the adapter when `CodeMap` only needs the other languages. The durable daemon runtime runs on Linux, macOS, WSL2, and native
 Windows 10/11 (named pipes under `%LOCALAPPDATA%\winx\run`, job objects for the shell tree, no WSL involved). On
 native Windows the shell is the Git for Windows `bash.exe` (resolved from the standard install locations or `PATH`;
 the WSL launcher in `System32` is never used), so install Git for Windows before running `BashCommand`. GitHub
@@ -641,7 +643,7 @@ List MCP tools in your client. You should see 7 entries with `full`, 5 with `cod
 aliases should not. Start with `Initialize` unless a local client exposes MCP Roots and Winx bootstraps from them; preserve its
 returned `thread_id`/`workspace_root` pair for every later call.
 
-## Durable session lifecycle (Unix)
+## Durable session lifecycle
 
 The daemon runtime caps live guardians at 32 by default and uses tiered idle retention: a shell that has never run a
 command expires after 30 minutes, while a used shell expires after 24 hours. A foreground command or live background
@@ -883,7 +885,7 @@ Robustness is also fuzzed and model-checked:
 
 - **proptest** feeds arbitrary/adversarial bytes into the live terminal emulator, the ANSI stripper, and the exit-code
   parser, asserting they never panic and stay within the viewport. (This is how we found - and worked around - a vt100
-  underflow on tiny grids and a reflow panic on column shrink that would otherwise crash the `panic = "abort"` release.)
+  underflow on tiny grids and a reflow panic on column shrink that would otherwise take a whole session down.)
 - **loom** exhaustively model-checks the session pin counter (the lock-free guard that keeps an in-flight session from
   being LRU-evicted) across every thread interleaving. It's behind a feature so it doesn't perturb the normal build:
 

@@ -363,7 +363,8 @@ else from `output`. The main fields are:
     "instruction": "Perform every required read before retrying the edit.",
     "arguments": {
       "file_paths": ["/workspace/README.md:231-301"],
-      "thread_id": "ws_project_hash"
+      "thread_id": "ws_project_hash",
+      "workspace_root": "/workspace"
     }
   },
   "requiredReads": [
@@ -767,8 +768,8 @@ winx-code-agent doctor
 winx-code-agent list
 ```
 
-Check the selected runtime, the unused/used TTLs, explicit prune/kill operations, guardian quota pressure, and whether the
-server is native Windows/embedded rather than Unix daemon mode.
+Check the selected runtime (`doctor` reports `runtime` as `daemon` or `embedded` on every platform), the unused/used
+TTLs, explicit prune/kill operations, and guardian quota pressure.
 
 ### Token file rejected
 
