@@ -81,10 +81,10 @@ tokie = { version = "0.1.4", default-features = false }
 
 # gitignore-aware repo walking (ripgrep's engine) for repo context parity with pygit2
 ignore = "0.4"
-tree-sitter = "0.26.9"
+tree-sitter = "0.27"
 # Symbol/outline extraction (the `Outline` tool) via each grammar's embedded
 # TAGS_QUERY — the same engine GitHub uses for code navigation.
-tree-sitter-tags = "0.26"
+tree-sitter-tags = "0.27"
 tree-sitter-bash = "0.25.1"
 tree-sitter-json = "0.24.8"
 tree-sitter-javascript = "0.25.0"
@@ -105,10 +105,10 @@ tree-sitter-java = "0.23.5"
 tree-sitter-ruby = "0.23.1"
 tree-sitter-css = "0.25.0"
 tree-sitter-html = "0.23.2"
-tree-sitter-php = "0.24.2"
+tree-sitter-php = "0.25"
 tree-sitter-c-sharp = "0.23.5"
 tree-sitter-lua = "0.5.0"
-vt100 = "0.16"
+vt100 = "0.18"
 
 # Opt-in Landlock filesystem sandbox (WINX_SANDBOX=1). Linux-only LSM, so the
 # dep is gated to Linux targets; the runtime env var is the actual gate.

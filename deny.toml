@@ -38,7 +38,9 @@ allow = []
 deny = []
 skip = [
     { crate = "base64@0.22.1", reason = "tokie 0.1.4 has not migrated to base64 0.23" },
-    { crate = "getrandom@0.3.4", reason = "proptest 1.11 and tempfile 3.27 (dev-only) still sit on the rand 0.9 / getrandom 0.3 line, while rmcp's rand 0.10 and uuid use getrandom 0.4" },
+    { crate = "foldhash@0.1.5", reason = "tokie 0.1.4 has not migrated to foldhash 0.2, which serde_json 1.0.154 now uses" },
+    { crate = "miniz_oxide@0.8.9", reason = "png 0.18 depends on miniz_oxide 0.8 directly while flate2 1.1.10 moved to 0.9" },
+    { crate = "synstructure@0.13.2", reason = "icu 1.5 (via tokie 0.1.4) keeps yoke-derive 0.7 on synstructure 0.13 while zerofrom-derive 0.1.8 moved to 0.14" },
     { crate = "bitflags@1.3.2", reason = "portable-pty 0.9.0 still requires bitflags 1" },
     { crate = "syn@2.0.119", reason = "landlock and several proc-macro dependencies have not migrated to syn 3" },
     { crate = "thiserror@1.0.69", reason = "portable-pty 0.9.0 pulls filedescriptor 0.8.3, which still requires thiserror 1" },

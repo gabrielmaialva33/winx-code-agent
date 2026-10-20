@@ -14,6 +14,7 @@
 //! which is the right model there: it must keep every line of output, not clip
 //! to a viewport.
 
+use std::num::NonZeroU16;
 use vt100::Parser;
 
 /// Floor for the viewport dimensions. vt100 0.16.2 underflows (`grid.rs`:
@@ -22,6 +23,12 @@ use vt100::Parser;
 /// release. A real PTY is never that small, but `resize` can be asked for it, so
 /// we clamp to the smallest size vt100 handles safely.
 const MIN_VIEWPORT: u16 = 2;
+
+/// Floor a requested grid dimension at [`MIN_VIEWPORT`] as the non-zero
+/// size `vt100` requires.
+fn grid_dimension(value: u16) -> NonZeroU16 {
+    NonZeroU16::new(value.max(MIN_VIEWPORT)).unwrap_or(NonZeroU16::MIN)
+}
 
 /// What changed on the live screen since the client last looked. Lets
 /// `status_check` ship only the delta when piloting a TUI over many polls —
@@ -92,7 +99,7 @@ impl LiveTerminal {
     /// and the PTY keeps its own raw `line_ring` for deeper scrollback.
     pub fn new(rows: u16, cols: u16) -> Self {
         Self {
-            parser: Parser::new(rows.max(MIN_VIEWPORT), cols.max(MIN_VIEWPORT), 0),
+            parser: Parser::new(grid_dimension(rows), grid_dimension(cols), 0),
             last_snapshot: None,
             osc_parser: vte::Parser::new(),
             osc: OscSignals::default(),
@@ -140,8 +147,8 @@ impl LiveTerminal {
     /// and replay the visible text — plain rendered lines can't retrigger the
     /// reflow bug, and TUIs redraw on the SIGWINCH that accompanies a resize.
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        let rows = rows.max(MIN_VIEWPORT);
-        let cols = cols.max(MIN_VIEWPORT);
+        let rows = grid_dimension(rows);
+        let cols = grid_dimension(cols);
         let preserved = self.snapshot(0);
         self.parser = Parser::new(rows, cols, 0);
         if !preserved.is_empty() {

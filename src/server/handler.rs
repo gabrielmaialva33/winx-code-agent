@@ -5,7 +5,7 @@ use rmcp::{
         Icon, Implementation, ListPromptsResult, ListResourcesResult, ListToolsResult,
         PaginatedRequestParams, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
         ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role,
-        ServerCapabilities, ServerInfo, Tool, UpdateTaskParams,
+        ServerCapabilities, ServerConfig, Tool, UpdateTaskParams,
     },
     service::{NotificationContext, RequestContext, RoleServer},
     ErrorData as McpError, ServerHandler,
@@ -128,7 +128,7 @@ fn normalized_wait_request(
 
 #[allow(clippy::unused_async_trait_impl)] // rmcp's trait requires these async signatures
 impl ServerHandler for WinxService {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         let mut capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources()
@@ -139,7 +139,7 @@ impl ServerHandler for WinxService {
             .extensions
             .get_or_insert_default()
             .insert(COMPACT_BASH_OUTPUT_EXTENSION.to_string(), rmcp::model::JsonObject::new());
-        ServerInfo::new(capabilities)
+        ServerConfig::new(capabilities)
             .with_server_info(
                 Implementation::new("winx-mcp-server", self.version.clone())
                     .with_title("Winx High-Performance MCP")

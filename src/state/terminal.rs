@@ -145,6 +145,8 @@ fn render_via_vt100(text: &str) -> Vec<String> {
     let line_estimate = text.lines().count().saturating_add(2);
     let rows = u16::try_from(line_estimate.clamp(1, DEFAULT_MAX_SCREEN_LINES)).unwrap_or(u16::MAX);
     let cols = u16::try_from(DEFAULT_COLUMNS).unwrap_or(u16::MAX);
+    let rows = std::num::NonZeroU16::new(rows).unwrap_or(std::num::NonZeroU16::MIN);
+    let cols = std::num::NonZeroU16::new(cols).unwrap_or(std::num::NonZeroU16::MIN);
 
     let mut parser = vt100::Parser::new(rows, cols, 0);
     parser.process(&bytes);
