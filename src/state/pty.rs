@@ -97,7 +97,8 @@ fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>,
     }
 
     let shell = preferred_shell(restricted_mode);
-    let is_zsh = shell == "zsh";
+    // `WINX_SHELL=/bin/zsh` must get the zsh bootstrap too, not only `zsh`.
+    let is_zsh = shell_is_zsh(&shell);
     let mut cmd = CommandBuilder::new(&shell);
     // zsh's restricted mode isn't the `-r` flag, so restricted always uses bash -r.
     if restricted_mode && !is_zsh {
@@ -160,6 +161,16 @@ fn preferred_shell(restricted_mode: bool) -> String {
         }
     }
     "bash".to_string()
+}
+
+/// Whether a shell selection (basename or absolute path) names zsh.
+fn shell_is_zsh(shell: &str) -> bool {
+    Path::new(shell).file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+        name == "zsh"
+            || name
+                .strip_prefix("zsh-")
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    })
 }
 
 fn command_available(command: &str) -> bool {
@@ -1432,6 +1443,17 @@ mod tests {
         assert!(!PtyShell::check_prompt_complete("◉ /fake──➤ ", end));
         assert!(!PtyShell::check_prompt_complete("◉ /fake──➤wrongnonce:0 ", end));
         assert!(!PtyShell::check_prompt_complete("◉ /home/x──➤deadbeefcafe0001 ", end));
+    }
+
+    #[test]
+    fn zsh_is_recognized_by_basename_and_absolute_path() {
+        assert!(super::shell_is_zsh("zsh"));
+        assert!(super::shell_is_zsh("/bin/zsh"));
+        assert!(super::shell_is_zsh("/opt/homebrew/bin/zsh"));
+        assert!(super::shell_is_zsh("/usr/bin/zsh-5.9"));
+        assert!(!super::shell_is_zsh("bash"));
+        assert!(!super::shell_is_zsh("/usr/bin/bash"));
+        assert!(!super::shell_is_zsh("/home/zsh/bin/bash"));
     }
 
     #[test]
