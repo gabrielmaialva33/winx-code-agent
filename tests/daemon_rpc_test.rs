@@ -1168,3 +1168,41 @@ async fn daemon_conditional_kill_spares_a_session_that_became_active() -> Result
     server_task.abort();
     Ok(())
 }
+
+/// The status probe asks the guardian that owns the shell, so a daemon-backed
+/// session reports its guardian identity and live command state.
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_status_probe_reports_the_guardian_and_running_command() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let socket_dir = TempDir::new()?;
+    let socket = socket_dir.path().join("winxd-status.sock");
+    let server = DaemonServer::bind(&socket).await?;
+    let server_task = tokio::spawn(server.serve());
+    let thread_id = "daemon-status";
+    let state = initialized_state(&workspace, thread_id).await?;
+    let runtime = DaemonShellRuntime::new(&socket);
+
+    // No command yet, so no guardian exists: the probe still answers.
+    let idle = runtime.describe_session(&state).await?;
+    assert_eq!(idle.runtime, "daemon");
+    assert!(idle.guardian_pid.is_none(), "{idle:?}");
+    assert!(!idle.command_running, "{idle:?}");
+
+    let started = runtime
+        .run_action_detailed(
+            &state,
+            foreground(thread_id, "sh -c 'sleep 1; printf done'", 0.05),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    assert!(started.result.state.is_running(), "{started:?}");
+    let busy = runtime.describe_session(&state).await?;
+    assert!(busy.command_running, "{busy:?}");
+    assert!(busy.running_command_id.is_some(), "{busy:?}");
+    assert!(busy.guardian_pid.is_some(), "{busy:?}");
+    assert!(busy.guardian_epoch.is_some(), "{busy:?}");
+
+    let _ = DaemonClient::new(&socket).kill_session(thread_id).await;
+    server_task.abort();
+    Ok(())
+}

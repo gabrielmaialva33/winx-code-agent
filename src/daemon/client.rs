@@ -20,7 +20,8 @@ use crate::errors::{Result, WinxError};
 use crate::runtime::{
     BashCommandRuntimeResult, ShellActionOptions, ShellExecutionToken, ShellRuntime,
     ShellRuntimeBoolFuture, ShellRuntimeConfigureFuture, ShellRuntimeDetailedFuture,
-    ShellRuntimeFuture, ShellRuntimeUnitFuture, ShellSessionConfiguration, ShellSessionTransition,
+    ShellRuntimeFuture, ShellRuntimeStatusFuture, ShellRuntimeUnitFuture,
+    ShellSessionConfiguration, ShellSessionStatus, ShellSessionTransition,
 };
 use crate::state::bash_state::BashState;
 use crate::tools::bash_command::BashCommandResult;
@@ -995,6 +996,56 @@ impl ShellRuntime for DaemonShellRuntime {
         // The stable control daemon cannot answer this without a session. Keep
         // the legacy context-free probe conservative.
         Box::pin(async { Ok(false) })
+    }
+
+    fn describe_session<'a>(
+        &'a self,
+        bash_state: &'a std::sync::Arc<tokio::sync::Mutex<Option<BashState>>>,
+    ) -> ShellRuntimeStatusFuture<'a> {
+        Box::pin(async move {
+            let thread_id = bash_state
+                .lock()
+                .await
+                .as_ref()
+                .ok_or(WinxError::BashStateNotInitialized)?
+                .current_thread_id
+                .clone();
+            // A session that never ran a command has no guardian yet; the
+            // control daemon answers "session not found" and the probe reports
+            // an idle daemon-backed session instead of failing.
+            let info = match DaemonClient::new(&self.socket_path).session_info(&thread_id).await {
+                Ok(info) => info,
+                Err(WinxError::CommandExecutionError(message))
+                    if message.contains("session not found") =>
+                {
+                    return Ok(ShellSessionStatus {
+                        runtime: "daemon",
+                        ..ShellSessionStatus::default()
+                    });
+                }
+                Err(error) => return Err(error),
+            };
+            // The control plane attaches the guardian hello to `session.list`
+            // entries; a direct guardian answer omits it, so negotiate the
+            // identity from the socket itself in that case.
+            let guardian = match info.runtime.clone() {
+                Some(hello) => Some(hello),
+                None => self.negotiated_guardian(&thread_id).await.ok(),
+            };
+            let guardian = guardian.as_ref();
+            Ok(ShellSessionStatus {
+                runtime: "daemon",
+                guardian_pid: guardian.map(|hello| hello.daemon_pid),
+                guardian_epoch: guardian.map(|hello| hello.daemon_epoch.clone()),
+                guardian_build: guardian
+                    .and_then(|hello| hello.build.as_ref())
+                    .map(|build| build.display.clone()),
+                command_running: info.running,
+                running_command_id: info.command_id,
+                background_command_ids: info.background_command_ids,
+                last_activity_unix_ms: info.last_activity_unix_ms,
+            })
+        })
     }
 
     fn supports_generation_bound_actions_for<'a>(
