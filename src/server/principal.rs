@@ -215,6 +215,22 @@ fn affinity_thread_id(
 
 /// Derive the external thread ID that a workspace-bound request must carry.
 /// Caller-owned thread affinity intentionally has no derivable ID.
+/// The affinity id a first-call Initialize without a workspace path receives
+/// (its playground is created afterwards, so the id is derived from "scratch").
+pub(super) fn expected_scratch_thread_id(
+    affinity: HttpSessionAffinity,
+    conversation_identity: Option<&str>,
+) -> Option<String> {
+    let arguments = serde_json::Map::new();
+    match affinity {
+        HttpSessionAffinity::Workspace => Some(affinity_thread_id(&arguments, None)),
+        HttpSessionAffinity::Conversation => {
+            conversation_identity.map(|identity| affinity_thread_id(&arguments, Some(identity)))
+        }
+        HttpSessionAffinity::Thread => None,
+    }
+}
+
 pub(super) fn expected_affinity_thread_id(
     workspace: &Path,
     affinity: HttpSessionAffinity,

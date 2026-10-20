@@ -2,7 +2,10 @@ use std::path::PathBuf;
 
 use rmcp::model::CallToolRequestParams;
 
-use super::principal::{canonical_workspace_identity, expected_affinity_thread_id, RequestScope};
+use super::principal::{
+    canonical_workspace_identity, expected_affinity_thread_id, expected_scratch_thread_id,
+    RequestScope,
+};
 use super::{SessionIsolation, WinxService};
 use crate::config::HttpSessionAffinity;
 use crate::errors::{Result, WinxError};
@@ -62,20 +65,28 @@ impl WinxService {
         }
         let requested_workspace = canonical_binding_root(&workspace_root)?;
 
-        if let Some(expected_thread_id) =
+        // Ids derived from the workspace path must match it. Scratch and
+        // saved-task resumes derive their id before the final workspace is
+        // known (playground, snapshot), so for them the established binding
+        // below is what ties the id to the workspace Initialize returned.
+        let affinity_mismatch =
             expected_affinity_thread_id(&requested_workspace, affinity, conversation_identity)
-        {
-            if external_thread_id != expected_thread_id {
-                return Err(WinxError::WorkspaceThreadMismatch {
-                    thread_id: external_thread_id,
-                    workspace_root: requested_workspace,
+                .is_some_and(|expected| {
+                    external_thread_id != expected
+                        && expected_scratch_thread_id(affinity, conversation_identity).as_deref()
+                            != Some(external_thread_id.as_str())
                 });
-            }
-        }
 
         let bound_workspace =
             if let Some(workspace) = self.bound_workspace(&internal_thread_id).await {
                 workspace
+            } else if affinity_mismatch {
+                // No binding vouches for this id, so it was invented or taken
+                // from another workspace.
+                return Err(WinxError::WorkspaceThreadMismatch {
+                    thread_id: external_thread_id,
+                    workspace_root: requested_workspace,
+                });
             } else {
                 // After an adapter restart the registry is empty even though the
                 // session's snapshot (and possibly its guardian PTY) survived.
@@ -88,6 +99,13 @@ impl WinxService {
             };
         let bound_workspace = canonical_workspace_identity(&bound_workspace.to_string_lossy());
         if requested_workspace != bound_workspace {
+            if affinity_mismatch {
+                // The id belongs to another workspace entirely.
+                return Err(WinxError::WorkspaceThreadMismatch {
+                    thread_id: external_thread_id,
+                    workspace_root: requested_workspace,
+                });
+            }
             return Err(WinxError::WorkspaceBindingMismatch {
                 thread_id: external_thread_id,
                 requested_workspace,

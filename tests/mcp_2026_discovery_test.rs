@@ -4619,3 +4619,88 @@ async fn http_principals_cannot_touch_each_others_transport_sessions() -> anyhow
     );
     Ok(())
 }
+
+/// Initialize without a workspace path creates a playground; the pair it
+/// returns must be usable by the next tool call under workspace affinity.
+#[tokio::test(flavor = "multi_thread")]
+async fn scratch_initialize_binding_is_accepted_by_following_calls() -> anyhow::Result<()> {
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "scratch-init",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("scratch-client", false),
+            "name": "Initialize",
+            "arguments": {"type": "first_call", "any_workspace_path": "", "mode_name": "wcgw", "thread_id": "scratch_probe"}
+        }
+    });
+    let initialize = post_json(address, "2026-07-28", "tools/call", &request.to_string()).await?;
+    assert!(initialize.starts_with("HTTP/1.1 200"), "{initialize}");
+    let thread_id = initialized_thread_id(&initialize)?;
+    let workspace_root = initialized_workspace_root(&initialize)?;
+    assert!(workspace_root.contains("winx-playground"), "{workspace_root}");
+
+    let pwd = pwd_as(address, TEST_TOKEN, &thread_id, "scratch-client").await?;
+    assert!(pwd.starts_with("HTTP/1.1 200"), "{pwd}");
+    assert!(!pwd.contains("workspace_thread_mismatch"), "{pwd}");
+    assert!(pwd.contains("winx-playground"), "{pwd}");
+    Ok(())
+}
+
+/// A saved context resumed into a session without a workspace path derives
+/// its affinity id from the task id; the returned pair must keep working.
+#[tokio::test(flavor = "multi_thread")]
+async fn resumed_task_without_a_path_keeps_a_usable_binding() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialize = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "resume_seed",
+        "resume-seed-client",
+    )
+    .await?;
+    assert!(initialize.starts_with("HTTP/1.1 200"), "{initialize}");
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    let save = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "save",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("resume-seed-client", false),
+            "name": "ContextSave",
+            "arguments": {
+                "thread_id": thread_id,
+                "id": "handoff-probe",
+                "project_root_path": workspace.path(),
+                "description": "probe",
+                "relevant_file_globs": []
+            }
+        }
+    });
+    let saved = post_json(address, "2026-07-28", "tools/call", &save.to_string()).await?;
+    assert!(saved.starts_with("HTTP/1.1 200"), "{saved}");
+    assert!(!saved.contains("\"isError\":true"), "{saved}");
+
+    let resume = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "resume",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("resume-client", false),
+            "name": "Initialize",
+            "arguments": {"type": "first_call", "any_workspace_path": "", "mode_name": "wcgw", "thread_id": "resume_probe", "task_id_to_resume": "handoff-probe"}
+        }
+    });
+    let resumed = post_json(address, "2026-07-28", "tools/call", &resume.to_string()).await?;
+    assert!(resumed.starts_with("HTTP/1.1 200"), "{resumed}");
+    assert!(resumed.contains("Resumed task handoff-probe"), "{resumed}");
+    let resumed_thread = initialized_thread_id(&resumed)?;
+    let pwd = pwd_as(address, TEST_TOKEN, &resumed_thread, "resume-client").await?;
+    assert!(pwd.starts_with("HTTP/1.1 200"), "{pwd}");
+    assert!(!pwd.contains("workspace_thread_mismatch"), "{pwd}");
+    Ok(())
+}
