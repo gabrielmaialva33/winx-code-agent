@@ -23,7 +23,8 @@
     "cancellable_action_reservations",
     "attach_or_create",
     "build_identity",
-    "process_shutdown"
+    "process_shutdown",
+    "conditional_session_kill"
   ],
   "samples": {
     "rpc_request": {

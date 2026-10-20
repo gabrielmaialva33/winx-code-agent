@@ -20,6 +20,9 @@ pub const BUILD_IDENTITY_CAPABILITY: &str = "build_identity";
 /// The process exits cleanly on a `winx.shutdown` request; Windows has no
 /// SIGTERM, so this is the only graceful stop there.
 pub const PROCESS_SHUTDOWN_CAPABILITY: &str = "process_shutdown";
+/// `session.kill` honors `only_if_idle` and refuses a session that is running
+/// a foreground command or owns background shells.
+pub const CONDITIONAL_SESSION_KILL_CAPABILITY: &str = "conditional_session_kill";
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Process role advertised during daemon negotiation.
@@ -197,6 +200,9 @@ pub struct SessionInfo {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SessionParams {
     pub thread_id: String,
+    /// `session.kill` only: refuse (return `false`) when the session is busy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub only_if_idle: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

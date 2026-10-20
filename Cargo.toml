@@ -135,6 +135,8 @@ windows-sys = { version = "0.61", features = [
 landlock = "0.4"
 
 [dev-dependencies]
+# `start_paused` for timeout tests that must not wait in real time.
+tokio = { version = "1", features = ["test-util"] }
 tempfile = "3.14"
 # Property-based fuzzing of the terminal/ANSI parsers and pure helpers.
 proptest = "1.5"

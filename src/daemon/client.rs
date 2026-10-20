@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use crate::daemon::transport::DaemonStream;
 use tokio::sync::Mutex;
 
+use super::protocol::CONDITIONAL_SESSION_KILL_CAPABILITY;
 use super::protocol::{
     read_json_frame, write_json_frame, CancelActionParams, ConfigureSessionParams,
     ConfigureSessionResult, ConfigureSessionTransition, HelloResult, JournalRead,
@@ -154,7 +155,29 @@ impl DaemonClient {
         self.connected_with_hello().await.map(|(_, hello)| hello)
     }
 
+    /// Bound a control RPC end to end. `connected()` already bounds the
+    /// handshake, but a guardian that answers hello and then stalls would
+    /// otherwise park the caller forever — and lifecycle callers hold the
+    /// global mutation gate while they wait.
+    async fn bounded<T>(
+        &self,
+        what: &str,
+        future: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        match tokio::time::timeout(SESSION_CONTROL_RPC_TIMEOUT, future).await {
+            Ok(result) => result,
+            Err(_) => Err(WinxError::CommandTimeout {
+                command: format!("winxd {what} RPC at {}", self.socket_path.display()),
+                timeout_seconds: SESSION_CONTROL_RPC_TIMEOUT.as_secs(),
+            }),
+        }
+    }
+
     pub async fn list_sessions(&self) -> Result<Vec<SessionInfo>> {
+        self.bounded("session.list", self.list_sessions_unbounded()).await
+    }
+
+    async fn list_sessions_unbounded(&self) -> Result<Vec<SessionInfo>> {
         let mut stream = self.connected().await?;
         DaemonShellRuntime::request(
             &mut stream,
@@ -166,12 +189,17 @@ impl DaemonClient {
     }
 
     pub async fn session_info(&self, thread_id: &str) -> Result<SessionInfo> {
+        self.bounded("session.info", self.session_info_unbounded(thread_id)).await
+    }
+
+    async fn session_info_unbounded(&self, thread_id: &str) -> Result<SessionInfo> {
         let mut stream = self.connected().await?;
         DaemonShellRuntime::request(
             &mut stream,
             rand::random::<u64>(),
             "session.info",
             serde_json::to_value(SessionParams {
+                only_if_idle: false,
                 thread_id: thread_id.to_string(),
                 expected_generation: None,
                 expected_execution: None,
@@ -183,6 +211,15 @@ impl DaemonClient {
     }
 
     pub async fn read_output(&self, thread_id: &str, consumer_id: &str) -> Result<JournalRead> {
+        self.bounded("session.read_output", self.read_output_unbounded(thread_id, consumer_id))
+            .await
+    }
+
+    async fn read_output_unbounded(
+        &self,
+        thread_id: &str,
+        consumer_id: &str,
+    ) -> Result<JournalRead> {
         let mut stream = self.connected().await?;
         DaemonShellRuntime::request(
             &mut stream,
@@ -200,6 +237,10 @@ impl DaemonClient {
     /// Ask the process behind this socket to exit after answering. Only
     /// daemons advertising `process_shutdown` honor it.
     pub async fn shutdown(&self) -> Result<()> {
+        self.bounded("winx.shutdown", self.shutdown_unbounded()).await
+    }
+
+    async fn shutdown_unbounded(&self) -> Result<()> {
         let mut stream = self.connected().await?;
         let _: serde_json::Value = DaemonShellRuntime::request(
             &mut stream,
@@ -211,13 +252,49 @@ impl DaemonClient {
         Ok(())
     }
 
+    /// Kill the session only if the guardian finds it idle at that moment
+    /// (no foreground command, no background shells). Returns `Ok(false)`
+    /// when the guardian refused because the session became active.
+    ///
+    /// A guardian from a build without the capability cannot re-check under
+    /// its own barrier; for it the idleness is re-read right before the kill,
+    /// which shrinks the original window from a whole sweep to one RPC gap.
+    pub async fn kill_session_if_idle(&self, thread_id: &str) -> Result<bool> {
+        let (mut stream, hello) = self.connected_with_hello().await?;
+        let conditional = hello
+            .capabilities
+            .iter()
+            .any(|capability| capability == CONDITIONAL_SESSION_KILL_CAPABILITY);
+        if !conditional {
+            let info = self.session_info(thread_id).await?;
+            if info.running || !info.background_command_ids.is_empty() {
+                return Ok(false);
+            }
+        }
+        self.bounded(
+            "session.kill",
+            DaemonShellRuntime::request(
+                &mut stream,
+                rand::random::<u64>(),
+                "session.kill",
+                serde_json::json!({ "thread_id": thread_id, "only_if_idle": conditional }),
+            ),
+        )
+        .await
+    }
+
     pub async fn kill_session(&self, thread_id: &str) -> Result<bool> {
+        self.bounded("session.kill", self.kill_session_unbounded(thread_id)).await
+    }
+
+    async fn kill_session_unbounded(&self, thread_id: &str) -> Result<bool> {
         let mut stream = self.connected().await?;
         DaemonShellRuntime::request(
             &mut stream,
             rand::random::<u64>(),
             "session.kill",
             serde_json::to_value(SessionParams {
+                only_if_idle: false,
                 thread_id: thread_id.to_string(),
                 expected_generation: None,
                 expected_execution: None,
@@ -274,6 +351,7 @@ impl DaemonClient {
             rand::random::<u64>(),
             "session.negotiate",
             serde_json::to_value(SessionParams {
+                only_if_idle: false,
                 thread_id: thread_id.to_string(),
                 expected_generation: None,
                 expected_execution: None,
@@ -302,6 +380,7 @@ impl DaemonClient {
             rand::random::<u64>(),
             "session.interrupt",
             serde_json::to_value(SessionParams {
+                only_if_idle: false,
                 thread_id: thread_id.to_string(),
                 expected_generation,
                 expected_execution: expected_execution.filter(|token| {
@@ -323,6 +402,7 @@ impl DaemonClient {
             rand::random::<u64>(),
             "session.negotiate",
             serde_json::to_value(SessionParams {
+                only_if_idle: false,
                 thread_id: thread_id.to_string(),
                 expected_generation: None,
                 expected_execution: None,
@@ -404,6 +484,7 @@ impl DaemonShellRuntime {
                 rand::random::<u64>(),
                 "session.negotiate",
                 serde_json::to_value(SessionParams {
+                    only_if_idle: false,
                     thread_id: thread_id.to_string(),
                     expected_generation: None,
                     expected_execution: None,
@@ -1137,6 +1218,48 @@ mod tests {
     use crate::daemon::protocol::{RpcResponse, TYPED_ACTION_RESULT_CAPABILITY};
     #[cfg(unix)]
     use tokio::net::UnixStream;
+
+    #[cfg(unix)] // mocks a guardian that answers hello and then stalls
+    #[tokio::test(start_paused = true)]
+    async fn control_rpcs_time_out_when_a_guardian_stalls_after_hello() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let socket = temp.path().join("stalled.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).expect("bind mock guardian");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let hello: RpcRequest = read_json_frame(&mut stream).await.expect("read hello");
+            assert_eq!(hello.method, "winx.hello");
+            let result = HelloResult::current(
+                crate::daemon::protocol::DaemonProcessRole::Guardian,
+                vec![],
+                "stalled",
+            );
+            write_json_frame(
+                &mut stream,
+                &RpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: hello.id,
+                    result: Some(serde_json::to_value(result).expect("hello json")),
+                    error: None,
+                },
+            )
+            .await
+            .expect("write hello");
+            // Read the session.list request, then never answer it.
+            let _list: RpcRequest = read_json_frame(&mut stream).await.expect("read list");
+            std::future::pending::<()>().await;
+        });
+
+        let error = DaemonClient::new(&socket)
+            .list_sessions()
+            .await
+            .expect_err("a stalled guardian must not park the caller forever");
+        assert!(
+            matches!(error, WinxError::CommandTimeout { .. }),
+            "expected a bounded timeout, got {error}"
+        );
+        server.abort();
+    }
 
     #[cfg(unix)] // mocks the control plane with a raw UnixListener/pair
     #[tokio::test]

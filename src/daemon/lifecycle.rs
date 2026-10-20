@@ -343,17 +343,32 @@ impl GuardianLifecycle {
         result: &mut PruneResult,
     ) -> Result<bool> {
         for session in &observation.sessions {
-            if let Err(error) =
-                DaemonClient::new(&observation.socket).kill_session(&session.thread_id).await
+            // The observation is stale by now; the guardian re-checks idleness
+            // under its operation barrier and refuses if a command started.
+            match DaemonClient::new(&observation.socket)
+                .kill_session_if_idle(&session.thread_id)
+                .await
             {
-                tracing::warn!(
-                    socket = %observation.socket.display(),
-                    session = %session.thread_id,
-                    %error,
-                    "refusing to terminate guardian after session cleanup failed"
-                );
-                result.unreachable_guardian_count += 1;
-                return Ok(false);
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::info!(
+                        socket = %observation.socket.display(),
+                        session = %session.thread_id,
+                        "guardian became active before reclamation; keeping it"
+                    );
+                    result.skipped_active_thread_ids.push(observation.thread_id.clone());
+                    return Ok(false);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        socket = %observation.socket.display(),
+                        session = %session.thread_id,
+                        %error,
+                        "refusing to terminate guardian after session cleanup failed"
+                    );
+                    result.unreachable_guardian_count += 1;
+                    return Ok(false);
+                }
             }
         }
         self.terminate_guardian_with_pid(&observation.socket, observation.hello.daemon_pid).await?;
@@ -509,6 +524,9 @@ impl GuardianLifecycle {
                 "guardian left no exit record; it did not exit on purpose"
             );
         }
+        // The `.sock.lock` beside the socket is deliberately left in place: a
+        // replacement guardian may already hold that inode, and unlinking the
+        // name would let a third claimant lock a fresh one.
         for path in [socket.to_path_buf(), metadata_path(socket)] {
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => {}

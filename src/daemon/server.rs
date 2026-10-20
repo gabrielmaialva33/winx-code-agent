@@ -429,6 +429,7 @@ async fn dispatch(
                     "session_activity_timestamps".to_string(),
                     ATTACH_OR_CREATE_CAPABILITY.to_string(),
                     crate::daemon::protocol::PROCESS_SHUTDOWN_CAPABILITY.to_string(),
+                    crate::daemon::protocol::CONDITIONAL_SESSION_KILL_CAPABILITY.to_string(),
                 ],
                 epoch,
             ),
@@ -436,6 +437,9 @@ async fn dispatch(
         "winx.shutdown" => {
             schedule_process_exit("winx-guardian");
             rpc_result(request.id, &serde_json::json!({ "shutting_down": true }))
+        }
+        "session.configure" | "shell.run_action" if DRAINING.load(Ordering::Acquire) => {
+            draining_error(request.id)
         }
         "session.configure" => {
             let params: ConfigureSessionParams = match serde_json::from_value(request.params) {
@@ -534,10 +538,20 @@ async fn dispatch(
                 Ok(params) => params,
                 Err(error) => return rpc_error(request.id, -32602, &error.to_string()),
             };
-            let session = sessions.lock().await.remove(&normalize_thread_id(&params.thread_id));
+            let key = normalize_thread_id(&params.thread_id);
+            let session = sessions.lock().await.get(&key).cloned();
             match session {
                 Some(session) => {
                     let _operation = session.operation_barrier.write().await;
+                    // A reaper decided on an older observation; re-check under
+                    // the barrier so a command that started since then survives.
+                    if params.only_if_idle {
+                        if session_is_busy(&session).await {
+                            return rpc_result(request.id, &false);
+                        }
+                        DRAINING.store(true, Ordering::Release);
+                    }
+                    sessions.lock().await.remove(&key);
                     let background_ids = session.background_ids.lock().await.clone();
                     {
                         let mut store = lock_session_store();
@@ -1407,6 +1421,28 @@ fn rpc_error(id: u64, code: i32, message: &str) -> RpcResponse {
     }
 }
 
+/// Set once a conditional (`only_if_idle`) kill succeeded: the control plane
+/// is about to terminate this process, so no new session or action may be
+/// admitted in the meantime. One guardian serves one process.
+static DRAINING: AtomicBool = AtomicBool::new(false);
+
+fn draining_error(id: u64) -> RpcResponse {
+    rpc_error(id, -32011, "guardian is retiring after idle reclamation; renegotiate the session")
+}
+
+/// Whether the session is running a foreground command or owns background
+/// shells right now. Checked under the operation barrier by conditional kills.
+async fn session_is_busy(session: &DaemonSession) -> bool {
+    if !session.background_ids.lock().await.is_empty() {
+        return true;
+    }
+    let state = session.state.lock().await;
+    let Some(bash_state) = state.as_ref() else { return false };
+    let shell = crate::tools::bash_command::main_shell(bash_state);
+    let guard = shell.lock().await;
+    guard.as_ref().is_some_and(|shell| shell.command_running)
+}
+
 /// Answer the in-flight request, then exit. Guardians own PTYs that die with
 /// them, so this is only requested after `session.kill` drained the session.
 pub(crate) fn schedule_process_exit(role: &'static str) {
@@ -1960,6 +1996,7 @@ mod tests {
         assert!(!interrupt_session(
             &session,
             &SessionParams {
+                only_if_idle: false,
                 thread_id: "automatic_pty_reset".to_string(),
                 expected_generation: Some(prior_token.generation),
                 expected_execution: Some(prior_token.clone()),
@@ -2084,6 +2121,7 @@ mod tests {
         assert!(!interrupt_session(
             &session,
             &SessionParams {
+                only_if_idle: false,
                 thread_id: "atomic_reset".to_string(),
                 expected_generation: Some(stale_execution.generation),
                 expected_execution: Some(stale_execution),

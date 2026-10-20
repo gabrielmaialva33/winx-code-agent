@@ -1104,3 +1104,67 @@ async fn daemon_runtime_owns_initialization_and_reset() -> Result<()> {
     assert_ne!(before.shell_pid, after.shell_pid, "{before:?} {after:?}");
     Ok(())
 }
+
+/// A reaper decides from a stale observation; the guardian must refuse a
+/// conditional kill once a command has started, and still honor an
+/// unconditional one.
+#[tokio::test(flavor = "multi_thread")]
+async fn daemon_conditional_kill_spares_a_session_that_became_active() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let socket_dir = TempDir::new()?;
+    let socket = socket_dir.path().join("winxd-conditional-kill.sock");
+    let server = DaemonServer::bind(&socket).await?;
+    let server_task = tokio::spawn(server.serve());
+    let thread_id = "daemon-conditional-kill";
+    let state = initialized_state(&workspace, thread_id).await?;
+    let runtime = DaemonShellRuntime::new(&socket);
+
+    let hello = DaemonClient::new(&socket).hello().await?;
+    assert!(
+        hello.capabilities.iter().any(|capability| capability == "conditional_session_kill"),
+        "{hello:?}"
+    );
+
+    let started = runtime
+        .run_action_detailed(
+            &state,
+            foreground(thread_id, "sh -c 'sleep 1.5; printf survived'", 0.05),
+            ShellActionOptions::default(),
+        )
+        .await?;
+    assert!(started.result.state.is_running(), "{started:?}");
+
+    let client = DaemonClient::new(&socket);
+    assert!(!client.kill_session_if_idle(thread_id).await?, "busy session must be spared");
+    let sessions = client.list_sessions().await?;
+    // Guardians list the normalized thread id, so match on the running flag.
+    assert!(
+        sessions.len() == 1 && sessions[0].running,
+        "session must still be listed as running: {sessions:?}"
+    );
+
+    tokio::time::sleep(Duration::from_millis(1800)).await;
+    assert!(client.kill_session_if_idle(thread_id).await?, "idle session is reclaimed");
+    assert!(client.list_sessions().await?.is_empty(), "session gone after the conditional kill");
+
+    // The guardian is now retiring: a late request routed to it must be
+    // refused instead of starting a command the reaper is about to kill.
+    let late = runtime
+        .run_action_detailed(
+            &state,
+            foreground(thread_id, "printf late", 0.5),
+            ShellActionOptions::default(),
+        )
+        .await;
+    let error = match late {
+        Ok(result) => {
+            return Err(WinxError::CommandExecutionError(format!(
+                "retiring guardian accepted a new action: {result:?}"
+            )))
+        }
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("retiring"), "{error}");
+    server_task.abort();
+    Ok(())
+}

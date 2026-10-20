@@ -143,7 +143,7 @@ impl ShellDeliveryCursor {
     }
 }
 
-fn main_shell(bash_state: &BashState) -> SharedPtyShell {
+pub(crate) fn main_shell(bash_state: &BashState) -> SharedPtyShell {
     let mut store = lock_session_store();
     store.bind_main(&bash_state.current_thread_id, &bash_state.pty_shell);
     store
