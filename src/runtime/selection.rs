@@ -280,29 +280,38 @@ pub async fn ensure_daemon_at(socket: &Path, daemon_binary: &Path) -> Result<()>
 
     let mut child = spawn_detached(daemon_binary, socket)?;
 
+    // Several adapters starting at once each spawn a daemon; the kernel lets
+    // exactly one claim the socket and the others exit at once. An early
+    // child exit is therefore not a failure yet: keep asking the socket until
+    // the deadline, because the winner may belong to a sibling adapter.
     let deadline = Instant::now() + DAEMON_TRANSITION_TIMEOUT;
+    let mut child_exit = None;
     while Instant::now() < deadline {
         match client.hello().await {
             Ok(_) => {
-                std::thread::spawn(move || {
-                    let _ = child.wait();
-                });
+                if child_exit.is_none() {
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                }
                 return Ok(());
             }
             Err(error @ WinxError::ConfigurationError(_)) => return Err(error),
             Err(_) => {}
         }
-        if let Some(status) = child.try_wait()? {
-            return Err(WinxError::ShellInitializationError(format!(
-                "winxd exited before accepting connections: {status}"
-            )));
+        if child_exit.is_none() {
+            child_exit = child.try_wait()?;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    Err(WinxError::ShellInitializationError(format!(
-        "timed out waiting for winxd at {}",
-        socket.display()
-    )))
+    Err(WinxError::ShellInitializationError(match child_exit {
+        Some(status) => format!(
+            "winxd exited ({status}) and nothing answered at {} within {} seconds",
+            socket.display(),
+            DAEMON_TRANSITION_TIMEOUT.as_secs()
+        ),
+        None => format!("timed out waiting for winxd at {}", socket.display()),
+    }))
 }
 
 #[cfg(test)]

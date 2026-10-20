@@ -11,6 +11,22 @@ pub(crate) mod unix {
         unsafe { libc::geteuid() }
     }
 
+    /// Take an exclusive, non-blocking advisory lock on `file`. Returns
+    /// `Ok(false)` when another process holds it. The lock lives as long as
+    /// the file descriptor, so callers keep the `File` open to stay locked.
+    pub(crate) fn try_lock_exclusive(file: &std::fs::File) -> io::Result<bool> {
+        use std::os::unix::io::AsRawFd as _;
+        // SAFETY: the descriptor belongs to a live `File` borrowed for the call.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::WouldBlock {
+            return Ok(false);
+        }
+        Err(error)
+    }
+
     /// Return whether a positive process ID still names a live process. EPERM
     /// means the process exists but is not signalable by this caller.
     pub(crate) fn process_exists(pid: u32) -> bool {

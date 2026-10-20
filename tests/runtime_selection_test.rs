@@ -105,3 +105,38 @@ async fn planned_control_restart_changes_epoch() -> anyhow::Result<()> {
     tokio::time::sleep(Duration::from_millis(100)).await;
     validation
 }
+
+/// Several MCP clients often start at the same moment (one editor, many
+/// sessions). Every adapter that finds no daemon spawns `winxd`; exactly one
+/// claim must win, the others must attach to it, and no adapter may fail.
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_auto_spawns_converge_on_one_daemon() -> anyhow::Result<()> {
+    let runtime_dir = TempDir::new()?;
+    let socket = runtime_dir.path().join("winxd.sock");
+    let binary = Path::new(env!("CARGO_BIN_EXE_winxd"));
+
+    // Spawn all starters before awaiting any, so the launches really overlap.
+    let starters: Vec<_> = (0..4)
+        .map(|_| {
+            let socket = socket.clone();
+            tokio::spawn(async move { ensure_control_daemon_at(&socket, binary).await })
+        })
+        .collect();
+    for starter in starters {
+        starter.await??;
+    }
+
+    let hello = DaemonClient::new(&socket).hello().await?;
+    let mut pids = std::collections::BTreeSet::new();
+    for _ in 0..4 {
+        pids.insert(DaemonClient::new(&socket).hello().await?.daemon_pid);
+    }
+    let validation = if pids.len() == 1 && pids.contains(&hello.daemon_pid) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("expected one daemon behind the socket, saw pids {pids:?}"))
+    };
+    terminate_test_daemon(&socket, hello.daemon_pid).await?;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    validation
+}

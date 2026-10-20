@@ -65,16 +65,16 @@ impl ControlServer {
         tokio::fs::create_dir_all(&guardian_dir).await?;
         crate::daemon::transport::restrict_to_owner(&guardian_dir, 0o700).await?;
 
-        if tokio::fs::try_exists(&socket_path).await? {
-            if crate::daemon::transport::connect(&socket_path).await.is_ok() {
-                return Err(WinxError::ConfigurationError(format!(
-                    "a winxd instance is already listening at {}",
+        // The listener claims the path atomically; a concurrent daemon start
+        // fails here instead of stealing a live socket.
+        let listener = crate::daemon::transport::DaemonListener::bind(&socket_path).await.map_err(
+            |error| {
+                WinxError::ConfigurationError(format!(
+                    "cannot claim daemon socket {}: {error}",
                     socket_path.display()
-                )));
-            }
-            tokio::fs::remove_file(&socket_path).await?;
-        }
-        let listener = crate::daemon::transport::DaemonListener::bind(&socket_path)?;
+                ))
+            },
+        )?;
         crate::daemon::transport::restrict_to_owner(&socket_path, 0o600).await?;
         let lifecycle = Arc::new(GuardianLifecycle::new(
             guardian_dir,

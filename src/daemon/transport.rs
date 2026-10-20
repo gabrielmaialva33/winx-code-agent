@@ -7,7 +7,7 @@
 //! probes, or removes `*.sock` files works unchanged on both platforms.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 pub use unix_impl::{connect, peer_is_same_user, DaemonListener, DaemonStream};
@@ -30,6 +30,35 @@ pub async fn restrict_to_owner(path: &Path, mode: u32) -> io::Result<()> {
     }
 }
 
+/// Lock file that serializes daemons claiming `socket`.
+pub fn lock_path(socket: &Path) -> PathBuf {
+    let mut name = socket.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_default();
+    name.push(".lock");
+    socket.with_file_name(name)
+}
+
+/// Open `path` owner-only and take the exclusive advisory lock, failing with
+/// `AddrInUse` when another process already holds it.
+#[cfg(unix)]
+fn claim_lock(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .mode(0o600)
+        .open(path)?;
+    if crate::os::unix::try_lock_exclusive(&file)? {
+        Ok(file)
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("another daemon is starting or listening (lock {})", path.display()),
+        ))
+    }
+}
+
 #[cfg(unix)]
 mod unix_impl {
     use std::io;
@@ -41,11 +70,32 @@ mod unix_impl {
 
     pub struct DaemonListener {
         inner: UnixListener,
+        /// Held for the listener's lifetime; see [`DaemonListener::bind`].
+        _lock: std::fs::File,
     }
 
     impl DaemonListener {
-        pub fn bind(path: &Path) -> io::Result<Self> {
-            Ok(Self { inner: UnixListener::bind(path)? })
+        /// Claim `path` for this process, replacing a stale socket left by a
+        /// dead daemon but never stealing a live one.
+        ///
+        /// Two daemons started at the same moment both see the same stale
+        /// socket; without coordination the second one unlinks the first
+        /// one's freshly bound socket and both end up listening, one of them
+        /// unreachable. An exclusive advisory lock on `<path>.lock` makes the
+        /// existence check and the bind one atomic step: the loser fails with
+        /// `AddrInUse` and its launcher simply connects to the winner.
+        pub async fn bind(path: &Path) -> io::Result<Self> {
+            let lock = super::claim_lock(&super::lock_path(path))?;
+            if tokio::fs::try_exists(path).await? {
+                if connect(path).await.is_ok() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AddrInUse,
+                        format!("a daemon is already listening at {}", path.display()),
+                    ));
+                }
+                tokio::fs::remove_file(path).await?;
+            }
+            Ok(Self { inner: UnixListener::bind(path)?, _lock: lock })
         }
 
         pub async fn accept(&mut self) -> io::Result<DaemonStream> {
@@ -166,7 +216,12 @@ mod windows_impl {
     }
 
     impl DaemonListener {
-        pub fn bind(path: &Path) -> io::Result<Self> {
+        /// Claim the pipe named after `path`. `first_pipe_instance` already
+        /// makes the kernel refuse a second daemon, so a stale marker file
+        /// needs no check: it is simply rewritten by the winner.
+        // Signature parity with the Unix listener, which awaits the stale-socket check.
+        #[allow(clippy::unused_async, clippy::unused_async_trait_impl)]
+        pub async fn bind(path: &Path) -> io::Result<Self> {
             let name = pipe_name(path);
             // Every instance carries an owner-only DACL plus an integrity
             // label (see `PipeSecurity`): other local accounts and
@@ -244,5 +299,48 @@ mod windows_impl {
             assert!(lower.starts_with(r"\\.\pipe\winx-"));
             assert_ne!(lower, pipe_name(Path::new(r"C:\Users\X\winx\other.sock")));
         }
+    }
+}
+
+#[cfg(all(test, unix))]
+mod unix_claim_tests {
+    #![allow(clippy::expect_used)]
+    use super::{connect, lock_path, DaemonListener};
+
+    #[tokio::test]
+    async fn second_bind_fails_while_the_first_listens_and_the_first_stays_reachable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("winxd.sock");
+        let first = DaemonListener::bind(&socket).await.expect("first bind");
+        let error = DaemonListener::bind(&socket)
+            .await
+            .err()
+            .expect("second bind must not steal the socket");
+        assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse, "{error}");
+        assert!(lock_path(&socket).is_file(), "lock file beside the socket");
+        // The loser did not unlink the winner's socket.
+        assert!(connect(&socket).await.is_ok(), "first listener still reachable");
+        drop(first);
+        DaemonListener::bind(&socket).await.expect("bind after the first listener is gone");
+    }
+
+    #[tokio::test]
+    async fn stale_socket_from_a_dead_daemon_is_replaced() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("winxd.sock");
+        let stale = tokio::net::UnixListener::bind(&socket).expect("stale listener");
+        drop(stale);
+        assert!(socket.exists(), "unix sockets outlive their listener");
+        let listener = DaemonListener::bind(&socket).await.expect("replace stale socket");
+        assert!(connect(&socket).await.is_ok());
+        drop(listener);
+    }
+
+    #[test]
+    fn lock_path_sits_beside_the_socket() {
+        assert_eq!(
+            lock_path(std::path::Path::new("/run/u/winx/winxd.sock")),
+            std::path::PathBuf::from("/run/u/winx/winxd.sock.lock")
+        );
     }
 }
