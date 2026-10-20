@@ -171,6 +171,22 @@ enum Commands {
     /// Print a redacted runtime/configuration diagnostic report
     Doctor,
 
+    /// Download, verify, and install the latest release bundle beside this executable
+    Update {
+        /// Only report whether a newer release exists.
+        #[arg(long)]
+        check: bool,
+        /// Install this release tag (for example `v0.2.351`) instead of the latest.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Reinstall even when the version already matches.
+        #[arg(long)]
+        force: bool,
+        /// Install into this directory instead of the running executable's directory.
+        #[arg(long, value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
+
     /// Aggregate privacy-safe tool/HTTP usage telemetry from JSONL logs
     Report {
         /// Base usage log path. Rotated siblings are discovered automatically.
@@ -254,6 +270,9 @@ async fn async_main(cli: Cli) -> Result<()> {
         Some(Commands::Prune { idle_seconds, socket }) => run_prune(socket, idle_seconds).await,
         Some(Commands::RestartDaemon { socket }) => run_restart_daemon(socket).await,
         Some(Commands::Doctor) => run_doctor().await,
+        Some(Commands::Update { check, tag, force, dir }) => {
+            run_update(check, tag, force, dir).await
+        }
         Some(Commands::Report { log, last, since_minutes, build }) => {
             run_report(log, last, since_minutes, build).await
         }
@@ -337,6 +356,25 @@ async fn run_restart_daemon(socket: Option<PathBuf>) -> Result<()> {
         hello.daemon_pid,
         hello.daemon_epoch
     )?;
+    Ok(())
+}
+
+async fn run_update(
+    check: bool,
+    tag: Option<String>,
+    force: bool,
+    dir: Option<PathBuf>,
+) -> Result<()> {
+    let options =
+        winx_code_agent::update::UpdateOptions { check_only: check, tag, force, install_dir: dir };
+    let report = tokio::task::spawn_blocking(move || winx_code_agent::update::run(&options))
+        .await
+        .map_err(|error| {
+            WinxError::CommandExecutionError(format!("update task failed: {error}"))
+        })??;
+    serde_json::to_writer_pretty(std::io::stdout().lock(), &report)
+        .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+    writeln!(std::io::stdout().lock())?;
     Ok(())
 }
 

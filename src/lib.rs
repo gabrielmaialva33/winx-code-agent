@@ -27,6 +27,7 @@ pub mod tool_policy;
 pub mod tool_registry;
 pub mod tools;
 pub mod types;
+pub mod update;
 pub mod utils;
 
 pub use errors::{Result, WinxError};
