@@ -8,6 +8,8 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 pub use unix_impl::{connect, peer_is_same_user, DaemonListener, DaemonStream};
@@ -37,25 +39,39 @@ pub fn lock_path(socket: &Path) -> PathBuf {
     socket.with_file_name(name)
 }
 
-/// Open `path` owner-only and take the exclusive advisory lock, failing with
-/// `AddrInUse` when another process already holds it.
+/// How long a claim keeps retrying a busy lock before giving up. A lock can
+/// stay held for a few milliseconds after its owner released it: `flock`
+/// follows the open file description, and a child forked while the lock was
+/// open keeps that description until it execs. A genuine second daemon is
+/// still refused, just a quarter second later.
 #[cfg(unix)]
-fn claim_lock(path: &Path) -> io::Result<std::fs::File> {
+const CLAIM_RETRY_WINDOW: Duration = Duration::from_millis(250);
+
+/// Open `path` owner-only and take the exclusive advisory lock, failing with
+/// `AddrInUse` when another process still holds it after the retry window.
+#[cfg(unix)]
+async fn claim_lock(path: &Path) -> io::Result<std::fs::File> {
     use std::os::unix::fs::OpenOptionsExt as _;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .mode(0o600)
-        .open(path)?;
-    if crate::os::unix::try_lock_exclusive(&file)? {
-        Ok(file)
-    } else {
-        Err(io::Error::new(
-            io::ErrorKind::AddrInUse,
-            format!("another daemon is starting or listening (lock {})", path.display()),
-        ))
+    let deadline = Instant::now() + CLAIM_RETRY_WINDOW;
+    loop {
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .open(path)?;
+        if crate::os::unix::try_lock_exclusive(&file)? {
+            return Ok(file);
+        }
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("another daemon is starting or listening (lock {})", path.display()),
+            ));
+        }
+        drop(file);
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
 
@@ -85,7 +101,7 @@ mod unix_impl {
         /// existence check and the bind one atomic step: the loser fails with
         /// `AddrInUse` and its launcher simply connects to the winner.
         pub async fn bind(path: &Path) -> io::Result<Self> {
-            let lock = super::claim_lock(&super::lock_path(path))?;
+            let lock = super::claim_lock(&super::lock_path(path)).await?;
             if tokio::fs::try_exists(path).await? {
                 if connect(path).await.is_ok() {
                     return Err(io::Error::new(
