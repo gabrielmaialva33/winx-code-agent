@@ -17,7 +17,7 @@ pub mod errors;
 pub mod fuzzing;
 pub mod http_server;
 pub mod logging;
-mod os;
+pub mod os;
 pub mod report;
 pub mod runtime;
 pub mod sandbox;

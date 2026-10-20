@@ -189,6 +189,7 @@ enum Commands {
 }
 
 fn main() -> Result<()> {
+    winx_code_agent::os::harden_process();
     let cli = Cli::parse();
     let offline_report = matches!(&cli.command, Some(Commands::Report { .. }));
 

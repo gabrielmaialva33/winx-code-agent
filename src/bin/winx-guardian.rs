@@ -12,6 +12,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    winx_code_agent::os::harden_process();
     let cli = Cli::parse();
     DaemonServer::bind(cli.socket).await?.serve().await?;
     Ok(())

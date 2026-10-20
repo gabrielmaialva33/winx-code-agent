@@ -103,6 +103,14 @@ pub(crate) mod unix {
 }
 
 /// Whether a process with `pid` is alive, on every supported platform.
+/// Process-wide hardening applied at the top of every binary's `main`.
+/// On Windows it narrows the DLL search path (see
+/// `windows::restrict_dll_search_path`); Unix has nothing equivalent to do.
+pub fn harden_process() {
+    #[cfg(windows)]
+    windows::restrict_dll_search_path();
+}
+
 pub(crate) fn process_exists(pid: u32) -> bool {
     #[cfg(unix)]
     {
@@ -125,8 +133,16 @@ pub(crate) mod windows {
     use std::io;
 
     use windows_sys::Win32::Foundation::{
-        CloseHandle, SetHandleInformation, ERROR_ACCESS_DENIED, HANDLE, HANDLE_FLAG_INHERIT,
-        INVALID_HANDLE_VALUE, STILL_ACTIVE,
+        CloseHandle, LocalFree, SetHandleInformation, ERROR_ACCESS_DENIED, HANDLE,
+        HANDLE_FLAG_INHERIT, INVALID_HANDLE_VALUE, STILL_ACTIVE,
+    };
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, TokenElevation, TokenUser, SECURITY_ATTRIBUTES, TOKEN_ELEVATION,
+        TOKEN_QUERY, TOKEN_USER,
     };
     use windows_sys::Win32::System::Console::{
         GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
@@ -136,9 +152,12 @@ pub(crate) mod windows {
         SetInformationJobObject, TerminateJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
     };
+    use windows_sys::Win32::System::LibraryLoader::{
+        SetDefaultDllDirectories, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+    };
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, OpenProcess, TerminateProcess, CREATE_BREAKAWAY_FROM_JOB,
-        CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
+        GetCurrentProcess, GetExitCodeProcess, OpenProcess, OpenProcessToken, TerminateProcess,
+        CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS,
         PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
     };
 
@@ -210,6 +229,199 @@ pub(crate) mod windows {
             }
         }
         Ok(())
+    }
+
+    /// Restrict implicit DLL loading to the application directory and
+    /// System32.
+    ///
+    /// `portable-pty` probes a bare `conpty.dll` through the default search
+    /// order, which includes the current directory and every `PATH` entry, so
+    /// a planted DLL would be loaded into the process that owns the shells.
+    /// After this call, a bare name resolves only beside the executable or in
+    /// System32 and otherwise falls back to the `ConPTY` exports already in
+    /// `kernel32.dll`. Failure is logged and ignored: the process still works,
+    /// just without the narrower search path.
+    pub(crate) fn restrict_dll_search_path() {
+        // SAFETY: the flag is a documented constant; the call has no pointer
+        // arguments and only changes this process's loader policy.
+        if unsafe { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_DEFAULT_DIRS) } == 0 {
+            tracing::warn!(
+                error = %io::Error::last_os_error(),
+                "could not restrict the DLL search path"
+            );
+        }
+    }
+
+    /// Owner-only security descriptor for the daemon named pipes.
+    ///
+    /// The default pipe DACL lets other local users open the pipe read-only
+    /// and lets lower-integrity processes of the same user connect, which
+    /// would hand a sandboxed process a shell. This descriptor grants full
+    /// access to SYSTEM and read/write to the current account SID only, and a
+    /// mandatory integrity label refuses readers and writers below the
+    /// daemon's own level (`High` when the daemon runs elevated, otherwise
+    /// `Medium`), so an unelevated client cannot drive an elevated daemon.
+    pub(crate) struct PipeSecurity {
+        descriptor: *mut c_void,
+        attributes: SECURITY_ATTRIBUTES,
+    }
+
+    // SAFETY: the descriptor is a LocalAlloc block that is only read after
+    // construction; nothing about it is thread-affine.
+    unsafe impl Send for PipeSecurity {}
+    // SAFETY: see the `Send` impl; shared references only read the block.
+    unsafe impl Sync for PipeSecurity {}
+
+    impl Drop for PipeSecurity {
+        fn drop(&mut self) {
+            // SAFETY: the pointer came from
+            // ConvertStringSecurityDescriptorToSecurityDescriptorW, whose
+            // contract is a single LocalFree.
+            unsafe {
+                LocalFree(self.descriptor);
+            }
+        }
+    }
+
+    impl PipeSecurity {
+        pub(crate) fn owner_only() -> io::Result<Self> {
+            let sddl = owner_only_sddl()?;
+            let descriptor = parse_sddl(&sddl)?;
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: u32::try_from(std::mem::size_of::<SECURITY_ATTRIBUTES>())
+                    .map_err(|_| io::Error::other("security attributes too large"))?,
+                lpSecurityDescriptor: descriptor,
+                bInheritHandle: 0,
+            };
+            Ok(Self { descriptor, attributes })
+        }
+
+        /// Create one server instance of `name` carrying this descriptor.
+        pub(crate) fn create_pipe_instance(
+            &self,
+            options: &tokio::net::windows::named_pipe::ServerOptions,
+            name: &str,
+        ) -> io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+            let attributes: *const SECURITY_ATTRIBUTES = &raw const self.attributes;
+            // SAFETY: the attributes block and its descriptor outlive the
+            // call, and the descriptor was produced by the SDDL parser.
+            unsafe {
+                options.create_with_security_attributes_raw(name, attributes.cast_mut().cast())
+            }
+        }
+    }
+
+    /// Build the SDDL string for [`PipeSecurity::owner_only`].
+    fn owner_only_sddl() -> io::Result<String> {
+        let token = current_process_token()?;
+        let sid = token_user_sid(&token)?;
+        let integrity = if token_is_elevated(&token)? { "HI" } else { "ME" };
+        Ok(format!("D:P(A;;GA;;;SY)(A;;GRGW;;;{sid})S:(ML;;NRNW;;;{integrity})"))
+    }
+
+    fn current_process_token() -> io::Result<OwnedHandle> {
+        let mut token: HANDLE = std::ptr::null_mut();
+        // SAFETY: the pseudo handle from GetCurrentProcess is always valid and
+        // `token` is a live out-pointer; a zero return is checked.
+        if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(OwnedHandle(token))
+    }
+
+    fn token_user_sid(token: &OwnedHandle) -> io::Result<String> {
+        let mut needed = 0u32;
+        // SAFETY: a null buffer with zero length is the documented way to ask
+        // for the required size; the result is deliberately ignored.
+        unsafe {
+            GetTokenInformation(token.0, TokenUser, std::ptr::null_mut(), 0, &raw mut needed);
+        }
+        if needed == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // `usize` storage keeps TOKEN_USER aligned and its trailing SID alive.
+        let mut buffer = vec![0usize; (needed as usize).div_ceil(std::mem::size_of::<usize>())];
+        // SAFETY: the buffer is at least `needed` bytes and suitably aligned.
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                needed,
+                &raw mut needed,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: GetTokenInformation initialized a TOKEN_USER at the start of
+        // the buffer, and the SID it points to lives inside the same buffer.
+        let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+        let mut sid_text: *mut u16 = std::ptr::null_mut();
+        // SAFETY: the SID pointer is valid while `buffer` lives; the out
+        // pointer receives a LocalAlloc string freed below.
+        if unsafe { ConvertSidToStringSidW(user.User.Sid, &raw mut sid_text) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let sid = wide_to_string(sid_text);
+        // SAFETY: ConvertSidToStringSidW documents a single LocalFree.
+        unsafe {
+            LocalFree(sid_text.cast());
+        }
+        Ok(sid)
+    }
+
+    fn token_is_elevated(token: &OwnedHandle) -> io::Result<bool> {
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut needed = 0u32;
+        let size = u32::try_from(std::mem::size_of::<TOKEN_ELEVATION>())
+            .map_err(|_| io::Error::other("token elevation block too large"))?;
+        // SAFETY: the out-pointer references a live, correctly sized struct.
+        if unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenElevation,
+                (&raw mut elevation).cast(),
+                size,
+                &raw mut needed,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(elevation.TokenIsElevated != 0)
+    }
+
+    /// Parse an SDDL string into a self-relative security descriptor that the
+    /// caller must release with `LocalFree`.
+    fn parse_sddl(sddl: &str) -> io::Result<*mut c_void> {
+        let wide: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut descriptor: *mut c_void = std::ptr::null_mut();
+        // SAFETY: `wide` is NUL-terminated and outlives the call; the out
+        // pointer receives a LocalAlloc block; a zero return is checked.
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide.as_ptr(),
+                SDDL_REVISION_1,
+                &raw mut descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(descriptor)
+    }
+
+    fn wide_to_string(text: *const u16) -> String {
+        let mut len = 0usize;
+        // SAFETY: the string is NUL-terminated by its producer; the loop stops
+        // at the terminator without reading past it.
+        while unsafe { *text.add(len) } != 0 {
+            len += 1;
+        }
+        // SAFETY: `len` characters were just read successfully.
+        String::from_utf16_lossy(unsafe { std::slice::from_raw_parts(text, len) })
     }
 
     /// Stop this process's standard handles from being inherited by children.
@@ -325,6 +537,23 @@ pub(crate) mod windows {
             let status = child.wait().expect("child reaped after job termination");
             assert!(!status.success());
             assert!(!super::process_exists(child.id()));
+        }
+
+        #[test]
+        fn owner_only_sddl_names_the_current_user_and_an_integrity_label() {
+            let sddl = super::owner_only_sddl().expect("sddl");
+            assert!(sddl.starts_with("D:P(A;;GA;;;SY)(A;;GRGW;;;S-1-"), "{sddl}");
+            assert!(
+                sddl.ends_with("S:(ML;;NRNW;;;ME)") || sddl.ends_with("S:(ML;;NRNW;;;HI)"),
+                "{sddl}"
+            );
+            let security = super::PipeSecurity::owner_only().expect("descriptor");
+            assert!(!security.descriptor.is_null());
+        }
+
+        #[test]
+        fn dll_search_path_restriction_is_accepted() {
+            super::restrict_dll_search_path();
         }
 
         #[test]

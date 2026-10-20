@@ -78,6 +78,8 @@ mod windows_impl {
     };
     use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
+    use crate::os::windows::PipeSecurity;
+
     /// How long a client keeps retrying while every pipe instance is busy.
     /// The listener always keeps a spare instance, so this only covers the
     /// instant between one client's `connect` and the next instance's creation.
@@ -159,34 +161,42 @@ mod windows_impl {
     pub struct DaemonListener {
         name: String,
         marker: PathBuf,
+        security: PipeSecurity,
         spare: Option<NamedPipeServer>,
     }
 
     impl DaemonListener {
         pub fn bind(path: &Path) -> io::Result<Self> {
             let name = pipe_name(path);
+            // Every instance carries an owner-only DACL plus an integrity
+            // label (see `PipeSecurity`): other local accounts and
+            // lower-integrity processes cannot open the pipe at all.
             // `first_pipe_instance` makes a second daemon fail to bind instead
             // of silently sharing the name; `reject_remote_clients` keeps the
-            // pipe off the network. The default DACL grants other local users
-            // read-only access at most, and every Winx client opens read/write,
-            // so a foreign user cannot complete a connection.
-            let spare = ServerOptions::new()
-                .first_pipe_instance(true)
-                .reject_remote_clients(true)
-                .create(&name)?;
+            // pipe off the network.
+            let security = PipeSecurity::owner_only()?;
+            let spare = security.create_pipe_instance(
+                ServerOptions::new().first_pipe_instance(true).reject_remote_clients(true),
+                &name,
+            )?;
             std::fs::write(path, format!("{name}\n{}\n", std::process::id()))?;
-            Ok(Self { name, marker: path.to_path_buf(), spare: Some(spare) })
+            Ok(Self { name, marker: path.to_path_buf(), security, spare: Some(spare) })
+        }
+
+        fn new_instance(&self) -> io::Result<NamedPipeServer> {
+            self.security
+                .create_pipe_instance(ServerOptions::new().reject_remote_clients(true), &self.name)
         }
 
         pub async fn accept(&mut self) -> io::Result<DaemonStream> {
             let server = match self.spare.take() {
                 Some(server) => server,
-                None => ServerOptions::new().reject_remote_clients(true).create(&self.name)?,
+                None => self.new_instance()?,
             };
             server.connect().await?;
             // Create the next instance before handing this one out so a client
             // racing in finds a free instance instead of `ERROR_PIPE_BUSY`.
-            self.spare = ServerOptions::new().reject_remote_clients(true).create(&self.name).ok();
+            self.spare = self.new_instance().ok();
             Ok(DaemonStream::Server(server))
         }
 
@@ -214,8 +224,9 @@ mod windows_impl {
         }
     }
 
-    /// See [`DaemonListener::bind`]: the pipe ACL already excludes other users
-    /// from read/write connections, so an accepted connection is same-user.
+    /// See [`DaemonListener::bind`]: the owner-only DACL and integrity label
+    /// on every pipe instance stop other accounts and lower-integrity
+    /// processes from opening it, so an accepted connection is same-user.
     pub fn peer_is_same_user(_stream: &DaemonStream) -> io::Result<bool> {
         Ok(true)
     }

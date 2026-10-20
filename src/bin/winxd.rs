@@ -12,6 +12,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    winx_code_agent::os::harden_process();
     let cli = Cli::parse();
     let socket = cli.socket.unwrap_or_else(default_socket_path);
     tracing_subscriber::fmt().with_writer(std::io::stderr).init();
