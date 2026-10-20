@@ -6,6 +6,12 @@ Winx is a Rust 2021 MCP server for shell and coding-agent workflows. The binary 
 
 ## Build, Test, and Development Commands
 
+`justfile` wraps the commands below; run `just --list` to see every recipe. `just check` runs formatting, host clippy,
+the Windows target lint, the test suite, and the MSRV check, and is the gate before any commit. `just install-hooks`
+points Git at `.githooks/`, whose pre-commit hook runs formatting and host clippy and whose commit-msg hook enforces
+Conventional Commit subjects. The toolchain is pinned in `rust-toolchain.toml`; bump it deliberately in its own
+commit, since new clippy lints land with each stable release.
+
 - `cargo check --all-features --locked` performs a fast compile check with the committed lockfile.
 - `WINX_EMBEDDED=1 cargo run --release` starts an in-process development server without sibling daemons.
 - `cargo build --release --locked --bins` produces the complete optimized Unix bundle; run `./target/release/winx-code-agent` afterward.

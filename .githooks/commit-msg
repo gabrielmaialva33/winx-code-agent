@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Enforce the Conventional Commit subject style used in this repository:
+#   <type>(<optional scope>)<optional !>: <description>
+set -euo pipefail
+
+subject="$(sed -n '1p' "$1")"
+types='build|cargo|chore|ci|docs|feat|fix|perf|refactor|revert|style|test'
+
+if [[ "$subject" =~ ^(Merge|Revert|fixup!|squash!) ]]; then
+    exit 0
+fi
+
+if ! [[ "$subject" =~ ^($types)(\([A-Za-z0-9_./-]+\))?!?:\ [^[:space:]].* ]]; then
+    echo "commit-msg: subject must follow Conventional Commits, e.g. 'fix(daemon): reconnect after restart'" >&2
+    echo "commit-msg: allowed types: ${types//|/, }" >&2
+    echo "commit-msg: got: $subject" >&2
+    exit 1
+fi
+
+if (( ${#subject} > 100 )); then
+    echo "commit-msg: subject is ${#subject} characters; keep it at or under 100" >&2
+    exit 1
+fi

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Formatting and host clippy before every commit. Skip once with
+# `WINX_SKIP_HOOKS=1 git commit ...` when a deliberately partial commit is needed.
+set -euo pipefail
+
+if [[ "${WINX_SKIP_HOOKS:-0}" == "1" ]]; then
+    exit 0
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+
+if ! git diff --cached --quiet -- '*.rs' Cargo.toml Cargo.lock; then
+    echo "pre-commit: cargo fmt --all -- --check"
+    cargo fmt --all -- --check
+    echo "pre-commit: cargo clippy --all-targets --all-features --locked -- -D warnings"
+    cargo clippy --all-targets --all-features --locked -- -D warnings
+fi

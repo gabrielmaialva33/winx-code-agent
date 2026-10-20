@@ -38,7 +38,9 @@ Read [Architecture and invariants](docs/architecture.md) before changing cross-c
 
 ## Local Checks
 
-Run these before opening a pull request:
+Run `just check` before opening a pull request (install `just`, then `just install-hooks` once to get the
+pre-commit and commit-msg hooks). It covers the first five commands below; run the rest when your change touches
+packaging, benchmarks, dependencies, or fuzz targets:
 
 ```bash
 cargo fmt --all -- --check
