@@ -46,6 +46,7 @@ pub fn syntax_warning(path: &Path, content: &str) -> Option<String> {
             tree_sitter_warning(content, &language, "C")
         }
         // `.h` is parsed with the C++ grammar, which accepts C headers too.
+        #[cfg(feature = "languages-extra")]
         "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "h" => {
             let language = tree_sitter_cpp::LANGUAGE.into();
             tree_sitter_warning(content, &language, "C++")
@@ -54,6 +55,7 @@ pub fn syntax_warning(path: &Path, content: &str) -> Option<String> {
             let language = tree_sitter_java::LANGUAGE.into();
             tree_sitter_warning(content, &language, "Java")
         }
+        #[cfg(feature = "languages-extra")]
         "rb" => {
             let language = tree_sitter_ruby::LANGUAGE.into();
             tree_sitter_warning(content, &language, "Ruby")
@@ -66,18 +68,22 @@ pub fn syntax_warning(path: &Path, content: &str) -> Option<String> {
             let language = tree_sitter_html::LANGUAGE.into();
             tree_sitter_warning(content, &language, "HTML")
         }
+        #[cfg(feature = "languages-extra")]
         "php" => {
             let language = tree_sitter_php::LANGUAGE_PHP.into();
             tree_sitter_warning(content, &language, "PHP")
         }
+        #[cfg(feature = "languages-extra")]
         "cs" => {
             let language = tree_sitter_c_sharp::LANGUAGE.into();
             tree_sitter_warning(content, &language, "C#")
         }
+        #[cfg(feature = "languages-extra")]
         "lua" => {
             let language = tree_sitter_lua::LANGUAGE.into();
             tree_sitter_warning(content, &language, "Lua")
         }
+        #[cfg(feature = "languages-extra")]
         "ex" | "exs" => {
             let language = tree_sitter_elixir::LANGUAGE.into();
             tree_sitter_warning(content, &language, "Elixir")
@@ -256,12 +262,14 @@ mod tests {
         assert!(syntax_warning(Path::new("main.go"), "package main\nfunc main( {\n").is_some());
     }
 
+    #[cfg(feature = "languages-extra")]
     #[test]
     fn checks_php() {
         assert!(syntax_warning(Path::new("a.php"), "<?php echo 1; ?>\n").is_none());
         assert!(syntax_warning(Path::new("a.php"), "<?php echo (1; ?>\n").is_some());
     }
 
+    #[cfg(feature = "languages-extra")]
     #[test]
     fn checks_elixir() {
         assert!(syntax_warning(Path::new("worker.ex"), "defmodule Worker do\nend\n").is_none());

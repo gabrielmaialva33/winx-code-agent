@@ -793,9 +793,13 @@ mod tests {
         assert_eq!(python_data["language_supported"], true);
 
         let (elixir, elixir_data) = handle_tool_call(&st, args("worker.ex")).await.unwrap();
-        assert!(elixir.contains("Worker"), "{elixir}");
-        assert!(elixir.contains("run"), "{elixir}");
-        assert_eq!(elixir_data["language_supported"], true);
+        if cfg!(feature = "languages-extra") {
+            assert!(elixir.contains("Worker"), "{elixir}");
+            assert!(elixir.contains("run"), "{elixir}");
+            assert_eq!(elixir_data["language_supported"], true);
+        } else {
+            assert_eq!(elixir_data["language_supported"], false, "{elixir}");
+        }
     }
 
     #[tokio::test]

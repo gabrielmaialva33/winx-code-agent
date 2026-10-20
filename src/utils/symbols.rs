@@ -35,16 +35,22 @@ fn lang_and_query(ext: &str) -> Option<(tree_sitter::Language, &'static str)> {
         }
         "tsx" => (tree_sitter_typescript::LANGUAGE_TSX.into(), tree_sitter_typescript::TAGS_QUERY),
         "py" | "pyi" => (tree_sitter_python::LANGUAGE.into(), tree_sitter_python::TAGS_QUERY),
+        #[cfg(feature = "languages-extra")]
         "ex" | "exs" => (tree_sitter_elixir::LANGUAGE.into(), tree_sitter_elixir::TAGS_QUERY),
         "go" => (tree_sitter_go::LANGUAGE.into(), tree_sitter_go::TAGS_QUERY),
         "c" | "h" => (tree_sitter_c::LANGUAGE.into(), tree_sitter_c::TAGS_QUERY),
+        #[cfg(feature = "languages-extra")]
         "cpp" | "cc" | "cxx" | "hpp" | "hxx" | "hh" => {
             (tree_sitter_cpp::LANGUAGE.into(), tree_sitter_cpp::TAGS_QUERY)
         }
         "java" => (tree_sitter_java::LANGUAGE.into(), tree_sitter_java::TAGS_QUERY),
+        #[cfg(feature = "languages-extra")]
         "rb" => (tree_sitter_ruby::LANGUAGE.into(), tree_sitter_ruby::TAGS_QUERY),
+        #[cfg(feature = "languages-extra")]
         "cs" => (tree_sitter_c_sharp::LANGUAGE.into(), tree_sitter_c_sharp::TAGS_QUERY),
+        #[cfg(feature = "languages-extra")]
         "php" => (tree_sitter_php::LANGUAGE_PHP.into(), tree_sitter_php::TAGS_QUERY),
+        #[cfg(feature = "languages-extra")]
         "lua" => (tree_sitter_lua::LANGUAGE.into(), tree_sitter_lua::TAGS_QUERY),
         _ => return None,
     };
@@ -137,7 +143,7 @@ mod tests {
         assert!(supports("rs"));
         assert!(supports("ts"));
         assert!(supports("py"));
-        assert!(supports("ex"));
+        assert_eq!(supports("ex"), cfg!(feature = "languages-extra"));
     }
 
     #[test]
@@ -152,6 +158,7 @@ mod tests {
         assert!(names.contains(&"top"), "got {names:?}");
     }
 
+    #[cfg(feature = "languages-extra")]
     #[test]
     fn extracts_elixir_symbols() {
         let mut ctx = TagsContext::new();
