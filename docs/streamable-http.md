@@ -517,9 +517,15 @@ winx-code-agent doctor
 
 # Offline aggregation and recovery-contract audit; does not open the log writer
 winx-code-agent report --last 10000 --since-minutes 120
+
+# Verified self-update from GitHub Releases (system curl + tar); --check only reports
+winx-code-agent update
 ```
 
 Changing guardian limits or TTL environment variables requires `restart-daemon` because `winxd` reads them at startup.
+After `update`, run `restart-daemon` as well so the control plane runs the new build; guardians keep the old one until
+their sessions end, and `doctor` flags the mix under `mixed_guardian_builds`. Every planned daemon exit writes a
+`<socket>.exit.json` record (reason, pid, epoch), surfaced by `doctor` as `daemon_topology.last_exit`.
 
 ## Persistent usage telemetry
 

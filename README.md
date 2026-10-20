@@ -672,7 +672,16 @@ winx-code-agent doctor
 
 # Aggregate the latest privacy-safe tool/HTTP events and audit recovery invariants
 winx-code-agent report --last 10000 --since-minutes 120
+
+# Download the latest release bundle, verify SHA256SUMS, and swap the three binaries in place
+winx-code-agent update            # --check only reports; --tag vX.Y.Z pins a release
 ```
+
+`update` uses the system `curl` and `tar` (bsdtar on Windows also reads the zip bundle), installs next to the running
+executable, and leaves running daemons on the old build until `restart-daemon` replaces `winxd`; guardians switch as
+their sessions end. `doctor` reports `daemon_topology.last_exit`, the reason the control daemon last stopped on
+purpose (a `winx.shutdown` request, a signal, or a listener failure), so a stale socket without a record means a
+hard kill.
 
 The quota and TTL are enforced by `winxd`, not just by one MCP adapter, so reconnecting clients and multiple adapters
 share the same resource boundary. Under quota pressure, Winx first reclaims the oldest inactive guardian that has never

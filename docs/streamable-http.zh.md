@@ -345,7 +345,12 @@ winx-code-agent restart-daemon
 
 # 输出脱敏后的系统与环境诊断报告
 winx-code-agent doctor
+
+# 从 GitHub Releases 校验并自更新（使用系统 curl 与 tar）；--check 仅报告
+winx-code-agent update
 ```
+
+`update` 之后请运行 `restart-daemon`，让控制平面切换到新二进制；Guardian 会在各自会话结束时切换，`doctor` 会在 `mixed_guardian_builds` 中标出混用。守护进程每次计划内退出都会写入 `<socket>.exit.json`（原因、pid、epoch），`doctor` 在 `daemon_topology.last_exit` 中展示。
 
 ## 遥测与使用日志
 

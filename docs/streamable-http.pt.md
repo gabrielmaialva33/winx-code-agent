@@ -378,7 +378,12 @@ winx-code-agent restart-daemon
 
 # Gerar relatório de diagnóstico sanitizado
 winx-code-agent doctor
+
+# Atualização verificada a partir do GitHub Releases (curl e tar do sistema); --check apenas informa
+winx-code-agent update
 ```
+
+Depois do `update`, rode `restart-daemon` para o plano de controle usar o binário novo; os guardians trocam quando suas sessões terminam, e o `doctor` aponta a mistura em `mixed_guardian_builds`. Toda saída planejada de um daemon grava `<socket>.exit.json` (motivo, pid, epoch), exposto pelo `doctor` em `daemon_topology.last_exit`.
 
 ## Telemetria de Uso Persistente
 
