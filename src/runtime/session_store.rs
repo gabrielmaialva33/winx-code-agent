@@ -82,6 +82,11 @@ impl SessionStore {
         self.backgrounds.peek_tombstone(thread_id, bg_command_id)
     }
 
+    /// Live background shell ids owned by `thread_id`.
+    pub(crate) fn background_ids_for(&self, thread_id: &str) -> Vec<String> {
+        self.backgrounds.ids_for(thread_id)
+    }
+
     pub(crate) fn get_running_info(&mut self, thread_id: &str) -> String {
         self.backgrounds.get_running_info(thread_id)
     }

@@ -165,6 +165,30 @@ pub struct ShellSessionConfiguration {
 pub type ShellRuntimeConfigureFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ShellSessionConfiguration>> + Send + 'a>>;
 
+/// Observational snapshot of one shell session, answered by
+/// `Initialize(type = "status")` without touching the PTY.
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize)]
+pub struct ShellSessionStatus {
+    /// `daemon` or `embedded`.
+    pub runtime: &'static str,
+    /// Guardian process behind this session (daemon runtime only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guardian_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guardian_epoch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub guardian_build: Option<String>,
+    pub command_running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub running_command_id: Option<String>,
+    pub background_command_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_activity_unix_ms: Option<u64>,
+}
+
+pub type ShellRuntimeStatusFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ShellSessionStatus>> + Send + 'a>>;
+
 /// State transition requested by the Initialize tool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShellSessionTransition {
@@ -223,6 +247,36 @@ pub trait ShellRuntime: Send + Sync {
         _bash_state: &'a Arc<Mutex<Option<BashState>>>,
     ) -> ShellRuntimeBoolFuture<'a> {
         self.supports_generation_bound_actions()
+    }
+
+    /// Describe the session without mutating it. The default inspects the
+    /// in-process PTY; daemon-backed runtimes ask the guardian that owns it.
+    fn describe_session<'a>(
+        &'a self,
+        bash_state: &'a Arc<Mutex<Option<BashState>>>,
+    ) -> ShellRuntimeStatusFuture<'a> {
+        Box::pin(async move {
+            let guard = bash_state.lock().await;
+            let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+            let (command_running, running_command_id) = {
+                let shell = state.pty_shell.lock().await;
+                shell.as_ref().map_or((false, None), |shell| {
+                    (
+                        shell.command_running,
+                        shell.command_running.then(|| shell.last_command.clone()),
+                    )
+                })
+            };
+            let background_command_ids =
+                lock_session_store().background_ids_for(&state.current_thread_id);
+            Ok(ShellSessionStatus {
+                runtime: "embedded",
+                command_running,
+                running_command_id,
+                background_command_ids,
+                ..ShellSessionStatus::default()
+            })
+        })
     }
 
     fn interrupt<'a>(

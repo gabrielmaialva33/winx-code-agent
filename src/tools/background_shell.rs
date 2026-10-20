@@ -240,6 +240,19 @@ impl BackgroundShellManager {
     }
 
     /// Get info about all running background shells - matches WCGW Python `get_bg_running_commandsinfo`
+    /// Ids of the live background shells owned by `owner_thread_id`, sorted
+    /// for stable output. Read-only: finished shells are not pruned here.
+    pub fn ids_for(&self, owner_thread_id: &str) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .shells
+            .iter()
+            .filter(|(_, entry)| entry.owner_thread_id == owner_thread_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        ids.sort();
+        ids
+    }
+
     pub fn get_running_info(&mut self, owner_thread_id: &str) -> String {
         self.prune_finished_shells();
 
