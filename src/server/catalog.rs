@@ -105,7 +105,7 @@ fn mcp_tool<T: schemars::JsonSchema>(
 }
 
 const WORKSPACE_ROOT_DESCRIPTION: &str =
-    "Exact canonical workspace_root returned by Initialize. Before every call, confirm it matches the project in the user's current task; if uncertain, Initialize that project. Use it only with the thread_id returned by the same Initialize call. It identifies the project session and is not a filesystem sandbox: target paths may be outside it when WINX_ALLOW_PATHS and the active mode permit. Never infer it from a target file path.";
+    "Exact workspace_root returned by the same Initialize call as thread_id. It names the project session, not a path sandbox; never infer it from a target path. If unsure it is the user's current project, Initialize that project.";
 
 fn with_workspace_binding(
     schema: Arc<serde_json::Map<String, Value>>,
@@ -127,7 +127,7 @@ fn with_workspace_binding(
             thread_id.insert(
                 "description".to_string(),
                 Value::String(
-                    "Exact thread_id returned by the same Initialize call as workspace_root. Select it only after confirming workspace_root matches the user's current project. Never borrow it from another chat or project."
+                    "Exact thread_id returned by the same Initialize call as workspace_root. Never borrow one from another chat or project."
                         .to_string(),
                 ),
             );
@@ -310,7 +310,7 @@ const FILE_WRITE_OR_EDIT_DESCRIPTION: &str =
     "Edit one read file; use MultiFileEdit for batches. For <=50%, use exact SEARCH/REPLACE blocks (optional @line); otherwise read and send the complete file. A SEARCH conflict revokes the read permit: execute its ReadFiles next_action (shell reads do not count), rebuild SEARCH, and retry once. Put helpers in temporary_artifact_dir. verify_command is post-commit; completed_with_issues means the edit remains applied - diagnose it, never repeat it.";
 
 const MULTI_FILE_EDIT_DESCRIPTION: &str =
-    "Atomically edit 2+ read, unique files. Validation failure writes nothing and revokes only the conflicting target's permit; execute its ReadFiles next_action before one corrected retry. Uses FileWriteOrEdit semantics. verify_command is post-commit; completed_with_issues means edits remain applied - never repeat them.";
+    "Edit 2+ read, unique files in one validated batch; each file is replaced atomically and a commit-time failure reports which files were written. Validation failure writes nothing and revokes only the conflicting target's permit; execute its ReadFiles next_action before one corrected retry. Uses FileWriteOrEdit semantics. verify_command is post-commit; completed_with_issues means edits remain applied - never repeat them.";
 
 const APPLY_PATCH_DESCRIPTION: &str =
     "Patch one exact ReadFiles revision with ordered non-overlapping 1-based ranges. Copy path/revision; delete_lines=0 inserts and totalLines+1 appends. Only visible lines may change. On revision_mismatch execute the exact ReadFiles nextAction; never retry stale input. Prefer this over SEARCH when coordinates are known.";

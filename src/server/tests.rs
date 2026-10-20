@@ -1146,14 +1146,14 @@ mod schema_tests {
             assert!(
                 workspace["description"]
                     .as_str()
-                    .is_some_and(|description| description.contains("not a filesystem sandbox")),
+                    .is_some_and(|description| description.contains("not a path sandbox")),
                 "{} does not distinguish identity from path authority: {workspace}",
                 tool.name
             );
             assert!(
                 workspace["description"]
                     .as_str()
-                    .is_some_and(|description| description.contains("user's current task")),
+                    .is_some_and(|description| description.contains("user's current project")),
                 "{} does not require a current-project check: {workspace}",
                 tool.name
             );

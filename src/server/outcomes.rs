@@ -47,26 +47,24 @@ pub(super) struct RequiredRead {
     pub ranges: Vec<String>,
 }
 
-/// Shared structured output advertised by Winx tools.
-///
-/// Text content remains the backwards-compatible human-readable result. This
-/// object gives an LLM an unambiguous state transition and safe next action.
-/// Some clients expose only this object to the model once a tool advertises an
-/// `outputSchema` (observed with the `ChatGPT` MCP connector and Claude Code),
-/// so `output` carries the delivered text as well instead of leaving the model
-/// with byte counts alone.
+/// Structured result shared by every Winx tool: authoritative `status`, the
+/// delivered text in `output`, and the safe next action.
+//
+// Text content remains the backwards-compatible human-readable result. Some
+// clients expose only this object to the model once a tool advertises an
+// `outputSchema` (observed with the ChatGPT MCP connector and Claude Code), so
+// `output` carries the delivered text as well instead of leaving the model
+// with byte counts alone. Doc comments here become `outputSchema`
+// descriptions repeated for every tool in `tools/list`; keep them short.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ToolResultEnvelope {
     pub status: ToolResultStatus,
     pub tool: String,
     pub message: String,
-    /// Delivered text for this invocation, after output limits, redaction and
-    /// response transformations: the text content blocks joined in order with
-    /// a single newline. Read it for command output, file text and
-    /// diagnostics. Omitted when no text block is returned (image-only
-    /// results) and for `CodeMap` results whose `files`/`hits` already carry
-    /// the symbols; `CodeMap` diagnostics without symbols keep it.
+    /// The delivered text (command output, file text, diagnostics), joined
+    /// from the text content blocks. Omitted for image-only results and for
+    /// `CodeMap` results whose `files`/`hits` already carry the symbols.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
