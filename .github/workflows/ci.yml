@@ -118,6 +118,9 @@ jobs:
       - name: File whitelist timing regression
         run: cargo test --all-features --locked --test file_write_edit_test test_whitelist_after_read -- --ignored --test-threads=1
 
+      - name: PowerShell shell contract (pwsh is preinstalled on ubuntu-latest)
+        run: cargo test --all-features --locked --test powershell_pty_test -- --ignored --test-threads=1
+
   security:
     name: Dependency security and policy
     runs-on: ubuntu-latest
