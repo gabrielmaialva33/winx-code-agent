@@ -93,9 +93,18 @@ impl ControlServer {
     }
 
     pub async fn serve(mut self) -> Result<()> {
+        crate::daemon::exit::install("winxd", &self.socket_path, &self.epoch);
         self.lifecycle.clone().spawn_sweeper();
         loop {
-            let stream = self.listener.accept().await?;
+            let stream = match self.listener.accept().await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    crate::daemon::exit::record_current(
+                        &crate::daemon::exit::ExitReason::ListenerFailure(error.to_string()),
+                    );
+                    return Err(error.into());
+                }
+            };
             if !crate::daemon::transport::peer_is_same_user(&stream)? {
                 tracing::warn!("Rejected winxd control connection from a different uid");
                 continue;

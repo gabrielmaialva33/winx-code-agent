@@ -495,6 +495,20 @@ impl GuardianLifecycle {
     }
 
     async fn remove_artifacts(&self, socket: &Path) {
+        if let Some(record) = crate::daemon::exit::take_record(socket).await {
+            tracing::info!(
+                socket = %socket.display(),
+                pid = record.pid,
+                reason = %record.reason,
+                detail = record.detail.as_deref().unwrap_or(""),
+                "guardian left an exit record"
+            );
+        } else {
+            tracing::info!(
+                socket = %socket.display(),
+                "guardian left no exit record; it did not exit on purpose"
+            );
+        }
         for path in [socket.to_path_buf(), metadata_path(socket)] {
             match tokio::fs::remove_file(&path).await {
                 Ok(()) => {}

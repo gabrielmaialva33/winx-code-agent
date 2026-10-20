@@ -3,6 +3,7 @@
 
 mod client;
 mod control;
+pub mod exit;
 mod lifecycle;
 mod protocol;
 mod server;

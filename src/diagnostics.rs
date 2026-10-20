@@ -165,8 +165,14 @@ async fn add_runtime_report(report: &mut Value) {
         entries.push(entry);
     }
 
+    let last_exit = selected
+        .as_deref()
+        .map(std::path::Path::new)
+        .and_then(crate::daemon::exit::read_record)
+        .map_or(Value::Null, |record| serde_json::to_value(record).unwrap_or(Value::Null));
     report["daemon_topology"] = json!({
         "selected_socket": selected,
+        "last_exit": last_exit,
         "reachable_count": reachable,
         "compatible_count": compatible,
         "split_brain": reachable > 1,

@@ -347,12 +347,21 @@ impl DaemonServer {
         let listener = crate::daemon::transport::DaemonListener::bind(&socket_path)?;
         crate::daemon::transport::restrict_to_owner(&socket_path, 0o600).await?;
         let epoch = format!("{:016x}", rand::random::<u64>());
+        crate::daemon::exit::install("winx-guardian", &socket_path, &epoch);
         Ok(Self { listener, socket_path, sessions: Arc::new(Mutex::new(HashMap::new())), epoch })
     }
 
     pub async fn serve(mut self) -> Result<()> {
         loop {
-            let stream = self.listener.accept().await?;
+            let stream = match self.listener.accept().await {
+                Ok(stream) => stream,
+                Err(error) => {
+                    crate::daemon::exit::record_current(
+                        &crate::daemon::exit::ExitReason::ListenerFailure(error.to_string()),
+                    );
+                    return Err(error.into());
+                }
+            };
             if !crate::daemon::transport::peer_is_same_user(&stream)? {
                 tracing::warn!("Rejected winxd connection from a different uid");
                 continue;
@@ -1404,8 +1413,8 @@ fn rpc_error(id: u64, code: i32, message: &str) -> RpcResponse {
 pub(crate) fn schedule_process_exit(role: &'static str) {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        tracing::info!("{role} exiting on winx.shutdown request");
-        std::process::exit(0);
+        tracing::debug!("{role} exiting on winx.shutdown request");
+        crate::daemon::exit::leave(&crate::daemon::exit::ExitReason::ShutdownRequest);
     });
 }
 
