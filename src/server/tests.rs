@@ -1486,6 +1486,25 @@ mod discovery_protocol_tests {
             .as_array()
             .is_some_and(|versions| versions.iter().any(|version| version == "2026-07-28")));
 
+        // The probe alone commits to no lifecycle (rmcp 3.6+), and `ping` is
+        // allowed before `initialize`. The first other request with complete
+        // inline metadata selects the stateless lifecycle without an
+        // `initialize` round trip.
+        client_write
+            .write_all(
+                b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{\"_meta\":{\"io.modelcontextprotocol/protocolVersion\":\"2026-07-28\",\"io.modelcontextprotocol/clientInfo\":{\"name\":\"discovery-test\",\"version\":\"1\"},\"io.modelcontextprotocol/clientCapabilities\":{}}}}\n",
+            )
+            .await
+            .expect("write stateless tools/list");
+        let mut line = String::new();
+        client_read.read_line(&mut line).await.expect("read tools/list response");
+        let response: Value = serde_json::from_str(&line).expect("valid tools/list response");
+        assert_eq!(response["id"], 2);
+        assert!(
+            response["result"]["tools"].is_array(),
+            "stateless tools/list should succeed: {response}"
+        );
+
         drop(client_read);
         drop(client_write);
         task.await.expect("server task");
