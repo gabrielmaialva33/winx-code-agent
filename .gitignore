@@ -15,3 +15,8 @@ tmp
 .antigravitycli
 .winx
 cache/
+
+# cargo-fuzz corpus and crash reproducers live in CI caches/artifacts.
+fuzz/corpus/
+fuzz/artifacts/
+fuzz/coverage/

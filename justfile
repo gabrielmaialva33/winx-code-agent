@@ -72,6 +72,10 @@ deny:
     cargo deny --all-features check
     cargo audit --deny warnings
 
+# Run one fuzz target for `seconds` (needs nightly and cargo-fuzz), e.g. `just fuzz terminal 120`
+fuzz target seconds="60":
+    cargo +nightly fuzz run {{target}} -- -max_total_time={{seconds}} -rss_limit_mb=2048 -timeout=20
+
 # Verify the crates.io package and the benchmark build
 package:
     cargo package --locked
