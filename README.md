@@ -143,7 +143,9 @@ Secure MCP Tunnel / VPN / authenticated reverse proxy
   pipelines, `&&`/`||`/`;`, command substitution, subshells - not just the first word, and can't be bypassed with
   `ls && curl … | sh` or `ls $(rm …)`.
 - A resilient PTY: a shell that won't return to a prompt (even after Ctrl-C) is auto-reset at the same cwd/mode, child
-  processes are reaped on drop, and prompt detection is robust to a custom `PS1`. Opt into `zsh` with `WINX_SHELL=zsh`.
+  processes are reaped on drop, and prompt detection is robust to a custom `PS1`. Opt into `zsh` with `WINX_SHELL=zsh`,
+  or into PowerShell 7 with `WINX_SHELL=pwsh` (same completion marker, exit codes and cwd tracking; one pipeline per
+  call unless `allow_multi`).
 - File reads with WCGW-style line ranges (`file.rs:10-40`, `file.rs:10-`, `file.rs:-40`). Active files are tracked
   and prioritized in the repository context across calls.
 - One public `EditFiles` tool for replace, SEARCH/REPLACE, revision-bound line patch, atomic batches, verification, and
@@ -333,7 +335,9 @@ default-on `languages-extra` feature; `cargo install winx-code-agent --no-defaul
 the adapter when `CodeMap` only needs the other languages. The durable daemon runtime runs on Linux, macOS, WSL2, and native
 Windows 10/11 (named pipes under `%LOCALAPPDATA%\winx\run`, job objects for the shell tree, no WSL involved). On
 native Windows the shell is the Git for Windows `bash.exe` (resolved from the standard install locations or `PATH`;
-the WSL launcher in `System32` is never used), so install Git for Windows before running `BashCommand`. GitHub
+the WSL launcher in `System32` is never used). Without Git for Windows, Winx drives PowerShell instead (`pwsh`, else
+Windows PowerShell 5.1) with the same completion contract; `WINX_SHELL=pwsh` selects it explicitly, and restricted
+mode still requires bash. GitHub
 Release downloads are `.tar.gz` bundles on Unix and a `.zip` bundle on Windows, each containing all three sibling
 binaries.
 
@@ -841,7 +845,7 @@ All optional - Winx works out of the box without any of these. Boolean variables
 | `WINX_KEEP_TAIL_PIPE`                                      | Set to `1` to keep a trailing `\| tail …` instead of stripping it. Winx truncates output server-side, so by default it drops a redundant trailing `tail` (wcgw parity).                                                                                                                                                                                                                                                                                 |
 | `WINX_USE_SCREEN` / `WINX_ATTACH_TERMINAL`                 | Run the shell inside `screen`/`tmux` so you can attach to the live session. Set to `screen`, `tmux`, or any truthy value; Winx prints an attach hint on `Initialize`.                                                                                                                                                                                                                                                                                   |
 | `WINX_OPEN_CONTEXT`                                        | Set to `1` to open the saved context file in your default app after `ContextSave`.                                                                                                                                                                                                                                                                                                                                                                      |
-| `WINX_SHELL`                                               | Set to `zsh` to run the session under zsh instead of bash (opt-in; bash stays the default). Falls back to bash if zsh isn't on `PATH` or the mode is restricted. An absolute path selects that exact shell binary; `WINX_SHELL_ARGS` appends whitespace-separated arguments (for example `-i --login`). On native Windows the default is the Git for Windows `bash.exe`. |
+| `WINX_SHELL`                                               | Set to `zsh` to run the session under zsh instead of bash (opt-in; bash stays the default). Falls back to bash if zsh isn't on `PATH` or the mode is restricted. An absolute path selects that exact shell binary; `WINX_SHELL_ARGS` appends whitespace-separated arguments (for example `-i --login`). On native Windows the default is the Git for Windows `bash.exe`. `pwsh` or `powershell` selects PowerShell 7 (Windows PowerShell 5.1 as the Windows fallback); restricted mode always keeps bash. |
 | `WINX_SERVER_INSTRUCTIONS`                                 | Extra operator instructions appended to the MCP handshake and every `Initialize` response, after Winx's built-in orchestration contract.                                                                                                                                                                                                                                                                                                                |
 
 ## Verifying releases
