@@ -102,15 +102,24 @@ pub fn run(options: &UpdateOptions) -> Result<UpdateReport> {
         next_step: "nothing to do",
     };
 
+    // One decision for `--check` and for the install: an implicit "latest"
+    // only moves forward, an explicit `--tag` may go anywhere, and `--force`
+    // reinstalls even the same version.
+    let wanted = should_install(options.tag.is_some(), newer, same);
     if options.check_only {
-        if newer || (options.tag.is_some() && !same) {
+        if wanted {
             report.action = UpdateAction::UpdateAvailable;
             report.next_step = "run `winx-code-agent update` to install it";
         }
         return Ok(report);
     }
-    if same && !options.force {
-        report.next_step = "already on this version; pass --force to reinstall";
+    if !wanted && !options.force {
+        report.next_step = if same {
+            "already on this version; pass --force to reinstall"
+        } else {
+            "installed build is newer than the latest release; pass --tag to pin a release or \
+             --force to reinstall"
+        };
         return Ok(report);
     }
 
@@ -149,16 +158,40 @@ pub fn run(options: &UpdateOptions) -> Result<UpdateReport> {
             install_dir.display()
         ))
     })?;
-    for source in binaries {
+    // One update per install directory at a time: two concurrent runs would
+    // otherwise commit each other's staged files and leave a mixed bundle.
+    let _install_lock = InstallLock::acquire(&install_dir)?;
+    // Stage all three beside their targets first, so a full disk, a name
+    // collision, or a permission problem surfaces before any executable is
+    // touched; then commit the daemons and the adapter last, since the
+    // adapter's version is what a later `update` compares against.
+    let mut staged = Vec::with_capacity(binaries.len());
+    for source in binaries.iter().rev() {
         let file_name = source.file_name().map(OsStr::to_os_string).unwrap_or_default();
         let destination = install_dir.join(file_name);
-        replace_binary(&source, &destination)?;
+        let staging =
+            stage_binary(source, &destination).inspect_err(|_| discard_staged(&staged))?;
+        staged.push((staging, destination));
+    }
+    for (staging, destination) in staged {
+        commit_binary(&staging, &destination)?;
         report.installed.push(destination);
     }
     report.action = UpdateAction::Installed;
     report.next_step = "run `winx-code-agent restart-daemon` so winxd uses the new build; \
                         guardians switch as their sessions end";
     Ok(report)
+}
+
+/// Whether a release is worth installing without `--force`: an implicit
+/// "latest" never downgrades, an explicit tag installs anything but the
+/// current version.
+fn should_install(explicit_tag: bool, newer: bool, same: bool) -> bool {
+    if explicit_tag {
+        !same
+    } else {
+        newer
+    }
 }
 
 /// Release asset built for this operating system and architecture.
@@ -327,19 +360,78 @@ fn find_file(root: &Path, file_name: &str, depth: usize) -> Option<PathBuf> {
 }
 
 /// Swap `source` into `destination` without ever leaving a half-written
-/// executable in place. The new file is staged beside the target and renamed
-/// over it; on Windows a running executable cannot be overwritten but can be
-/// renamed, so the old one moves aside first.
+/// executable in place: [`stage_binary`] then [`commit_binary`].
 pub fn replace_binary(source: &Path, destination: &Path) -> Result<()> {
-    let staged = sibling_with_suffix(destination, ".new");
-    std::fs::copy(source, &staged).map_err(|error| {
+    let staged = stage_binary(source, destination)?;
+    commit_binary(&staged, destination)
+}
+
+/// Exclusive advisory lock on `<install_dir>/.winx-update.lock`, held for the
+/// duration of one update.
+#[derive(Debug)]
+struct InstallLock {
+    _file: std::fs::File,
+}
+
+impl InstallLock {
+    fn acquire(install_dir: &Path) -> Result<Self> {
+        let path = install_dir.join(".winx-update.lock");
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|error| {
+                WinxError::CommandExecutionError(format!("cannot open {}: {error}", path.display()))
+            })?;
+        match file.try_lock() {
+            Ok(()) => Ok(Self { _file: file }),
+            Err(std::fs::TryLockError::WouldBlock) => Err(WinxError::CommandExecutionError(
+                format!("another update is running in {}", install_dir.display()),
+            )),
+            Err(std::fs::TryLockError::Error(error)) => Err(WinxError::CommandExecutionError(
+                format!("cannot lock {}: {error}", path.display()),
+            )),
+        }
+    }
+}
+
+/// Copy `source` to a private `<destination>.new-<pid>-<random>` (same
+/// directory, so the later rename is atomic) and mark it executable. Nothing
+/// in place changes yet, and no other process can hand us its file.
+pub fn stage_binary(source: &Path, destination: &Path) -> Result<PathBuf> {
+    let staged = sibling_with_suffix(
+        destination,
+        &format!(".new-{}-{:08x}", std::process::id(), rand::random::<u32>()),
+    );
+    if std::fs::symlink_metadata(&staged).is_ok() {
+        return Err(WinxError::CommandExecutionError(format!(
+            "cannot stage {}: something is already in the way",
+            staged.display()
+        )));
+    }
+    let mut reader = std::fs::File::open(source).map_err(|error| {
+        WinxError::CommandExecutionError(format!("cannot read {}: {error}", source.display()))
+    })?;
+    let mut writer = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&staged)
+        .map_err(|error| {
+            WinxError::CommandExecutionError(format!("cannot stage {}: {error}", staged.display()))
+        })?;
+    std::io::copy(&mut reader, &mut writer).map_err(|error| {
+        let _ = std::fs::remove_file(&staged);
         WinxError::CommandExecutionError(format!("cannot stage {}: {error}", staged.display()))
     })?;
+    drop(writer);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755)).map_err(
             |error| {
+                let _ = std::fs::remove_file(&staged);
                 WinxError::CommandExecutionError(format!(
                     "cannot mark {} executable: {error}",
                     staged.display()
@@ -347,6 +439,18 @@ pub fn replace_binary(source: &Path, destination: &Path) -> Result<()> {
             },
         )?;
     }
+    Ok(staged)
+}
+
+fn discard_staged(staged: &[(PathBuf, PathBuf)]) {
+    for (staging, _) in staged {
+        let _ = std::fs::remove_file(staging);
+    }
+}
+
+/// Move a staged file over `destination`. On Windows a running executable
+/// cannot be overwritten but can be renamed, so the old one moves aside first.
+pub fn commit_binary(staged: &Path, destination: &Path) -> Result<()> {
     if cfg!(windows) && destination.exists() {
         let retired = sibling_with_suffix(destination, ".old");
         let _ = std::fs::remove_file(&retired);
@@ -357,8 +461,8 @@ pub fn replace_binary(source: &Path, destination: &Path) -> Result<()> {
             ))
         })?;
     }
-    std::fs::rename(&staged, destination).map_err(|error| {
-        let _ = std::fs::remove_file(&staged);
+    std::fs::rename(staged, destination).map_err(|error| {
+        let _ = std::fs::remove_file(staged);
         WinxError::CommandExecutionError(format!(
             "cannot install {}: {error}",
             destination.display()
@@ -490,6 +594,17 @@ mod tests {
     }
 
     #[test]
+    fn implicit_latest_never_downgrades_but_an_explicit_tag_may() {
+        // (explicit_tag, newer, same)
+        assert!(should_install(false, true, false), "latest is newer");
+        assert!(!should_install(false, false, true), "already current");
+        assert!(!should_install(false, false, false), "installed build is newer than latest");
+        assert!(should_install(true, false, false), "pinned older tag");
+        assert!(should_install(true, true, false), "pinned newer tag");
+        assert!(!should_install(true, false, true), "pinned current tag");
+    }
+
+    #[test]
     fn checksum_manifest_parses_sha256sum_output() {
         let manifest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  winx-linux-amd64.tar.gz\n\
                         ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789 *winx-windows-amd64.zip\n\
@@ -561,6 +676,37 @@ mod tests {
             let mode = std::fs::metadata(&destination).expect("metadata").permissions().mode();
             assert_eq!(mode & 0o111, 0o111, "installed binary must be executable");
         }
+    }
+
+    #[test]
+    fn staging_uses_a_private_name_and_never_follows_a_planted_symlink() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("src.bin");
+        std::fs::write(&source, b"new").expect("write new");
+        let destination = dir.path().join("winxd");
+        std::fs::write(&destination, b"old").expect("write old");
+        std::fs::write(dir.path().join("winxd.new"), b"planted").expect("foreign staging file");
+        let staged = stage_binary(&source, &destination).expect("stage");
+        assert_ne!(staged, dir.path().join("winxd.new"), "staging must not reuse a shared name");
+        assert_eq!(std::fs::read(&staged).expect("read staged"), b"new");
+        assert_eq!(std::fs::read(&destination).expect("read"), b"old", "target untouched");
+        commit_binary(&staged, &destination).expect("commit");
+        assert_eq!(std::fs::read(&destination).expect("read"), b"new");
+        assert_eq!(
+            std::fs::read(dir.path().join("winxd.new")).expect("foreign file"),
+            b"planted",
+            "someone else's staging file is left alone"
+        );
+    }
+
+    #[test]
+    fn only_one_update_runs_per_install_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = InstallLock::acquire(dir.path()).expect("first lock");
+        let error = InstallLock::acquire(dir.path()).expect_err("second lock must fail");
+        assert!(error.to_string().contains("another update is running"), "{error}");
+        drop(first);
+        InstallLock::acquire(dir.path()).expect("lock is released with its holder");
     }
 
     #[test]
