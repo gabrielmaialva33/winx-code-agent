@@ -340,7 +340,7 @@ shell-runtime failure. A repeated reset within five minutes and without new fail
 allowed absolute targets, or start a new conversation for a genuinely different project. A finite post-edit check can be
 supplied as `verify_command` on `EditFiles`, saving one network/model round trip. Extra
 `WINX_SERVER_INSTRUCTIONS` are appended after those stable rules and are also included in the `Initialize` response for
-clients that do not expose handshake instructions to the model.
+clients that do not expose handshake instructions to the model. When unsure whether a pair is still live, call `Initialize` with `type="status"` and that pair: it answers with the bound workspace, cwd, mode, runtime and command state (`session_status` in `structuredContent`) and never creates, resets or reconfigures anything; an unknown pair returns `needs_initialize`.
 
 Every tool advertises an `outputSchema` and returns a common `structuredContent` envelope. Existing text and image content
 remain unchanged for older clients. Some clients expose only the structured object to the model once a tool advertises
