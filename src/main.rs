@@ -112,6 +112,14 @@ enum Commands {
         )]
         requests_per_minute: u32,
 
+        /// Fixed-window request limit per authenticated principal (fairness when
+        /// every client arrives through one tunnel or reverse proxy).
+        #[arg(
+            long,
+            default_value_t = winx_code_agent::http_server::DEFAULT_PRINCIPAL_REQUESTS_PER_MINUTE
+        )]
+        principal_requests_per_minute: u32,
+
         /// Extra Host authority to accept (your tunnel hostname, e.g.
         /// abc.trycloudflare.com). Repeatable. Loopback is always allowed.
         #[arg(long = "allowed-host")]
@@ -242,6 +250,7 @@ async fn async_main(cli: Cli) -> Result<()> {
             session_affinity,
             max_concurrency,
             requests_per_minute,
+            principal_requests_per_minute,
             allowed_host,
             allow_query_token,
         }) => {
@@ -257,6 +266,7 @@ async fn async_main(cli: Cli) -> Result<()> {
                 session_affinity,
                 max_concurrency,
                 requests_per_minute,
+                principal_requests_per_minute,
                 allowed_host,
                 allow_query_token,
             )
@@ -420,6 +430,7 @@ async fn run_http_server(
     session_affinity: winx_code_agent::config::HttpSessionAffinity,
     max_concurrency: usize,
     requests_per_minute: u32,
+    principal_requests_per_minute: u32,
     allowed_hosts: Vec<String>,
     allow_query_token: bool,
 ) -> Result<()> {
@@ -445,6 +456,7 @@ async fn run_http_server(
         session_affinity,
         max_concurrency,
         requests_per_minute,
+        principal_requests_per_minute,
     };
     tracing::info!(
         build = %winx_code_agent::build_info::display_version(),

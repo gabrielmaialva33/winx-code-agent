@@ -21,6 +21,8 @@ rmcp = { version = "3.1.2", features = [
 
 # HTTP server for the primary remote MCP transport (ChatGPT custom apps, hosted agents, etc.)
 axum = "0.8"
+# Response-body wrapper that keeps the admission permit until a stream ends.
+http-body = "1"
 # Tower middleware for the HTTP transport: request body-size cap + per-request
 # timeout on the network-reachable RCE endpoint.
 tower-http = { version = "0.7", features = ["limit", "timeout"] }

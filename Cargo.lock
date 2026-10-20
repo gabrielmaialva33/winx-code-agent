@@ -2974,6 +2974,7 @@ dependencies = [
  "criterion",
  "glob",
  "home",
+ "http-body",
  "ignore",
  "image",
  "landlock",

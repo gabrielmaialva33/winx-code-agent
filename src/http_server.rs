@@ -44,6 +44,10 @@ const MAX_RATE_TRACKED_IPS: usize = 4_096;
 const INVALID_AUTH_DELAY: Duration = Duration::from_millis(100);
 pub const DEFAULT_MAX_CONCURRENCY: usize = 32;
 pub const DEFAULT_REQUESTS_PER_MINUTE: u32 = 120;
+/// Fixed-window request budget per authenticated principal. Behind one reverse
+/// proxy every client shares a single source IP, so the IP window alone cannot
+/// keep one busy principal from starving the others.
+pub const DEFAULT_PRINCIPAL_REQUESTS_PER_MINUTE: u32 = 120;
 
 #[derive(Debug)]
 struct HealthState {
@@ -81,6 +85,7 @@ pub struct HttpServerOptions {
     pub session_affinity: HttpSessionAffinity,
     pub max_concurrency: usize,
     pub requests_per_minute: u32,
+    pub principal_requests_per_minute: u32,
 }
 
 impl HttpServerOptions {
@@ -101,6 +106,7 @@ impl HttpServerOptions {
             session_affinity: HttpSessionAffinity::Workspace,
             max_concurrency: DEFAULT_MAX_CONCURRENCY,
             requests_per_minute: DEFAULT_REQUESTS_PER_MINUTE,
+            principal_requests_per_minute: DEFAULT_PRINCIPAL_REQUESTS_PER_MINUTE,
         })
     }
 }
@@ -129,6 +135,7 @@ pub async fn start_http_server_with_runtime(
         options.principals.iter().map(|principal| principal.name().to_string()).collect::<Vec<_>>();
     let shared_concurrency = Arc::new(Semaphore::new(options.max_concurrency));
     let shared_rate_limiter = Arc::new(RateLimiter::new(options.requests_per_minute));
+    let principal_rate_limiter = Arc::new(RateLimiter::new(options.principal_requests_per_minute));
 
     let mut config = StreamableHttpServerConfig::default();
     config.legacy_session_mode = true;
@@ -144,6 +151,7 @@ pub async fn start_http_server_with_runtime(
         session_affinity: options.session_affinity,
         concurrency: shared_concurrency,
         rate_limiter: shared_rate_limiter,
+        principal_rate_limiter,
         session_owners: Arc::new(SessionOwners::default()),
         session_manager,
     });
@@ -243,6 +251,9 @@ fn validate_options(options: &HttpServerOptions) -> Result<SocketAddr, BoxError>
     if options.requests_per_minute == 0 {
         return Err("requests_per_minute must be at least 1".into());
     }
+    if options.principal_requests_per_minute == 0 {
+        return Err("principal_requests_per_minute must be at least 1".into());
+    }
     if options.principals.is_empty() {
         return Err("at least one HTTP principal is required".into());
     }
@@ -261,7 +272,8 @@ struct RouteSecurity {
     allow_query: bool,
     session_affinity: HttpSessionAffinity,
     concurrency: Arc<Semaphore>,
-    rate_limiter: Arc<RateLimiter>,
+    rate_limiter: Arc<RateLimiter<IpAddr>>,
+    principal_rate_limiter: Arc<RateLimiter<String>>,
     session_owners: Arc<SessionOwners>,
     session_manager: Arc<LocalSessionManager>,
 }
@@ -347,9 +359,11 @@ async fn enforce_route_security(
     }
     let started = Instant::now();
     if !security.rate_limiter.allow(peer.ip()).await {
+        log_rejection(peer, None, "ip_rate_limit", StatusCode::TOO_MANY_REQUESTS);
         return retry_response(StatusCode::TOO_MANY_REQUESTS, "request rate limit exceeded\n");
     }
     let Ok(permit) = security.concurrency.clone().try_acquire_owned() else {
+        log_rejection(peer, None, "concurrency", StatusCode::SERVICE_UNAVAILABLE);
         return retry_response(StatusCode::SERVICE_UNAVAILABLE, "too many concurrent requests\n");
     };
 
@@ -362,10 +376,20 @@ async fn enforce_route_security(
             path = %request.uri().path(),
             "rejected request with missing or invalid HTTP token"
         );
+        log_rejection(peer, None, "auth", StatusCode::UNAUTHORIZED);
         return (StatusCode::UNAUTHORIZED, "missing or invalid token\n").into_response();
     };
 
     let principal_name = principal.name().to_string();
+    if !security.principal_rate_limiter.allow(principal_name.clone()).await {
+        log_rejection(
+            peer,
+            Some(&principal_name),
+            "principal_rate_limit",
+            StatusCode::TOO_MANY_REQUESTS,
+        );
+        return retry_response(StatusCode::TOO_MANY_REQUESTS, "principal rate limit exceeded\n");
+    }
     let method = request.method().clone();
     let correlation = RequestCorrelation::new();
     // A transport session id belongs to the principal that created it. Any
@@ -379,6 +403,7 @@ async fn enforce_route_security(
                 principal = %principal_name,
                 "rejected request presenting another principal's MCP session id"
             );
+            log_rejection(peer, Some(&principal_name), "foreign_session", StatusCode::NOT_FOUND);
             return (StatusCode::NOT_FOUND, "session not found\n").into_response();
         }
     }
@@ -386,8 +411,10 @@ async fn enforce_route_security(
     request.extensions_mut().insert(principal);
     request.extensions_mut().insert(security.session_affinity);
     request.extensions_mut().insert(correlation.clone());
-    let response = next.run(request).await;
-    drop(permit);
+    // The permit travels with the body: a streaming response (SSE) keeps its
+    // concurrency slot until the stream ends, not just until headers exist.
+    let response =
+        next.run(request).await.map(|body| axum::body::Body::new(PermitBody::new(body, permit)));
     if response.status().is_success() {
         if let Some(minted) = session_id_header(response.headers()) {
             for evicted in security.session_owners.record(&minted, &principal_name) {
@@ -421,6 +448,55 @@ async fn enforce_route_security(
     response
 }
 
+/// One redacted `winx::usage` event per admission rejection, so overload and
+/// auth failures are visible in reports instead of vanishing before the
+/// per-request event.
+fn log_rejection(peer: SocketAddr, principal: Option<&str>, reason: &str, status: StatusCode) {
+    tracing::info!(
+        target: "winx::usage",
+        event = "http_rejected",
+        principal = principal.unwrap_or(""),
+        peer = %peer,
+        reason,
+        status = status.as_u16(),
+        "http request rejected"
+    );
+}
+
+/// Response body that owns the admission permit until the last frame is
+/// consumed or the body is dropped.
+struct PermitBody<B> {
+    inner: std::pin::Pin<Box<B>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl<B> PermitBody<B> {
+    fn new(inner: B, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        Self { inner: Box::pin(inner), _permit: permit }
+    }
+}
+
+impl<B: http_body::Body> http_body::Body for PermitBody<B> {
+    type Data = B::Data;
+    type Error = B::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+        // `Pin<Box<B>>` and the permit are both `Unpin`, so the struct is too.
+        self.get_mut().inner.as_mut().poll_frame(cx)
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.inner.is_end_stream()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        self.inner.size_hint()
+    }
+}
+
 fn retry_response(status: StatusCode, body: &'static str) -> Response {
     let mut response = (status, body).into_response();
     response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
@@ -435,23 +511,25 @@ struct RateWindow {
 }
 
 #[derive(Debug)]
-struct RateLimiter {
+/// Fixed-window limiter keyed by source IP (pre-auth abuse control) or by
+/// authenticated principal (fairness behind a shared proxy).
+struct RateLimiter<K> {
     requests_per_window: u32,
-    windows: Mutex<HashMap<IpAddr, RateWindow>>,
+    windows: Mutex<HashMap<K, RateWindow>>,
 }
 
-impl RateLimiter {
+impl<K: std::hash::Hash + Eq + Clone> RateLimiter<K> {
     fn new(requests_per_window: u32) -> Self {
         Self { requests_per_window, windows: Mutex::new(HashMap::new()) }
     }
 
-    async fn allow(&self, peer: IpAddr) -> bool {
+    async fn allow(&self, peer: K) -> bool {
         let now = Instant::now();
         let mut windows = self.windows.lock().await;
         windows.retain(|_, window| now.duration_since(window.last_seen) < RATE_WINDOW * 2);
         if !windows.contains_key(&peer) && windows.len() >= MAX_RATE_TRACKED_IPS {
             if let Some(oldest) =
-                windows.iter().min_by_key(|(_, window)| window.last_seen).map(|(ip, _)| *ip)
+                windows.iter().min_by_key(|(_, window)| window.last_seen).map(|(ip, _)| ip.clone())
             {
                 windows.remove(&oldest);
             }
@@ -491,6 +569,43 @@ fn bearer_token(request: &Request) -> Option<&str> {
 
 fn query_token(request: &Request) -> Option<&str> {
     request.uri().query()?.split('&').find_map(|pair| pair.strip_prefix("token="))
+}
+
+#[cfg(test)]
+mod admission_tests {
+    #![allow(clippy::expect_used)]
+    use std::sync::Arc;
+
+    use tokio::sync::Semaphore;
+
+    use super::{PermitBody, RateLimiter};
+
+    #[tokio::test]
+    async fn principal_windows_are_independent_of_each_other() {
+        let limiter: RateLimiter<String> = RateLimiter::new(2);
+        assert!(limiter.allow("left".to_string()).await);
+        assert!(limiter.allow("left".to_string()).await);
+        assert!(!limiter.allow("left".to_string()).await, "left exhausted its window");
+        assert!(limiter.allow("right".to_string()).await, "right is unaffected");
+    }
+
+    #[tokio::test]
+    async fn permit_is_released_only_when_the_body_finishes() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let permit = semaphore.clone().try_acquire_owned().expect("permit");
+        let body =
+            axum::body::Body::new(PermitBody::new(axum::body::Body::from("payload"), permit));
+        assert_eq!(semaphore.available_permits(), 0, "held while the body is pending");
+        let bytes = axum::body::to_bytes(body, usize::MAX).await.expect("read body");
+        assert_eq!(&bytes[..], b"payload");
+        assert_eq!(semaphore.available_permits(), 1, "released with the consumed body");
+
+        let permit = semaphore.clone().try_acquire_owned().expect("permit again");
+        let body =
+            axum::body::Body::new(PermitBody::new(axum::body::Body::from("abandoned"), permit));
+        drop(body);
+        assert_eq!(semaphore.available_permits(), 1, "released when a client disconnects");
+    }
 }
 
 #[cfg(test)]
@@ -564,6 +679,7 @@ mod tests {
             session_affinity: crate::config::HttpSessionAffinity::Workspace,
             max_concurrency: super::DEFAULT_MAX_CONCURRENCY,
             requests_per_minute: super::DEFAULT_REQUESTS_PER_MINUTE,
+            principal_requests_per_minute: super::DEFAULT_PRINCIPAL_REQUESTS_PER_MINUTE,
         }
     }
 
