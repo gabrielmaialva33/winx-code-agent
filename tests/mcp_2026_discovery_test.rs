@@ -4520,3 +4520,102 @@ async fn http_principals_isolate_the_same_external_thread_id() -> anyhow::Result
     assert!(!right_pwd.contains(&left_path), "right principal reached left workspace: {right_pwd}");
     Ok(())
 }
+
+async fn delete_session_as(
+    address: std::net::SocketAddr,
+    session_id: &str,
+    token: &str,
+) -> anyhow::Result<String> {
+    let mut stream = TcpStream::connect(address).await?;
+    let request = format!(
+        "DELETE /mcp HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nMCP-Protocol-Version: 2025-11-25\r\nMcp-Session-Id: {session_id}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut response)).await??;
+    Ok(String::from_utf8_lossy(&response).into_owned())
+}
+
+/// A legacy transport session id is not a credential: another principal's
+/// valid token must not be able to close (or resume) a session it did not
+/// create, even when it knows the id.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn http_principals_cannot_touch_each_others_transport_sessions() -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let credentials = tempfile::tempdir()?;
+    let left_token_file = credentials.path().join("left-token");
+    let right_token_file = credentials.path().join("right-token");
+    std::fs::write(&left_token_file, LEFT_TOKEN)?;
+    std::fs::write(&right_token_file, RIGHT_TOKEN)?;
+    std::fs::set_permissions(&left_token_file, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::set_permissions(&right_token_file, std::fs::Permissions::from_mode(0o600))?;
+    let principal_config = credentials.path().join("principals.toml");
+    std::fs::write(
+        &principal_config,
+        format!(
+            "[[principals]]\nname = \"left\"\ntoken_file = {left_token_file:?}\n\n[[principals]]\nname = \"right\"\ntoken_file = {right_token_file:?}\n"
+        ),
+    )?;
+    let principal_config_for_server = principal_config.clone();
+    let (address, _server) = spawn_server_on_free_port(move |address| {
+        let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+            .args(["serve", "--http", "--bind", &address.to_string(), "--principal-config"])
+            .arg(&principal_config_for_server)
+            .env("WINX_EMBEDDED", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()?;
+        Ok(ServerProcess(child))
+    })
+    .await?;
+
+    let initialize = post_json_with_session_as(
+        address,
+        "2025-11-25",
+        None,
+        None,
+        r#"{"jsonrpc":"2.0","id":"left-init","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"left-legacy","version":"1"}}}"#,
+        LEFT_TOKEN,
+    )
+    .await?;
+    assert!(initialize.starts_with("HTTP/1.1 200"), "{initialize}");
+    let session_id = response_header(&initialize, "mcp-session-id")
+        .ok_or_else(|| anyhow::anyhow!("no session id: {initialize}"))?;
+
+    // The other principal presents the id: unknown session, not a close.
+    let foreign_delete = delete_session_as(address, &session_id, RIGHT_TOKEN).await?;
+    assert!(foreign_delete.starts_with("HTTP/1.1 404"), "{foreign_delete}");
+    let foreign_post = post_json_with_session_as(
+        address,
+        "2025-11-25",
+        None,
+        Some(&session_id),
+        r#"{"jsonrpc":"2.0","id":"right-tools","method":"tools/list","params":{}}"#,
+        RIGHT_TOKEN,
+    )
+    .await?;
+    assert!(foreign_post.starts_with("HTTP/1.1 404"), "{foreign_post}");
+
+    // The owner still has its session and can close it.
+    let own_tools = post_json_with_session_as(
+        address,
+        "2025-11-25",
+        None,
+        Some(&session_id),
+        r#"{"jsonrpc":"2.0","id":"left-tools","method":"tools/list","params":{}}"#,
+        LEFT_TOKEN,
+    )
+    .await?;
+    assert!(own_tools.starts_with("HTTP/1.1 200"), "{own_tools}");
+    let own_delete = delete_session_as(address, &session_id, LEFT_TOKEN).await?;
+    assert!(
+        own_delete.starts_with("HTTP/1.1 200")
+            || own_delete.starts_with("HTTP/1.1 202")
+            || own_delete.starts_with("HTTP/1.1 204"),
+        "{own_delete}"
+    );
+    Ok(())
+}

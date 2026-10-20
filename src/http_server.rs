@@ -7,7 +7,7 @@
 
 #![allow(clippy::doc_markdown)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -23,7 +23,8 @@ use axum::{
 };
 use rand::RngExt as _;
 use rmcp::transport::streamable_http_server::{
-    session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    session::local::LocalSessionManager, session::SessionManager as _, StreamableHttpServerConfig,
+    StreamableHttpService,
 };
 use serde::Serialize;
 use tokio::sync::{Mutex, Semaphore};
@@ -134,17 +135,17 @@ pub async fn start_http_server_with_runtime(
     config.allowed_hosts.extend(options.extra_hosts);
 
     let shared = WinxService::with_runtime(SessionIsolation::Strict, shell_runtime);
-    let mcp_service = StreamableHttpService::new(
-        move || Ok(shared.clone()),
-        Arc::new(LocalSessionManager::default()),
-        config,
-    );
+    let session_manager = Arc::new(LocalSessionManager::default());
+    let mcp_service =
+        StreamableHttpService::new(move || Ok(shared.clone()), session_manager.clone(), config);
     let security = Arc::new(RouteSecurity {
         principals: Arc::new(options.principals),
         allow_query: options.allow_query_token,
         session_affinity: options.session_affinity,
         concurrency: shared_concurrency,
         rate_limiter: shared_rate_limiter,
+        session_owners: Arc::new(SessionOwners::default()),
+        session_manager,
     });
     // The timeout sits INSIDE the security middleware: when it fires, the
     // middleware still receives the 408 response and records the usage event.
@@ -261,6 +262,77 @@ struct RouteSecurity {
     session_affinity: HttpSessionAffinity,
     concurrency: Arc<Semaphore>,
     rate_limiter: Arc<RateLimiter>,
+    session_owners: Arc<SessionOwners>,
+    session_manager: Arc<LocalSessionManager>,
+}
+
+/// Upper bound on remembered transport sessions. Past it the oldest entry is
+/// evicted and its SDK session closed at the same time, so an id never
+/// outlives the record that says who may use it.
+const MAX_TRACKED_SESSIONS: usize = 65_536;
+
+/// Which principal created each legacy MCP transport session (`Mcp-Session-Id`).
+///
+/// The SDK's session manager is shared by every principal and treats a known
+/// session id as sufficient to resume its stream or delete it. Winx records
+/// the creator when the `initialize` response mints the id and refuses any
+/// later request that presents the id under another principal's token.
+#[derive(Default)]
+struct SessionOwners {
+    inner: std::sync::Mutex<SessionOwnerTable>,
+}
+
+#[derive(Default)]
+struct SessionOwnerTable {
+    owners: HashMap<String, String>,
+    order: VecDeque<String>,
+}
+
+impl SessionOwners {
+    /// Only the recorded creator may present a minted `session_id`. An id this
+    /// process never minted is not an SDK session at all: modern stateless
+    /// clients may send one as a conversation identity, and the SDK answers
+    /// 404 itself if such an id reaches a legacy session path.
+    fn owner_matches(&self, session_id: &str, principal: &str) -> bool {
+        let table = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        table.owners.get(session_id).is_none_or(|owner| owner == principal)
+    }
+
+    /// Remember the creator of a freshly minted id. Returns the ids evicted
+    /// to stay within [`MAX_TRACKED_SESSIONS`]; the caller closes those SDK
+    /// sessions so a forgotten id can never be presented by anyone.
+    fn record(&self, session_id: &str, principal: &str) -> Vec<String> {
+        let mut table = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if table.owners.contains_key(session_id) {
+            return Vec::new();
+        }
+        table.owners.insert(session_id.to_string(), principal.to_string());
+        table.order.push_back(session_id.to_string());
+        let mut evicted = Vec::new();
+        while table.order.len() > MAX_TRACKED_SESSIONS {
+            if let Some(oldest) = table.order.pop_front() {
+                table.owners.remove(&oldest);
+                evicted.push(oldest);
+            }
+        }
+        evicted
+    }
+
+    fn forget(&self, session_id: &str) {
+        let mut table = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if table.owners.remove(session_id).is_some() {
+            table.order.retain(|id| id != session_id);
+        }
+    }
+}
+
+fn session_id_header(headers: &header::HeaderMap) -> Option<String> {
+    headers
+        .get("mcp-session-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
 }
 
 async fn enforce_route_security(
@@ -296,12 +368,43 @@ async fn enforce_route_security(
     let principal_name = principal.name().to_string();
     let method = request.method().clone();
     let correlation = RequestCorrelation::new();
+    // A transport session id belongs to the principal that created it. Any
+    // other authenticated principal sees it as unknown, exactly like a stale
+    // id: the SDK would otherwise let it resume the stream or close it.
+    let presented_session = session_id_header(request.headers());
+    if let Some(session_id) = presented_session.as_deref() {
+        if !security.session_owners.owner_matches(session_id, &principal_name) {
+            tracing::warn!(
+                peer = %peer,
+                principal = %principal_name,
+                "rejected request presenting another principal's MCP session id"
+            );
+            return (StatusCode::NOT_FOUND, "session not found\n").into_response();
+        }
+    }
     let mut request = request;
     request.extensions_mut().insert(principal);
     request.extensions_mut().insert(security.session_affinity);
     request.extensions_mut().insert(correlation.clone());
     let response = next.run(request).await;
     drop(permit);
+    if response.status().is_success() {
+        if let Some(minted) = session_id_header(response.headers()) {
+            for evicted in security.session_owners.record(&minted, &principal_name) {
+                let manager = security.session_manager.clone();
+                tokio::spawn(async move {
+                    let id: rmcp::transport::common::server_side_http::SessionId =
+                        Arc::from(evicted.as_str());
+                    let _ = manager.close_session(&id).await;
+                });
+            }
+        }
+        if method == axum::http::Method::DELETE {
+            if let Some(session_id) = presented_session.as_deref() {
+                security.session_owners.forget(session_id);
+            }
+        }
+    }
     // One structured `winx::usage` event per authenticated request. Metadata
     // only — the body (commands, file contents) is never logged.
     tracing::info!(
@@ -388,6 +491,36 @@ fn bearer_token(request: &Request) -> Option<&str> {
 
 fn query_token(request: &Request) -> Option<&str> {
     request.uri().query()?.split('&').find_map(|pair| pair.strip_prefix("token="))
+}
+
+#[cfg(test)]
+mod session_owner_tests {
+    use super::SessionOwners;
+
+    #[test]
+    fn minted_session_ids_belong_to_their_first_creator() {
+        let owners = SessionOwners::default();
+        assert!(owners.owner_matches("conv-a", "left"), "unminted ids are not SDK sessions");
+        assert!(owners.record("s1", "left").is_empty(), "nothing evicted");
+        assert!(owners.owner_matches("s1", "left"));
+        assert!(!owners.owner_matches("s1", "right"), "another principal");
+        assert!(owners.record("s1", "right").is_empty(), "nothing evicted");
+        assert!(owners.owner_matches("s1", "left"), "first creator wins");
+        owners.forget("s1");
+        assert!(owners.owner_matches("s1", "right"), "closed ids are plain unknown ids again");
+    }
+
+    #[test]
+    fn eviction_hands_back_the_ids_whose_sdk_sessions_must_close() {
+        let owners = SessionOwners::default();
+        assert!(owners.record("oldest", "left").is_empty(), "nothing evicted");
+        let mut evicted = Vec::new();
+        for index in 0..super::MAX_TRACKED_SESSIONS {
+            evicted.extend(owners.record(&format!("s{index}"), "left"));
+        }
+        assert_eq!(evicted, vec!["oldest".to_string()]);
+        assert!(owners.owner_matches(&format!("s{}", super::MAX_TRACKED_SESSIONS - 1), "left"));
+    }
 }
 
 #[cfg(test)]
