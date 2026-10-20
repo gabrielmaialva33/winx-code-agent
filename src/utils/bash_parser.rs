@@ -35,6 +35,52 @@ fn neutralize_supplementary(command: &str) -> Cow<'_, str> {
 /// shell on the request path, so it's gated to trusted (`wcgw`) mode only — in
 /// restricted modes (`code_writer`/`architect`) we must not spawn `bash` to
 /// vet a command, so tree-sitter's verdict is final there.
+/// Shell-aware single-statement check: PowerShell has its own separators and
+/// no bash grammar, so it gets a conservative scanner instead of the parser.
+pub fn assert_single_statement_for(
+    shell: crate::utils::executable::ShellKind,
+    command: &str,
+    allow_shell_probe: bool,
+) -> Result<()> {
+    if shell.is_powershell() {
+        return assert_single_powershell_statement(command);
+    }
+    assert_single_statement(command, allow_shell_probe)
+}
+
+/// Reject PowerShell input that chains statements: `;`, newlines, or the
+/// `&&`/`||` chain operators outside quotes. A single pipeline is allowed.
+pub fn assert_single_powershell_statement(command: &str) -> Result<()> {
+    let mut quote: Option<char> = None;
+    let mut previous = '\0';
+    for c in command.chars() {
+        match quote {
+            Some(open) => {
+                if c == open && previous != '`' {
+                    quote = None;
+                }
+            }
+            None => {
+                match c {
+                    '\'' | '"' => quote = Some(c),
+                    ';' | '\n' | '\r' => return Err(WinxError::CommandNotAllowed(
+                        "multiple statements require allow_multi=true (use one pipeline per call)"
+                            .to_string(),
+                    )),
+                    '&' | '|' if previous == c => {
+                        return Err(WinxError::CommandNotAllowed(
+                            "chained statements (&&, ||) require allow_multi=true".to_string(),
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        previous = c;
+    }
+    Ok(())
+}
+
 pub fn assert_single_statement(command: &str, allow_shell_probe: bool) -> Result<()> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
@@ -547,6 +593,27 @@ pub fn detect_allowlist_bypass(allowed: &[String]) -> Vec<String> {
     hits.sort();
     hits.dedup();
     hits
+}
+
+#[cfg(test)]
+mod powershell_statement_tests {
+    use super::assert_single_powershell_statement;
+
+    #[test]
+    fn single_pipelines_pass_and_chains_are_rejected() {
+        for ok in [
+            "Get-ChildItem",
+            "Get-Process | Where-Object CPU -gt 1 | Select-Object -First 3",
+            "Write-Output 'a; b && c'",
+            "Write-Output \"x || y\"",
+            "cargo test -- --nocapture",
+        ] {
+            assert!(assert_single_powershell_statement(ok).is_ok(), "{ok}");
+        }
+        for bad in ["cd ..; ls", "a && b", "a || b", "a\nb"] {
+            assert!(assert_single_powershell_statement(bad).is_err(), "{bad}");
+        }
+    }
 }
 
 #[cfg(test)]
