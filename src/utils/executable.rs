@@ -8,6 +8,77 @@
 
 use std::path::{Path, PathBuf};
 
+/// Shell family Winx drives in the PTY. It decides the prompt bootstrap, the
+/// completion marker, and which statement policy applies to commands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellKind {
+    Bash,
+    Zsh,
+    PowerShell,
+}
+
+impl ShellKind {
+    pub fn is_powershell(self) -> bool {
+        matches!(self, Self::PowerShell)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bash => "bash",
+            Self::Zsh => "zsh",
+            Self::PowerShell => "powershell",
+        }
+    }
+}
+
+/// Classify a shell selection (`zsh`, `/bin/zsh`, `pwsh`, `C:\\...\\pwsh.exe`,
+/// `powershell`) by its basename; anything unrecognized is driven as bash.
+pub fn shell_kind_of(shell: &str) -> ShellKind {
+    let name = Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    let stem = name.strip_suffix(".exe").unwrap_or(&name);
+    if stem == "zsh"
+        || stem
+            .strip_prefix("zsh-")
+            .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+    {
+        ShellKind::Zsh
+    } else if stem == "pwsh" || stem == "powershell" || stem.starts_with("pwsh-") {
+        ShellKind::PowerShell
+    } else {
+        ShellKind::Bash
+    }
+}
+
+/// PowerShell to drive when requested (or when Windows has no Git for Windows
+/// bash). PowerShell 7 (`pwsh`) is preferred; Windows PowerShell 5.1 is the
+/// fallback on Windows only.
+pub fn powershell_executable() -> Option<PathBuf> {
+    if let Some(found) = find_on_path("pwsh") {
+        return Some(found);
+    }
+    #[cfg(windows)]
+    {
+        if let Some(found) = find_on_path("powershell") {
+            return Some(found);
+        }
+        let system_root = std::env::var_os("SystemRoot")?;
+        let legacy = PathBuf::from(system_root)
+            .join("System32")
+            .join("WindowsPowerShell")
+            .join("v1.0")
+            .join("powershell.exe");
+        is_executable_file(&legacy).then_some(legacy)
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 /// Locate `program` on `PATH`. A name with a path separator is checked as-is.
 /// On Windows, a bare name is tried with every `PATHEXT` suffix (`.exe`,
 /// `.cmd`, …) as well as verbatim.
