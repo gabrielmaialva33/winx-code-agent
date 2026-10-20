@@ -159,7 +159,7 @@ cargo fmt --all -- --check
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-features --locked
 cargo test --features loom --lib loom_
-cargo +1.88.0 check --all-features --locked
+cargo +1.90.0 check --all-features --locked
 cargo package --locked
 cargo deny --all-features check
 cargo audit --deny warnings

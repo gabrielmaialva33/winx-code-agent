@@ -19,7 +19,7 @@ commit, since new clippy lints land with each stable release.
 - `cargo clippy --all-targets --all-features --locked -- -D warnings` runs the enforced lint suite.
 - `cargo test --all-features --locked` runs the full normal test suite.
 - `cargo test --features loom --lib loom_` runs the opt-in concurrency model checks.
-- `cargo +1.88.0 check --all-features --locked` verifies the declared MSRV.
+- `cargo +1.90.0 check --all-features --locked` verifies the declared MSRV.
 - `cargo package --locked` verifies the crates.io package.
 - `cargo bench --bench performance --locked --no-run` compiles the benchmark suite.
 - `cargo deny --all-features check` and `cargo audit --deny warnings` enforce dependency policy.

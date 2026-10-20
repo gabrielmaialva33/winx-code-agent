@@ -10,7 +10,7 @@ By participating, you agree to follow the [Code of Conduct](CODE_OF_CONDUCT.md).
 
 Requirements:
 
-- Rust 1.88 or newer
+- Rust 1.90 or newer
 - Cargo
 - Git
 
@@ -47,7 +47,7 @@ cargo fmt --all -- --check
 cargo check --all-features --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-features --locked
-cargo +1.88.0 check --all-features --locked
+cargo +1.90.0 check --all-features --locked
 cargo package --locked
 cargo bench --bench performance --locked --no-run
 cargo deny --all-features check

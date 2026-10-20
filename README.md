@@ -328,7 +328,7 @@ On every platform this installs `winx-code-agent`, `winxd`, and `winx-guardian` 
 starts one guardian per shell session. Every config snippet below assumes that directory is on `$PATH`; with a sterile
 client environment, use the absolute path returned by `which winx-code-agent`.
 
-Needs Rust 1.88+, bash, and a real terminal. The durable daemon runtime runs on Linux, macOS, WSL2, and native
+Needs Rust 1.90+, bash, and a real terminal. The durable daemon runtime runs on Linux, macOS, WSL2, and native
 Windows 10/11 (named pipes under `%LOCALAPPDATA%\winx\run`, job objects for the shell tree, no WSL involved). On
 native Windows the shell is the Git for Windows `bash.exe` (resolved from the standard install locations or `PATH`;
 the WSL launcher in `System32` is never used), so install Git for Windows before running `BashCommand`. GitHub
@@ -849,7 +849,7 @@ cargo fmt --all -- --check
 cargo check --all-features --locked
 cargo clippy --all-targets --all-features --locked -- -D warnings
 cargo test --all-features --locked
-cargo +1.88.0 check --all-features --locked
+cargo +1.90.0 check --all-features --locked
 cargo package --locked
 cargo bench --bench performance --locked --no-run
 cargo deny --all-features check
