@@ -937,7 +937,13 @@ impl WinxService {
             ));
         }
         let allow_shell_probe = matches!(state.mode, crate::types::Modes::Wcgw);
-        crate::utils::bash_parser::assert_single_statement(&verification.command, allow_shell_probe)
+        let restricted_mode =
+            matches!(state.bash_command_mode.bash_mode, crate::types::BashMode::RestrictedMode);
+        crate::utils::bash_parser::assert_single_statement_for(
+            crate::state::pty::configured_shell_kind(restricted_mode),
+            &verification.command,
+            allow_shell_probe,
+        )
     }
 
     async fn finish_edit_verification(
