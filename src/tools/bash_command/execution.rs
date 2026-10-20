@@ -98,16 +98,27 @@ pub(super) async fn execute_command(
     }
 
     let command = command.trim();
+    let restricted_mode =
+        matches!(bash_state.bash_command_mode.bash_mode, crate::types::BashMode::RestrictedMode);
+    let shell_kind = crate::state::pty::configured_shell_kind(restricted_mode);
     if !allow_multi {
         let allow_shell_probe = matches!(bash_state.mode, crate::types::Modes::Wcgw);
-        crate::utils::bash_parser::assert_single_statement(command, allow_shell_probe)?;
+        crate::utils::bash_parser::assert_single_statement_for(
+            shell_kind,
+            command,
+            allow_shell_probe,
+        )?;
     }
-    crate::utils::agent_temp::validate_bash_command(
-        &bash_state.workspace_root,
-        &bash_state.cwd,
-        &bash_state.current_thread_id,
-        command,
-    )?;
+    // The static write-path analysis parses bash syntax; PowerShell commands
+    // are still audited dynamically after they run.
+    if !shell_kind.is_powershell() {
+        crate::utils::agent_temp::validate_bash_command(
+            &bash_state.workspace_root,
+            &bash_state.cwd,
+            &bash_state.current_thread_id,
+            command,
+        )?;
+    }
     if options.is_launch_cancelled() {
         return Err(WinxError::CommandExecutionError(
             "task was cancelled before command launch".to_string(),
