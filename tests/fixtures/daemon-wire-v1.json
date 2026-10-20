@@ -1,0 +1,127 @@
+{
+  "_comment": "Frozen daemon wire contract for protocol major 1. Every sample here must keep decoding and re-encoding byte-for-byte in future releases: an adapter and a daemon from different versions share these shapes. Never edit a sample to bless a change; add a new capability or method and append a new sample instead.",
+  "protocol_major": 1,
+  "min_protocol_minor": 6,
+  "methods": [
+    "winx.hello",
+    "winx.shutdown",
+    "session.negotiate",
+    "session.configure",
+    "session.list",
+    "session.info",
+    "session.read_output",
+    "session.interrupt",
+    "session.kill",
+    "session.prune",
+    "shell.run_action",
+    "shell.cancel_action"
+  ],
+  "capabilities": [
+    "typed_action_result",
+    "compact_action_output",
+    "generation_bound_actions",
+    "cancellable_action_reservations",
+    "attach_or_create",
+    "build_identity",
+    "process_shutdown"
+  ],
+  "samples": {
+    "rpc_request": {
+      "jsonrpc": "2.0",
+      "id": 7,
+      "method": "session.list",
+      "params": {}
+    },
+    "rpc_response_result": {
+      "jsonrpc": "2.0",
+      "id": 7,
+      "result": true
+    },
+    "rpc_response_error": {
+      "jsonrpc": "2.0",
+      "id": 8,
+      "error": {
+        "code": -32004,
+        "message": "session not found"
+      }
+    },
+    "hello_result_legacy_1_5": {
+      "protocol_major": 1,
+      "protocol_minor": 5,
+      "capabilities": [
+        "session.configure",
+        "shell.run_action"
+      ],
+      "max_frame_bytes": 8388608,
+      "daemon_epoch": "0123456789abcdef",
+      "daemon_pid": 4242
+    },
+    "hello_result_1_6": {
+      "protocol_major": 1,
+      "protocol_minor": 6,
+      "capabilities": [
+        "session.configure",
+        "shell.run_action",
+        "build_identity",
+        "process_shutdown"
+      ],
+      "max_frame_bytes": 8388608,
+      "daemon_epoch": "0123456789abcdef",
+      "daemon_pid": 4242,
+      "process_role": "control",
+      "build": {
+        "package_version": "0.2.351",
+        "display": "0.2.351+g7f030143c49b",
+        "revision": "7f030143c49b",
+        "dirty": false
+      }
+    },
+    "session_info_legacy_1_2": {
+      "thread_id": "ws_demo_1234",
+      "cwd": "/home/alice/project",
+      "shell_pid": 1234,
+      "command_id": null,
+      "running": false,
+      "background_command_ids": []
+    },
+    "session_info_1_6": {
+      "thread_id": "ws_demo_1234",
+      "cwd": "C:\\Users\\alice\\project",
+      "shell_pid": 1234,
+      "command_id": "2e634656ab7acd30",
+      "running": true,
+      "background_command_ids": [
+        "bg_1"
+      ],
+      "created_at_unix_ms": 1789689326259,
+      "last_activity_unix_ms": 1789689327124,
+      "last_command_at_unix_ms": 1789689327013,
+      "ever_ran_command": true,
+      "runtime": {
+        "protocol_major": 1,
+        "protocol_minor": 6,
+        "capabilities": [],
+        "max_frame_bytes": 8388608,
+        "daemon_epoch": "fedcba9876543210",
+        "daemon_pid": 99,
+        "process_role": "guardian"
+      }
+    },
+    "journal_read": {
+      "output": "hello\n",
+      "next_seq": 12,
+      "gap": false
+    },
+    "prune_result": {
+      "removed_thread_ids": [
+        "ws_old"
+      ],
+      "skipped_active_thread_ids": [],
+      "stale_socket_count": 1,
+      "unreachable_guardian_count": 0
+    },
+    "shutdown_result": {
+      "shutting_down": true
+    }
+  }
+}

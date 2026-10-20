@@ -365,3 +365,164 @@ mod tests {
         assert_eq!(encoded.matches(&compact).count(), 1, "compact payload must not be duplicated");
     }
 }
+
+#[cfg(test)]
+mod wire_contract_tests {
+    //! Frozen wire contract for protocol major 1 (`tests/fixtures/daemon-wire-v1.json`).
+    //!
+    //! An adapter and a daemon from different releases exchange these shapes,
+    //! so every fixture sample must keep decoding, legacy samples must re-encode
+    //! as a superset of themselves, and current samples must re-encode exactly.
+    //! A failure here means a wire change: add a capability, a method, or an
+    //! optional field with `skip_serializing_if`, and append a new sample
+    //! instead of editing an old one.
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use serde::de::DeserializeOwned;
+    use serde::Serialize;
+    use serde_json::Value;
+
+    use super::*;
+
+    const FIXTURE: &str = include_str!("../../tests/fixtures/daemon-wire-v1.json");
+    const CONTROL_SOURCE: &str = include_str!("control.rs");
+    const GUARDIAN_SOURCE: &str = include_str!("server.rs");
+    const PROTOCOL_SOURCE: &str = include_str!("protocol.rs");
+
+    fn fixture() -> Value {
+        serde_json::from_str(FIXTURE).expect("fixture is valid JSON")
+    }
+
+    fn strings(value: &Value) -> Vec<String> {
+        value
+            .as_array()
+            .expect("array")
+            .iter()
+            .map(|item| item.as_str().expect("string").to_string())
+            .collect()
+    }
+
+    /// Every quoted `"prefix.name"` literal in `source`, for the given prefixes.
+    fn quoted_methods(source: &str) -> Vec<String> {
+        let mut found = Vec::new();
+        for (index, _) in source.match_indices('"') {
+            let rest = &source[index + 1..];
+            let Some(end) = rest.find('"') else { continue };
+            let literal = &rest[..end];
+            let is_method =
+                ["winx.", "session.", "shell."].iter().any(|prefix| literal.starts_with(prefix))
+                    && literal.len() > 6
+                    && literal.chars().all(|c| c.is_ascii_lowercase() || c == '.' || c == '_');
+            if is_method && !found.contains(&literal.to_string()) {
+                found.push(literal.to_string());
+            }
+        }
+        found
+    }
+
+    fn assert_subset(expected: &Value, actual: &Value, path: &str) {
+        match (expected, actual) {
+            (Value::Object(expected), Value::Object(actual)) => {
+                for (key, value) in expected {
+                    let child = actual.get(key).unwrap_or_else(|| {
+                        panic!("{path}.{key} disappeared from the re-encoded message")
+                    });
+                    assert_subset(value, child, &format!("{path}.{key}"));
+                }
+            }
+            (expected, actual) => assert_eq!(expected, actual, "{path} changed meaning"),
+        }
+    }
+
+    fn round_trip<T: DeserializeOwned + Serialize>(sample: &Value) -> Value {
+        let decoded: T = serde_json::from_value(sample.clone())
+            .unwrap_or_else(|error| panic!("sample must decode: {error}\n{sample}"));
+        serde_json::to_value(&decoded).expect("re-encode")
+    }
+
+    fn legacy<T: DeserializeOwned + Serialize>(name: &str) {
+        let sample = fixture()["samples"][name].clone();
+        assert!(sample.is_object(), "missing sample {name}");
+        assert_subset(&sample, &round_trip::<T>(&sample), name);
+    }
+
+    fn current<T: DeserializeOwned + Serialize>(name: &str) {
+        let sample = fixture()["samples"][name].clone();
+        assert!(sample.is_object(), "missing sample {name}");
+        assert_eq!(round_trip::<T>(&sample), sample, "{name} must re-encode exactly");
+    }
+
+    #[test]
+    fn protocol_version_stays_within_the_frozen_major() {
+        let fixture = fixture();
+        assert_eq!(u64::from(PROTOCOL_MAJOR), fixture["protocol_major"].as_u64().expect("major"));
+        assert!(
+            u64::from(PROTOCOL_MINOR) >= fixture["min_protocol_minor"].as_u64().expect("minor"),
+            "protocol minor must never go backwards"
+        );
+    }
+
+    #[test]
+    fn every_method_the_daemons_dispatch_is_frozen_in_the_fixture() {
+        let frozen = strings(&fixture()["methods"]);
+        let mut in_code = quoted_methods(CONTROL_SOURCE);
+        for method in quoted_methods(GUARDIAN_SOURCE) {
+            if !in_code.contains(&method) {
+                in_code.push(method);
+            }
+        }
+        for method in &frozen {
+            assert!(in_code.contains(method), "frozen method {method} is no longer dispatched");
+        }
+        for method in &in_code {
+            assert!(frozen.contains(method), "new method {method}: append it to the fixture");
+        }
+    }
+
+    #[test]
+    fn every_capability_constant_is_frozen_in_the_fixture() {
+        let frozen = strings(&fixture()["capabilities"]);
+        let in_code: Vec<String> = PROTOCOL_SOURCE
+            .lines()
+            .filter(|line| line.contains("_CAPABILITY: &str = \""))
+            .map(|line| {
+                let start = line.find('"').expect("open quote") + 1;
+                let end = line[start..].find('"').expect("close quote") + start;
+                line[start..end].to_string()
+            })
+            .collect();
+        for capability in &frozen {
+            assert!(in_code.contains(capability), "frozen capability {capability} was removed");
+        }
+        for capability in &in_code {
+            assert!(
+                frozen.contains(capability),
+                "new capability {capability}: append it to the fixture"
+            );
+        }
+    }
+
+    #[test]
+    fn frames_and_results_keep_their_frozen_shapes() {
+        current::<RpcRequest>("rpc_request");
+        current::<RpcResponse>("rpc_response_result");
+        current::<RpcResponse>("rpc_response_error");
+        legacy::<HelloResult>("hello_result_legacy_1_5");
+        current::<HelloResult>("hello_result_1_6");
+        legacy::<SessionInfo>("session_info_legacy_1_2");
+        current::<SessionInfo>("session_info_1_6");
+        current::<JournalRead>("journal_read");
+        current::<PruneResult>("prune_result");
+        let shutdown = fixture()["samples"]["shutdown_result"].clone();
+        assert_eq!(shutdown["shutting_down"], Value::Bool(true));
+    }
+
+    #[test]
+    fn legacy_hello_without_role_or_build_is_still_accepted() {
+        let sample = fixture()["samples"]["hello_result_legacy_1_5"].clone();
+        let hello: HelloResult = serde_json::from_value(sample).expect("decode");
+        assert_eq!(hello.process_role, None);
+        assert_eq!(hello.build, None);
+        assert!(!hello.build_matches(&crate::build_info::BuildIdentity::current()));
+    }
+}
