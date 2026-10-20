@@ -413,7 +413,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(mime, "image/png");
-        assert!(!base64.is_empty());
+        assert!(!base64.is_empty(), "expected non-empty base64");
         assert!(!metadata.transcoded);
     }
 

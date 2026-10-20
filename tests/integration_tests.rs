@@ -25,13 +25,13 @@ use winx_code_agent::WinxService;
 #[test]
 fn test_winx_service_creation() {
     let service = WinxService::new();
-    assert!(!service.version.is_empty());
+    assert!(!service.version.is_empty(), "expected non-empty service.version");
 }
 
 #[test]
 fn test_winx_service_default() {
     let service = WinxService::default();
-    assert!(!service.version.is_empty());
+    assert!(!service.version.is_empty(), "expected non-empty service.version");
 }
 
 // ==================== Initialize Tool Tests ====================
@@ -70,7 +70,10 @@ async fn test_initialize_first_call_wcgw_mode() -> Result<()> {
 
     let bash_state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
     assert!(bash_state.initialized);
-    assert!(!bash_state.current_thread_id.is_empty());
+    assert!(
+        !bash_state.current_thread_id.is_empty(),
+        "expected non-empty bash_state.current_thread_id"
+    );
 
     Ok(())
 }
@@ -844,8 +847,8 @@ fn test_generate_thread_id() {
     assert_ne!(id1, id2);
 
     // IDs should have reasonable format (hex string)
-    assert!(!id1.is_empty());
-    assert!(!id2.is_empty());
+    assert!(!id1.is_empty(), "expected non-empty id1");
+    assert!(!id2.is_empty(), "expected non-empty id2");
 }
 
 // ==================== Mode Configuration Tests ====================
@@ -1190,7 +1193,7 @@ async fn test_read_image_png() -> Result<()> {
     assert_eq!(mime_type, "image/png");
 
     // Verify base64 data is not empty
-    assert!(!base64_data.is_empty());
+    assert!(!base64_data.is_empty(), "expected non-empty base64_data");
 
     // Decode and verify it matches original
     let decoded = general_purpose::STANDARD
@@ -1317,7 +1320,7 @@ async fn test_read_image_non_image_file() -> Result<()> {
                 || mime_type == "text/plain"
                 || mime_type.starts_with("text/")
         );
-        assert!(!base64_data.is_empty());
+        assert!(!base64_data.is_empty(), "expected non-empty base64_data");
     } else {
         // Some implementations might error on non-image files
         // This is also acceptable behavior

@@ -3483,7 +3483,7 @@ fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
         .lines()
         .map(serde_json::from_str::<serde_json::Value>)
         .collect::<Result<Vec<_>, _>>()?;
-    assert!(!entries.is_empty());
+    assert!(!entries.is_empty(), "expected non-empty entries");
     assert!(entries.iter().all(|entry| entry["target"] == "winx::usage"));
     let tool_call = entries
         .iter()

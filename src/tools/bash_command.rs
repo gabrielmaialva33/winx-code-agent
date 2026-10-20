@@ -656,7 +656,7 @@ mod tests {
             false,
         );
         assert_eq!(result.compact_output.as_deref(), Some("child output"));
-        assert!(result.result.output.is_empty());
+        assert!(result.result.output.is_empty(), "expected empty result.result.output");
     }
 
     #[test]

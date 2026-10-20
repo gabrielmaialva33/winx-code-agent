@@ -488,7 +488,7 @@ async fn default_prune_uses_short_ttl_for_never_used_sessions() -> anyhow::Resul
     tokio::time::sleep(Duration::from_millis(1_100)).await;
     let pruned = client.prune_sessions(None).await?;
     assert_eq!(pruned.removed_thread_ids, vec![thread_id]);
-    assert!(client.list_sessions().await?.is_empty());
+    assert!(client.list_sessions().await?.is_empty(), "expected empty client.list_sessions()");
 
     daemon.kill()?;
     let _ = daemon.wait()?;
@@ -869,7 +869,7 @@ async fn manual_prune_removes_idle_but_preserves_active_sessions() -> anyhow::Re
     let _idle = initialize_daemon_session(&socket, workspace.path(), "prune_idle").await?;
     let pruned = client.prune_sessions(Some(0)).await?;
     assert_eq!(pruned.removed_thread_ids, vec!["prune_idle"]);
-    assert!(client.list_sessions().await?.is_empty());
+    assert!(client.list_sessions().await?.is_empty(), "expected empty client.list_sessions()");
 
     let active = initialize_daemon_session(&socket, workspace.path(), "prune_active").await?;
     let runtime = DaemonShellRuntime::new(&socket);

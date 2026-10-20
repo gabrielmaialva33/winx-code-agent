@@ -1348,7 +1348,7 @@ mod tests {
     fn decode_passes_clean_utf8_through() {
         let (text, carry) = decode_keep_incomplete("hello ✓ café".as_bytes());
         assert_eq!(text, "hello ✓ café");
-        assert!(carry.is_empty());
+        assert!(carry.is_empty(), "expected empty carry");
     }
 
     #[test]
@@ -1363,7 +1363,7 @@ mod tests {
         next.push(0xA9); // continuation byte arrives in the next read
         let (text2, carry2) = decode_keep_incomplete(&next);
         assert_eq!(text2, "é");
-        assert!(carry2.is_empty());
+        assert!(carry2.is_empty(), "expected empty carry2");
     }
 
     #[test]
@@ -1371,7 +1371,7 @@ mod tests {
         // 0xFF is never valid UTF-8 and is not an incomplete prefix.
         let (text, carry) = decode_keep_incomplete(&[b'x', 0xFF, b'y']);
         assert_eq!(text, "x\u{FFFD}y");
-        assert!(carry.is_empty());
+        assert!(carry.is_empty(), "expected empty carry");
     }
 
     #[test]
@@ -1381,7 +1381,7 @@ mod tests {
         // The iterative version must handle far more than the 4KB reader buffer.
         let big = vec![0xFFu8; 200_000];
         let (text, carry) = decode_keep_incomplete(&big);
-        assert!(carry.is_empty());
+        assert!(carry.is_empty(), "expected empty carry");
         assert_eq!(text.chars().filter(|&c| c == '\u{FFFD}').count(), 200_000);
     }
 

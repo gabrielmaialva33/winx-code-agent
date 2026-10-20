@@ -955,7 +955,7 @@ async fn daemon_drains_output_without_an_attached_consumer() -> Result<()> {
     assert_eq!(listed.len(), 1);
     assert!(listed[0].shell_pid.is_some(), "{listed:?}");
     assert!(client.kill_session("rpc-continuous-drain").await?);
-    assert!(client.list_sessions().await?.is_empty());
+    assert!(client.list_sessions().await?.is_empty(), "expected empty client.list_sessions()");
 
     server_task.abort();
     Ok(())

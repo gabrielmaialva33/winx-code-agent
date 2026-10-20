@@ -17,7 +17,7 @@ fn closest_snippet_search_longer_than_file_does_not_panic() {
     let lines = vec!["the only line".to_string()];
     let search = vec!["a".to_string(), "b".to_string(), "c".to_string()];
     let (snippet, similarity) = closest_snippet(&lines, 0, &search);
-    assert!(snippet.is_empty());
+    assert!(snippet.is_empty(), "expected empty snippet");
     assert!(similarity.abs() < f64::EPSILON, "expected 0.0 similarity, got {similarity}");
 }
 
@@ -82,7 +82,7 @@ fn apply_blocks_reports_indentation_tolerance() -> Result<()> {
         ..Default::default()
     };
     let (_, tolerances) = apply_blocks(content, &[block])?;
-    assert!(!tolerances.is_empty());
+    assert!(!tolerances.is_empty(), "expected non-empty tolerances");
     Ok(())
 }
 
@@ -94,7 +94,7 @@ fn apply_blocks_exact_match_reports_no_tolerances() -> Result<()> {
         ..Default::default()
     };
     let (_, tolerances) = apply_blocks("a\nb\nc\n", &[block])?;
-    assert!(tolerances.is_empty());
+    assert!(tolerances.is_empty(), "expected empty tolerances");
     Ok(())
 }
 

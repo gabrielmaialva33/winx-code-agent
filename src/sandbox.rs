@@ -166,7 +166,7 @@ mod tests {
 
     #[test]
     fn parse_path_list_splits_and_drops_empties() {
-        assert!(parse_path_list("").is_empty());
+        assert!(parse_path_list("").is_empty(), "expected empty list for an empty string");
         assert_eq!(parse_path_list("/a:/b"), vec![PathBuf::from("/a"), PathBuf::from("/b")]);
         assert_eq!(parse_path_list("/a::/b:"), vec![PathBuf::from("/a"), PathBuf::from("/b")]);
     }

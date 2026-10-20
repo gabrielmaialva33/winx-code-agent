@@ -560,7 +560,7 @@ mod tests {
         let mut first_line_only = "partial first line".to_string();
         first_line_only.truncate(7);
         trim_to_last_line_boundary(&mut first_line_only);
-        assert!(first_line_only.is_empty());
+        assert!(first_line_only.is_empty(), "expected empty first_line_only");
     }
 
     #[test]
@@ -611,7 +611,7 @@ mod tests {
             vec![result.visible_range],
             result.total_lines,
         );
-        assert!(coverage.line_ranges_read.is_empty());
+        assert!(coverage.line_ranges_read.is_empty(), "expected empty coverage.line_ranges_read");
         assert_eq!(coverage.get_unread_ranges(), vec![(1, 1)]);
         Ok(())
     }

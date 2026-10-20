@@ -1077,7 +1077,7 @@ mod whitelist_range_tests {
         // A (0, 999) range on a 10-line file counts as full coverage, not a panic.
         let w = wl(&[(0, 999)], 10);
         assert!((w.get_percentage_read() - 100.0).abs() < 1e-9);
-        assert!(w.get_unread_ranges().is_empty());
+        assert!(w.get_unread_ranges().is_empty(), "expected empty w.get_unread_ranges()");
     }
 
     #[test]
@@ -1392,7 +1392,7 @@ mod whitelist_range_tests {
         let replay = restored
             .edit_mutation_receipt("apply-fingerprint", 1_001, 10_000)
             .expect("mutation receipt remains available");
-        assert!(replay.undo_ids.is_empty());
+        assert!(replay.undo_ids.is_empty(), "expected empty replay.undo_ids");
         assert!(replay.next_undo_id.is_none());
     }
 

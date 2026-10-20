@@ -737,7 +737,10 @@ mod tests {
     #[test]
     fn detect_allowlist_bypass_clean_list_is_empty() {
         let allowed = vec!["ls".to_string(), "cat".to_string(), "grep -n foo".to_string()];
-        assert!(detect_allowlist_bypass(&allowed).is_empty());
+        assert!(
+            detect_allowlist_bypass(&allowed).is_empty(),
+            "expected empty detect_allowlist_bypass(&allowed)"
+        );
     }
 
     #[test]
