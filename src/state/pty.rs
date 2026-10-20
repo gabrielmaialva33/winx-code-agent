@@ -7,6 +7,7 @@
 //! - Terminal resize events
 //! - Job control signals (Ctrl+C, Ctrl+Z, etc.)
 
+use crate::utils::executable::{shell_kind_of, ShellKind};
 use anyhow::{anyhow, Context, Result};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::collections::hash_map::DefaultHasher;
@@ -65,7 +66,7 @@ const WCGW_PROMPT_END: &str = "──➤";
 /// on a cold start.
 const PROMPT_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>, bool) {
+fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>, ShellKind) {
     let requested = crate::config::env_text("WINX_ATTACH_TERMINAL")
         .or_else(|| crate::config::env_text("WINX_USE_SCREEN"))
         .unwrap_or_default();
@@ -80,7 +81,7 @@ fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>,
             if restricted_mode {
                 cmd.arg("-r");
             }
-            return (cmd, Some(format!("tmux attach -t {session}")), false);
+            return (cmd, Some(format!("tmux attach -t {session}")), ShellKind::Bash);
         }
         if command_available("screen") {
             // Parity with wcgw: ensure a sane ~/.screenrc and reap sessions whose
@@ -92,17 +93,25 @@ fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>,
             if restricted_mode {
                 cmd.arg("-r");
             }
-            return (cmd, Some(format!("screen -x {session}")), false);
+            return (cmd, Some(format!("screen -x {session}")), ShellKind::Bash);
         }
     }
 
     let shell = preferred_shell(restricted_mode);
     // `WINX_SHELL=/bin/zsh` must get the zsh bootstrap too, not only `zsh`.
-    let is_zsh = shell_is_zsh(&shell);
+    let kind = shell_kind_of(&shell);
     let mut cmd = CommandBuilder::new(&shell);
-    // zsh's restricted mode isn't the `-r` flag, so restricted always uses bash -r.
-    if restricted_mode && !is_zsh {
-        cmd.arg("-r");
+    match kind {
+        // zsh's restricted mode isn't the `-r` flag, so restricted always uses bash -r.
+        ShellKind::Bash if restricted_mode => {
+            cmd.arg("-r");
+        }
+        // The banner would otherwise land in the first command's output; the
+        // profile still runs so the user's PATH and aliases apply.
+        ShellKind::PowerShell => {
+            cmd.arg("-NoLogo");
+        }
+        ShellKind::Bash | ShellKind::Zsh => {}
     }
     // Operator-supplied extra shell arguments (`WINX_SHELL_ARGS="-i --login"`):
     // whitespace-separated, applied to the direct shell path only.
@@ -111,7 +120,14 @@ fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>,
             cmd.arg(arg);
         }
     }
-    (cmd, None, is_zsh)
+    (cmd, None, kind)
+}
+
+/// The shell family a new PTY would get right now, from the same selection
+/// the spawner uses. Command policy (single-statement checks, static write
+/// analysis) consults it before a shell exists.
+pub fn configured_shell_kind(restricted_mode: bool) -> ShellKind {
+    shell_kind_of(&preferred_shell(restricted_mode))
 }
 
 /// Shell to spawn directly. Defaults to bash; honors `WINX_SHELL=zsh` when zsh is
@@ -136,9 +152,18 @@ fn ensure_windows_shell_available(restricted_mode: bool) -> Result<()> {
     if crate::utils::executable::bash_executable().is_some() {
         return Ok(());
     }
+    if crate::utils::executable::powershell_executable().is_some() {
+        if restricted_mode {
+            return Err(anyhow!(
+                "restricted mode needs bash -r; install Git for Windows or set WINX_SHELL to an \
+                 absolute bash.exe path (PowerShell has no equivalent restricted mode)"
+            ));
+        }
+        return Ok(());
+    }
     Err(anyhow!(
-        "no usable bash.exe found: install Git for Windows (the System32 WSL launcher is not \
-         used), or set WINX_SHELL to an absolute bash.exe path"
+        "no usable shell found: install Git for Windows (the System32 WSL launcher is not \
+         used) or PowerShell 7, or set WINX_SHELL to an absolute bash.exe or pwsh.exe path"
     ))
 }
 
@@ -147,6 +172,13 @@ fn preferred_shell(restricted_mode: bool) -> String {
         if let Ok(requested) = std::env::var("WINX_SHELL") {
             if requested == "zsh" && command_available("zsh") {
                 return "zsh".to_string();
+            }
+            // `pwsh`/`powershell` select PowerShell wherever it is installed;
+            // restricted mode never does, because `bash -r` has no equivalent.
+            if matches!(requested.as_str(), "pwsh" | "powershell") {
+                if let Some(found) = crate::utils::executable::powershell_executable() {
+                    return found.to_string_lossy().into_owned();
+                }
             }
             // An absolute path selects that exact shell binary (a specific
             // bash.exe on Windows, a custom build elsewhere).
@@ -159,18 +191,38 @@ fn preferred_shell(restricted_mode: bool) -> String {
         if let Some(bash) = crate::utils::executable::bash_executable() {
             return bash.to_string_lossy().into_owned();
         }
+        // No Git for Windows: PowerShell keeps the native runtime usable
+        // without WSL, outside restricted mode.
+        if !restricted_mode {
+            if let Some(found) = crate::utils::executable::powershell_executable() {
+                return found.to_string_lossy().into_owned();
+            }
+        }
     }
     "bash".to_string()
 }
 
-/// Whether a shell selection (basename or absolute path) names zsh.
-fn shell_is_zsh(shell: &str) -> bool {
-    Path::new(shell).file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-        name == "zsh"
-            || name
-                .strip_prefix("zsh-")
-                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
-    })
+/// One-line PowerShell bootstrap with the same completion contract as the
+/// bash prompt: `◉ <cwd>──➤<nonce>:<code> ` after every command.
+///
+/// `PSReadLine` is unloaded because it redraws the line with cursor movement
+/// that breaks marker detection; `PlainText` rendering keeps ANSI out of
+/// command output on PowerShell 7.2+. The exit code mirrors a POSIX shell:
+/// a native process code when one was set, `1` for a failed cmdlet
+/// (`$?` false), else `0`; `$LASTEXITCODE` is cleared so a later cmdlet
+/// does not inherit a stale native failure. Windows PowerShell 5.1 keeps
+/// `$?` true after a failing native command, which is why the code is read
+/// before `$?` is consulted.
+fn powershell_bootstrap(nonce: &str) -> String {
+    format!(
+        "Remove-Module PSReadLine -ErrorAction SilentlyContinue; \
+         if (Get-Variable PSStyle -ErrorAction SilentlyContinue) {{ $PSStyle.OutputRendering = 'PlainText' }}; \
+         $env:PAGER = 'cat'; $env:GIT_PAGER = 'cat'; $global:LASTEXITCODE = 0; \
+         function global:prompt {{ $ok = $?; $ec = $global:LASTEXITCODE; \
+         $code = if ($ec -is [int] -and $ec -ne 0) {{ $ec }} elseif ($ok) {{ 0 }} else {{ 1 }}; \
+         $global:LASTEXITCODE = 0; \
+         \"\u{25c9} $($ExecutionContext.SessionState.Path.CurrentLocation.ProviderPath)\u{2500}\u{2500}\u{27a4}{nonce}:$code \" }}"
+    )
 }
 
 fn command_available(command: &str) -> bool {
@@ -557,7 +609,12 @@ impl PtyShell {
         let pair = pty_system.openpty(size).context("Failed to open PTY pair")?;
 
         // Build the command
-        let (mut cmd, attach_hint, is_zsh) = attachable_command(restricted_mode);
+        let (mut cmd, attach_hint, shell_kind) = attachable_command(restricted_mode);
+        if shell_kind.is_powershell() && restricted_mode {
+            return Err(anyhow!(
+                "restricted mode needs bash -r; PowerShell has no equivalent restricted mode"
+            ));
+        }
 
         // Set up environment for proper terminal behavior
         cmd.env("TERM", "xterm-256color");
@@ -654,14 +711,14 @@ impl PtyShell {
         };
 
         // Initialize the shell with WCGW-style prompt
-        shell.initialize_prompt(is_zsh, &nonce)?;
+        shell.initialize_prompt(shell_kind, &nonce)?;
 
         debug!("PTY shell created successfully");
         Ok(shell)
     }
 
     /// Initialize the shell prompt for WCGW compatibility
-    fn initialize_prompt(&mut self, is_zsh: bool, nonce: &str) -> Result<()> {
+    fn initialize_prompt(&mut self, shell_kind: ShellKind, nonce: &str) -> Result<()> {
         // Set up the dynamic prompt - matches WCGW Python PROMPT_STATEMENT.
         // zsh ignores PROMPT_COMMAND, so it gets a precmd hook with a blanked
         // default prompt instead.
@@ -670,17 +727,17 @@ impl PtyShell {
         // is appended after the marker, and prompt detection — which anchors on a
         // trailing `──➤` — only fires when the chunk happens to fragment right
         // before the PS1, making command-completion detection flaky.
-        let prompt_statement = if is_zsh {
+        let prompt_statement = match shell_kind {
             // Clear precmd_functions too: frameworks (oh-my-zsh/p10k) register the
             // prompt via that array, so redefining `precmd` alone leaves their
             // prompt in place and our `──➤` marker never ends the line.
-            format!(
+            ShellKind::Zsh => format!(
                 r#"export GIT_PAGER=cat PAGER=cat; precmd_functions=(); preexec_functions=(); PROMPT=''; RPROMPT=''; precmd() {{ local __winx_ec=$?; printf "◉ %s──➤{nonce}:%s " "$PWD" "$__winx_ec" }}"#
-            )
-        } else {
-            format!(
+            ),
+            ShellKind::Bash => format!(
                 r#"export GIT_PAGER=cat PAGER=cat PROMPT_COMMAND='__winx_ec=$?; printf "◉ %s──➤{nonce}:%s " "$PWD" "$__winx_ec"'; PS1=''"#
-            )
+            ),
+            ShellKind::PowerShell => powershell_bootstrap(nonce),
         };
 
         self.write_command(&prompt_statement)?;
@@ -1462,14 +1519,13 @@ mod tests {
     }
 
     #[test]
-    fn zsh_is_recognized_by_basename_and_absolute_path() {
-        assert!(super::shell_is_zsh("zsh"));
-        assert!(super::shell_is_zsh("/bin/zsh"));
-        assert!(super::shell_is_zsh("/opt/homebrew/bin/zsh"));
-        assert!(super::shell_is_zsh("/usr/bin/zsh-5.9"));
-        assert!(!super::shell_is_zsh("bash"));
-        assert!(!super::shell_is_zsh("/usr/bin/bash"));
-        assert!(!super::shell_is_zsh("/home/zsh/bin/bash"));
+    fn powershell_bootstrap_defines_a_marker_prompt_without_psreadline() {
+        let bootstrap = super::powershell_bootstrap("cafe1234");
+        assert!(bootstrap.contains("Remove-Module PSReadLine"), "{bootstrap}");
+        assert!(bootstrap.contains("function global:prompt"), "{bootstrap}");
+        assert!(bootstrap.contains("──➤cafe1234:$code "), "{bootstrap}");
+        assert!(bootstrap.contains("$global:LASTEXITCODE = 0"), "{bootstrap}");
+        assert!(!bootstrap.contains('\n'), "bootstrap must be a single input line");
     }
 
     #[test]
