@@ -603,6 +603,7 @@ impl WinxService {
                     "temporary_artifact_stale_pruned_bytes": outcome.temporary_artifact_stale_pruned_bytes,
                     "temporary_code_map_max_calls": outcome.temporary_code_map_max_calls,
                     "temporary_code_map_max_unique_files": outcome.temporary_code_map_max_unique_files,
+                    "session_status": outcome.session_status,
                 }));
                 Ok(result)
             }

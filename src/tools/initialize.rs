@@ -30,6 +30,8 @@ pub(crate) enum InitializeTransition {
     ShellReset,
     ResetSkippedHealthy,
     WorkspaceChanged,
+    /// Read-only `status` probe; nothing changed.
+    Status,
 }
 
 impl InitializeTransition {
@@ -41,6 +43,7 @@ impl InitializeTransition {
             Self::ShellReset => "shell_reset",
             Self::ResetSkippedHealthy => "reset_skipped_healthy",
             Self::WorkspaceChanged => "workspace_changed",
+            Self::Status => "status",
         }
     }
 
@@ -71,6 +74,8 @@ pub(crate) struct InitializeOutcome {
     pub(crate) temporary_artifact_stale_pruned_bytes: u64,
     pub(crate) temporary_code_map_max_calls: usize,
     pub(crate) temporary_code_map_max_unique_files: usize,
+    /// Present only for `type = "status"` probes.
+    pub(crate) session_status: Option<crate::runtime::ShellSessionStatus>,
 }
 
 /// Create a unique scratch workspace under the system temp dir, used when the
@@ -354,12 +359,17 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
 
     validate_thread_id(&initialize)?;
     let thread_id = initialize_thread_id(&initialize);
+    if initialize.init_type == InitializeType::Status {
+        return describe_session_status(runtime, bash_state_arc, &thread_id).await;
+    }
     let mut bash_state_guard = bash_state_arc.lock().await;
     let recovered_request = if bash_state_guard.is_none() {
         match initialize.init_type {
             InitializeType::UserAskedModeChange => Some("user_asked_mode_change"),
             InitializeType::ResetShell => Some("reset_shell"),
-            InitializeType::FirstCall | InitializeType::UserAskedChangeWorkspace => None,
+            InitializeType::FirstCall
+            | InitializeType::UserAskedChangeWorkspace
+            | InitializeType::Status => None,
         }
     } else {
         None
@@ -409,6 +419,11 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
     let mut shell_reset_retry_after_seconds = None;
 
     match initialize.init_type {
+        InitializeType::Status => {
+            return Err(WinxError::ArgumentParseError(
+                "status probes are answered before any session transition".to_string(),
+            ));
+        }
         InitializeType::FirstCall => {
             let configured = if local_attach {
                 let Some(state) = bash_state_guard.as_mut() else {
@@ -732,5 +747,89 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
         temporary_code_map_max_calls: crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_CALLS,
         temporary_code_map_max_unique_files:
             crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
+        session_status: None,
+    })
+}
+
+/// `Initialize(type = "status")`: describe the live session for `thread_id`
+/// without creating, resetting or reconfiguring anything.
+async fn describe_session_status(
+    runtime: &dyn ShellRuntime,
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    thread_id: &str,
+) -> Result<InitializeOutcome> {
+    let (workspace_root, cwd, mode, bound_thread_id) = {
+        let guard = bash_state_arc.lock().await;
+        let state = guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+        if !state.initialized {
+            return Err(WinxError::BashStateNotInitialized);
+        }
+        if state.current_thread_id != thread_id {
+            return Err(WinxError::ThreadIdMismatch(format!(
+                "thread_id {thread_id} is not the session bound here ({})",
+                state.current_thread_id
+            )));
+        }
+        (
+            state.workspace_root.clone(),
+            state.cwd.clone(),
+            state.mode,
+            state.current_thread_id.clone(),
+        )
+    };
+    let status = runtime.describe_session(bash_state_arc).await?;
+    let temporary_artifact =
+        crate::utils::agent_temp::session_info(&workspace_root, &bound_thread_id);
+    let mut response = String::new();
+    let _ = writeln!(response, "# Session status");
+    let _ = writeln!(response, "thread_id={bound_thread_id}");
+    let _ = writeln!(response, "workspace_root={}", workspace_root.display());
+    let _ = writeln!(response, "cwd={}", cwd.display());
+    let _ = writeln!(response, "mode={mode}");
+    let _ = writeln!(response, "runtime={}", status.runtime);
+    if let Some(pid) = status.guardian_pid {
+        let _ = writeln!(
+            response,
+            "guardian_pid={pid} guardian_epoch={} guardian_build={}",
+            status.guardian_epoch.as_deref().unwrap_or("?"),
+            status.guardian_build.as_deref().unwrap_or("?")
+        );
+    }
+    let _ = writeln!(response, "command_running={}", status.command_running);
+    if !status.background_command_ids.is_empty() {
+        let _ = writeln!(response, "background_command_ids={:?}", status.background_command_ids);
+    }
+    let _ = writeln!(
+        response,
+        "next: {}",
+        if status.command_running {
+            "poll BashCommand status_check for the running command"
+        } else {
+            "keep using this thread_id/workspace_root pair; nothing to re-initialize"
+        }
+    );
+    Ok(InitializeOutcome {
+        text: response,
+        transition: InitializeTransition::Status,
+        recovered_missing_session: false,
+        context_bytes: 0,
+        guidelines_bytes: 0,
+        initial_files_count: 0,
+        compact_response: true,
+        code_writer_policy_strength: None,
+        shell_spawners_present: false,
+        shell_reset_retry_after_seconds: None,
+        temporary_artifact_dir: temporary_artifact.directory,
+        temporary_artifact_ttl_seconds: temporary_artifact.ttl_seconds,
+        temporary_artifact_max_bytes: temporary_artifact.max_total_bytes,
+        temporary_artifact_max_session_bytes: temporary_artifact.max_session_bytes,
+        temporary_artifact_max_file_bytes: temporary_artifact.max_file_bytes,
+        temporary_artifact_max_files: temporary_artifact.max_session_files,
+        temporary_artifact_stale_pruned_files: temporary_artifact.stale_pruned_files,
+        temporary_artifact_stale_pruned_bytes: temporary_artifact.stale_pruned_bytes,
+        temporary_code_map_max_calls: crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_CALLS,
+        temporary_code_map_max_unique_files:
+            crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
+        session_status: Some(status),
     })
 }

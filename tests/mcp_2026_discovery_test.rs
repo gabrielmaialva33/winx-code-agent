@@ -4704,3 +4704,58 @@ async fn resumed_task_without_a_path_keeps_a_usable_binding() -> anyhow::Result<
     assert!(!pwd.contains("workspace_thread_mismatch"), "{pwd}");
     Ok(())
 }
+
+/// `Initialize(type = "status")` is a read-only probe: it reports the bound
+/// session and never creates, resets or reconfigures it.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_probe_reports_the_bound_session_without_mutating_it() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+
+    // Unknown session: a typed needs_initialize, not a new session.
+    let probe = |thread_id: &str, client: &str| {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": format!("status-{client}"),
+            "method": "tools/call",
+            "params": {
+                "_meta": modern_request_meta(client, false),
+                "name": "Initialize",
+                "arguments": {"type": "status", "any_workspace_path": workspace.path(), "mode_name": "wcgw", "thread_id": thread_id}
+            }
+        })
+        .to_string()
+    };
+    let unknown =
+        post_json(address, "2026-07-28", "tools/call", &probe("nobody", "status-unknown")).await?;
+    let unknown_json = response_json(&unknown)?;
+    assert_eq!(unknown_json["result"]["isError"], true, "{unknown}");
+    assert_eq!(
+        unknown_json["result"]["structuredContent"]["status"], "needs_initialize",
+        "{unknown}"
+    );
+
+    let initialize =
+        initialize_modern_as(address, TEST_TOKEN, workspace.path(), "status_seed", "status-seed")
+            .await?;
+    assert!(initialize.starts_with("HTTP/1.1 200"), "{initialize}");
+    let thread_id = initialized_thread_id(&initialize)?;
+
+    let status =
+        post_json(address, "2026-07-28", "tools/call", &probe(&thread_id, "status-probe")).await?;
+    let status_json = response_json(&status)?;
+    assert_ne!(status_json["result"]["isError"], true, "{status}");
+    let data = &status_json["result"]["structuredContent"]["data"];
+    assert_eq!(data["initialize_transition"], "status", "{status}");
+    assert_eq!(data["initialize_reused"], false, "{status}");
+    assert_eq!(data["thread_id"], thread_id, "{status}");
+    assert_eq!(data["session_status"]["runtime"], "embedded", "{status}");
+    assert_eq!(data["session_status"]["command_running"], false, "{status}");
+    assert!(status.contains("cwd="), "{status}");
+
+    // The probe left the session untouched: the same pair keeps working.
+    let pwd = pwd_as(address, TEST_TOKEN, &thread_id, "status-seed").await?;
+    assert!(pwd.starts_with("HTTP/1.1 200"), "{pwd}");
+    assert!(pwd.contains(&workspace.path().display().to_string()), "{pwd}");
+    Ok(())
+}

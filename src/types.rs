@@ -99,6 +99,12 @@ pub enum InitializeType {
     /// This should be used when the user asks to switch to a different
     /// workspace or project directory during the conversation.
     UserAskedChangeWorkspace,
+
+    /// Read-only probe of an existing session: reports its workspace, cwd,
+    /// mode, runtime and whether a command is still running. Never creates,
+    /// resets or reconfigures anything; an unknown session answers
+    /// `needs_initialize` with the safe next call.
+    Status,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -292,6 +298,7 @@ pub struct Initialize {
     /// - `UserAskedModeChange`: User requested to change the mode during a conversation
     /// - `ResetShell`: Reset the shell if it's not working properly
     /// - `UserAskedChangeWorkspace`: User requested to change the workspace during a conversation
+    /// - `Status`: Read-only probe of the bound session (workspace, cwd, mode, runtime, running command); never mutates
     #[serde(rename = "type")]
     #[serde(default = "default_init_type")]
     pub init_type: InitializeType,
