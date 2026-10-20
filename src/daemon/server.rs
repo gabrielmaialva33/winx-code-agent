@@ -323,6 +323,11 @@ pub struct DaemonServer {
     socket_path: PathBuf,
     sessions: Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     epoch: String,
+    /// Set once a conditional (`only_if_idle`) kill succeeded: the control
+    /// plane is about to terminate this guardian, so no new session or
+    /// action may be admitted meanwhile. Per server, not per process, so
+    /// several guardians hosted by one test process stay independent.
+    draining: Arc<AtomicBool>,
 }
 
 impl DaemonServer {
@@ -347,7 +352,13 @@ impl DaemonServer {
         crate::daemon::transport::restrict_to_owner(&socket_path, 0o600).await?;
         let epoch = format!("{:016x}", rand::random::<u64>());
         crate::daemon::exit::install("winx-guardian", &socket_path, &epoch);
-        Ok(Self { listener, socket_path, sessions: Arc::new(Mutex::new(HashMap::new())), epoch })
+        Ok(Self {
+            listener,
+            socket_path,
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            epoch,
+            draining: Arc::new(AtomicBool::new(false)),
+        })
     }
 
     pub async fn serve(mut self) -> Result<()> {
@@ -367,8 +378,9 @@ impl DaemonServer {
             }
             let sessions = self.sessions.clone();
             let epoch = self.epoch.clone();
+            let draining = self.draining.clone();
             tokio::spawn(async move {
-                if let Err(error) = serve_connection(stream, sessions, epoch).await {
+                if let Err(error) = serve_connection(stream, sessions, epoch, draining).await {
                     tracing::debug!("winxd client disconnected: {error}");
                 }
             });
@@ -386,6 +398,7 @@ async fn serve_connection(
     mut stream: crate::daemon::transport::DaemonStream,
     sessions: Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     epoch: String,
+    draining: Arc<AtomicBool>,
 ) -> Result<()> {
     loop {
         let request: RpcRequest = match read_json_frame(&mut stream).await {
@@ -393,7 +406,7 @@ async fn serve_connection(
             Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(()),
             Err(error) => return Err(error.into()),
         };
-        let response = dispatch(request, &sessions, &epoch).await;
+        let response = dispatch(request, &sessions, &epoch, &draining).await;
         write_json_frame(&mut stream, &response).await?;
     }
 }
@@ -403,6 +416,7 @@ async fn dispatch(
     request: RpcRequest,
     sessions: &Arc<Mutex<HashMap<String, Arc<DaemonSession>>>>,
     epoch: &str,
+    draining: &AtomicBool,
 ) -> RpcResponse {
     if request.jsonrpc != "2.0" {
         return rpc_error(request.id, -32600, "JSON-RPC version must be 2.0");
@@ -438,7 +452,7 @@ async fn dispatch(
             schedule_process_exit("winx-guardian");
             rpc_result(request.id, &serde_json::json!({ "shutting_down": true }))
         }
-        "session.configure" | "shell.run_action" if DRAINING.load(Ordering::Acquire) => {
+        "session.configure" | "shell.run_action" if draining.load(Ordering::Acquire) => {
             draining_error(request.id)
         }
         "session.configure" => {
@@ -549,7 +563,7 @@ async fn dispatch(
                         if session_is_busy(&session).await {
                             return rpc_result(request.id, &false);
                         }
-                        DRAINING.store(true, Ordering::Release);
+                        draining.store(true, Ordering::Release);
                     }
                     sessions.lock().await.remove(&key);
                     let background_ids = session.background_ids.lock().await.clone();
@@ -1420,11 +1434,6 @@ fn rpc_error(id: u64, code: i32, message: &str) -> RpcResponse {
         error: Some(RpcError { code, message: message.to_string() }),
     }
 }
-
-/// Set once a conditional (`only_if_idle`) kill succeeded: the control plane
-/// is about to terminate this process, so no new session or action may be
-/// admitted in the meantime. One guardian serves one process.
-static DRAINING: AtomicBool = AtomicBool::new(false);
 
 fn draining_error(id: u64) -> RpcResponse {
     rpc_error(id, -32011, "guardian is retiring after idle reclamation; renegotiate the session")
