@@ -22,6 +22,7 @@ Winx 通过经过身份验证的 **Streamable HTTP** 端点向 ChatGPT、云端�
 | 请求超时时间 | 120 秒 |
 | 全局并发上限 | 32 个并发请求 |
 | 单来源 IP 限流 | 120 请求/分钟 |
+| 单主体限流 | 120 请求/分钟 |
 | 认证失败延迟响应 | 100 毫秒 |
 | 未使用 Guardian TTL | 1,800 秒（30 分钟） |
 | 已使用 Guardian TTL | 86,400 秒（24 小时） |
@@ -434,6 +435,7 @@ winx-code-agent serve --http \
 | `--allow-query-token` | 允许通过 URL 参数 `?token=...` 传递凭证 |
 | `--max-concurrency <N>` | 全局最大并发请求数（默认 32） |
 | `--requests-per-minute <N>` | 单 IP 每分钟最大请求数（默认 120） |
+| `--principal-requests-per-minute <N>` | 单个已认证主体每分钟最大请求数（默认 120），用于同一隧道后的公平分配 |
 
 ## 安全边界说明
 

@@ -22,6 +22,7 @@ Como esse endpoint concede recursos reais de shell e acesso ao sistema de arquiv
 | Timeout de requisição | 120 segundos |
 | Concorrência global | 32 requisições simultâneas |
 | Rate limit por IP de origem | 120 requisições por minuto |
+| Rate limit por principal | 120 requisições por minuto |
 | Atraso em falha de autenticação | 100 ms |
 | TTL de guardian nunca utilizado | 1.800 segundos (30 minutos) |
 | TTL de guardian utilizado | 86.400 segundos (24 horas) |
@@ -468,6 +469,7 @@ winx-code-agent serve --http \
 | `--allow-query-token` | Permite passar o token via `?token=...` na URL |
 | `--max-concurrency <N>` | Limite global de requisições concorrentes (padrão: 32) |
 | `--requests-per-minute <N>` | Limite de requisições por IP (padrão: 120) |
+| `--principal-requests-per-minute <N>` | Limite de requisições por principal autenticado (padrão: 120); mantém justiça quando todos chegam pelo mesmo túnel |
 
 ## Limite de Segurança
 

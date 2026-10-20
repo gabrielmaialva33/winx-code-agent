@@ -783,6 +783,7 @@ requirements.
 | Request timeout              | 120 seconds                                                    |
 | Concurrent requests          | 32 globally                                                    |
 | Rate limit                   | 120 requests/minute per source IP                              |
+| Principal rate limit         | 120 requests/minute per authenticated principal                |
 | Invalid authentication delay | 100 ms                                                         |
 | Query token                  | Disabled; requires `--allow-query-token`                       |
 | Session affinity             | `workspace`; optional `conversation` or caller-owned `thread`  |

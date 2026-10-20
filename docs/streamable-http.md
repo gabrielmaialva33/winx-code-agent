@@ -25,6 +25,7 @@ refuses non-loopback binding unless explicitly acknowledged, bounds request cost
 | Request timeout          | 120 seconds                     |
 | Global concurrency       | 32 requests                     |
 | Per-source-IP rate limit | 120 requests per minute         |
+| Per-principal rate limit | 120 requests per minute         |
 | Invalid-auth delay       | 100 ms                          |
 | Never-used guardian TTL  | 1,800 seconds (30 minutes)      |
 | Used guardian TTL        | 86,400 seconds (24 hours)       |
