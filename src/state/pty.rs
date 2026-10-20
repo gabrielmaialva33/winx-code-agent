@@ -1052,17 +1052,33 @@ impl PtyShell {
     /// `:<digits>` suffix keep command output from forging completion.
     fn parse_prompt_exit_code(text: &str, prompt_end: &str) -> Option<i32> {
         let last = text.lines().rev().find(|line| !line.trim().is_empty())?;
-        // Strip ANSI so a trailing erase/cursor sequence after the code
-        // (e.g. ":0 \x1b[K") doesn't defeat the suffix check.
-        let clean = crate::state::terminal::strip_ansi_codes(last);
-        let clean = clean.trim_end();
-        if !clean.contains(WCGW_PROMPT_PATTERN) {
+        if !last.contains(WCGW_PROMPT_PATTERN) {
             return None;
         }
-        // Everything after the last "──➤<nonce>" must be ":<digits>" and nothing
-        // else — this confirms the prompt ends the line AND yields the code.
-        let after = clean.rsplit_once(prompt_end)?.1;
-        after.strip_prefix(':')?.trim().parse::<i32>().ok()
+        // Everything after the last "──➤<nonce>" must be ":<digits>" followed by
+        // the prompt's own terminator — this confirms the prompt ends the line
+        // AND yields the code. The raw tail keeps its escape sequences: a
+        // trailing erase/cursor sequence (":0 \x1b[K", or ConPTY's ":0\x1b[C")
+        // counts as the terminator, so it is stripped only for parsing.
+        let raw_tail = last.rsplit_once(prompt_end)?.1;
+        let clean_tail = crate::state::terminal::strip_ansi_codes(raw_tail);
+        let code_text = clean_tail.strip_prefix(':')?;
+        let digits = code_text
+            .char_indices()
+            .take_while(|(index, c)| c.is_ascii_digit() || (*index == 0 && *c == '-'))
+            .count();
+        let (code, rest) = code_text.split_at(digits);
+        if !rest.chars().all(char::is_whitespace) {
+            return None;
+        }
+        // A read boundary can fall between the digits of "127": without the
+        // terminator the record is still in flight, and accepting "1" now would
+        // report the wrong exit code before the rest arrives.
+        let terminated = !rest.is_empty() || raw_tail.len() > clean_tail.len();
+        if !terminated {
+            return None;
+        }
+        code.parse::<i32>().ok()
     }
 
     /// Point output-offload scratch files at `root` (the workspace). Idempotent;
@@ -1462,6 +1478,15 @@ mod tests {
         assert_eq!(PtyShell::parse_prompt_exit_code("ok\n◉ /x──➤cafe1234:0 ", end), Some(0));
         assert_eq!(PtyShell::parse_prompt_exit_code("oops\n◉ /x──➤cafe1234:1 ", end), Some(1));
         assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤cafe1234:42 ", end), Some(42));
+        // A record split by a read boundary inside the digits is still in flight.
+        assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤cafe1234:1", end), None);
+        assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤cafe1234:127", end), None);
+        assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤cafe1234:127 ", end), Some(127));
+        // ConPTY may replace the trailing space with a cursor move.
+        assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤cafe1234:127\u{1b}[C", end), Some(127));
+        assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤cafe1234:0\u{1b}[K", end), Some(0));
+        assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤cafe1234:-1 ", end), Some(-1));
+        assert_eq!(PtyShell::parse_prompt_exit_code("◉ /x──➤cafe1234:12a ", end), None);
         // still running (no completion prompt yet) -> None
         assert_eq!(PtyShell::parse_prompt_exit_code("building...", end), None);
         // forged with the wrong nonce -> None
