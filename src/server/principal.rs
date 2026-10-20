@@ -134,6 +134,31 @@ pub(super) fn scope_tool_request(
     let internal = scoped_thread_id(&principal, internal_source)?;
     arguments.insert("thread_id".to_string(), Value::String(internal.clone()));
     scope.replacements.push((internal, external));
+
+    // Saved contexts live in one process-wide memory directory keyed only by
+    // their id, so without scoping one principal could resume or overwrite
+    // another principal's context by guessing its name.
+    for field in ["task_id_to_resume", "id"] {
+        let is_context_id = matches!(
+            (field, ToolKind::parse(request.name.as_ref())),
+            ("task_id_to_resume", Some(ToolKind::Initialize)) | ("id", Some(ToolKind::ContextSave))
+        );
+        if !is_context_id {
+            continue;
+        }
+        let supplied = arguments.get(field).and_then(Value::as_str).unwrap_or_default().trim();
+        if supplied.is_empty() {
+            // A whitespace-only id must not survive as a raw lookup key.
+            if arguments.get(field).is_some() {
+                arguments.insert(field.to_string(), Value::String(String::new()));
+            }
+            continue;
+        }
+        let external = supplied.to_string();
+        let internal = scoped_context_id(&principal, &external);
+        arguments.insert(field.to_string(), Value::String(internal.clone()));
+        scope.replacements.push((internal, external));
+    }
     Ok((request, scope))
 }
 
@@ -234,6 +259,30 @@ fn tool_uses_thread_id(name: &str) -> bool {
     ToolKind::parse(name).is_some()
 }
 
+/// Longest saved-context id the memory directory stores verbatim; longer
+/// names are shortened by `context_save::sanitize_filename` with a random
+/// suffix, which would make save and resume disagree.
+const MAX_CONTEXT_ID_CHARS: usize = 50;
+
+/// Deterministic per-principal storage key for a saved context: the session
+/// prefix plus the external id, shortened to a stable digest form when it
+/// would exceed the sanitizer's verbatim limit.
+fn scoped_context_id(principal: &HttpPrincipal, external: &str) -> String {
+    let prefix = principal.session_prefix();
+    let candidate = format!("{prefix}{external}");
+    if candidate.chars().count() <= MAX_CONTEXT_ID_CHARS {
+        return candidate;
+    }
+    let digest = Sha256::digest(external.as_bytes());
+    let mut suffix = String::with_capacity(12);
+    for byte in &digest[..6] {
+        let _ = write!(suffix, "{byte:02x}");
+    }
+    let budget = MAX_CONTEXT_ID_CHARS.saturating_sub(prefix.chars().count() + suffix.len() + 1);
+    let head: String = external.chars().take(budget).collect();
+    format!("{prefix}{head}_{suffix}")
+}
+
 fn scoped_thread_id(principal: &HttpPrincipal, external: &str) -> Result<String> {
     let prefix = principal.session_prefix();
     if prefix.len() >= MAX_NORMALIZED_THREAD_ID_BYTES {
@@ -317,6 +366,96 @@ mod tests {
         )
         .expect("right");
         assert_ne!(left.arguments, right.arguments);
+    }
+
+    fn argument(request: &CallToolRequestParams, name: &str) -> String {
+        request
+            .arguments
+            .as_ref()
+            .and_then(|arguments| arguments.get(name))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn saved_context_ids_are_scoped_per_principal_and_unscoped_in_replies() {
+        let initialize = CallToolRequestParams::new("Initialize").with_arguments(
+            json!({"thread_id": "t", "any_workspace_path": "/tmp", "task_id_to_resume": "handoff"})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        let (left, left_scope) = scope_tool_request(
+            initialize.clone(),
+            Some(principal("left")),
+            HttpSessionAffinity::Thread,
+            None,
+        )
+        .expect("left");
+        let (right, _) = scope_tool_request(
+            initialize,
+            Some(principal("right")),
+            HttpSessionAffinity::Thread,
+            None,
+        )
+        .expect("right");
+        let left_id = argument(&left, "task_id_to_resume");
+        let right_id = argument(&right, "task_id_to_resume");
+        assert!(left_id.ends_with("__handoff"), "{left_id}");
+        assert_ne!(left_id, right_id, "principals must not share a saved context namespace");
+        assert_ne!(left_id, "handoff");
+        assert_eq!(left_scope.unscope_text(&format!("resumed {left_id}")), "resumed handoff");
+
+        let save = CallToolRequestParams::new("ContextSave").with_arguments(
+            json!({"thread_id": "t", "id": "handoff", "project_root_path": "/tmp", "description": "d", "relevant_file_globs": []})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        let (save, _) =
+            scope_tool_request(save, Some(principal("left")), HttpSessionAffinity::Thread, None)
+                .expect("save");
+        assert_eq!(argument(&save, "id"), left_id, "save and resume use the same scoped id");
+
+        // Local stdio sessions (no principal) keep their ids untouched.
+        let (plain, _) = scope_tool_request(
+            CallToolRequestParams::new("ContextSave").with_arguments(
+                json!({"thread_id": "t", "id": "handoff"}).as_object().cloned().unwrap(),
+            ),
+            None,
+            HttpSessionAffinity::Thread,
+            None,
+        )
+        .expect("plain");
+        assert_eq!(argument(&plain, "id"), "handoff");
+    }
+
+    #[test]
+    fn whitespace_only_context_ids_are_blanked_not_passed_through() {
+        let request = CallToolRequestParams::new("Initialize").with_arguments(
+            json!({"thread_id": "t", "any_workspace_path": "/tmp", "task_id_to_resume": "  "})
+                .as_object()
+                .cloned()
+                .unwrap(),
+        );
+        let (request, _) =
+            scope_tool_request(request, Some(principal("left")), HttpSessionAffinity::Thread, None)
+                .expect("scope");
+        assert_eq!(argument(&request, "task_id_to_resume"), "");
+    }
+
+    #[test]
+    fn long_context_ids_get_a_stable_key_within_the_memory_filename_limit() {
+        let long = "handoff-".repeat(40);
+        let first = super::scoped_context_id(&principal("left"), &long);
+        let second = super::scoped_context_id(&principal("left"), &long);
+        assert_eq!(first, second, "save and resume must derive the same key");
+        assert!(first.chars().count() <= super::MAX_CONTEXT_ID_CHARS, "{first}");
+        let other = super::scoped_context_id(&principal("left"), &format!("{long}x"));
+        assert_ne!(first, other, "different ids must not collide");
+        let short = super::scoped_context_id(&principal("left"), "handoff");
+        assert!(short.ends_with("handoff"), "{short}");
     }
 
     #[test]

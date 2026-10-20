@@ -428,7 +428,7 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
                 new_bash_state.write_if_empty_mode = write_if_empty_mode;
                 new_bash_state.initialized = true;
 
-                let resumed_context = if initialize.task_id_to_resume.is_empty() {
+                let resumed_context = if initialize.task_id_to_resume.trim().is_empty() {
                     None
                 } else {
                     crate::tools::context_save::load_saved_context(&initialize.task_id_to_resume)?

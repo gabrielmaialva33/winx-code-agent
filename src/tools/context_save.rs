@@ -86,7 +86,7 @@ fn normalize_context(context: &mut ContextSave) -> Result<()> {
         context.project_root_path = expand_user(&context.project_root_path);
     }
 
-    if context.id.is_empty() {
+    if context.id.trim().is_empty() {
         return Err(WinxError::ArgumentParseError("Task ID cannot be empty".to_string()));
     }
 
