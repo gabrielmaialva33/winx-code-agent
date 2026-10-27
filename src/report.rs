@@ -1,8 +1,7 @@
 //! Offline aggregation for privacy-safe `winx::usage` JSONL logs.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::fs::{self, File};
-use std::io::{BufRead as _, BufReader};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -10,6 +9,8 @@ use serde_json::Value;
 use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
 
 use crate::errors::{Result, WinxError};
+
+mod selection;
 
 const MAX_REPORT_EVENTS: usize = 100_000;
 
@@ -152,47 +153,14 @@ pub fn usage_report(
     let sources = usage_sources(&base)?;
     let cutoff = (since_minutes > 0)
         .then(|| OffsetDateTime::now_utc() - Duration::minutes(i64_saturating(since_minutes)));
-    let mut recent = VecDeque::with_capacity(last_events.min(4096));
-    let mut lines_seen = 0_u64;
-    let mut invalid_lines = 0_u64;
-    for source in &sources {
-        let reader =
-            BufReader::new(File::open(source).map_err(|error| WinxError::FileAccessError {
-                path: source.clone(),
-                message: format!("opening usage log: {error}"),
-            })?);
-        for line in reader.lines() {
-            lines_seen = lines_seen.saturating_add(1);
-            let Ok(line) = line else {
-                invalid_lines = invalid_lines.saturating_add(1);
-                continue;
-            };
-            let Some(event) = parse_event(&line) else {
-                invalid_lines = invalid_lines.saturating_add(1);
-                continue;
-            };
-            if cutoff.is_some_and(|cutoff| {
-                event
-                    .timestamp
-                    .as_deref()
-                    .and_then(parse_timestamp)
-                    .is_some_and(|timestamp| timestamp < cutoff)
-            }) {
-                continue;
-            }
-            if build_filter.is_some_and(|filter| {
-                ![string(&event.fields, "build"), string(&event.fields, "build_version")]
-                    .contains(&filter)
-            }) {
-                continue;
-            }
-            if recent.len() == last_events {
-                recent.pop_front();
-            }
-            recent.push_back(event);
-        }
-    }
-    Ok(aggregate(&base, sources.len(), lines_seen, invalid_lines, &recent))
+    let selected = selection::select(&sources, last_events, cutoff, build_filter)?;
+    Ok(aggregate(
+        &base,
+        sources.len(),
+        selected.lines_seen,
+        selected.invalid_lines,
+        &selected.events,
+    ))
 }
 
 #[derive(Default)]
@@ -597,6 +565,7 @@ fn i64_saturating(value: u64) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs::File;
     use std::io::Write as _;
 
     use super::*;

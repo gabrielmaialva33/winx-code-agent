@@ -575,6 +575,17 @@ preserving zero and false; unavailable identifier fingerprints are empty strings
 HTTP requests, reports latency/bytes/recovery behavior, and audits unsafe retry invariants. It disables the usage writer
 while reading, so generating a report cannot append to, rotate, or prune the observed logs.
 
+With `--build`, HTTP events without a build identity inherit membership only from tool events with the same nonempty
+`request_id` and principal and unambiguous ownership of the selected exact build or package version. Explicit HTTP build
+fields remain authoritative; unrelated HTTP records and conflicting ownership are excluded from that filtered report.
+Legacy records can correlate when both omit the principal.
+
+`--last` limits matching **events** after build attribution, in source traversal order, so it can split a tool/HTTP pair.
+`--since-minutes` controls which events are returned; an older tool may establish a recent HTTP event's build without
+being returned itself. Each report keeps opened log handles and their initial byte lengths across attribution passes,
+so later appends are considered on the next invocation. Attribution uses bounded candidate batches; sparse matches in
+large mixed-build histories can require additional scans.
+
 The report's `execution` section counts observations per tool call, including status polls and verification replays.
 It summarizes observed exit codes, output truncation, available correlation IDs, replay counts, and requested waits.
 These counts are not a count of distinct processes. Missing metadata in old logs is counted as unknown, never as exit
