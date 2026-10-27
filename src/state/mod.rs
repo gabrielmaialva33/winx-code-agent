@@ -1,6 +1,7 @@
 pub mod agent_resume;
 pub mod ansi_codes;
 pub mod bash_state;
+pub mod execution_history;
 pub mod line_ring;
 pub mod live_terminal;
 pub mod persistence;

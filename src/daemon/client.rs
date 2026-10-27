@@ -764,6 +764,20 @@ impl DaemonShellRuntime {
         };
         let mut session = self.live_negotiated_session(&thread_id).await?;
         let hello = session.lock().await.guardian.clone();
+        if matches!(
+            &command.action_json,
+            crate::types::BashCommandAction::Inspect { .. }
+                | crate::types::BashCommandAction::Prompt { .. }
+        ) && !hello
+            .capabilities
+            .iter()
+            .any(|capability| capability == super::protocol::AGENT_WORKFLOWS_CAPABILITY)
+        {
+            return Err(WinxError::InvalidInput(
+                "the effective guardian does not support native agent workflows; no input was sent"
+                    .to_string(),
+            ));
+        }
         let (options, mut generation_bound_actions) =
             action_options_for_guardian(&hello, requested_options.clone())?;
         let request_key = format!("{:016x}", rand::random::<u64>());
@@ -797,6 +811,17 @@ impl DaemonShellRuntime {
                         "{first_error}; guardian epoch changed from {} to {}, so Winx will not retry an ambiguously delivered shell action",
                         hello.daemon_epoch, retry_hello.daemon_epoch
                     )));
+                }
+                if matches!(
+                    &command.action_json,
+                    crate::types::BashCommandAction::Inspect { .. }
+                        | crate::types::BashCommandAction::Prompt { .. }
+                ) && !retry_hello
+                    .capabilities
+                    .iter()
+                    .any(|capability| capability == super::protocol::AGENT_WORKFLOWS_CAPABILITY)
+                {
+                    return Err(WinxError::InvalidInput("the effective guardian does not support native agent workflows; no input was sent".to_string()));
                 }
                 let (retry_options, retry_generation_bound) =
                     action_options_for_guardian(&retry_hello, requested_options.clone())?;
@@ -1120,6 +1145,26 @@ impl ShellRuntime for DaemonShellRuntime {
         })
     }
 
+    fn supports_agent_workflows_for<'a>(
+        &'a self,
+        bash_state: &'a std::sync::Arc<tokio::sync::Mutex<Option<BashState>>>,
+    ) -> ShellRuntimeBoolFuture<'a> {
+        Box::pin(async move {
+            let thread_id = bash_state
+                .lock()
+                .await
+                .as_ref()
+                .ok_or(WinxError::BashStateNotInitialized)?
+                .current_thread_id
+                .clone();
+            let hello = self.negotiated_guardian(&thread_id).await?;
+            Ok(hello
+                .capabilities
+                .iter()
+                .any(|capability| capability == super::protocol::AGENT_WORKFLOWS_CAPABILITY))
+        })
+    }
+
     fn interrupt<'a>(
         &'a self,
         bash_state: &'a std::sync::Arc<tokio::sync::Mutex<Option<BashState>>>,
@@ -1265,9 +1310,11 @@ fn runtime_result_from_wire(
                 compact_output,
                 command_generation: result.command_generation,
                 execution_token: result.execution_token,
+                action_context: result.action_context,
                 generation_bound_actions,
                 dropped_output_file,
                 output_truncated: result.output_truncated,
+                workflow: result.workflow,
             })
         }
         (_, _, _, Some(error), _) => Err(from_wire_error(error)),
@@ -1516,8 +1563,10 @@ mod tests {
                             compact_output: None,
                             command_generation: None,
                             execution_token: None,
+                            action_context: None,
                             dropped_output_file: None,
                             output_truncated: false,
+                            workflow: None,
                             state: Some(crate::tools::bash_command::BashCommandState {
                                 process_status:
                                     crate::tools::bash_command::BashProcessStatus::Exited,

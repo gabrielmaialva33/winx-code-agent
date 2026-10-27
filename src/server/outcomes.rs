@@ -1445,6 +1445,8 @@ mod tests {
             generation_bound_actions: false,
             dropped_output_file: None,
             output_truncated: false,
+            action_context: None,
+            workflow: None,
         }
     }
 
@@ -1955,6 +1957,8 @@ mod tests {
                 generation_bound_actions: true,
                 dropped_output_file: None,
                 output_truncated: false,
+                workflow: None,
+                action_context: None,
             },
             false,
         )
@@ -2103,6 +2107,8 @@ mod tests {
                 generation_bound_actions: true,
                 dropped_output_file: None,
                 output_truncated: false,
+                action_context: None,
+            workflow: None,
             },
             false,
         )
@@ -2136,6 +2142,8 @@ mod tests {
                 generation_bound_actions: true,
                 dropped_output_file: Some("/workspace/.winx/scratch/bash-output.log".into()),
                 output_truncated: true,
+                action_context: None,
+                workflow: None,
             },
             false,
         )
@@ -2176,6 +2184,8 @@ mod tests {
                 generation_bound_actions: true,
                 dropped_output_file: None,
                 output_truncated: false,
+                action_context: None,
+                workflow: None,
             },
             false,
         )
@@ -2212,6 +2222,8 @@ mod tests {
                 generation_bound_actions: true,
                 dropped_output_file: None,
                 output_truncated: false,
+                action_context: None,
+                workflow: None,
             },
             false,
         )
@@ -2486,6 +2498,8 @@ mod tests {
                 generation_bound_actions: false,
                 dropped_output_file: None,
                 output_truncated: false,
+                action_context: None,
+                workflow: None,
             },
             true,
         )

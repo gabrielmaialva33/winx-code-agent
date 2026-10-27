@@ -2,6 +2,7 @@
 
 mod selection;
 mod session_store;
+pub mod workflow;
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -45,6 +46,7 @@ pub struct BashCommandRuntimeResult {
     pub compact_output: Option<String>,
     pub command_generation: Option<u64>,
     pub execution_token: Option<ShellExecutionToken>,
+    pub action_context: Option<ShellActionContext>,
     pub generation_bound_actions: bool,
     /// Runtime-owned file containing output dropped from the in-memory head.
     /// The current result retains the tail; consumers should read this file only
@@ -53,6 +55,7 @@ pub struct BashCommandRuntimeResult {
     /// Authoritative runtime truncation state. It is never inferred from
     /// terminal text, which is controlled by the child process.
     pub output_truncated: bool,
+    pub workflow: Option<workflow::WorkflowObservation>,
 }
 
 impl BashCommandRuntimeResult {
@@ -62,9 +65,11 @@ impl BashCommandRuntimeResult {
             compact_output: None,
             command_generation: None,
             execution_token: None,
+            action_context: None,
             generation_bound_actions: false,
             dropped_output_file: None,
             output_truncated: false,
+            workflow: None,
         }
     }
 
@@ -72,6 +77,14 @@ impl BashCommandRuntimeResult {
         self.dropped_output_file = path;
         self
     }
+}
+
+/// Immutable context captured when the runtime admits this action.
+/// Later observations may run in another workspace; only launches create history.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ShellActionContext {
+    pub thread_id: String,
+    pub workspace_root: PathBuf,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -248,6 +261,13 @@ pub trait ShellRuntime: Send + Sync {
     ) -> ShellRuntimeBoolFuture<'a> {
         self.supports_generation_bound_actions()
     }
+    /// Whether this exact session's guardian supports native observations and prompts.
+    fn supports_agent_workflows_for<'a>(
+        &'a self,
+        _bash_state: &'a Arc<Mutex<Option<BashState>>>,
+    ) -> ShellRuntimeBoolFuture<'a> {
+        Box::pin(async { Ok(false) })
+    }
 
     /// Describe the session without mutating it. The default inspects the
     /// in-process PTY; daemon-backed runtimes ask the guardian that owns it.
@@ -378,12 +398,35 @@ impl ShellRuntime for EmbeddedShellRuntime {
         command: BashCommand,
         options: ShellActionOptions,
     ) -> ShellRuntimeDetailedFuture<'a> {
-        Box::pin(crate::tools::bash_command::handle_embedded_tool_call_detailed(
-            bash_state, command, options,
-        ))
+        Box::pin(async move {
+            if options
+                .expected_execution
+                .as_ref()
+                .is_some_and(|expected| expected.guardian_epoch != "embedded")
+                || options
+                    .expected_guardian_epoch
+                    .as_deref()
+                    .is_some_and(|epoch| epoch != "embedded")
+            {
+                return Err(WinxError::InvalidInput(
+                    "execution precondition belongs to a different runtime guardian".to_string(),
+                ));
+            }
+            crate::tools::bash_command::handle_embedded_tool_call_detailed(
+                bash_state, command, options,
+            )
+            .await
+        })
     }
 
     fn supports_generation_bound_actions(&self) -> ShellRuntimeBoolFuture<'_> {
+        Box::pin(async { Ok(true) })
+    }
+
+    fn supports_agent_workflows_for<'a>(
+        &'a self,
+        _bash_state: &'a Arc<Mutex<Option<BashState>>>,
+    ) -> ShellRuntimeBoolFuture<'a> {
         Box::pin(async { Ok(true) })
     }
 

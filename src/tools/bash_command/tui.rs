@@ -226,7 +226,7 @@ pub(super) async fn execute_wait_for_turn(
                     shell.poll_output_nonblocking();
                     let running = shell.command_running;
                     (
-                        shell.live_snapshot(max_lines),
+                        shell.live_snapshot(0),
                         shell.live_osc_title(),
                         shell.live_osc_progress(),
                         shell.live_in_alt_screen(),
@@ -289,7 +289,12 @@ pub(super) async fn execute_wait_for_turn(
             timed_out,
             wait_through_busy,
         ) {
-            let (body, output_truncated) = render_snapshot(&snapshot);
+            let visible = if max_lines == 0 {
+                snapshot.as_slice()
+            } else {
+                &snapshot[snapshot.len().saturating_sub(max_lines)..]
+            };
+            let (body, output_truncated) = render_snapshot(visible);
             let alt = if in_alt { " [alt-screen]" } else { "" };
             let header = format!(
                 "--- turn: {} ({}, recognizer={}, waited {:.1}s){} ---",
@@ -428,5 +433,31 @@ mod tests {
         let (rendered, output_truncated) = render_snapshot(&snapshot);
         assert!(output_truncated);
         assert!(rendered.starts_with("(...truncated)\n"));
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_workflow_detection_ignores_presentation_line_limit() -> anyhow::Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let mut state = crate::state::bash_state::BashState::new();
+        state.cwd = temp.path().to_path_buf();
+        let mut pty = crate::state::pty::PtyShell::new(temp.path(), false)?;
+        pty.send_command("printf '\\033[2J\\033[Hesc to interrupt\\nordinary footer'; sleep 5")?;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let shell = std::sync::Arc::new(tokio::sync::Mutex::new(Some(pty)));
+        let result = super::execute_wait_for_turn(
+            &state,
+            Some(shell),
+            true,
+            Some("workflow-test"),
+            Some("claude"),
+            Some(50),
+            Some(0.5),
+            Some(1),
+            false,
+            false,
+        )
+        .await?;
+        assert_eq!(result.result.state.turn_state, Some(TurnState::Busy));
+        Ok(())
     }
 }

@@ -11,6 +11,7 @@ pub mod code_map;
 pub mod context_save;
 pub mod edit_files;
 pub mod file_write_or_edit;
+pub mod herdr;
 pub mod initialize;
 pub mod multi_file_edit;
 pub mod outline;

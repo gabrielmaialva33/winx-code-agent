@@ -327,6 +327,12 @@ const CONTEXT_SAVE_DESCRIPTION: &str =
 const CODE_MAP_DESCRIPTION: &str =
     "Navigate syntax-aware code structure in 13 languages. outline on a file returns definitions; on a directory it returns a query/activity-ranked, byte-budgeted page. Pass a concise query and continue truncated maps with next_cursor using the same path/query. references requires an exact name and returns definitions before uses. Results are gitignore-aware and contain symbols, not source. For exact text or unsupported languages, use the structured fallback to ReadFiles; plain-text search belongs to rg via BashCommand; never transform source solely to make CodeMap parse it or turn command output into a carrier. A genuinely useful derived helper must be one existing file in temporary_artifact_dir returned by Initialize; reuse stable names because helper maps have smaller per-response, unique-file, and aggregate-call budgets while canonical maps remain unrestricted.";
 
+const EXECUTION_DESCRIPTION: &str =
+    "Scoped command history: list/get/read/explain/wait. Leaves BashCommand output intact. Keep cursors; honor gap/resync. Never replay commands; unknown is not success.";
+
+const AGENT_DESCRIPTION: &str =
+    "Observe/prompt explicit native or configured Herdr targets. Native: target, prompt_id, text; same ID/payload returns receipt without resending. Delivery is not completion; never auto-resend uncertain input. Prompts need BashCommand + wcgw. Herdr rejects prompt_id.";
+
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
 static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();
 
@@ -423,6 +429,16 @@ fn build_winx_tool(kind: ToolKind) -> Tool {
             edit_files_input_schema(),
         )
         .with_annotations(annotations(kind)),
+        ToolKind::Execution => mcp_session_tool::<super::workflow_types::ExecutionRequest>(
+            kind.as_str(),
+            EXECUTION_DESCRIPTION,
+            annotations(kind),
+        ),
+        ToolKind::Agent => mcp_session_tool::<super::workflow_types::AgentRequest>(
+            kind.as_str(),
+            AGENT_DESCRIPTION,
+            annotations(kind),
+        ),
     };
     match kind.descriptor().output_contract {
         ToolOutputContract::Shared => with_output_schema::<ToolResultEnvelope>(tool),

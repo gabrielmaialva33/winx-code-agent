@@ -250,6 +250,22 @@ impl WinxService {
         bash_options: ShellActionOptions,
         edit_permissions: EditPermissionSet,
     ) -> Result<ToolCallExecution, McpError> {
+        self.execute_tool_call_with_authority(
+            param,
+            bash_options,
+            edit_permissions,
+            super::workflow_types::WorkflowAuthority::default(),
+        )
+        .await
+    }
+
+    pub(super) async fn execute_tool_call_with_authority(
+        &self,
+        param: CallToolRequestParams,
+        bash_options: ShellActionOptions,
+        edit_permissions: EditPermissionSet,
+        workflow_authority: super::workflow_types::WorkflowAuthority,
+    ) -> Result<ToolCallExecution, McpError> {
         let requested_tool = param.name.to_string();
         let requested_tool = RequestedTool::parse(&requested_tool).ok_or_else(|| {
             McpError::invalid_request(format!("Unknown tool: {requested_tool}"), None)
@@ -294,7 +310,13 @@ impl WinxService {
         };
 
         let (result, bash_runtime) = self
-            .dispatch_tool(requested_tool, args_value, prepared_edit.as_ref(), bash_options)
+            .dispatch_tool(
+                requested_tool,
+                args_value,
+                prepared_edit.as_ref(),
+                bash_options,
+                &workflow_authority,
+            )
             .await;
 
         let result = match result {
@@ -343,6 +365,7 @@ impl WinxService {
         args: Option<Value>,
         prepared_edit: Option<&PreparedEditCall>,
         bash_options: ShellActionOptions,
+        workflow_authority: &super::workflow_types::WorkflowAuthority,
     ) -> (Result<CallToolResult, McpError>, Option<BashRuntimeMetadata>) {
         match tool {
             RequestedTool::Public(ToolKind::Initialize) => {
@@ -381,6 +404,12 @@ impl WinxService {
                 (self.handle_read_image(args).await, None)
             }
             RequestedTool::Public(ToolKind::CodeMap) => (self.handle_code_map(args).await, None),
+            RequestedTool::Public(ToolKind::Execution) => {
+                (Box::pin(self.handle_execution(args)).await, None)
+            }
+            RequestedTool::Public(ToolKind::Agent) => {
+                (Box::pin(self.handle_agent(args, workflow_authority)).await, None)
+            }
         }
     }
 
@@ -486,7 +515,7 @@ impl WinxService {
         text
     }
 
-    async fn persist_state(&self, slot: &SharedBashState) {
+    pub(super) async fn persist_state(&self, slot: &SharedBashState) {
         let guard = slot.lock().await;
         if let Some(state) = guard.as_ref() {
             if let Err(error) = state.save_state_to_disk() {
@@ -752,12 +781,33 @@ impl WinxService {
                 bash_command.thread_id = thread_id;
             }
         }
+        let history_thread_id = normalize_thread_id(&bash_command.thread_id);
+        let history_label = match &bash_command.action_json {
+            crate::types::BashCommandAction::Command { command, .. } => Some(command.clone()),
+            _ => None,
+        };
+        if matches!(
+            bash_command.action_json,
+            crate::types::BashCommandAction::Command { is_background: false, .. }
+        ) {
+            self.refresh_before_launch(&slot).await;
+        }
         let mut execution = match self
             .shell_runtime
             .run_action_detailed(&slot, bash_command, options.clone())
             .await
         {
             Ok(outcome) => {
+                let history_capture = self
+                    .capture_bash_execution(
+                        &slot,
+                        &outcome,
+                        history_label,
+                        &history_thread_id,
+                        None,
+                    )
+                    .await;
+                let workflow = outcome.workflow.clone();
                 let audit_target =
                     slot.lock().await.as_ref().map(|state| {
                         (state.workspace_root.clone(), state.current_thread_id.clone())
@@ -794,6 +844,12 @@ impl WinxService {
                     outcome,
                     options.compact_output,
                 )?;
+                super::agents::attach_workflow_result(
+                    &mut result,
+                    workflow.as_ref(),
+                    &recovery_args,
+                );
+                super::agents::attach_history_result(&mut result, history_capture);
                 // Show-once recovery note from a rehydrated session (restart
                 // that lost the live shell, agent resume hint). Lead with it so
                 // the model sees the recovery before the command output.

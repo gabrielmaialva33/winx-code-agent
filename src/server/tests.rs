@@ -15,6 +15,8 @@ mod daemon_edit_tests;
 #[cfg(unix)]
 mod session_workflow_tests;
 
+mod execution_workflow_tests;
+
 mod audit_tests {
     use super::audit_summary;
     use serde_json::json;
@@ -1240,6 +1242,8 @@ mod schema_tests {
                 "ReadImage",
                 "CodeMap",
                 "EditFiles",
+                "Execution",
+                "Agent",
             ]
         );
         assert_eq!(tools.len(), crate::tool_policy::ToolPolicy::default().len());
@@ -1380,8 +1384,7 @@ mod discovery_protocol_tests {
         let (server_read, server_write) = tokio::io::split(server);
         let transport = AsyncRwTransport::new_server(server_read, server_write);
         let task = tokio::spawn(async move {
-            let running = WinxService::new()
-                .serve(transport)
+            let running = Box::pin(WinxService::new().serve(transport))
                 .await
                 .expect("server should accept stdio initialization");
             running.waiting().await.expect("server should shut down cleanly");
@@ -1468,8 +1471,7 @@ mod discovery_protocol_tests {
         let (server_read, server_write) = tokio::io::split(server);
         let transport = AsyncRwTransport::new_server(server_read, server_write);
         let task = tokio::spawn(async move {
-            let running = WinxService::new()
-                .serve(transport)
+            let running = Box::pin(WinxService::new().serve(transport))
                 .await
                 .expect("server should accept modern discovery");
             running.waiting().await.expect("server should shut down cleanly");

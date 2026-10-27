@@ -115,6 +115,7 @@ impl WinxService {
             root_bootstrap: Arc::new(Mutex::new(())),
             shell_runtime,
             mutations: super::mutations::MutationCoordinator::default(),
+            execution_history: Arc::new(super::executions::history::WorkflowHistory::default()),
             version: crate::build_info::display_version().to_string(),
             isolation,
         }

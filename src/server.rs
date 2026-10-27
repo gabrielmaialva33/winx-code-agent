@@ -3,8 +3,10 @@
 //! Protocol catalog, session lifecycle, task handling, MCP dispatch, and tool
 //! adapters live in focused submodules under `server/`.
 
+mod agents;
 mod catalog;
 mod coherence;
+mod executions;
 mod handler;
 mod mutations;
 mod outcomes;
@@ -14,6 +16,7 @@ mod sessions;
 mod tasks;
 mod tool_dispatch;
 mod usage;
+mod workflow_types;
 
 #[cfg(test)]
 mod tests;
@@ -45,6 +48,7 @@ pub struct WinxService {
     root_bootstrap: Arc<Mutex<()>>,
     shell_runtime: Arc<dyn ShellRuntime>,
     mutations: mutations::MutationCoordinator,
+    execution_history: Arc<executions::history::WorkflowHistory>,
     /// Version information advertised in the MCP handshake.
     pub version: String,
     isolation: SessionIsolation,
@@ -52,7 +56,7 @@ pub struct WinxService {
 
 /// Create and start the Winx MCP server.
 pub async fn start_winx_server() -> Result<(), Box<dyn std::error::Error>> {
-    start_winx_server_with_runtime(configured_shell_runtime().await?).await
+    Box::pin(start_winx_server_with_runtime(configured_shell_runtime().await?)).await
 }
 
 /// Create and start the stdio MCP server with an explicit shell runtime.
@@ -63,7 +67,7 @@ pub async fn start_winx_server_with_runtime(
     let service = WinxService::with_runtime(SessionIsolation::Lenient, runtime);
     let (stdin, stdout) = stdio();
     let transport = AsyncRwTransport::new_server(stdin, stdout);
-    let server = service.serve(transport).await?;
+    let server = Box::pin(service.serve(transport)).await?;
     server.waiting().await?;
     Ok(())
 }

@@ -13,11 +13,16 @@ use crate::types::SpecialKey;
 const TEXT_CHUNK_SIZE: usize = 128;
 const SUBMIT_NUDGE_DELAY: Duration = Duration::from_millis(40);
 
-async fn submit_enter(shell: &SharedPtyShell) -> Result<()> {
+async fn submit_enter(shell: &SharedPtyShell, identity: (u64, u64)) -> Result<()> {
     tokio::time::sleep(SUBMIT_NUDGE_DELAY).await;
     let mut guard = shell.lock().await;
     let shell = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
     ensure_interactive_target(shell)?;
+    if (shell.incarnation(), shell.command_generation()) != identity {
+        return Err(WinxError::InvalidInput(
+            "interactive command generation changed before Enter; no input was sent to the replacement".to_string(),
+        ));
+    }
     shell
         .send_special_key("Enter")
         .map_err(|error| WinxError::CommandExecutionError(format!("Failed to submit: {error}")))?;
@@ -58,14 +63,16 @@ pub(super) async fn execute_send_text(
     }
 
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
-    {
+    let identity = {
         let mut guard = shell.lock().await;
         let shell = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
         ensure_interactive_target(shell)?;
+        let identity = (shell.incarnation(), shell.command_generation());
         send_utf8_in_byte_chunks(shell, text, TEXT_CHUNK_SIZE)?;
-    }
+        identity
+    };
     if submit {
-        submit_enter(&shell).await?;
+        submit_enter(&shell, identity).await?;
     }
 
     wait_for_output(
@@ -77,7 +84,7 @@ pub(super) async fn execute_send_text(
         false,
         delivery_cursor,
         compact_output,
-        None,
+        Some(identity.1),
     )
     .await
 }
@@ -101,10 +108,11 @@ pub(super) async fn execute_send_specials(
 
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
     let mut is_interrupt = false;
-    {
+    let identity = {
         let mut guard = shell.lock().await;
         let shell = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
         ensure_interactive_target(shell)?;
+        let identity = (shell.incarnation(), shell.command_generation());
 
         for key in keys {
             match key {
@@ -147,10 +155,11 @@ pub(super) async fn execute_send_specials(
                 })?,
             }
         }
-    }
+        identity
+    };
 
     if submit {
-        submit_enter(&shell).await?;
+        submit_enter(&shell, identity).await?;
     }
     let mut result = wait_for_output(
         bash_state,
@@ -161,7 +170,7 @@ pub(super) async fn execute_send_specials(
         false,
         delivery_cursor,
         compact_output,
-        None,
+        Some(identity.1),
     )
     .await?;
     if is_interrupt && result.result.state.is_running() {
@@ -190,10 +199,11 @@ pub(super) async fn execute_send_ascii(
 
     let shell = background_shell.unwrap_or_else(|| main_shell(bash_state));
     let mut is_interrupt = false;
-    {
+    let identity = {
         let mut guard = shell.lock().await;
         let shell = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
         ensure_interactive_target(shell)?;
+        let identity = (shell.incarnation(), shell.command_generation());
         for &code in ascii_codes {
             shell.send_bytes(&[code]).map_err(|error| {
                 WinxError::CommandExecutionError(format!("Failed to write ASCII code: {error}"))
@@ -202,10 +212,11 @@ pub(super) async fn execute_send_ascii(
                 is_interrupt = true;
             }
         }
-    }
+        identity
+    };
 
     if submit {
-        submit_enter(&shell).await?;
+        submit_enter(&shell, identity).await?;
     }
     let mut result = wait_for_output(
         bash_state,
@@ -216,7 +227,7 @@ pub(super) async fn execute_send_ascii(
         false,
         delivery_cursor,
         compact_output,
-        None,
+        Some(identity.1),
     )
     .await?;
     if is_interrupt && result.result.state.is_running() {
@@ -225,3 +236,6 @@ pub(super) async fn execute_send_ascii(
     }
     Ok(result)
 }
+
+#[cfg(test)]
+mod tests;

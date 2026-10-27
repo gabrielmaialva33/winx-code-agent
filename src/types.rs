@@ -742,6 +742,20 @@ pub enum BashCommandAction {
         #[serde(default)]
         wait_through_busy: bool,
     },
+    /// Observe retained output and full detection screen without consuming delivery cursors.
+    Inspect {
+        bg_command_id: Option<String>,
+        recognizer: Option<String>,
+        include_output: Option<bool>,
+    },
+    /// Idempotently submit a prompt, or observe an existing receipt when text is absent.
+    Prompt {
+        bg_command_id: Option<String>,
+        prompt_id: String,
+        text: Option<String>,
+        recognizer: Option<String>,
+        timeout_seconds: Option<f32>,
+    },
 }
 
 /// Parameters for the `BashCommand` tool

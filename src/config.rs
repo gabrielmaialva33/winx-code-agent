@@ -414,7 +414,7 @@ mod tests {
         assert_ne!(principals[0].session_prefix(), principals[1].session_prefix());
         assert_eq!(
             principals[0].tool_policy().names().collect::<Vec<_>>(),
-            vec!["Initialize", "BashCommand"]
+            vec!["Initialize", "BashCommand", "Execution", "Agent"]
         );
         assert_eq!(
             principals[1].tool_policy().names().collect::<Vec<_>>(),

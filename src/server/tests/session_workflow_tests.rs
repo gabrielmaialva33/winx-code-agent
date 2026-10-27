@@ -294,10 +294,16 @@ async fn assert_attached_workflow(session: &WorkflowSession) -> anyhow::Result<(
         background["data"]["bg_command_id"].as_str().context("background omitted bg_command_id")?;
     let execution_id =
         background["data"]["execution_id"].as_str().context("background omitted execution_id")?;
+    let background_generation = background["data"]["command_generation"]
+        .as_u64()
+        .context("background omitted command_generation")?;
+    ensure!(background["data"]["history_recorded"] == true, "{background}");
     let completed = session.completed(Some(background_id)).await?;
     ensure!(completed["status"] == "completed", "{completed}");
     ensure!(completed["data"]["exit_code"] == 0, "{completed}");
     ensure!(completed["data"]["execution_id"] == execution_id, "{completed}");
+    ensure!(completed["data"]["command_generation"] == background_generation, "{completed}");
+    ensure!(completed["data"]["history_recorded"] == true, "{completed}");
     ensure!(std::fs::read_to_string(session.root.join("independent.marker"))? == "x");
     ensure!(!session.root.join("foreground.done").exists());
 

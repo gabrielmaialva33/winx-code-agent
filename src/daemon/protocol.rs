@@ -15,6 +15,7 @@ pub const TYPED_ACTION_RESULT_CAPABILITY: &str = "typed_action_result";
 pub const COMPACT_ACTION_OUTPUT_CAPABILITY: &str = "compact_action_output";
 pub const GENERATION_BOUND_ACTIONS_CAPABILITY: &str = "generation_bound_actions";
 pub const CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY: &str = "cancellable_action_reservations";
+pub const AGENT_WORKFLOWS_CAPABILITY: &str = "agent_workflows";
 pub const ATTACH_OR_CREATE_CAPABILITY: &str = "attach_or_create";
 pub const BUILD_IDENTITY_CAPABILITY: &str = "build_identity";
 /// The process exits cleanly on a `winx.shutdown` request; Windows has no
@@ -148,9 +149,13 @@ pub(crate) struct RunActionResult {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_token: Option<crate::runtime::ShellExecutionToken>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_context: Option<crate::runtime::ShellActionContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dropped_output_file: Option<std::path::PathBuf>,
     #[serde(default)]
     pub output_truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow: Option<crate::runtime::workflow::WorkflowObservation>,
     /// Runtime-owned state added in protocol 1.4. Optional only so a new adapter
     /// can reject an older guardian with an actionable upgrade error instead of
     /// trying to reconstruct state from attacker-controlled output text.
@@ -327,8 +332,10 @@ mod tests {
             compact_output: Some("compact output".to_string()),
             command_generation: Some(7),
             execution_token: None,
+            action_context: None,
             dropped_output_file: Some("/tmp/winx-output".into()),
             output_truncated: false,
+            workflow: None,
             state: None,
             snapshot: crate::state::bash_state::BashState::new().snapshot(),
             error: None,
@@ -346,6 +353,7 @@ mod tests {
         assert_eq!(decoded.compact_output, None);
         assert_eq!(decoded.command_generation, None);
         assert_eq!(decoded.execution_token, None);
+        assert_eq!(decoded.action_context, None);
         assert_eq!(decoded.dropped_output_file, None);
         assert!(!decoded.output_truncated);
     }
@@ -358,8 +366,10 @@ mod tests {
             compact_output: Some(compact.clone()),
             command_generation: Some(9),
             execution_token: None,
+            action_context: None,
             dropped_output_file: None,
             output_truncated: false,
+            workflow: None,
             state: None,
             snapshot: crate::state::bash_state::BashState::new().snapshot(),
             error: None,

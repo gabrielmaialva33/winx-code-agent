@@ -93,6 +93,9 @@ an OpenAI-hosted MCP endpoint.
   host checks, body/time/concurrency limits, per-IP rate limiting, and delayed invalid-auth responses.
 - **Agent-native terminal semantics:** foreground and background commands, status polling, interactive input, stable TUI
   snapshots, turn detection, real exit codes, and bounded output.
+- **Execution and agent workflows:** durable scoped history, non-consuming output pages, state explanations, wait-any,
+  and receipt-bound native prompts; an optional Herdr adapter binds explicitly configured targets. See the
+  [workflow guide](docs/agent-workflows.md).
 - **Repository tools, not just a shell:** one guarded edit protocol, multi-file planning, undo, token-budgeted reads,
   image input, context handoff, and tree-sitter symbol navigation.
 
@@ -206,10 +209,10 @@ or context handoff.
 
 | Profile     | Tool count | Capabilities                                                                   |
 |-------------|-----------:|--------------------------------------------------------------------------------|
-| `terminal`  |          2 | `Initialize`, `BashCommand`                                                    |
-| `read-only` |          4 | Initialization, exact file/image reads, and `CodeMap`                          |
-| `coding`    |          5 | `Initialize`, `BashCommand`, `ReadFiles`, `CodeMap`, and `EditFiles`           |
-| `full`      |          7 | Default; adds `ContextSave` and `ReadImage` to the compact coding workflow     |
+| `terminal`  |          4 | `Initialize`, `BashCommand`, `Execution`, and `Agent`                          |
+| `read-only` |          5 | Initialization, exact file/image reads, `CodeMap`, and execution observation   |
+| `coding`    |          7 | `Initialize`, `BashCommand`, `ReadFiles`, `CodeMap`, `EditFiles`, `Execution`, and `Agent` |
+| `full`      |          9 | Default; adds `ContextSave` and `ReadImage` to the coding workflow              |
 
 For a single-token HTTP server:
 

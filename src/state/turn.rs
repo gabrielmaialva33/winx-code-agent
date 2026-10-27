@@ -66,6 +66,17 @@ impl<'a> TurnInput<'a> {
     }
 }
 
+/// Evidence for the winning turn classification. Child text is never process state.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct TurnExplanation {
+    pub state: TurnState,
+    pub recognizer: String,
+    pub source: String,
+    pub matched_rule: Option<String>,
+    pub priority: Option<i32>,
+    pub reason: Option<String>,
+}
+
 /// Reads a rendered screen (ANSI already stripped, one `String` per line) and
 /// classifies the current turn state for a specific kind of TUI.
 pub trait TurnRecognizer: Send + Sync {
@@ -78,6 +89,18 @@ pub trait TurnRecognizer: Send + Sync {
     /// use OSC title/progress rules.
     fn detect_input(&self, input: &TurnInput<'_>) -> TurnState {
         self.detect(input.screen)
+    }
+    /// Explain an ordinary recognizer without requiring external implementations to change.
+    fn explain_input(&self, input: &TurnInput<'_>) -> TurnExplanation {
+        let state = self.detect_input(input);
+        TurnExplanation {
+            state,
+            recognizer: self.name().to_string(),
+            source: "recognizer".to_string(),
+            matched_rule: None,
+            priority: None,
+            reason: (state == TurnState::Unknown).then(|| "no recognized evidence".to_string()),
+        }
     }
 }
 
@@ -419,6 +442,10 @@ impl TurnRecognizer for ManifestRecognizer {
     }
 
     fn detect_input(&self, input: &TurnInput<'_>) -> TurnState {
+        self.explain_input(input).state
+    }
+
+    fn explain_input(&self, input: &TurnInput<'_>) -> TurnExplanation {
         let joined = input.screen.join("\n");
         let verdict = self.manifest.detect(crate::state::turn_manifest::DetectionInput {
             screen: &joined,
@@ -426,18 +453,32 @@ impl TurnRecognizer for ManifestRecognizer {
             osc_progress: input.osc_progress,
         });
         if let Some((rule_id, priority)) = verdict.rule {
-            tracing::trace!(
-                manifest = self.name(),
-                rule = rule_id,
-                priority,
-                state = verdict.state.as_str(),
-                "turn manifest rule matched"
-            );
-            return verdict.state;
+            return TurnExplanation {
+                state: verdict.state,
+                recognizer: self.name().to_string(),
+                source: "manifest".to_string(),
+                matched_rule: Some(rule_id.to_string()),
+                priority: Some(priority),
+                reason: (verdict.state == TurnState::Unknown)
+                    .then(|| "matching manifest rule explicitly selected unknown".to_string()),
+            };
         }
         match &self.fallback {
-            Some(fallback) => fallback.detect_input(input),
-            None => TurnState::Unknown,
+            Some(fallback) => {
+                let mut explanation = fallback.explain_input(input);
+                explanation.source = "fallback".to_string();
+                explanation.reason =
+                    Some("no manifest rule matched; legacy recognizer used".to_string());
+                explanation
+            }
+            None => TurnExplanation {
+                state: TurnState::Unknown,
+                recognizer: self.name().to_string(),
+                source: "manifest".to_string(),
+                matched_rule: None,
+                priority: None,
+                reason: Some("no manifest rule matched and no fallback exists".to_string()),
+            },
         }
     }
 }
@@ -460,13 +501,24 @@ impl TurnRecognizer for ManifestAutoRecognizer {
     }
 
     fn detect_input(&self, input: &TurnInput<'_>) -> TurnState {
-        let states = self.members.each_ref().map(|member| member.detect_input(input));
-        for want in [TurnState::Busy, TurnState::AwaitingApproval, TurnState::AwaitingInput] {
-            if states.contains(&want) {
-                return want;
+        self.explain_input(input).state
+    }
+
+    fn explain_input(&self, input: &TurnInput<'_>) -> TurnExplanation {
+        let explanations = self.members.each_ref().map(|member| member.explain_input(input));
+        for want in [
+            TurnState::Busy,
+            TurnState::AwaitingApproval,
+            TurnState::AwaitingInput,
+            TurnState::Unknown,
+        ] {
+            if let Some(explanation) =
+                explanations.iter().find(|explanation| explanation.state == want)
+            {
+                return explanation.clone();
             }
         }
-        TurnState::Unknown
+        unreachable!("both recognizers always classify a turn")
     }
 }
 
@@ -865,3 +917,6 @@ mod tests {
         assert_eq!(recognizer_for("auto").detect(&screen), TurnState::Unknown);
     }
 }
+
+#[cfg(test)]
+mod workflow_tests;

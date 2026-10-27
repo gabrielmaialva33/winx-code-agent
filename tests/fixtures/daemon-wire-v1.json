@@ -21,6 +21,7 @@
     "compact_action_output",
     "generation_bound_actions",
     "cancellable_action_reservations",
+    "agent_workflows",
     "attach_or_create",
     "build_identity",
     "process_shutdown",

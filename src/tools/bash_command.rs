@@ -7,6 +7,7 @@ mod execution;
 mod interaction;
 mod output;
 mod tui;
+mod workflow;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -91,9 +92,11 @@ pub(crate) fn runtime_rendered(
         compact_output,
         command_generation,
         execution_token: None,
+        action_context: None,
         generation_bound_actions: true,
         dropped_output_file: None,
         output_truncated,
+        workflow: None,
     }
 }
 
@@ -301,6 +304,8 @@ async fn handle_embedded_tool_call_inner(
         BashCommandAction::SendAscii { .. } => "send_ascii",
         BashCommandAction::Screen { .. } => "screen",
         BashCommandAction::WaitForTurn { .. } => "wait_for_turn",
+        BashCommandAction::Inspect { .. } => "inspect",
+        BashCommandAction::Prompt { .. } => "prompt",
     };
     info!(thread_id = %command.thread_id, action = action_kind, "BashCommand tool called");
 
@@ -378,6 +383,10 @@ async fn handle_embedded_tool_call_inner(
         |shell| format!("{:016x}", shell.incarnation()),
     );
     if let Ok(outcome) = &mut result {
+        outcome.action_context = Some(crate::runtime::ShellActionContext {
+            thread_id: local_state.current_thread_id.clone(),
+            workspace_root: local_state.workspace_root.clone(),
+        });
         if let Some(generation) = outcome.command_generation {
             outcome.execution_token = Some(ShellExecutionToken {
                 guardian_epoch: "embedded".to_string(),
@@ -386,14 +395,7 @@ async fn handle_embedded_tool_call_inner(
             });
         }
         if let BashCommandAction::Command { ref command, .. } = command.action_json {
-            let command = command.trim();
-            if outcome.result.output.starts_with(command) {
-                outcome.result.output = outcome.result.output[command.len()..].to_string();
-            }
-            if outcome.compact_output.as_ref().is_some_and(|output| output.starts_with(command)) {
-                let output = outcome.compact_output.take().unwrap_or_default();
-                outcome.compact_output = Some(output[command.len()..].to_string());
-            }
+            strip_submitted_command_echo(outcome, command);
         }
     }
 
@@ -401,6 +403,17 @@ async fn handle_embedded_tool_call_inner(
     sync_embedded_cwd_if_current(bash_state, &local_state, &completed_session_epoch).await;
 
     result
+}
+
+fn strip_submitted_command_echo(outcome: &mut BashCommandRuntimeResult, command: &str) {
+    let command = command.trim();
+    if outcome.result.output.starts_with(command) {
+        outcome.result.output = outcome.result.output[command.len()..].to_string();
+    }
+    if outcome.compact_output.as_ref().is_some_and(|output| output.starts_with(command)) {
+        let output = outcome.compact_output.take().unwrap_or_default();
+        outcome.compact_output = Some(output[command.len()..].to_string());
+    }
 }
 
 async fn sync_embedded_cwd_if_current(
@@ -470,7 +483,9 @@ async fn execute_bash_action(
         | BashCommandAction::SendSpecials { bg_command_id, .. }
         | BashCommandAction::SendAscii { bg_command_id, .. }
         | BashCommandAction::Screen { bg_command_id, .. }
-        | BashCommandAction::WaitForTurn { bg_command_id, .. } => {
+        | BashCommandAction::WaitForTurn { bg_command_id, .. }
+        | BashCommandAction::Inspect { bg_command_id, .. }
+        | BashCommandAction::Prompt { bg_command_id, .. } => {
             if let Some(id) = bg_command_id {
                 let mut manager = lock_session_store();
                 manager.prune_finished_shells();
@@ -481,6 +496,7 @@ async fn execute_bash_action(
                 } else if let Some(tombstone) =
                     manager.peek_tombstone(&bash_state.current_thread_id, id)
                 {
+                    workflow::validate_tombstone(&tombstone, &options)?;
                     drop(manager);
                     return finalize_tombstone(
                         bash_state,
@@ -608,6 +624,30 @@ async fn execute_bash_action(
                 *lines,
                 *wait_through_busy,
                 options.compact_output,
+            )
+            .await
+        }
+        BashCommandAction::Inspect { recognizer, include_output, .. } => {
+            workflow::execute_inspect(
+                bash_state,
+                background_shell,
+                background_id.as_deref(),
+                recognizer.as_deref(),
+                include_output.unwrap_or(true),
+                &options,
+            )
+            .await
+        }
+        BashCommandAction::Prompt { prompt_id, text, recognizer, timeout_seconds, .. } => {
+            workflow::execute_prompt(
+                bash_state,
+                background_shell,
+                background_id.as_deref(),
+                prompt_id,
+                text.as_deref(),
+                recognizer.as_deref(),
+                *timeout_seconds,
+                &options,
             )
             .await
         }

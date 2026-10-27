@@ -192,6 +192,7 @@ async fn dispatch(
                     COMPACT_ACTION_OUTPUT_CAPABILITY.to_string(),
                     GENERATION_BOUND_ACTIONS_CAPABILITY.to_string(),
                     CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY.to_string(),
+                    super::protocol::AGENT_WORKFLOWS_CAPABILITY.to_string(),
                     "session.list".to_string(),
                     "session.read_output".to_string(),
                     "session.kill".to_string(),
@@ -538,6 +539,17 @@ fn normalize_guardian_request(request: &mut RpcRequest, hello: &HelloResult) -> 
     let has = |capability: &str| hello.capabilities.iter().any(|candidate| candidate == capability);
     if request.method == "shell.run_action" {
         let mut params = decode::<RunActionParams>(request.params.clone())?;
+        if matches!(
+            &params.command.action_json,
+            crate::types::BashCommandAction::Inspect { .. }
+                | crate::types::BashCommandAction::Prompt { .. }
+        ) && !has(super::protocol::AGENT_WORKFLOWS_CAPABILITY)
+        {
+            return Err(WinxError::InvalidInput(
+                "the effective guardian does not support native agent workflows; no input was sent"
+                    .to_string(),
+            ));
+        }
         if !has(TYPED_ACTION_RESULT_CAPABILITY) {
             return Err(WinxError::ConfigurationError(format!(
                 "guardian pid {} does not advertise {TYPED_ACTION_RESULT_CAPABILITY}; terminate this durable session and initialize it again before running another BashCommand",
@@ -860,6 +872,46 @@ mod tests {
             normalize_guardian_request(&mut request, &guardian_1_4()),
             Err(WinxError::InvalidInput(_))
         ));
+    }
+
+    #[test]
+    fn native_workflow_actions_require_the_effective_guardian_capability_before_relay() {
+        for action in [
+            serde_json::json!({ "type": "inspect", "bg_command_id": "one" }),
+            serde_json::json!({ "type": "prompt", "bg_command_id": "one", "prompt_id": "once", "text": "no input on old guardian" }),
+        ] {
+            let command: BashCommand = serde_json::from_value(serde_json::json!({
+                "action_json": action, "thread_id": "guardian14",
+            }))
+            .expect("native action");
+            let mut request = RpcRequest {
+                jsonrpc: "2.0".to_string(),
+                id: 16,
+                method: "shell.run_action".to_string(),
+                params: serde_json::to_value(RunActionParams {
+                    snapshot: BashState::new().snapshot(),
+                    command,
+                    request_key: "native16".to_string(),
+                    consumer_id: "consumer16".to_string(),
+                    options: ShellActionOptions::default(),
+                })
+                .expect("native run params"),
+            };
+            let before = request.params.clone();
+            let error = normalize_guardian_request(&mut request, &guardian_1_4())
+                .expect_err("old guardian cannot accept native workflow actions");
+            assert!(error.to_string().contains("does not support native agent workflows"));
+            assert_eq!(
+                request.params, before,
+                "unsupported actions never reach normalization/relay"
+            );
+            let mut supported = guardian_1_4();
+            supported
+                .capabilities
+                .push(super::super::protocol::AGENT_WORKFLOWS_CAPABILITY.to_string());
+            normalize_guardian_request(&mut request, &supported)
+                .expect("capability authorizes native action");
+        }
     }
 
     #[cfg(unix)] // mocks a guardian with a raw UnixListener

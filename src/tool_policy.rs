@@ -16,7 +16,7 @@ pub enum ToolProfile {
     Full,
     /// Core repository exploration and editing without image or handoff helpers.
     Coding,
-    /// Filesystem read/navigation tools only; shell and edit calls are rejected.
+    /// File/navigation and execution observation only; shell and edit calls are rejected.
     ReadOnly,
     /// Durable terminal access with the smallest useful catalog.
     Terminal,
@@ -109,6 +109,8 @@ impl ToolProfile {
                     | ToolKind::ReadImage.bit()
                     | ToolKind::CodeMap.bit()
                     | ToolKind::EditFiles.bit()
+                    | ToolKind::Execution.bit()
+                    | ToolKind::Agent.bit()
             }
             Self::Coding => {
                 ToolKind::Initialize.bit()
@@ -116,14 +118,22 @@ impl ToolProfile {
                     | ToolKind::ReadFiles.bit()
                     | ToolKind::CodeMap.bit()
                     | ToolKind::EditFiles.bit()
+                    | ToolKind::Execution.bit()
+                    | ToolKind::Agent.bit()
             }
             Self::ReadOnly => {
                 ToolKind::Initialize.bit()
                     | ToolKind::ReadFiles.bit()
                     | ToolKind::ReadImage.bit()
                     | ToolKind::CodeMap.bit()
+                    | ToolKind::Execution.bit()
             }
-            Self::Terminal => ToolKind::Initialize.bit() | ToolKind::BashCommand.bit(),
+            Self::Terminal => {
+                ToolKind::Initialize.bit()
+                    | ToolKind::BashCommand.bit()
+                    | ToolKind::Execution.bit()
+                    | ToolKind::Agent.bit()
+            }
         }
     }
 }
@@ -291,19 +301,29 @@ mod tests {
                 "ReadImage",
                 "CodeMap",
                 "EditFiles",
+                "Execution",
+                "Agent",
             ]
         );
         assert_eq!(
             ToolPolicy::from_profile(ToolProfile::Coding).names().collect::<Vec<_>>(),
-            vec!["Initialize", "BashCommand", "ReadFiles", "CodeMap", "EditFiles"]
+            vec![
+                "Initialize",
+                "BashCommand",
+                "ReadFiles",
+                "CodeMap",
+                "EditFiles",
+                "Execution",
+                "Agent"
+            ]
         );
         assert_eq!(
             ToolPolicy::from_profile(ToolProfile::ReadOnly).names().collect::<Vec<_>>(),
-            vec!["Initialize", "ReadFiles", "ReadImage", "CodeMap"]
+            vec!["Initialize", "ReadFiles", "ReadImage", "CodeMap", "Execution"]
         );
         assert_eq!(
             ToolPolicy::from_profile(ToolProfile::Terminal).names().collect::<Vec<_>>(),
-            vec!["Initialize", "BashCommand"]
+            vec!["Initialize", "BashCommand", "Execution", "Agent"]
         );
     }
 
@@ -362,5 +382,31 @@ mod tests {
 
         let bash_only = ToolPolicy::from_allowed_tools(["BashCommand"]).expect("valid policy");
         assert!(!bash_only.allows_call_kind(ToolKind::EditFiles));
+    }
+
+    #[test]
+    fn workflow_policy_separates_observation_from_prompt_authority() {
+        for profile in [ToolProfile::Full, ToolProfile::Coding, ToolProfile::Terminal] {
+            let policy = ToolPolicy::from_profile(profile);
+            assert!(policy.allows("Execution"));
+            assert!(policy.allows("Agent"));
+        }
+        let read_only = ToolPolicy::from_profile(ToolProfile::ReadOnly);
+        assert!(read_only.allows_call("Execution"));
+        assert!(!read_only.allows_call("Agent"));
+        assert!(!read_only.allows_call("BashCommand"));
+
+        let agent = ToolPolicy::from_allowed_tools(["Agent"]).expect("explicit observation policy");
+        assert!(agent.allows_call("Agent"));
+        assert!(!agent.allows_call("Execution"));
+        assert!(!agent.allows_call("BashCommand"));
+        assert!(!agent.edit_permissions().allows_verification());
+        assert!(!agent.edit_permissions().has_mutation_authority());
+
+        let execution =
+            ToolPolicy::from_allowed_tools(["Execution"]).expect("explicit history policy");
+        assert!(execution.allows_call("Execution"));
+        assert!(!execution.allows_call("Agent"));
+        assert!(!execution.allows_call("BashCommand"));
     }
 }

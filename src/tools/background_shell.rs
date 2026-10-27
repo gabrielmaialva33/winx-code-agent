@@ -24,6 +24,7 @@ pub struct ExitedShellInfo {
     pub output_truncated: bool,
     pub scratch_path: Option<PathBuf>,
     pub exited_at: Instant,
+    pub workflow: Option<crate::runtime::workflow::RetainedWorkflow>,
 }
 
 #[derive(Debug)]
@@ -180,6 +181,7 @@ impl BackgroundShellManager {
         shell: &mut PtyShell,
         now: Instant,
     ) -> ExitedShellInfo {
+        let activity_seq = shell.poll_workflow_output();
         ExitedShellInfo {
             owner_thread_id: owner_thread_id.to_string(),
             last_command: shell.last_command.clone(),
@@ -189,6 +191,7 @@ impl BackgroundShellManager {
             output_truncated: shell.output_truncated,
             scratch_path: shell.scratch_path().map(Path::to_path_buf),
             exited_at: now,
+            workflow: Some(shell.retained_workflow(activity_seq)),
         }
     }
 
@@ -333,6 +336,7 @@ mod tests {
             output_truncated: false,
             scratch_path: None,
             exited_at: Instant::now(),
+            workflow: None,
         }
     }
 

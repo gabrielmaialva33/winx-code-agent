@@ -20,6 +20,9 @@ pub enum ToolKind {
     /// Unified mutation surface. Appended so every persisted legacy policy bit
     /// keeps its original meaning during the catalog migration.
     EditFiles = 11,
+    /// Workflow tools append to the catalog without changing legacy policy bits.
+    Execution = 12,
+    Agent = 13,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -56,7 +59,7 @@ pub struct ToolDescriptor {
 }
 
 impl ToolKind {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 14] = [
         Self::Initialize,
         Self::BashCommand,
         Self::ReadFiles,
@@ -69,6 +72,8 @@ impl ToolKind {
         Self::CodeMap,
         Self::ApplyPatch,
         Self::EditFiles,
+        Self::Execution,
+        Self::Agent,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -85,6 +90,8 @@ impl ToolKind {
             Self::CodeMap => "CodeMap",
             Self::ApplyPatch => "ApplyPatch",
             Self::EditFiles => "EditFiles",
+            Self::Execution => "Execution",
+            Self::Agent => "Agent",
         }
     }
 
@@ -102,6 +109,8 @@ impl ToolKind {
             "CodeMap" => Some(Self::CodeMap),
             "ApplyPatch" => Some(Self::ApplyPatch),
             "EditFiles" => Some(Self::EditFiles),
+            "Execution" => Some(Self::Execution),
+            "Agent" => Some(Self::Agent),
             _ => None,
         }
     }
@@ -112,12 +121,15 @@ impl ToolKind {
 
     pub const fn descriptor(self) -> ToolDescriptor {
         let (access, world) = match self {
-            Self::Initialize | Self::ReadFiles | Self::ReadImage | Self::CodeMap => {
-                (ToolAccess::ReadOnly, ToolWorld::Closed)
-            }
+            Self::Initialize
+            | Self::ReadFiles
+            | Self::ReadImage
+            | Self::CodeMap
+            | Self::Execution => (ToolAccess::ReadOnly, ToolWorld::Closed),
             Self::ContextSave => (ToolAccess::Neutral, ToolWorld::Closed),
             Self::UndoEdit => (ToolAccess::Destructive, ToolWorld::Closed),
             Self::BashCommand
+            | Self::Agent
             | Self::FileWriteOrEdit
             | Self::MultiFileEdit
             | Self::ApplyPatch
@@ -159,7 +171,7 @@ impl fmt::Display for ToolKind {
 }
 
 /// Backwards-compatible name array derived from the typed stable order.
-pub const ALL_TOOL_NAMES: [&str; 12] = [
+pub const ALL_TOOL_NAMES: [&str; 14] = [
     ToolKind::Initialize.as_str(),
     ToolKind::BashCommand.as_str(),
     ToolKind::ReadFiles.as_str(),
@@ -172,6 +184,8 @@ pub const ALL_TOOL_NAMES: [&str; 12] = [
     ToolKind::CodeMap.as_str(),
     ToolKind::ApplyPatch.as_str(),
     ToolKind::EditFiles.as_str(),
+    ToolKind::Execution.as_str(),
+    ToolKind::Agent.as_str(),
 ];
 
 #[cfg(test)]
@@ -200,5 +214,21 @@ mod tests {
             .into_iter()
             .filter(|kind| *kind != ToolKind::Initialize)
             .all(|kind| { kind.descriptor().session == ToolSessionContract::RequiresInitialized }));
+    }
+
+    #[test]
+    fn workflow_tools_append_bits_and_preserve_access_contracts() {
+        assert_eq!(ToolKind::EditFiles.bit(), 1 << 11);
+        assert_eq!(ToolKind::Execution.bit(), 1 << 12);
+        assert_eq!(ToolKind::Agent.bit(), 1 << 13);
+        assert_eq!(ToolKind::Execution.descriptor().access, ToolAccess::ReadOnly);
+        assert_eq!(ToolKind::Execution.descriptor().world, ToolWorld::Closed);
+        assert_eq!(ToolKind::Agent.descriptor().access, ToolAccess::Destructive);
+        assert_eq!(ToolKind::Agent.descriptor().world, ToolWorld::Open);
+        for kind in [ToolKind::Execution, ToolKind::Agent] {
+            assert_eq!(kind.descriptor().output_contract, ToolOutputContract::Shared);
+            assert!(!kind.is_file_mutation());
+            assert!(!kind.requires_bash_companion());
+        }
     }
 }

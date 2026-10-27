@@ -368,7 +368,7 @@ async fn assert_principal_tool_policies(address: std::net::SocketAddr) -> anyhow
             .filter_map(|tool| tool["name"].as_str().map(ToString::to_string))
             .collect::<Vec<_>>()
     };
-    assert_eq!(tool_names(&left_tools), vec!["Initialize", "BashCommand"]);
+    assert_eq!(tool_names(&left_tools), vec!["Initialize", "BashCommand", "Execution", "Agent"]);
     assert_eq!(left_tools["result"]["cacheScope"], "private", "{left_tools}");
     assert_eq!(
         tool_names(&right_tools),
@@ -380,6 +380,8 @@ async fn assert_principal_tool_policies(address: std::net::SocketAddr) -> anyhow
             "ReadImage",
             "CodeMap",
             "EditFiles",
+            "Execution",
+            "Agent",
         ],
         "{right_tools}"
     );
@@ -1391,6 +1393,8 @@ async fn modern_stateless_tools_list_exposes_compact_unified_catalog() -> anyhow
             "ReadImage",
             "CodeMap",
             "EditFiles",
+            "Execution",
+            "Agent",
         ],
         "{response}"
     );

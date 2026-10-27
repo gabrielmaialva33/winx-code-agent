@@ -444,6 +444,8 @@ impl ServerHandler for WinxService {
                         crate::types::BashCommandAction::SendAscii { .. } => "send_ascii",
                         crate::types::BashCommandAction::Screen { .. } => "screen",
                         crate::types::BashCommandAction::WaitForTurn { .. } => "wait_for_turn",
+                        crate::types::BashCommandAction::Inspect { .. } => "inspect",
+                        crate::types::BashCommandAction::Prompt { .. } => "prompt",
                     };
                     let error = crate::errors::WinxError::InvalidWaitPolicyForAction {
                         wait_policy: "until_complete".to_string(),
@@ -579,18 +581,26 @@ impl ServerHandler for WinxService {
             BashTaskRoute::Synchronous => {}
         }
 
+        let workflow_authority = super::workflow_types::WorkflowAuthority {
+            principal_key: scope.principal().map_or_else(
+                || "local".to_string(),
+                |principal| format!("http:{}", principal.id()),
+            ),
+            bash_allowed: effective_tool_policy.allows_call_kind(ToolKind::BashCommand),
+        };
         let request = match wait_policy {
             Some(policy) => normalized_wait_request(request, policy, false)?,
             None => request,
         };
         match self
-            .execute_tool_call(
+            .execute_tool_call_with_authority(
                 request,
                 ShellActionOptions {
                     compact_output: compact_bash_output,
                     ..ShellActionOptions::default()
                 },
                 effective_tool_policy.edit_permissions(),
+                workflow_authority,
             )
             .await
         {

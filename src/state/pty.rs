@@ -15,7 +15,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc::{self, TryRecvError};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread;
@@ -321,6 +321,68 @@ fn timestamp_millis() -> u128 {
         .map_or(0, |duration| duration.as_millis())
 }
 
+/// Prompt text can be echoed only after submission, with whitespace reflowed.
+/// A receipt containing recognizable activity text cannot establish independent work.
+fn prompt_text_mimics_activity(
+    recognizer: &dyn crate::state::turn::TurnRecognizer,
+    text: &str,
+) -> bool {
+    let lines: Vec<String> = text.lines().map(str::to_string).collect();
+    let folded = [text.split_whitespace().collect::<Vec<_>>().join(" ")];
+    let mimics_activity = |screen: &[String]| {
+        matches!(
+            recognizer.detect_input(&crate::state::turn::TurnInput::screen_only(screen)),
+            crate::state::turn::TurnState::Busy | crate::state::turn::TurnState::AwaitingApproval
+        )
+    };
+    mimics_activity(&lines) || mimics_activity(&folded)
+}
+
+#[cfg(test)]
+mod workflow_activity_tests;
+
+/// Only the current prompt owns a live reader gate. Earlier receipts retain their flag.
+struct PromptActivityGate {
+    recognizer: Box<dyn crate::state::turn::TurnRecognizer>,
+    baseline_seq: u64,
+    observed: Arc<AtomicBool>,
+    submitted: bool,
+    ambiguous_echo: bool,
+    blocked_state: Option<crate::state::turn::TurnState>,
+}
+
+impl PromptActivityGate {
+    fn observe(&mut self, live: &LiveTerminal, seq: u64) {
+        if !self.submitted
+            || self.ambiguous_echo
+            || seq <= self.baseline_seq
+            || self.observed.load(AtomicOrdering::Acquire)
+        {
+            return;
+        }
+        let screen = live.snapshot(0);
+        let input = crate::state::turn::TurnInput {
+            screen: &screen,
+            osc_title: live.osc_title(),
+            osc_progress: live.osc_progress(),
+        };
+        let state = self.recognizer.detect_input(&input);
+        if self.blocked_state == Some(state) {
+            return;
+        }
+        self.blocked_state = None;
+        if matches!(
+            state,
+            crate::state::turn::TurnState::Busy | crate::state::turn::TurnState::AwaitingApproval
+        ) {
+            self.observed.store(true, AtomicOrdering::Release);
+        }
+    }
+}
+
+#[cfg(test)]
+mod workflow_reader_tests;
+
 /// Background thread that pumps the PTY master into the output channel and the
 /// live emulator. Owns the blocking `read` loop so the async side never blocks.
 fn spawn_pty_reader(
@@ -328,6 +390,9 @@ fn spawn_pty_reader(
     output_tx: mpsc::SyncSender<String>,
     live: Arc<StdMutex<LiveTerminal>>,
     discard_throttle: Arc<AtomicBool>,
+    activity_seq: Arc<AtomicU64>,
+    queued_activity_seq: Arc<AtomicU64>,
+    prompt_activity: Arc<StdMutex<Option<PromptActivityGate>>>,
 ) {
     thread::spawn(move || {
         let mut buf = [0u8; 4096];
@@ -342,7 +407,13 @@ fn spawn_pty_reader(
                     debug!("PTY reader reached EOF");
                     // EOF - PTY closed. Flush any held bytes lossily.
                     if !carry.is_empty() {
-                        let _ = output_tx.send(String::from_utf8_lossy(&carry).into_owned());
+                        // EOF can publish replacement bytes after the valid prefix
+                        // from the same read; give this final delivery a fresh sequence.
+                        let seq =
+                            activity_seq.fetch_add(1, AtomicOrdering::Release).saturating_add(1);
+                        if output_tx.send(String::from_utf8_lossy(&carry).into_owned()).is_ok() {
+                            queued_activity_seq.store(seq, AtomicOrdering::Release);
+                        }
                     }
                     break;
                 }
@@ -353,19 +424,33 @@ fn spawn_pty_reader(
                     // lossy String — keeps the persistent VTE parser exact
                     // across chunk boundaries. Recover from a poisoned lock
                     // instead of dropping the feed silently.
-                    {
+                    let seq = {
                         let mut emu =
                             live.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
                         emu.feed(&buf[..n]);
-                    }
+                        let seq =
+                            activity_seq.fetch_add(1, AtomicOrdering::Release).saturating_add(1);
+                        if let Some(gate) = prompt_activity
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .as_mut()
+                        {
+                            gate.observe(&emu, seq);
+                        }
+                        seq
+                    };
                     // Decode the longest valid prefix; carry an incomplete
                     // trailing char into the next read.
                     carry.extend_from_slice(&buf[..n]);
                     let (chunk, rest) = decode_keep_incomplete(&carry);
                     carry = rest;
-                    if !chunk.is_empty() && output_tx.send(chunk).is_err() {
-                        // Receiver dropped, exit thread
-                        break;
+                    if !chunk.is_empty() {
+                        if output_tx.send(chunk).is_err() {
+                            // Receiver dropped, exit thread.
+                            break;
+                        }
+                        // Publish only after enqueueing, outside the live/gate locks.
+                        queued_activity_seq.store(seq, AtomicOrdering::Release);
                     }
                     // Once the command's output is pure discard, stop
                     // consuming at stream speed: the pause fills the kernel
@@ -417,6 +502,12 @@ pub struct PtyShell {
     /// Random identity of this PTY instance. Unlike the numeric generation it
     /// changes when a shell is reset and generations start again at zero.
     incarnation: u64,
+    activity_seq: Arc<AtomicU64>,
+    /// Highest reader sequence whose decoded bytes have reached the output channel.
+    queued_activity_seq: Arc<AtomicU64>,
+    pub(crate) prompt_receipts:
+        std::collections::HashMap<String, crate::runtime::workflow::PromptRecord>,
+    prompt_activity: Arc<StdMutex<Option<PromptActivityGate>>>,
     /// Exit code of the last completed foreground command, parsed from the prompt
     /// marker (`──➤<nonce>:<code>`). `None` until a command finishes, and reset
     /// to `None` while one is running.
@@ -598,15 +689,12 @@ impl PtyShell {
         #[cfg(windows)]
         ensure_windows_shell_available(restricted_mode)?;
 
-        // Initialize the native PTY system
-        let pty_system = native_pty_system();
-
         // Configure terminal size
         let size =
             PtySize { rows: DEFAULT_ROWS, cols: DEFAULT_COLS, pixel_width: 0, pixel_height: 0 };
 
         // Open the PTY pair (master + slave)
-        let pair = pty_system.openpty(size).context("Failed to open PTY pair")?;
+        let pair = native_pty_system().openpty(size).context("Failed to open PTY pair")?;
 
         // Build the command
         let (mut cmd, attach_hint, shell_kind) = attachable_command(restricted_mode);
@@ -672,11 +760,20 @@ impl PtyShell {
         // Live terminal emulator, shared with the reader thread so the screen
         // grid stays current without any consumer needing to poll.
         let live = Arc::new(StdMutex::new(LiveTerminal::new(DEFAULT_ROWS, DEFAULT_COLS)));
-        let live_reader = Arc::clone(&live);
         let discard_throttle = Arc::new(AtomicBool::new(false));
-        let throttle_reader = Arc::clone(&discard_throttle);
+        let prompt_activity = Arc::new(StdMutex::new(None));
 
-        spawn_pty_reader(reader, output_tx, live_reader, throttle_reader);
+        let activity_seq = Arc::new(AtomicU64::new(0));
+        let queued_activity_seq = Arc::new(AtomicU64::new(0));
+        spawn_pty_reader(
+            reader,
+            output_tx,
+            Arc::clone(&live),
+            Arc::clone(&discard_throttle),
+            activity_seq.clone(),
+            queued_activity_seq.clone(),
+            prompt_activity.clone(),
+        );
 
         // Create the shell instance
         let mut shell = Self {
@@ -692,6 +789,10 @@ impl PtyShell {
             command_started_at: None,
             command_generation: 0,
             incarnation: rand::random::<u64>().max(1),
+            activity_seq,
+            queued_activity_seq,
+            prompt_receipts: std::collections::HashMap::new(),
+            prompt_activity,
             last_exit_code: None,
             max_output_size: MAX_OUTPUT_SIZE,
             output_truncated: false,
@@ -911,6 +1012,8 @@ impl PtyShell {
 
     /// Start the monotonic runtime clock for a newly submitted command.
     pub fn mark_command_started(&mut self) {
+        self.prompt_receipts.clear();
+        *self.prompt_activity.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         self.command_generation = self.command_generation.saturating_add(1);
         self.command_started_at = Some(Instant::now());
         self.pending_completion_report = true;
@@ -929,6 +1032,94 @@ impl PtyShell {
 
     pub fn command_generation(&self) -> u64 {
         self.command_generation
+    }
+
+    /// Monotonic count of actual PTY reads, including redraws with identical text.
+    pub fn activity_seq(&self) -> u64 {
+        self.activity_seq.load(AtomicOrdering::Acquire)
+    }
+
+    /// Drain an observation without advancing legacy output delivery cursors.
+    /// Sample the enqueue watermark first: later queued bytes must remain visible
+    /// as a newer sequence even if the reader advances during this capture.
+    pub(crate) fn poll_workflow_output(&mut self) -> u64 {
+        let activity_seq = self.queued_activity_seq.load(AtomicOrdering::Acquire);
+        self.poll_output_nonblocking();
+        activity_seq
+    }
+
+    /// Arm strict activity beside the reader using the same full-screen snapshot
+    /// that validates readiness. The reader uses the same live -> gate lock order.
+    pub(crate) fn arm_prompt_activity(
+        &mut self,
+        hint: &str,
+        text: &str,
+    ) -> crate::errors::Result<(u64, Arc<AtomicBool>)> {
+        let recognizer = crate::state::turn::recognizer_for(hint);
+        let ambiguous_echo = prompt_text_mimics_activity(recognizer.as_ref(), text);
+        let live = self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let screen = live.snapshot(0);
+        let input = crate::state::turn::TurnInput {
+            screen: &screen,
+            osc_title: live.osc_title(),
+            osc_progress: live.osc_progress(),
+        };
+        if recognizer.detect_input(&input) != crate::state::turn::TurnState::AwaitingInput {
+            return Err(crate::errors::WinxError::InvalidInput(
+                "native prompt requires a running command at a recognized input-ready prompt"
+                    .to_string(),
+            ));
+        }
+        let baseline_seq = self.activity_seq();
+        let observed = Arc::new(AtomicBool::new(false));
+        *self.prompt_activity.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(PromptActivityGate {
+                recognizer,
+                baseline_seq,
+                observed: observed.clone(),
+                submitted: false,
+                ambiguous_echo,
+                blocked_state: None,
+            });
+        Ok((baseline_seq, observed))
+    }
+
+    /// Publish successful Enter delivery before the reader can classify its output.
+    /// Typed echo present before Enter cannot itself satisfy strict activity.
+    pub(crate) fn submit_prompt_enter(&mut self) -> Result<()> {
+        let live = self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut gate =
+            self.prompt_activity.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let gate = gate.as_mut().ok_or_else(|| anyhow!("prompt activity gate is unavailable"))?;
+        let screen = live.snapshot(0);
+        let state = gate.recognizer.detect_input(&crate::state::turn::TurnInput {
+            screen: &screen,
+            osc_title: live.osc_title(),
+            osc_progress: live.osc_progress(),
+        });
+        gate.blocked_state = matches!(
+            state,
+            crate::state::turn::TurnState::Busy | crate::state::turn::TurnState::AwaitingApproval
+        )
+        .then_some(state);
+        self.writer.write_all(b"\r")?;
+        self.writer.flush()?;
+        gate.submitted = true;
+        Ok(())
+    }
+
+    pub(crate) fn retained_workflow(
+        &self,
+        activity_seq: u64,
+    ) -> crate::runtime::workflow::RetainedWorkflow {
+        crate::runtime::workflow::RetainedWorkflow {
+            generation: self.command_generation(),
+            activity_seq,
+            screen: self.live_snapshot(0),
+            osc_title: self.live_osc_title(),
+            osc_progress: self.live_osc_progress(),
+            receipts: self.prompt_receipts.clone(),
+        }
     }
 
     pub fn incarnation(&self) -> u64 {

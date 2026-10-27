@@ -477,6 +477,16 @@ pub(super) fn finalize_tombstone(
     action: &BashCommandAction,
     compact_output: bool,
 ) -> Result<BashCommandRuntimeResult> {
+    if matches!(action, BashCommandAction::Inspect { .. } | BashCommandAction::Prompt { .. }) {
+        return super::workflow::inspect_tombstone(
+            bash_state,
+            id,
+            &tombstone,
+            action,
+            compact_output,
+        );
+    }
+    let generation = tombstone.workflow.as_ref().map(|workflow| workflow.generation);
     let ExitedShellInfo {
         last_command,
         final_output,
@@ -487,6 +497,9 @@ pub(super) fn finalize_tombstone(
         ..
     } = tombstone;
     match action {
+        BashCommandAction::Inspect { .. } | BashCommandAction::Prompt { .. } => {
+            unreachable!("native tombstones are handled before legacy output rendering")
+        }
         BashCommandAction::StatusCheck { .. }
         | BashCommandAction::Screen { .. }
         | BashCommandAction::WaitForTurn { .. } => {
@@ -503,7 +516,7 @@ pub(super) fn finalize_tombstone(
                 &status,
                 state,
                 compact_output,
-                None,
+                generation,
                 output_truncated || source_token_truncated || rendered_token_truncated,
             )
             .with_dropped_output_file(scratch_path))

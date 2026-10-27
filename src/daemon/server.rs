@@ -435,6 +435,7 @@ async fn dispatch(
                     COMPACT_ACTION_OUTPUT_CAPABILITY.to_string(),
                     GENERATION_BOUND_ACTIONS_CAPABILITY.to_string(),
                     CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY.to_string(),
+                    super::protocol::AGENT_WORKFLOWS_CAPABILITY.to_string(),
                     "session.list".to_string(),
                     "session.read_output".to_string(),
                     "session.kill".to_string(),
@@ -992,17 +993,30 @@ async fn execute_action(
     }
     let is_command =
         matches!(&params.command.action_json, crate::types::BashCommandAction::Command { .. });
+    let native_workflow = matches!(
+        &params.command.action_json,
+        crate::types::BashCommandAction::Inspect { .. }
+            | crate::types::BashCommandAction::Prompt { .. }
+    );
     ensure_drainer(session);
     session.note_activity(is_command);
 
     let preflight_reset = {
         let mut guard = session.state.lock().await;
         let state = if let Some(state) = guard.as_mut() {
-            let daemon_cwd = state.cwd.clone();
-            state.apply_snapshot(&params.snapshot);
-            state.cwd = daemon_cwd;
+            // Configuration owns authority; an adapter may still hold a pre-transition snapshot.
+            // Legacy actions import only the adapter-local file guard and mutation evidence.
+            if !native_workflow {
+                let mut merged = state.snapshot();
+                merged.whitelist_for_overwrite = params.snapshot.whitelist_for_overwrite.clone();
+                merged.edit_mutation_receipts = params.snapshot.edit_mutation_receipts.clone();
+                state.apply_snapshot(&merged);
+            }
             state
         } else {
+            if native_workflow {
+                return Err(WinxError::BashStateNotInitialized);
+            }
             let mut state = BashState::new();
             state.apply_snapshot(&params.snapshot);
             guard.insert(state)
@@ -1088,8 +1102,10 @@ async fn execute_action(
                 compact_output,
                 command_generation,
                 execution_token,
+                action_context: result.action_context,
                 dropped_output_file: result.dropped_output_file,
                 output_truncated: result.output_truncated,
+                workflow: result.workflow,
                 state: Some(result.result.state),
                 snapshot,
                 error: None,
@@ -1100,8 +1116,10 @@ async fn execute_action(
             compact_output: None,
             command_generation: None,
             execution_token: None,
+            action_context: None,
             dropped_output_file: None,
             output_truncated: false,
+            workflow: None,
             state: None,
             snapshot,
             error: Some(to_wire_error(error)),
@@ -1146,8 +1164,10 @@ async fn foreground_admission_busy_result(
         compact_output: None,
         command_generation: None,
         execution_token: None,
+        action_context: None,
         dropped_output_file: None,
         output_truncated: false,
+        workflow: None,
         state: None,
         snapshot,
         error: Some(WireShellError::CommandAlreadyRunning { current_command, duration_seconds }),
@@ -1189,9 +1209,9 @@ fn delivery_cursor_key(consumer_id: &str, action: &crate::types::BashCommandActi
         | crate::types::BashCommandAction::SendSpecials { bg_command_id, .. }
         | crate::types::BashCommandAction::SendAscii { bg_command_id, .. }
         | crate::types::BashCommandAction::Screen { bg_command_id, .. }
-        | crate::types::BashCommandAction::WaitForTurn { bg_command_id, .. } => {
-            bg_command_id.as_deref()
-        }
+        | crate::types::BashCommandAction::WaitForTurn { bg_command_id, .. }
+        | crate::types::BashCommandAction::Inspect { bg_command_id, .. }
+        | crate::types::BashCommandAction::Prompt { bg_command_id, .. } => bg_command_id.as_deref(),
         crate::types::BashCommandAction::Command { .. } => None,
     };
     match background_id {
@@ -2163,3 +2183,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod workflow_tests;
