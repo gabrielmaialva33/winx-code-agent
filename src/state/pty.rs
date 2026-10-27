@@ -740,6 +740,14 @@ impl PtyShell {
             ShellKind::PowerShell => powershell_bootstrap(nonce),
         };
 
+        if shell_kind.is_powershell() {
+            // PSReadLine initializes asynchronously after the first prompt
+            // (it queries the cursor position first). Input written before
+            // that lands in its line editor with the Enter keys dropped, so
+            // the bootstrap and the first command fuse into one unsubmitted
+            // line. Wait for the default `PS ...>` prompt before typing.
+            self.wait_for_initial_powershell_prompt();
+        }
         self.write_command(&prompt_statement)?;
 
         // Wait for the first marker-bearing prompt instead of a fixed pause:
@@ -782,6 +790,33 @@ impl PtyShell {
         );
 
         Ok(())
+    }
+
+    /// Block until PowerShell has drawn its initial prompt (or the bootstrap
+    /// timeout elapses), answering cursor-position queries on the way.
+    fn wait_for_initial_powershell_prompt(&mut self) {
+        let deadline = Instant::now() + PROMPT_BOOTSTRAP_TIMEOUT;
+        let mut seen = String::new();
+        while Instant::now() < deadline {
+            match self.output_rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(chunk) => {
+                    self.answer_terminal_queries(&chunk);
+                    seen.push_str(&chunk);
+                    let clean = crate::state::terminal::strip_ansi_codes(&seen);
+                    if clean.contains("> ") || clean.contains(">\u{a0}") {
+                        // Give PSReadLine a moment to finish arming its input loop.
+                        std::thread::sleep(Duration::from_millis(100));
+                        return;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
+        }
+        warn!(
+            timeout_ms = PROMPT_BOOTSTRAP_TIMEOUT.as_millis(),
+            "PowerShell did not draw its initial prompt in time; sending the bootstrap anyway"
+        );
     }
 
     /// Answer terminal queries the console host blocks on.
