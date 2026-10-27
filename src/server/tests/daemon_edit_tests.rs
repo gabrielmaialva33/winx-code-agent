@@ -142,7 +142,9 @@ async fn daemon_command_preserves_undo_and_updates_cwd() -> anyhow::Result<()> {
     let command = session.bash("cd child").await?;
     assert_eq!(command["status"], "completed", "{command}");
     assert_eq!(command["data"]["exit_code"], 0, "{command}");
-    assert_eq!(command["data"]["cwd"], json!(child), "{command}");
+    // The shell reports the resolved path; macOS temp dirs live behind a
+    // `/var -> /private/var` symlink.
+    assert_eq!(command["data"]["cwd"], json!(child.canonicalize()?), "{command}");
 
     let replay = session.edit(None).await?;
     assert_eq!(replay["data"]["mutation_transition"], "replayed", "{replay}");
