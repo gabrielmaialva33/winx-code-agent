@@ -248,6 +248,11 @@ pub struct EditCheckpoint {
 #[derive(Debug, Clone)]
 struct EditCheckpointMetadata {
     checkpoint_fingerprint: String,
+    receipt: Option<EditCheckpointReceipt>,
+}
+
+#[derive(Debug, Clone)]
+struct EditCheckpointReceipt {
     undo_id: String,
     wrote_hash: String,
 }
@@ -543,11 +548,7 @@ impl BashState {
         let undo_id = format!("undo_{:032x}", rand::random::<u128>());
         self.push_edit_checkpoint_inner(
             checkpoint,
-            Some(EditCheckpointMetadata {
-                checkpoint_fingerprint: String::new(),
-                undo_id: undo_id.clone(),
-                wrote_hash,
-            }),
+            Some(EditCheckpointReceipt { undo_id: undo_id.clone(), wrote_hash }),
         )
         .then_some(undo_id)
     }
@@ -555,7 +556,7 @@ impl BashState {
     fn push_edit_checkpoint_inner(
         &mut self,
         mut checkpoint: EditCheckpoint,
-        metadata: Option<EditCheckpointMetadata>,
+        receipt: Option<EditCheckpointReceipt>,
     ) -> bool {
         if checkpoint.prior_content.len() > EDIT_CHECKPOINT_MAX_CONTENT_BYTES {
             info!(
@@ -567,16 +568,18 @@ impl BashState {
         sanitize_checkpoint_metadata(&mut checkpoint);
         let fingerprint = checkpoint_fingerprint(&checkpoint);
         self.edit_checkpoints.push_back(checkpoint);
-        if let Some(mut metadata) = metadata {
-            metadata.checkpoint_fingerprint.clone_from(&fingerprint);
-            self.edit_checkpoint_metadata.push_back(metadata);
-        }
+        // Every occurrence needs a slot, including legacy checkpoints without
+        // a receipt, so identical snapshots cannot borrow each other's handles.
+        self.edit_checkpoint_metadata.push_back(EditCheckpointMetadata {
+            checkpoint_fingerprint: fingerprint.clone(),
+            receipt,
+        });
         while self.edit_checkpoints.len() > EDIT_CHECKPOINT_CAP
             || self.undo_content_bytes() > EDIT_CHECKPOINT_CONTENT_BYTES_CAP
             || self.undo_metadata_bytes() > EDIT_CHECKPOINT_METADATA_BYTES_CAP
         {
             if let Some(removed) = self.edit_checkpoints.pop_front() {
-                self.remove_checkpoint_metadata(&checkpoint_fingerprint(&removed));
+                self.remove_oldest_checkpoint_metadata(&checkpoint_fingerprint(&removed));
             } else {
                 break;
             }
@@ -592,7 +595,14 @@ impl BashState {
         let index =
             self.edit_checkpoints.iter().rposition(|cp| cp.file_path_str == file_path_str)?;
         let checkpoint = self.edit_checkpoints.remove(index)?;
-        self.remove_checkpoint_metadata(&checkpoint_fingerprint(&checkpoint));
+        let fingerprint = checkpoint_fingerprint(&checkpoint);
+        if let Some(metadata_index) = self
+            .edit_checkpoint_metadata
+            .iter()
+            .rposition(|metadata| metadata.checkpoint_fingerprint == fingerprint)
+        {
+            self.edit_checkpoint_metadata.remove(metadata_index);
+        }
         Some(checkpoint)
     }
 
@@ -606,18 +616,16 @@ impl BashState {
             .iter()
             .rposition(|checkpoint| checkpoint.file_path_str == file_path_str)?;
         let fingerprint = checkpoint_fingerprint(self.edit_checkpoints.get(index)?);
-        if self
+        let metadata_index = self
             .edit_checkpoint_metadata
             .iter()
-            .rev()
-            .find(|metadata| metadata.checkpoint_fingerprint == fingerprint)?
-            .undo_id
-            != undo_id
-        {
+            .rposition(|metadata| metadata.checkpoint_fingerprint == fingerprint)?;
+        let receipt = self.edit_checkpoint_metadata.get(metadata_index)?.receipt.as_ref()?;
+        if receipt.undo_id != undo_id {
             return None;
         }
         let checkpoint = self.edit_checkpoints.remove(index)?;
-        self.remove_checkpoint_metadata(&fingerprint);
+        self.edit_checkpoint_metadata.remove(metadata_index);
         Some(checkpoint)
     }
 
@@ -648,8 +656,10 @@ impl BashState {
         self.edit_checkpoint_metadata
             .iter()
             .rev()
-            .find(|metadata| metadata.checkpoint_fingerprint == fingerprint)
-            .map(|metadata| metadata.undo_id.clone())
+            .find(|metadata| metadata.checkpoint_fingerprint == fingerprint)?
+            .receipt
+            .as_ref()
+            .map(|receipt| receipt.undo_id.clone())
     }
 
     pub(crate) fn latest_receipt_bound_checkpoint(
@@ -667,7 +677,8 @@ impl BashState {
             .iter()
             .rev()
             .find(|metadata| metadata.checkpoint_fingerprint == fingerprint)?;
-        Some((checkpoint.clone(), metadata.undo_id.clone(), metadata.wrote_hash.clone()))
+        let receipt = metadata.receipt.as_ref()?;
+        Some((checkpoint.clone(), receipt.undo_id.clone(), receipt.wrote_hash.clone()))
     }
 
     /// Whether an opaque undo handle still has its private in-memory checkpoint.
@@ -680,7 +691,8 @@ impl BashState {
             }
             let fingerprint = checkpoint_fingerprint(checkpoint);
             self.edit_checkpoint_metadata.iter().rev().any(|metadata| {
-                metadata.checkpoint_fingerprint == fingerprint && metadata.undo_id == undo_id
+                metadata.checkpoint_fingerprint == fingerprint
+                    && metadata.receipt.as_ref().is_some_and(|receipt| receipt.undo_id == undo_id)
             })
         })
     }
@@ -693,7 +705,7 @@ impl BashState {
         self.edit_checkpoints.iter().map(checkpoint_metadata_bytes).sum()
     }
 
-    fn remove_checkpoint_metadata(&mut self, fingerprint: &str) {
+    fn remove_oldest_checkpoint_metadata(&mut self, fingerprint: &str) {
         if let Some(index) = self
             .edit_checkpoint_metadata
             .iter()
@@ -1323,11 +1335,83 @@ mod whitelist_range_tests {
         assert_eq!(state.next_undo_id_for("/workspace/hot.rs").as_deref(), Some(latest.as_str()));
         assert!(state.pop_latest_edit_checkpoint_by_id("/workspace/hot.rs", &ids[1]).is_none());
 
+        for undo_id in ids.iter().rev().take(EDIT_CHECKPOINT_CAP) {
+            assert!(state.pop_latest_edit_checkpoint_by_id("/workspace/hot.rs", undo_id).is_some());
+            assert!(
+                !state.has_receipt_bound_checkpoint("/workspace/hot.rs", undo_id),
+                "consumed handle must not remain attached to an older identical snapshot"
+            );
+        }
+        assert!(state.next_undo_id_for("/workspace/hot.rs").is_none());
+
         for id in 0..(EDIT_CHECKPOINT_CAP + 8) {
             let path = format!("/workspace/file-{id}.rs");
             state.push_edit_checkpoint(checkpoint(&path, 100 + id, String::new()));
         }
         assert!(state.edit_checkpoints.len() <= EDIT_CHECKPOINT_CAP);
+    }
+
+    #[test]
+    fn legacy_undo_of_repeated_snapshot_preserves_older_receipt() {
+        let mut state = BashState::new();
+        let path = "/workspace/repeated.rs";
+        let first = state
+            .push_receipt_bound_edit_checkpoint(
+                checkpoint(path, 1, "original".to_string()),
+                "first-hash".to_string(),
+            )
+            .expect("first checkpoint");
+        let second = state
+            .push_receipt_bound_edit_checkpoint(
+                checkpoint(path, 2, "original".to_string()),
+                "second-hash".to_string(),
+            )
+            .expect("second checkpoint");
+
+        assert!(state.pop_edit_checkpoint_for(path).is_some());
+        assert!(!state.has_receipt_bound_checkpoint(path, &second));
+        assert_eq!(state.next_undo_id_for(path).as_deref(), Some(first.as_str()));
+        assert!(state.pop_latest_edit_checkpoint_by_id(path, &first).is_some());
+        assert!(state.next_undo_id_for(path).is_none());
+    }
+
+    #[test]
+    fn legacy_checkpoint_does_not_borrow_an_older_undo_receipt() {
+        let mut state = BashState::new();
+        let path = "/workspace/repeated.rs";
+        let original = checkpoint(path, 1, "original".to_string());
+        let undo_id = state
+            .push_receipt_bound_edit_checkpoint(original.clone(), "edited-hash".to_string())
+            .expect("bound checkpoint");
+        state.push_edit_checkpoint(original);
+
+        assert!(state.next_undo_id_for(path).is_none());
+        assert!(state.latest_receipt_bound_checkpoint(path).is_none());
+        assert!(state.pop_edit_checkpoint_for(path).is_some());
+        assert_eq!(state.next_undo_id_for(path).as_deref(), Some(undo_id.as_str()));
+        assert!(state.pop_latest_edit_checkpoint_by_id(path, &undo_id).is_some());
+    }
+
+    #[test]
+    fn evicting_legacy_checkpoint_preserves_later_identical_undo_receipt() {
+        let mut state = BashState::new();
+        let path = "/workspace/repeated.rs";
+        let original = checkpoint(path, 1, "original".to_string());
+        state.push_edit_checkpoint(original.clone());
+        let undo_id = state
+            .push_receipt_bound_edit_checkpoint(original, "edited-hash".to_string())
+            .expect("bound checkpoint");
+        for id in 0..(EDIT_CHECKPOINT_CAP - 1) {
+            state.push_edit_checkpoint(checkpoint(
+                &format!("/workspace/other-{id}.rs"),
+                id,
+                "other".to_string(),
+            ));
+        }
+
+        assert_eq!(state.undo_checkpoint_count_for(path), 1);
+        assert_eq!(state.next_undo_id_for(path).as_deref(), Some(undo_id.as_str()));
+        assert!(state.pop_latest_edit_checkpoint_by_id(path, &undo_id).is_some());
     }
 
     #[test]

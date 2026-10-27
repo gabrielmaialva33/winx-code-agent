@@ -23,7 +23,8 @@ use crate::runtime::{
     ShellRuntimeFuture, ShellRuntimeStatusFuture, ShellRuntimeUnitFuture,
     ShellSessionConfiguration, ShellSessionStatus, ShellSessionTransition,
 };
-use crate::state::bash_state::BashState;
+use crate::state::bash_state::{BashState, EditVerificationState};
+use crate::state::persistence::{load_bash_state, BashStateSnapshot};
 use crate::tools::bash_command::BashCommandResult;
 use crate::types::BashCommand;
 
@@ -567,7 +568,7 @@ impl DaemonShellRuntime {
         Arc::ptr_eq(&current.revision, expected) && current.revision.load(Ordering::SeqCst) == value
     }
 
-    async fn apply_snapshot_if_current(
+    async fn sync_action_cwd_if_current(
         &self,
         bash_state: &Arc<Mutex<Option<BashState>>>,
         thread_id: &str,
@@ -580,7 +581,11 @@ impl DaemonShellRuntime {
         if !self.local_revision_is_current(thread_id, expected_revision, revision_value).await {
             return false;
         }
-        state.apply_snapshot(snapshot);
+        // Shell actions own cwd, not the adapter's edit/read state. Restoring
+        // the full snapshot clears live undo and can overwrite newer receipts
+        // or read coverage created while this action was in flight.
+        let cwd = if snapshot.cwd.is_empty() { &snapshot.workspace_root } else { &snapshot.cwd };
+        state.cwd = PathBuf::from(cwd);
         true
     }
 
@@ -810,7 +815,7 @@ impl DaemonShellRuntime {
             }
         };
 
-        self.apply_snapshot_if_current(
+        self.sync_action_cwd_if_current(
             bash_state,
             &thread_id,
             &local_revision,
@@ -880,13 +885,61 @@ impl DaemonShellRuntime {
                 return Err(error);
             }
         };
-        if let Some(snapshot) = result.snapshot {
-            bash_state.apply_snapshot(&snapshot);
+        if let Some(mut restored) = result.snapshot {
+            if result.attached_existing
+                && matches!(
+                    transition,
+                    RemoteSessionTransition::FirstCall | RemoteSessionTransition::Attach
+                )
+            {
+                preserve_completed_verifications(&mut restored, &snapshot);
+                // A fresh Initialize has no local receipts yet, but the previous
+                // adapter may have persisted completion after its last shell RPC.
+                match load_bash_state(&thread_id) {
+                    Ok(Some(durable)) => preserve_completed_verifications(&mut restored, &durable),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        %thread_id, %error,
+                        "could not recover completed verification receipts during reattach"
+                    ),
+                }
+            }
+            bash_state.apply_snapshot(&restored);
         }
         Ok(ShellSessionConfiguration {
             attach_hint: result.attach_hint,
             attached_existing: result.attached_existing,
         })
+    }
+}
+
+// The daemon sees the receipt before the adapter records verification completion.
+// Restore that terminal result only for the same retained commit and session.
+fn preserve_completed_verifications(snapshot: &mut BashStateSnapshot, source: &BashStateSnapshot) {
+    if snapshot.chat_id != source.chat_id || snapshot.workspace_root != source.workspace_root {
+        return;
+    }
+    for receipt in &mut snapshot.edit_mutation_receipts {
+        let completed = source.edit_mutation_receipts.iter().any(|candidate| {
+            candidate.persisted
+                && candidate.verification_state == Some(EditVerificationState::Passed)
+                && candidate.verification_id.is_some()
+                && candidate.schema_version == receipt.schema_version
+                && candidate.tool == receipt.tool
+                && candidate.fingerprint == receipt.fingerprint
+                && candidate.receipt_id == receipt.receipt_id
+                && candidate.committed_at_unix_ms == receipt.committed_at_unix_ms
+                && candidate.verification_id == receipt.verification_id
+                && candidate.legacy_verification_id == receipt.legacy_verification_id
+                && candidate.postconditions == receipt.postconditions
+                && candidate.uncommitted_paths == receipt.uncommitted_paths
+        });
+        if completed {
+            receipt.status = "completed".to_string();
+            receipt.verification_pending = false;
+            receipt.verification_state = Some(EditVerificationState::Passed);
+            receipt.verification_execution = None;
+        }
     }
 }
 
@@ -1727,6 +1780,108 @@ mod tests {
         assert_eq!(cache.sessions.len(), MAX_NEGOTIATED_SESSIONS);
     }
 
+    fn verification_snapshot(verification_state: EditVerificationState) -> BashStateSnapshot {
+        use crate::state::bash_state::{EditMutationPostcondition, EditMutationReceipt};
+
+        let mut state = BashState::new();
+        state.current_thread_id = "receipt-session".to_string();
+        state.workspace_root = PathBuf::from("/workspace");
+        state.cwd = PathBuf::from("/workspace/daemon-cwd");
+        let mut snapshot = state.snapshot();
+        let passed = verification_state == EditVerificationState::Passed;
+        snapshot.edit_mutation_receipts.push(EditMutationReceipt {
+            schema_version: 1,
+            fingerprint: "fingerprint".to_string(),
+            receipt_id: "edit_same_request".to_string(),
+            tool: "EditFiles".to_string(),
+            status: if passed { "completed" } else { "completed_with_issues" }.to_string(),
+            committed_at_unix_ms: 1234,
+            postconditions: vec![EditMutationPostcondition {
+                path: "/workspace/target".to_string(),
+                sha256: "written-content".to_string(),
+            }],
+            persisted: true,
+            verification_pending: !passed,
+            verification_id: Some("verify_same_command".to_string()),
+            legacy_verification_id: None,
+            verification_state: Some(verification_state),
+            verification_execution: None,
+            uncommitted_paths: Vec::new(),
+            next_undo_id: Some("live-only".to_string()),
+            undo_ids: vec![Some("live-only".to_string())],
+        });
+        snapshot
+    }
+
+    #[test]
+    fn reattach_reconciliation_preserves_session_authority_and_undo_boundary() {
+        let mut remote = verification_snapshot(EditVerificationState::Interrupted);
+        let original_mode = remote.mode.clone();
+        let mut durable = verification_snapshot(EditVerificationState::Passed);
+        durable.cwd = "/workspace/old-adapter-cwd".to_string();
+        durable.mode = "architect".to_string();
+        let stale = remote.clone();
+
+        preserve_completed_verifications(&mut remote, &durable);
+        preserve_completed_verifications(&mut remote, &stale);
+        assert_eq!(remote.cwd, "/workspace/daemon-cwd");
+        assert_eq!(remote.mode, original_mode);
+        assert_eq!(remote.edit_mutation_receipts.len(), 1);
+        let receipt = &remote.edit_mutation_receipts[0];
+        assert_eq!(receipt.status, "completed");
+        assert!(!receipt.verification_pending);
+        assert_eq!(receipt.verification_state, Some(EditVerificationState::Passed));
+        assert_eq!(receipt.committed_at_unix_ms, 1234);
+
+        let mut restored = BashState::new();
+        restored.apply_snapshot(&remote);
+        let restored = restored.snapshot();
+        assert_eq!(
+            restored.edit_mutation_receipts[0].verification_state,
+            Some(EditVerificationState::Passed)
+        );
+        assert_eq!(restored.edit_mutation_receipts[0].undo_ids, Vec::<Option<String>>::new());
+        assert!(restored.edit_mutation_receipts[0].next_undo_id.is_none());
+    }
+
+    #[test]
+    fn reattach_reconciliation_rejects_other_commits_and_verification_variants() {
+        for mismatch in [
+            "thread",
+            "workspace",
+            "commit",
+            "contents",
+            "verification",
+            "legacy",
+            "volatile",
+            "pending",
+        ] {
+            let mut remote = verification_snapshot(EditVerificationState::Interrupted);
+            let before = remote.edit_mutation_receipts.clone();
+            let mut durable = verification_snapshot(EditVerificationState::Passed);
+            let receipt = &mut durable.edit_mutation_receipts[0];
+            match mismatch {
+                "thread" => durable.chat_id = "another-session".to_string(),
+                "workspace" => durable.workspace_root = "/another-workspace".to_string(),
+                "commit" => receipt.committed_at_unix_ms -= 1,
+                "contents" => receipt.postconditions[0].sha256 = "other-content".to_string(),
+                "verification" => receipt.verification_id = Some("verify_other".to_string()),
+                "legacy" => receipt.legacy_verification_id = Some("legacy_other".to_string()),
+                "volatile" => receipt.persisted = false,
+                "pending" => receipt.verification_state = Some(EditVerificationState::Pending),
+                _ => unreachable!(),
+            }
+            preserve_completed_verifications(&mut remote, &durable);
+            assert_eq!(remote.edit_mutation_receipts, before, "{mismatch}");
+        }
+
+        let mut remote = verification_snapshot(EditVerificationState::Interrupted);
+        remote.edit_mutation_receipts.clear();
+        let durable = verification_snapshot(EditVerificationState::Passed);
+        preserve_completed_verifications(&mut remote, &durable);
+        assert!(remote.edit_mutation_receipts.is_empty(), "evicted receipts stay absent");
+    }
+
     #[tokio::test]
     async fn stale_daemon_action_snapshot_cannot_overwrite_local_reconfiguration() {
         let runtime = DaemonShellRuntime::new("unused.sock");
@@ -1744,7 +1899,7 @@ mod tests {
         let apply_revision = Arc::clone(&revision);
         let stale_apply = tokio::spawn(async move {
             apply_runtime
-                .apply_snapshot_if_current(
+                .sync_action_cwd_if_current(
                     &apply_state,
                     "local-revision",
                     &apply_revision,

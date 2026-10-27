@@ -10,6 +10,9 @@ use crate::runtime::ShellRuntime;
 use crate::state::BashState;
 use crate::types::BashCommand;
 
+#[cfg(unix)]
+mod daemon_edit_tests;
+
 mod audit_tests {
     use super::audit_summary;
     use serde_json::json;
