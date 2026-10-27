@@ -426,9 +426,7 @@ impl ServerHandler for WinxService {
             None
         };
         if wait_policy == Some(BashWaitPolicy::UntilComplete) {
-            let parsed_bash = request.arguments.clone().and_then(|arguments| {
-                serde_json::from_value::<BashCommand>(serde_json::Value::Object(arguments)).ok()
-            });
+            let parsed_bash: Option<BashCommand> = Self::parse_ordinary_bash_request(&request);
             if let Some(bash) = parsed_bash.as_ref() {
                 let is_foreground_command = matches!(
                     bash.action_json,
@@ -675,7 +673,25 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn receipt_bound_verify_is_not_task_promotable() {
+    fn receipt_bound_verify_routing_does_not_emit_false_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+
+        struct ErrorCounter(Arc<AtomicUsize>);
+        impl<S: tracing::Subscriber> Layer<S> for ErrorCounter {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _context: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                if *event.metadata().level() == tracing::Level::ERROR {
+                    self.0.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        }
+        let errors = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry().with(ErrorCounter(Arc::clone(&errors)));
         let arguments = serde_json::json!({
             "action_json": {
                 "type": "verify",
@@ -686,7 +702,29 @@ mod tests {
         });
         let request = CallToolRequestParams::new("BashCommand")
             .with_arguments(arguments.as_object().expect("arguments object").clone());
-        assert!(!WinxService::bash_task_is_eligible(&request));
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(WinxService::parse_ordinary_bash_request(&request).is_none());
+            assert!(!WinxService::bash_task_is_eligible(&request));
+            for (action, eligible) in [
+                (serde_json::json!({"type": "status_check", "status_check": true}), false),
+                (
+                    serde_json::json!({"type": "command", "command": "true", "is_background": true}),
+                    false,
+                ),
+                (serde_json::json!({"type": "command", "command": "true"}), true),
+            ] {
+                let arguments = serde_json::json!({"action_json": action, "thread_id": "thread"});
+                let ordinary = CallToolRequestParams::new("BashCommand")
+                    .with_arguments(arguments.as_object().expect("arguments object").clone());
+                assert!(WinxService::parse_ordinary_bash_request(&ordinary).is_some());
+                assert_eq!(WinxService::bash_task_is_eligible(&ordinary), eligible);
+            }
+        });
+        assert_eq!(
+            errors.load(Ordering::SeqCst),
+            0,
+            "a valid verify action must not emit a parser error during task routing"
+        );
     }
 
     #[test]

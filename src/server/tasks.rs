@@ -324,14 +324,28 @@ impl WinxService {
         }
     }
 
-    pub(super) fn bash_task_is_eligible(request: &CallToolRequestParams) -> bool {
+    // Receipt-bound verification has its own strict dispatcher. Speculative
+    // routing must not feed it to the ordinary action parser, which logs errors.
+    pub(super) fn parse_ordinary_bash_request(
+        request: &CallToolRequestParams,
+    ) -> Option<BashCommand> {
         if ToolKind::parse(request.name.as_ref()) != Some(ToolKind::BashCommand) {
-            return false;
+            return None;
         }
-        let Some(arguments) = request.arguments.clone() else {
-            return false;
-        };
-        let Ok(bash) = serde_json::from_value::<BashCommand>(Value::Object(arguments)) else {
+        let arguments = request.arguments.as_ref()?;
+        if arguments
+            .get("action_json")
+            .and_then(|action| action.get("type"))
+            .and_then(Value::as_str)
+            == Some("verify")
+        {
+            return None;
+        }
+        serde_json::from_value(Value::Object(arguments.clone())).ok()
+    }
+
+    pub(super) fn bash_task_is_eligible(request: &CallToolRequestParams) -> bool {
+        let Some(bash) = Self::parse_ordinary_bash_request(request) else {
             return false;
         };
         matches!(bash.action_json, BashCommandAction::Command { is_background: false, .. })
