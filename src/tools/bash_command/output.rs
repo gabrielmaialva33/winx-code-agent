@@ -14,7 +14,9 @@ use crate::errors::{Result, WinxError};
 use crate::runtime::{lock_session_store, BashCommandRuntimeResult, ShellActionOptions};
 use crate::state::bash_state::BashState;
 use crate::state::pty::PtyShell;
-use crate::state::terminal::{render_terminal_output, strip_ansi_codes};
+use crate::state::terminal::{
+    render_terminal_output, render_terminal_output_detailed, strip_ansi_codes,
+};
 use crate::state::turn::TurnState;
 use crate::tools::background_shell::ExitedShellInfo;
 use crate::types::BashCommandAction;
@@ -140,15 +142,20 @@ pub(super) fn insert_note_before_status(
 fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> (String, bool) {
     let (truncated, output_truncated) = truncate_to_token_budget(text, MAX_OUTPUT_TOKENS);
     let text = truncated.as_ref();
+    let rendered = render_terminal_output_detailed(text);
+    let output_truncated = output_truncated || rendered.output_truncated;
 
     if last_pending_output.is_empty() {
-        let rendered = render_terminal_output(text);
-        return (rstrip_lines(&rendered).trim_start().to_string(), output_truncated);
+        return (rstrip_lines(&rendered.lines).trim_start().to_string(), output_truncated);
+    }
+    if text == last_pending_output {
+        return (String::new(), output_truncated);
     }
 
-    let last_rendered = render_terminal_output(last_pending_output);
-    if last_rendered.is_empty() {
-        return (rstrip_lines(&render_terminal_output(text)), output_truncated);
+    let last_rendered = render_terminal_output_detailed(last_pending_output);
+    let output_truncated = output_truncated || last_rendered.output_truncated;
+    if last_rendered.lines.is_empty() {
+        return (rstrip_lines(&rendered.lines), output_truncated);
     }
 
     let text_after_last = if text.len() > last_pending_output.len() {
@@ -157,9 +164,11 @@ fn wcgw_incremental_text(text: &str, last_pending_output: &str) -> (String, bool
     } else {
         text
     };
-    let combined = format!("{}\n{}", last_rendered.join("\n"), text_after_last);
+    let combined = format!("{}\n{}", last_rendered.lines.join("\n"), text_after_last);
+    // This context includes a synthetic newline, so its viewport can overflow
+    // even when the real snapshot fits. Report loss from the actual snapshots.
     let new_rendered = render_terminal_output(&combined);
-    (rstrip_lines(&get_incremental_output(&last_rendered, &new_rendered)), output_truncated)
+    (rstrip_lines(&get_incremental_output(&last_rendered.lines, &new_rendered)), output_truncated)
 }
 
 fn extract_prompt_cwd(output: &str) -> Option<PathBuf> {
@@ -610,7 +619,7 @@ pub(super) async fn execute_status_check(
                 state,
                 options.compact_output,
                 Some(generation),
-                output_truncated,
+                output_truncated || response.output_truncated,
             )
             .with_dropped_output_file(dropped_output_file));
         }
@@ -667,6 +676,8 @@ pub(super) async fn execute_status_check(
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::truncate_to_token_budget;
 
     #[test]
@@ -679,5 +690,47 @@ mod tests {
         let tail = rendered.strip_prefix("(...truncated)\n").unwrap_or_default();
         let tail_tokens = crate::utils::encoder::encode_ids(tail);
         assert!(tail_tokens.as_ref().is_some_and(|tokens| tokens.len() <= 19));
+    }
+
+    #[test]
+    fn viewport_truncation_is_reported_on_cache_hits_and_incremental_reads() {
+        let mut input = String::new();
+        for index in 0..600 {
+            let _ = writeln!(input, "row{index}");
+        }
+        for _ in 0..2 {
+            let (output, truncated) = super::wcgw_incremental_text(&input, "");
+            assert!(truncated, "viewport loss must be reported");
+            assert!(!output.lines().any(|line| line == "row0"));
+            assert!(output.contains("row599"), "{output}");
+        }
+        let (output, truncated) = super::wcgw_incremental_text(&format!("{input}tail"), &input);
+        assert!(truncated, "the previous viewport already lost output");
+        assert!(output.contains("tail"), "{output}");
+    }
+
+    #[test]
+    fn incremental_long_line_does_not_repeat_already_delivered_text() {
+        let previous = format!("WINX-START:{}:WINX-END\n", "Q".repeat(2_400));
+        let (output, truncated) =
+            super::wcgw_incremental_text(&format!("{previous}next-marker\n"), &previous);
+        assert_eq!(output, "next-marker");
+        assert!(!truncated, "all output fits in the viewport");
+    }
+
+    #[test]
+    fn unchanged_long_snapshot_does_not_report_synthetic_loss() {
+        let previous = "A".repeat(60_000);
+        let (output, truncated) = super::wcgw_incremental_text(&previous, &previous);
+        assert_eq!(output, "");
+        assert!(!truncated, "an unchanged snapshot still fits in 300 visual rows");
+    }
+
+    #[test]
+    fn incremental_snapshot_at_visual_limit_does_not_report_synthetic_loss() {
+        let previous = "A".repeat(99_999);
+        let (output, truncated) = super::wcgw_incremental_text(&format!("{previous}B"), &previous);
+        assert!(output.ends_with('B'));
+        assert!(!truncated, "the actual snapshot fits exactly in 500 visual rows");
     }
 }

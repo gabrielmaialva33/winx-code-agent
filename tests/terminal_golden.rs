@@ -134,3 +134,34 @@ fn line_cap_keeps_last_lines() {
     assert_eq!(out[out.len() - 1], "row599");
     assert!(!out.iter().any(|l| l == "row0"), "oldest lines must be dropped");
 }
+
+#[test]
+fn long_unbroken_line_keeps_its_start() {
+    let input = format!("WINX-START:{}:WINX-END", "Q".repeat(2_400));
+    assert_eq!(render(&input).join("\n"), input);
+}
+
+#[test]
+fn long_colored_wide_line_keeps_all_text() {
+    let plain = format!("WINX-START:{}:WINX-END", "界 e\u{301} ".repeat(400));
+    let input = format!("\x1b[32m{plain}\x1b[0m");
+    assert_eq!(render(&input).join("\n"), plain);
+}
+
+#[test]
+fn long_line_clear_screen_does_not_resurrect_text() {
+    let input = format!("{}\x1b[2J\x1b[HFINAL", "Q".repeat(2_400));
+    assert_eq!(render(&input), vec!["FINAL"]);
+}
+
+#[test]
+fn long_line_cursor_up_overwrites_the_correct_row() {
+    let input = format!("{}\r\x1b[5AZ", "A".repeat(1_200));
+    assert_eq!(render(&input).join("\n"), format!("Z{}", "A".repeat(1_199)));
+}
+
+#[test]
+fn alternate_screen_keeps_long_visible_line() {
+    let plain = format!("ALT-START:{}:ALT-END", "Q".repeat(2_400));
+    assert_eq!(render(&format!("\x1b[?1049h{plain}")).join("\n"), plain);
+}

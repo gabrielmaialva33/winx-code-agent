@@ -1206,3 +1206,119 @@ async fn daemon_status_probe_reports_the_guardian_and_running_command() -> Resul
     server_task.abort();
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn embedded_and_daemon_preserve_long_command_output() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let socket_dir = TempDir::new()?;
+    let socket = socket_dir.path().join("winxd-wrapped-output.sock");
+    let server = DaemonServer::bind(&socket).await?;
+    let server_task = tokio::spawn(server.serve());
+    let embedded = EmbeddedShellRuntime;
+    let daemon = DaemonShellRuntime::new(&socket);
+    let payload = "Q".repeat(2_400);
+    // Keep the markers out of the command echo so it cannot satisfy the assertion.
+    let command = format!("printf 'WINX-%s:%s:WINX-%s\\n' START {payload} END");
+    let mut responses = Vec::new();
+    for (runtime, thread_id) in [
+        (&embedded as &dyn ShellRuntime, "embedded-wrapped-output"),
+        (&daemon as &dyn ShellRuntime, "daemon-wrapped-output"),
+    ] {
+        let state = initialized_state(&workspace, thread_id).await?;
+        responses.push(
+            runtime
+                .run_action_detailed(
+                    &state,
+                    foreground(thread_id, &command, 2.0),
+                    ShellActionOptions::default(),
+                )
+                .await?,
+        );
+    }
+    let _ = DaemonClient::new(&socket).kill_session("daemon-wrapped-output").await;
+    server_task.abort();
+
+    let expected = format!("WINX-START:{payload}:WINX-END");
+    for response in responses {
+        assert_eq!(response.result.state.exit_code, Some(0), "{response:?}");
+        assert!(response.result.output.contains(&expected), "{response:?}");
+        assert!(!response.output_truncated, "{response:?}");
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn embedded_and_daemon_report_viewport_loss_on_repeated_status() -> Result<()> {
+    let workspace = TempDir::new()?;
+    let socket_dir = TempDir::new()?;
+    let socket = socket_dir.path().join("winxd-output-loss.sock");
+    let server = DaemonServer::bind(&socket).await?;
+    let server_task = tokio::spawn(server.serve());
+    let embedded = EmbeddedShellRuntime;
+    let daemon = DaemonShellRuntime::new(&socket);
+    let mut responses = Vec::new();
+    for (runtime, thread_id) in [
+        (&embedded as &dyn ShellRuntime, "embedded-output-loss"),
+        (&daemon as &dyn ShellRuntime, "daemon-output-loss"),
+    ] {
+        let state = initialized_state(&workspace, thread_id).await?;
+        let command = format!(
+            "sh -c 'i=0; while [ \"$i\" -lt 600 ]; do printf \"row%s\\n\" \"$i\"; \
+             i=$((i + 1)); done; : > {thread_id}.ready; \
+             while [ ! -f {thread_id}.release ]; do sleep 0.01; done; printf \"finished\\n\"'"
+        );
+        runtime
+            .run_action_detailed(
+                &state,
+                foreground(thread_id, &command, 0.05),
+                ShellActionOptions::default(),
+            )
+            .await?;
+        let ready = workspace.path().join(format!("{thread_id}.ready"));
+        let status_result = async {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !ready.exists() {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .map_err(|_| WinxError::CommandExecutionError("output probe did not start".into()))?;
+            let first = runtime
+                .run_action_detailed(
+                    &state,
+                    foreground_status(thread_id, 0.1),
+                    ShellActionOptions::default(),
+                )
+                .await?;
+            let second = runtime
+                .run_action_detailed(
+                    &state,
+                    foreground_status(thread_id, 0.1),
+                    ShellActionOptions::default(),
+                )
+                .await?;
+            Ok::<_, WinxError>((first, second))
+        }
+        .await;
+        // Release the child even if a status request failed.
+        std::fs::write(workspace.path().join(format!("{thread_id}.release")), [])?;
+        let finished = runtime
+            .run_action_detailed(
+                &state,
+                foreground_status(thread_id, 2.0),
+                ShellActionOptions::default(),
+            )
+            .await?;
+        responses.push((status_result?, finished));
+    }
+    let _ = DaemonClient::new(&socket).kill_session("daemon-output-loss").await;
+    server_task.abort();
+
+    for ((first, second), finished) in responses {
+        assert!(first.output_truncated, "{first:?}");
+        assert!(second.result.output.contains("no new output since last check"), "{second:?}");
+        assert!(second.output_truncated, "deduplication lost the truncation flag: {second:?}");
+        assert_eq!(finished.result.state.exit_code, Some(0), "{finished:?}");
+    }
+    Ok(())
+}

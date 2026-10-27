@@ -17,13 +17,20 @@ pub const MAX_OUTPUT_SIZE: usize = 500_000;
 /// Maximum cache entry lifetime in seconds
 const CACHE_TTL: u64 = 300; // 5 minutes
 
+/// Plain terminal text and whether nonblank rows were discarded during replay.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TerminalRender {
+    pub(crate) lines: Vec<String>,
+    pub(crate) output_truncated: bool,
+}
+
 /// Map from a 64-bit text hash to (rendered output, insertion time).
 ///
 /// Keyed by a hash of the source text rather than the text itself: a terminal
 /// dump can be hundreds of KB, and storing it as the map key (plus cloning it
 /// on every eviction) was the dominant cost. A hash collision only causes a
 /// stale render to be recomputed, never corruption.
-type CacheEntryMap = HashMap<u64, (Vec<String>, Instant)>;
+type CacheEntryMap = HashMap<u64, (TerminalRender, Instant)>;
 
 /// Hash a chunk of terminal text into the cache key space.
 fn hash_terminal_text(text: &str) -> u64 {
@@ -59,7 +66,7 @@ impl TerminalCache {
     }
 
     /// Get a cached value if available and not expired
-    fn get(&self, text: &str) -> Option<Vec<String>> {
+    fn get(&self, text: &str) -> Option<TerminalRender> {
         let key = hash_terminal_text(text);
         let inner = self.inner.read().ok()?;
         let (value, timestamp) = inner.map.get(&key)?;
@@ -71,7 +78,7 @@ impl TerminalCache {
     }
 
     /// Insert a value into the cache, evicting the oldest entries if over cap.
-    fn insert(&self, text: &str, value: Vec<String>) {
+    fn insert(&self, text: &str, value: TerminalRender) {
         let key = hash_terminal_text(text);
         let Ok(mut inner) = self.inner.write() else {
             return;
@@ -105,6 +112,10 @@ static TERMINAL_CACHE: LazyLock<TerminalCache> =
 
 /// Render terminal output with line wrapping
 pub fn render_terminal_output(text: &str) -> Vec<String> {
+    render_terminal_output_detailed(text).lines
+}
+
+pub(crate) fn render_terminal_output_detailed(text: &str) -> TerminalRender {
     // Check cache first.
     if let Some(cached) = TERMINAL_CACHE.get(text) {
         return cached;
@@ -125,11 +136,34 @@ pub fn render_terminal_output(text: &str) -> Vec<String> {
     result
 }
 
+#[derive(Default)]
+struct RenderCallbacks {
+    dropped_rows: usize,
+    dropped_text: bool,
+}
+
+impl vt100::Callbacks for RenderCallbacks {
+    fn on_scroll(&mut self, contents: vt100::capture::RowContents<'_>, _alternate_screen: bool) {
+        self.dropped_rows = self.dropped_rows.saturating_add(1);
+        if !self.dropped_text {
+            // Cursor movement can scroll an empty row without losing any text.
+            // Inspect only until the first nonblank row is lost in this pass.
+            let mut row = String::new();
+            let _ = contents.write_formatted_basic(
+                &mut row,
+                &mut vt100::capture::BasicFormattedCaptureState::default(),
+            );
+            self.dropped_text =
+                vt100::capture::basic_formatted_to_plain(&row).any(|part| !part.trim().is_empty());
+        }
+    }
+}
+
 /// Render finished command output to plain-text lines via vt100, applying cursor
 /// movements so readline echo / in-place redraws collapse exactly as a real
 /// terminal would. One-shot — a fresh parser per call. This is NOT the live PTY
 /// emulator (that is [`crate::state::live_terminal::LiveTerminal`]).
-fn render_via_vt100(text: &str) -> Vec<String> {
+fn render_via_vt100(text: &str) -> TerminalRender {
     // vt100 treats a bare LF as line-feed-only (the cursor keeps its column, so
     // output stair-steps). The old hand-rolled engine treated LF as CR+LF, and
     // the wcgw incremental path (`bash_command.rs`) re-feeds already-rendered
@@ -137,29 +171,39 @@ fn render_via_vt100(text: &str) -> Vec<String> {
     // a re-render stays idempotent.
     let bytes = normalize_lf_to_crlf(text);
 
-    // Size the viewport to the input so short output (the overwhelming majority
-    // of calls) doesn't pay for a giant grid allocation. Cap at
-    // DEFAULT_MAX_SCREEN_LINES: longer output keeps its LAST lines and drops the
-    // oldest — the same cap the old Screen enforced, now via vt100 scroll with
-    // scrollback disabled.
-    let line_estimate = text.lines().count().saturating_add(2);
-    let rows = u16::try_from(line_estimate.clamp(1, DEFAULT_MAX_SCREEN_LINES)).unwrap_or(u16::MAX);
+    // Start small for ordinary output. Newline count alone underestimates wrapped
+    // lines (JSON, compiler diagnostics, Unicode), so let vt100 detect overflow.
+    // Replaying from scratch preserves cursor and clear-screen semantics; merely
+    // resizing after a lossy pass cannot recover those operations.
+    let mut row_count = text.lines().count().saturating_add(2).clamp(1, DEFAULT_MAX_SCREEN_LINES);
     let cols = u16::try_from(DEFAULT_COLUMNS).unwrap_or(u16::MAX);
-    let rows = std::num::NonZeroU16::new(rows).unwrap_or(std::num::NonZeroU16::MIN);
     let cols = std::num::NonZeroU16::new(cols).unwrap_or(std::num::NonZeroU16::MIN);
 
-    let mut parser = vt100::Parser::new(rows, cols, 0);
-    parser.process(&bytes);
+    loop {
+        let rows = u16::try_from(row_count).unwrap_or(u16::MAX);
+        let rows = std::num::NonZeroU16::new(rows).unwrap_or(std::num::NonZeroU16::MIN);
+        let mut parser =
+            vt100::Parser::new_with_callbacks(rows, cols, 0, RenderCallbacks::default());
+        parser.process(&bytes);
+        let dropped_rows = parser.callbacks().dropped_rows;
+        if dropped_rows > 0 && row_count < DEFAULT_MAX_SCREEN_LINES {
+            row_count = row_count
+                .saturating_mul(2)
+                .max(row_count.saturating_add(dropped_rows))
+                .min(DEFAULT_MAX_SCREEN_LINES);
+            continue;
+        }
 
-    // vt100's `contents()` already yields plain text with escapes resolved, so no
-    // post-strip is needed. Trim trailing whitespace per line and drop trailing
-    // blank lines, matching the old `Screen::display()` shape.
-    let mut lines: Vec<String> =
-        parser.screen().contents().lines().map(|line| line.trim_end().to_string()).collect();
-    while lines.last().is_some_and(String::is_empty) {
-        lines.pop();
+        // Only the final pass determines loss. Keep the flag even if a later
+        // clear-screen or alternate-screen exit hides the surviving text.
+        let output_truncated = parser.callbacks().dropped_text;
+        let mut lines: Vec<String> =
+            parser.screen().contents().lines().map(|line| line.trim_end().to_string()).collect();
+        while lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        return TerminalRender { lines, output_truncated };
     }
-    lines
 }
 
 /// Insert a CR before any LF that lacks one. PTY data already arrives as CRLF;
@@ -220,9 +264,47 @@ mod tests {
     #[test]
     fn terminal_cache_round_trips() {
         let cache = TerminalCache::new(10, 60);
-        cache.insert("test", vec!["line1".to_string(), "line2".to_string()]);
-        assert_eq!(cache.get("test"), Some(vec!["line1".to_string(), "line2".to_string()]));
+        let rendered = TerminalRender {
+            lines: vec!["line1".to_string(), "line2".to_string()],
+            output_truncated: true,
+        };
+        cache.insert("test", rendered.clone());
+        assert_eq!(cache.get("test"), Some(rendered));
         assert_eq!(cache.get("unknown"), None);
+    }
+
+    #[test]
+    fn visual_row_limit_reports_only_actual_overflow() {
+        let exact = "A".repeat(DEFAULT_MAX_SCREEN_LINES * DEFAULT_COLUMNS);
+        let rendered = render_terminal_output_detailed(&exact);
+        assert_eq!(rendered.lines.join("\n"), exact);
+        assert!(!rendered.output_truncated);
+
+        for suffix in ["B", "\n"] {
+            let rendered = render_terminal_output_detailed(&format!("{exact}{suffix}"));
+            assert!(rendered.output_truncated, "suffix {suffix:?} must scroll one row");
+            assert!(rendered.lines.join("\n").len() <= DEFAULT_MAX_SCREEN_LINES * DEFAULT_COLUMNS);
+        }
+    }
+
+    #[test]
+    fn scrolling_blank_rows_does_not_report_lost_text() {
+        let rendered = render_terminal_output_detailed("\x1b[999B\nFINAL");
+        assert_eq!(rendered.lines.last().map(String::as_str), Some("FINAL"));
+        assert!(!rendered.output_truncated);
+    }
+
+    #[test]
+    fn discarded_text_is_reported_even_after_screen_replacement() {
+        let overflowing = "row\n".repeat(DEFAULT_MAX_SCREEN_LINES + 1);
+        for (input, expected) in [
+            (format!("{overflowing}\x1b[2J\x1b[HFINAL"), "FINAL"),
+            (format!("PRIMARY\x1b[?1049h{overflowing}\x1b[?1049l"), "PRIMARY"),
+        ] {
+            let rendered = render_terminal_output_detailed(&input);
+            assert_eq!(rendered.lines, vec![expected]);
+            assert!(rendered.output_truncated);
+        }
     }
 
     #[test]

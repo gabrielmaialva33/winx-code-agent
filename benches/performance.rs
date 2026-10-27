@@ -3,7 +3,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use tokio::sync::Mutex;
 
 use winx_code_agent::state::bash_state::BashState;
@@ -50,6 +50,32 @@ fn benchmark_terminal_rendering(criterion: &mut Criterion) {
             bencher.iter(|| {
                 winx_code_agent::state::terminal::render_terminal_output(black_box(input))
             });
+        });
+    }
+    group.finish();
+}
+
+fn benchmark_terminal_rendering_cold(criterion: &mut Criterion) {
+    let mut group = criterion.benchmark_group("terminal_rendering_cold");
+    for (name, input) in [
+        ("short", "build complete\n".to_string()),
+        ("wrapped_ascii", "Q".repeat(2_400)),
+        ("colored_unicode", format!("\x1b[32m{}\x1b[0m", "界 e\u{301} ".repeat(400))),
+        ("cursor_scroll", "\x1b[999B\nFINAL".to_string()),
+        ("over_limit", "Q".repeat(100_200)),
+    ] {
+        group.throughput(Throughput::Bytes(u64::try_from(input.len()).unwrap_or(u64::MAX)));
+        let mut nonce = 0_u64;
+        group.bench_with_input(BenchmarkId::from_parameter(name), &input, |bencher, input| {
+            bencher.iter_batched(
+                || {
+                    nonce = nonce.wrapping_add(1);
+                    // Invisible, fixed-width title changes prevent cache hits.
+                    format!("\x1b]0;{nonce:016x}\x07{input}")
+                },
+                |input| winx_code_agent::state::terminal::render_terminal_output(black_box(&input)),
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
@@ -153,6 +179,7 @@ criterion_group!(
     benches,
     benchmark_thread_ids,
     benchmark_terminal_rendering,
+    benchmark_terminal_rendering_cold,
     benchmark_redaction,
     benchmark_output_compression,
     benchmark_read_files_batch

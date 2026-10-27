@@ -15,8 +15,10 @@ pub fn normalize_thread_id(input: &[u8]) {
 /// Exercise the terminal renderer and ANSI stripper on arbitrary bytes.
 pub fn terminal(input: &[u8]) {
     let input = String::from_utf8_lossy(input);
-    let rendered = crate::state::terminal::render_terminal_output(&input);
-    let _ = crate::state::terminal::strip_ansi_codes(&rendered.join("\n"));
+    let rendered = crate::state::terminal::render_terminal_output_detailed(&input);
+    debug_assert!(rendered.lines.len() <= crate::state::terminal::DEFAULT_MAX_SCREEN_LINES);
+    debug_assert_eq!(rendered, crate::state::terminal::render_terminal_output_detailed(&input));
+    let _ = crate::state::terminal::strip_ansi_codes(&rendered.lines.join("\n"));
 }
 
 /// Exercise tree-sitter command parsing without spawning a shell fallback.
