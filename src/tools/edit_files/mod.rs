@@ -182,6 +182,9 @@ fn preserve_legacy_error(surface: EditSurface, error: WinxError) -> WinxError {
 
 fn plan_command(state: &mut BashState, prepared: &PreparedEditContext) -> Result<EditPlan> {
     match &prepared.command {
+        EditCommand::ReleaseTemporary { .. } => Err(WinxError::InvalidInput(
+            "temporary release must execute through the authoritative runtime owner".into(),
+        )),
         EditCommand::Apply { changes } => plan_apply(state, prepared, changes),
         EditCommand::Undo { undo_id, legacy_lifo, .. } => {
             let path = prepared
@@ -376,8 +379,11 @@ where
                 let current_undo = state.next_undo_id_for(&target);
                 undo_ids.push((current_undo != prior_undo).then_some(current_undo).flatten());
                 revisions.push(revision);
-                postconditions
-                    .push(EditMutationPostcondition { path: target.clone(), sha256: new_hash });
+                postconditions.push(EditMutationPostcondition {
+                    removed_generation: None,
+                    path: target.clone(),
+                    sha256: new_hash,
+                });
                 summaries.push(format!("[{target}]\n{summary}"));
             }
             Err(error) => {
@@ -470,7 +476,7 @@ fn commit_undo(state: &mut BashState, plan: UndoPlan) -> Result<EditExecution> {
         ))],
         undo_ids: Vec::new(),
         next_undo_id,
-        postconditions: vec![EditMutationPostcondition {
+        postconditions: vec![EditMutationPostcondition { removed_generation: None,
             path: plan.file_path_str.clone(),
             sha256: hash_content(&plan.checkpoint.prior_content),
         }],

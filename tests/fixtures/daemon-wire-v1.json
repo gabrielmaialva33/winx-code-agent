@@ -14,7 +14,8 @@
     "session.kill",
     "session.prune",
     "shell.run_action",
-    "shell.cancel_action"
+    "shell.cancel_action",
+    "session.release_temporary"
   ],
   "capabilities": [
     "typed_action_result",
@@ -25,7 +26,8 @@
     "attach_or_create",
     "build_identity",
     "process_shutdown",
-    "conditional_session_kill"
+    "conditional_session_kill",
+    "temporary_release"
   ],
   "samples": {
     "rpc_request": {

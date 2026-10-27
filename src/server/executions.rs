@@ -1,4 +1,5 @@
 //! Session-scoped observation tools; they never send terminal input.
+use crate::server::usage::lifecycle::{phase, Phase};
 pub(super) mod history;
 mod wait;
 
@@ -159,8 +160,9 @@ impl WinxService {
         workspace_root: &Path,
         timing: Option<WaitTiming>,
     ) -> HistoryResult<crate::errors::Result<WorkflowContext>> {
+        let guard = phase(Phase::SessionAdmission);
         let operation = self.workflow_context(thread_id, workspace_root);
-        if let Some(timing) = timing {
+        let result = if let Some(timing) = timing {
             tokio::time::timeout_at(timing.deadline(), operation).await.map_err(|_| {
                 HistoryError::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
@@ -169,7 +171,9 @@ impl WinxService {
             })
         } else {
             Ok(operation.await)
-        }
+        };
+        guard.finish(matches!(&result, Ok(Ok(_))));
+        result
     }
 
     pub(super) async fn handle_execution(

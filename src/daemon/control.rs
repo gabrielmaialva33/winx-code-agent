@@ -307,6 +307,9 @@ async fn dispatch(
         match relay_negotiated(&guardian_socket, request.clone(), &hello).await {
             Ok(result) => result,
             Err(first_error) => {
+                if request.method == "session.release_temporary" {
+                    return rpc_error(request_id, -32002, &format!("temporary release response unavailable; inspect the exact targets before retrying: {first_error}"));
+                }
                 guardian_capabilities.lock().await.remove(&guardian_socket);
                 let refreshed = match negotiated_guardian(
                     lifecycle,
@@ -374,6 +377,12 @@ fn request_thread_id(request: &RpcRequest) -> Result<String> {
         }
         "shell.run_action" => decode::<RunActionParams>(request.params.clone())?.command.thread_id,
         "shell.cancel_action" => decode::<CancelActionParams>(request.params.clone())?.thread_id,
+        "session.release_temporary" => {
+            decode::<crate::utils::agent_temp::release::TemporaryReleaseRequest>(
+                request.params.clone(),
+            )?
+            .thread_id
+        }
         "session.read_output" => decode::<JournalReadParams>(request.params.clone())?.thread_id,
         "session.negotiate" | "session.info" | "session.kill" | "session.interrupt" => {
             decode::<SessionParams>(request.params.clone())?.thread_id
@@ -535,7 +544,25 @@ async fn socket_identity(socket: &Path) -> Option<SocketIdentity> {
     }
 }
 
+fn normalize_temporary_release_request(request: &RpcRequest, hello: &HelloResult) -> Result<()> {
+    if request.method != "session.release_temporary" {
+        return Ok(());
+    }
+    let params = decode::<crate::utils::agent_temp::release::TemporaryReleaseRequest>(
+        request.params.clone(),
+    )?;
+    let capable = hello
+        .capabilities
+        .iter()
+        .any(|candidate| candidate == super::protocol::TEMPORARY_RELEASE_CAPABILITY);
+    if !capable || params.expected_guardian_epoch.as_deref() != Some(hello.daemon_epoch.as_str()) {
+        return Err(WinxError::InvalidInput("temporary release requires the same capable guardian; no retry against a replacement is allowed".into()));
+    }
+    Ok(())
+}
+
 fn normalize_guardian_request(request: &mut RpcRequest, hello: &HelloResult) -> Result<()> {
+    normalize_temporary_release_request(request, hello)?;
     let has = |capability: &str| hello.capabilities.iter().any(|candidate| candidate == capability);
     if request.method == "shell.run_action" {
         let mut params = decode::<RunActionParams>(request.params.clone())?;
@@ -651,7 +678,7 @@ fn request_requires_live_guardian(request: &RpcRequest) -> Result<bool> {
                 || params.expected_execution.is_some()
                 || params.expected_guardian_epoch.is_some())
         }
-        "shell.cancel_action" => Ok(true),
+        "shell.cancel_action" | "session.release_temporary" => Ok(true),
         _ => Ok(false),
     }
 }

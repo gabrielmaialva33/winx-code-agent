@@ -1,3 +1,6 @@
+#[cfg(all(test, target_os = "linux"))]
+mod temporary_tests;
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -436,6 +439,7 @@ async fn dispatch(
                     GENERATION_BOUND_ACTIONS_CAPABILITY.to_string(),
                     CANCELLABLE_ACTION_RESERVATIONS_CAPABILITY.to_string(),
                     super::protocol::AGENT_WORKFLOWS_CAPABILITY.to_string(),
+                    super::protocol::TEMPORARY_RELEASE_CAPABILITY.to_string(),
                     "session.list".to_string(),
                     "session.read_output".to_string(),
                     "session.kill".to_string(),
@@ -453,7 +457,9 @@ async fn dispatch(
             schedule_process_exit("winx-guardian");
             rpc_result(request.id, &serde_json::json!({ "shutting_down": true }))
         }
-        "session.configure" | "shell.run_action" if draining.load(Ordering::Acquire) => {
+        "session.configure" | "shell.run_action" | "session.release_temporary"
+            if draining.load(Ordering::Acquire) =>
+        {
             draining_error(request.id)
         }
         "session.configure" => {
@@ -473,6 +479,42 @@ async fn dispatch(
             };
             match run_action(sessions, params, epoch).await {
                 Ok(result) => rpc_result(request.id, &result),
+                Err(error) => rpc_error(request.id, -32603, &error.to_string()),
+            }
+        }
+        "session.release_temporary" => {
+            let params: crate::utils::agent_temp::release::TemporaryReleaseRequest =
+                match serde_json::from_value(request.params) {
+                    Ok(params) => params,
+                    Err(error) => return rpc_error(request.id, -32602, &error.to_string()),
+                };
+            if params.expected_guardian_epoch.as_deref() != Some(epoch) {
+                return rpc_error(request.id, -32602, "temporary release guardian epoch changed");
+            }
+            let session = sessions.lock().await.get(&params.thread_id).cloned();
+            let Some(session) = session else {
+                return rpc_error(request.id, -32004, "session not found");
+            };
+            let Ok(operation) = Arc::clone(&session.operation_barrier).try_write_owned() else {
+                return rpc_error(request.id, -32005, "in_use: runtime admission is active");
+            };
+            let pending_actions = {
+                let completed = session.completed.lock().await;
+                completed.values().any(|entry| !action_entry_is_terminal(entry))
+            };
+            let pending_reservations = !session.launch_reservations.lock().await.is_empty();
+            if pending_actions || pending_reservations {
+                return rpc_error(request.id, -32005, "in_use: runtime command is pending");
+            }
+            // Own admission across RPC cancellation and the blocking filesystem worker.
+            let joined = tokio::spawn(async move {
+                let _operation = operation;
+                crate::runtime::release_temporary_at_owner(&session.state, params).await
+            })
+            .await;
+            match joined {
+                Ok(Ok(result)) => rpc_result(request.id, &result),
+                Ok(Err(error)) => rpc_error(request.id, -32005, &error.to_string()),
                 Err(error) => rpc_error(request.id, -32603, &error.to_string()),
             }
         }

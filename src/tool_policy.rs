@@ -38,6 +38,7 @@ impl EditPermissionSet {
     const BATCH_SEARCH_REPLACE: u16 = 1 << 5;
     const BATCH_LINE_PATCH: u16 = 1 << 6;
     const VERIFY: u16 = 1 << 7;
+    const RELEASE_TEMPORARY: u16 = 1 << 8;
 
     const ALL: Self = Self {
         bits: Self::SINGLE_REPLACE
@@ -46,7 +47,8 @@ impl EditPermissionSet {
             | Self::SINGLE_UNDO
             | Self::BATCH_REPLACE
             | Self::BATCH_SEARCH_REPLACE
-            | Self::BATCH_LINE_PATCH,
+            | Self::BATCH_LINE_PATCH
+            | Self::RELEASE_TEMPORARY,
     };
 
     pub const fn is_empty(self) -> bool {
@@ -70,6 +72,7 @@ impl EditPermissionSet {
             (crate::tools::edit_files::EditMode::SearchReplace, true) => Self::BATCH_SEARCH_REPLACE,
             (crate::tools::edit_files::EditMode::LinePatch, true) => Self::BATCH_LINE_PATCH,
             (crate::tools::edit_files::EditMode::Undo, true) => 0,
+            (crate::tools::edit_files::EditMode::ReleaseTemporary, _) => Self::RELEASE_TEMPORARY,
         };
         self.bits & bit != 0
     }

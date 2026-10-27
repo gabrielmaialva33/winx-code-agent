@@ -1,3 +1,5 @@
+use crate::server::usage::lifecycle::{phase, Phase};
+
 use std::time::Instant;
 
 use serde_json::json;
@@ -114,7 +116,9 @@ impl WinxService {
                 return Ok(wait_reply(&changes, false, started));
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let guard = phase(Phase::WaitIdle);
             tokio::time::sleep(remaining.min(std::time::Duration::from_millis(250))).await;
+            guard.finish(true);
         }
     }
 }

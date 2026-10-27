@@ -3505,7 +3505,9 @@ fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
     assert_initialize_usage(&entries);
     let read_call = entries
         .iter()
-        .find(|entry| entry["fields"]["tool"] == "ReadFiles")
+        .find(|entry| {
+            entry["fields"]["event"] == "tool_call" && entry["fields"]["tool"] == "ReadFiles"
+        })
         .ok_or_else(|| anyhow::anyhow!("missing ReadFiles usage event: {contents}"))?;
     assert_eq!(read_call["fields"]["batch_items"], 2);
     assert_eq!(read_call["fields"]["worker_limit"], 3);
@@ -3516,6 +3518,19 @@ fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
         "missing privacy-preserving workspace fingerprint: {read_call}"
     );
     assert!(read_call["fields"]["duration_ms"].as_u64().is_some());
+    let usage_call_id =
+        read_call["fields"]["usage_call_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("missing internal call correlation: {read_call}"))?;
+    assert!(
+        entries.iter().any(|entry| {
+            entry["fields"]["event"] == "tool_started"
+                && entry["fields"]["tool"] == "ReadFiles"
+                && entry["fields"]["usage_call_id"] == usage_call_id
+        }),
+        "missing correlated lifecycle start: {contents}"
+    );
     assert!(
         entries.iter().any(|entry| {
             entry["fields"]["event"] == "http_request"

@@ -183,9 +183,12 @@ pub(super) async fn execute_command(
     }
 
     let scratch_root = bash_state.workspace_root.clone();
-    {
+    let launch_cwd = {
         let mut guard = shell.lock().await;
         let shell = guard.as_mut().ok_or(WinxError::BashStateNotInitialized)?;
+        // A queued action can carry a stale BashState cwd. The shared PTY
+        // owns the working directory at the actual foreground submission.
+        let launch_cwd = shell.current_cwd().to_path_buf();
         shell.output_buffer.clear();
         shell.output_truncated = false;
         shell.reset_scratch();
@@ -200,7 +203,11 @@ pub(super) async fn execute_command(
         shell.last_command = command.to_string();
         shell.command_running = true;
         shell.mark_command_started();
-    }
+        launch_cwd
+    };
+    // Keep launch persistence ordered with foreground admission and capture it
+    // before waiting: a later output error must not erase an accepted target.
+    super::record_foreground_agent_launch(bash_state, command, &launch_cwd);
 
     wait_for_output(
         bash_state,

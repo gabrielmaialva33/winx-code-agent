@@ -24,6 +24,7 @@ pub const PROCESS_SHUTDOWN_CAPABILITY: &str = "process_shutdown";
 /// `session.kill` honors `only_if_idle` and refuses a session that is running
 /// a foreground command or owns background shells.
 pub const CONDITIONAL_SESSION_KILL_CAPABILITY: &str = "conditional_session_kill";
+pub const TEMPORARY_RELEASE_CAPABILITY: &str = "temporary_release";
 pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 
 /// Process role advertised during daemon negotiation.

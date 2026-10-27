@@ -49,6 +49,8 @@ pub struct ReadFileRevision {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_start_line: Option<usize>,
+    #[serde(rename = "temporary_artifact", skip_serializing_if = "Option::is_none")]
+    pub temporary_artifact: Option<crate::utils::agent_temp::release::TemporaryArtifactMetadata>,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -121,6 +123,7 @@ impl ReadBatchState {
                         .into_iter()
                         .collect(),
                     truncated,
+                    temporary_artifact: None,
                     next_start_line: truncated
                         .then_some(visible_range.1.saturating_add(1))
                         .filter(|line| *line <= total_lines),
@@ -508,10 +511,14 @@ pub async fn handle_tool_call_detailed(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     read_files: ReadFiles,
 ) -> Result<ReadFilesOutcome> {
-    let (cwd, workspace_root) = {
+    let (cwd, workspace_root, temporary_thread) = {
         let bash_state_guard = bash_state_arc.lock().await;
         let bash_state = bash_state_guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
-        (bash_state.cwd.clone(), bash_state.workspace_root.clone())
+        (
+            bash_state.cwd.clone(),
+            bash_state.workspace_root.clone(),
+            bash_state.current_thread_id.clone(),
+        )
     };
 
     let requests = read_files
@@ -529,8 +536,36 @@ pub async fn handle_tool_call_detailed(
     let batch =
         execute_read_requests(&requests, &cwd, &workspace_root, read_files.show_line_numbers())
             .await;
-    let ReadBatchState { message, file_ranges, stats_paths, successful_files, revisions, errors } =
-        batch;
+    let ReadBatchState {
+        message,
+        file_ranges,
+        stats_paths,
+        successful_files,
+        mut revisions,
+        errors,
+    } = batch;
+    let temporary_workspace = workspace_root.clone();
+    revisions = tokio::task::spawn_blocking(move || {
+        for receipt in &mut revisions {
+            if let Ok(Some((text, metadata))) = crate::utils::agent_temp::release::read_managed(
+                &temporary_workspace,
+                &temporary_thread,
+                Path::new(&receipt.path),
+            ) {
+                // The descriptor used for generation observed exactly the bytes
+                // whose revision this response exposed. A concurrent change
+                // removes eligibility rather than issuing a mismatched token.
+                if revision_from_hash(&hash_content(&text)) == receipt.revision {
+                    receipt.temporary_artifact = Some(metadata);
+                }
+            }
+        }
+        revisions
+    })
+    .await
+    .map_err(|error| {
+        WinxError::CommandExecutionError(format!("temporary read metadata worker failed: {error}"))
+    })?;
     persist_read_stats(&workspace_root, stats_paths).await;
 
     let mut bash_state_guard = bash_state_arc.lock().await;

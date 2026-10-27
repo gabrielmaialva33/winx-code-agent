@@ -181,6 +181,79 @@ or completion cannot be established, the result stays explicit about the unknown
 outcome. Recovery never replays a command or prompt. Persistence uses private files;
 normal output redaction still applies.
 
+## Workflow telemetry and latency diagnostics
+
+Usage logs keep `usage_schema=1` and add `workflow_schema=1` for Agent/Execution
+observations. `winx-code-agent report --log <usage-log> --last 10000 --since-minutes 0`
+adds a `workflows` section grouped by tool, action and backend. The existing
+`execution` section and HTTP correlation retain their meanings.
+
+Workflow metrics distinguish catalog change/timeout/resynchronization, observed native
+prompt receipts, and Herdr submission/uncertain-input metadata. A receipt read counts as
+an observation, including when the same receipt is read again. These counters do not
+estimate unique prompts delivered or tasks completed. Missing or unrecognized evidence
+stays unknown; an explicit zero timeout is retained.
+
+Auxiliary `tool_started` and `tool_phase` events share a random internal
+`usage_call_id` with the terminal `tool_call`; HTTP correlation still uses the
+existing request ID. Phases cover workspace validation, session admission, catalog work,
+runtime inspection/capture, native prompt RPC, the Herdr adapter, deliberate wait sleep,
+temporary-file audit, and response finalization. Logs contain finite classifications,
+durations and counts, without adding command/prompt text, output, cursors or raw paths.
+
+Each call emits at most 16 phase start/finish pairs and one truncation marker. Suppressed
+phases still contribute to the terminal summary. Phase totals are inclusive: they can
+repeat or overlap and must not be summed as exclusive portions of request duration.
+Submillisecond observations can have zero milliseconds with a positive invocation count.
+Discarded futures record observed abandonment; underlying blocking work may continue.
+
+A start without a terminal means completion was not observed. Process loss, cancellation,
+log rotation, and existing early error exits can all produce that pattern. It is not
+evidence that a request is still running. The report ignores these new auxiliary event
+types before applying `--last`, preserving terminal/HTTP windows and build attribution;
+physical `linesSeen` still includes the added log lines.
+
+## Recover an explicitly selected conversation
+
+For these direct literal launches, Winx retains the UUID selected by the accepted command:
+
+| Accepted launch | Recovery target |
+|---|---|
+| `claude --session-id <uuid>` | `claude --resume <uuid>` |
+| `claude --resume <uuid>` | `claude --resume <uuid>` |
+| `claude -r <uuid>` | `claude --resume <uuid>` |
+| `codex resume <uuid>` | `codex resume <uuid>` |
+
+The resulting advice is `explicit_target`, with `source=launch_argument` and
+`current_conversation_verified=false`. It targets the recorded launch argument even if
+another conversation later becomes most recent. Backend acceptance, startup success and
+later in-TUI conversation switches are unverified.
+
+Bare supported launches without a selector are `best_effort` and carry no executable
+recovery recommendation. Unsupported or ambiguous launches are `unavailable`. Extra
+flags, wrappers, command lists, substitutions, pipelines, conflicting selectors and
+non-UUID names are not accepted for explicit recovery. No initial command or prompt is
+replayed, and recovery does not automatically choose `--continue` or `--last`.
+
+Records are scoped to the runtime's thread/workspace, bounded to 16 KiB and written
+atomically with private files. Accepted foreground launches update the evidence before
+the output wait; rejected, busy and background requests preserve the existing foreground
+record. A surviving guardian is reattached through the existing path. Recovery advice
+does not restart it or submit terminal input.
+
+## Release managed temporary helpers
+
+`EditFiles` supports explicit `release_temporary` requests for individually named helpers
+in the current session's managed directory. Each request uses a fresh `ReadFiles` revision
+and artifact generation; the runtime owner checks foreground/background activity before
+releasing anything. The initial implementation requires Linux and a capable durable
+guardian. Unsupported or unresolved ownership leaves the files in place.
+
+See [Releasing managed temporary helpers](temporary-release.md) for the request schema,
+revision and generation rules, retained-output protection, partial results and retry
+semantics. Existing maintenance reports usage without automatically deleting old or
+sibling-session helpers when runtime protection cannot be established.
+
 ## Optional Herdr backend
 
 Herdr is disabled unless the operator configures an executable, a connection, and target

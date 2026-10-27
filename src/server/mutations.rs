@@ -385,7 +385,9 @@ impl WinxService {
         // postcondition validation and replay construction. A concurrent mode
         // tightening is therefore ordered either wholly before (and denies) or
         // wholly after this replay decision.
-        if !postconditions_match(&receipt.postconditions).await {
+        if receipt.temporary_release.is_none()
+            && !postconditions_match(&receipt.postconditions).await
+        {
             return Ok(Some(mutation_drift_result(metadata, &receipt)));
         }
 
@@ -512,7 +514,20 @@ impl WinxService {
         mut owner: MutationOwner,
         result: &mut CallToolResult,
     ) {
-        if result.is_error == Some(true) || !edit_was_applied(result) {
+        // A failed release may still have preserved a captured generation in
+        // quarantine. Attach its checkpoint metadata even with zero removals.
+        let release_side_effect = result
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.pointer("/data/temporary_release/files"))
+            .and_then(Value::as_array)
+            .is_some_and(|files| {
+                files.iter().any(|file| {
+                    file.get("status").and_then(Value::as_str) == Some("released")
+                        || file.get("recovery_path").and_then(Value::as_str).is_some()
+                })
+            });
+        if (result.is_error == Some(true) || !edit_was_applied(result)) && !release_side_effect {
             owner.release();
             return;
         }
@@ -594,6 +609,73 @@ impl WinxService {
         }
         if let Err(error) = state.save_state_to_disk() {
             warn!(%error, "failed to checkpoint committed edit before verification");
+        }
+    }
+
+    /// Preserve every recovery outcome before returning a side-effectful release.
+    /// Pure preflight/claim denials remain retryable after the cause is corrected.
+    pub(super) async fn checkpoint_temporary_release(
+        &self,
+        prepared: &PreparedEditContext,
+        released: &crate::utils::agent_temp::release::TemporaryReleaseResult,
+    ) {
+        if !released
+            .files
+            .iter()
+            .any(|file| file.status == "released" || file.recovery_path.is_some())
+        {
+            return;
+        }
+        let Some(metadata) = mutation_metadata(prepared) else {
+            return;
+        };
+        let postconditions = released
+            .files
+            .iter()
+            .filter(|file| file.status == "released")
+            .map(|file| EditMutationPostcondition {
+                path: file.file_path.clone(),
+                sha256: String::new(),
+                removed_generation: Some(file.artifact_generation.clone()),
+            })
+            .collect::<Vec<_>>();
+        let uncommitted = released
+            .files
+            .iter()
+            .filter(|file| file.status != "released")
+            .map(|file| file.file_path.clone())
+            .collect::<Vec<_>>();
+        let status = if uncommitted.is_empty() {
+            "completed"
+        } else if postconditions.is_empty() {
+            "failed"
+        } else {
+            "completed_with_issues"
+        };
+        let mut receipts = mutation_receipts(
+            &metadata,
+            status.into(),
+            postconditions,
+            false,
+            uncommitted,
+            None,
+            Vec::new(),
+        );
+        for receipt in &mut receipts {
+            receipt.temporary_release = Some(released.clone());
+        }
+        let (slot, _guard) = self.session_for(&metadata.thread_id).await;
+        let mut state = slot.lock().await;
+        let Some(state) = state.as_mut() else {
+            return;
+        };
+        state.record_edit_mutation_receipts(receipts);
+        if let Err(error) = state.save_state_to_disk() {
+            state.mark_edit_mutation_receipt_volatile(&metadata.fingerprint);
+            if let Some(fingerprint) = metadata.legacy_fingerprint.as_deref() {
+                state.mark_edit_mutation_receipt_volatile(fingerprint);
+            }
+            warn!(%error, "failed to checkpoint temporary release recovery outcome");
         }
     }
 
@@ -773,6 +855,7 @@ fn mutation_receipts(
         }
     });
     let mut receipts = vec![EditMutationReceipt {
+        temporary_release: None,
         schema_version: 1,
         fingerprint: metadata.fingerprint.clone(),
         receipt_id: metadata.receipt_id.clone(),
@@ -792,6 +875,7 @@ fn mutation_receipts(
     }];
     if let Some(fingerprint) = metadata.legacy_fingerprint.as_ref() {
         receipts.push(EditMutationReceipt {
+            temporary_release: None,
             schema_version: 1,
             fingerprint: fingerprint.clone(),
             receipt_id: metadata.receipt_id.clone(),
@@ -825,7 +909,7 @@ fn canonicalize_replay_receipt_pair(
 ) -> (EditMutationReceipt, Vec<EditMutationReceipt>) {
     let partial = !receipt.uncommitted_paths.is_empty();
     let (status, verification_pending, verification_state, verification_execution) =
-        if exact_variant {
+        if exact_variant || receipt.temporary_release.is_some() {
             (
                 receipt.status.clone(),
                 receipt.verification_pending,
@@ -857,6 +941,7 @@ fn canonicalize_replay_receipt_pair(
             )
         };
     let canonical = EditMutationReceipt {
+        temporary_release: receipt.temporary_release.clone(),
         schema_version: 1,
         fingerprint: metadata.fingerprint.clone(),
         receipt_id: metadata.receipt_id.clone(),
@@ -877,6 +962,7 @@ fn canonicalize_replay_receipt_pair(
     let mut pair = vec![canonical.clone()];
     if let Some(fingerprint) = metadata.legacy_fingerprint.as_ref() {
         pair.push(EditMutationReceipt {
+            temporary_release: receipt.temporary_release.clone(),
             schema_version: 1,
             fingerprint: fingerprint.clone(),
             receipt_id: metadata.receipt_id.clone(),
@@ -972,6 +1058,16 @@ async fn postconditions_match(postconditions: &[EditMutationPostcondition]) -> b
     tokio::task::spawn_blocking(move || {
         !postconditions.is_empty()
             && postconditions.iter().all(|condition| {
+                // A release receipt proves removal of one historical physical
+                // generation, not continuing absence of this pathname. Replaying
+                // it must never delete a later replacement.
+                if condition
+                    .removed_generation
+                    .as_ref()
+                    .is_some_and(|generation| !generation.is_empty())
+                {
+                    return true;
+                }
                 std::fs::read(PathBuf::from(&condition.path)).is_ok_and(|content| {
                     hex_digest(Sha256::digest(content).as_slice()) == condition.sha256
                 })
@@ -1014,6 +1110,28 @@ fn mutation_replay_result(
     metadata: &MutationMetadata,
     receipt: &EditMutationReceipt,
 ) -> CallToolResult {
+    if let Some(released) = &receipt.temporary_release {
+        let text = "IDEMPOTENT REPLAY: this is the recorded temporary release outcome, including any preserved recovery location; no filesystem mutation was repeated.";
+        let mut result = CallToolResult::success(vec![ContentBlock::text(text)]);
+        result.is_error = Some(receipt.status == "failed");
+        result.structured_content = Some(json!({
+            "status": receipt.status, "tool": metadata.response_tool, "message": text,
+            "retryable": false, "retrySameCall": false,
+            "data": { "temporary_release": released }
+        }));
+        attach_mutation_metadata(&mut result, metadata, receipt.persisted, true);
+        return result;
+    }
+    if receipt.postconditions.iter().any(|condition| condition.removed_generation.is_some()) {
+        let mut result = CallToolResult::success(vec![ContentBlock::text("IDEMPOTENT REPLAY: the recorded temporary generations were already released; no filesystem mutation was repeated.")]);
+        result.structured_content = Some(
+            json!({ "status": receipt.status, "tool": metadata.response_tool,
+            "data": { "released_artifacts": receipt.postconditions.iter().map(|condition| json!({"file_path": condition.path, "artifact_generation": condition.removed_generation, "status": "released"})).collect::<Vec<_>>(),
+                "uncommitted_paths": receipt.uncommitted_paths, "partial": !receipt.uncommitted_paths.is_empty() } }),
+        );
+        attach_mutation_metadata(&mut result, metadata, receipt.persisted, true);
+        return result;
+    }
     if !receipt.uncommitted_paths.is_empty() {
         return partial_mutation_replay_result(metadata, receipt);
     }
@@ -1379,6 +1497,7 @@ mod tests {
         execution: Option<EditVerificationExecution>,
     ) -> EditMutationReceipt {
         EditMutationReceipt {
+            temporary_release: None,
             schema_version: 1,
             fingerprint: "verification-fingerprint".to_string(),
             receipt_id: "edit-verification-lifecycle".to_string(),
@@ -1434,6 +1553,7 @@ mod tests {
         let metadata = mutation_metadata(&legacy).expect("legacy metadata");
         let old_fingerprint = metadata.legacy_fingerprint.as_ref().expect("legacy fingerprint");
         let old = EditMutationReceipt {
+            temporary_release: None,
             schema_version: 0,
             fingerprint: old_fingerprint.clone(),
             receipt_id: "schema-zero-receipt".to_string(),
@@ -1441,6 +1561,7 @@ mod tests {
             status: "completed".to_string(),
             committed_at_unix_ms: 1_000,
             postconditions: vec![EditMutationPostcondition {
+                removed_generation: None,
                 path: "/workspace/file.rs".to_string(),
                 sha256: "hash".to_string(),
             }],
@@ -1606,6 +1727,7 @@ mod tests {
     ) -> std::result::Result<(), &'static str> {
         let metadata = mutation_metadata(&prepared("content", true)).ok_or("missing metadata")?;
         let receipt = EditMutationReceipt {
+            temporary_release: None,
             schema_version: 1,
             fingerprint: metadata.fingerprint.clone(),
             receipt_id: metadata.receipt_id.clone(),
@@ -1613,6 +1735,7 @@ mod tests {
             status: "completed_with_issues".to_string(),
             committed_at_unix_ms: now_unix_ms(),
             postconditions: vec![EditMutationPostcondition {
+                removed_generation: None,
                 path: "/workspace/file.rs".to_string(),
                 sha256: "hash".to_string(),
             }],
@@ -1649,6 +1772,7 @@ mod tests {
             new.verification.as_ref().map(|plan| &plan.id)
         );
         let receipt = EditMutationReceipt {
+            temporary_release: None,
             schema_version: 1,
             fingerprint: old.fingerprint,
             receipt_id: old.receipt_id,
@@ -1656,6 +1780,7 @@ mod tests {
             status: "completed".to_string(),
             committed_at_unix_ms: now_unix_ms(),
             postconditions: vec![EditMutationPostcondition {
+                removed_generation: None,
                 path: "/workspace/file.rs".to_string(),
                 sha256: "hash".to_string(),
             }],
@@ -1702,6 +1827,7 @@ mod tests {
             &old,
             "completed".to_string(),
             vec![EditMutationPostcondition {
+                removed_generation: None,
                 path: "/workspace/file.rs".to_string(),
                 sha256: "hash".to_string(),
             }],
@@ -1749,6 +1875,7 @@ mod tests {
             .collect();
         let metadata = mutation_metadata(&prepared).ok_or("missing metadata")?;
         let receipt = EditMutationReceipt {
+            temporary_release: None,
             schema_version: 1,
             fingerprint: metadata.fingerprint.clone(),
             receipt_id: metadata.receipt_id.clone(),
@@ -1756,6 +1883,7 @@ mod tests {
             status: "completed_with_issues".to_string(),
             committed_at_unix_ms: now_unix_ms(),
             postconditions: vec![EditMutationPostcondition {
+                removed_generation: None,
                 path: "/workspace/first.rs".to_string(),
                 sha256: "first-hash".to_string(),
             }],
@@ -1796,5 +1924,111 @@ mod tests {
         };
         assert_ne!(digest(json!(["ab", "c"])), digest(json!(["a", "bc"])));
         assert_ne!(digest(json!({"a": "bc"})), digest(json!({"ab": "c"})));
+    }
+}
+
+#[cfg(test)]
+mod temporary_release_receipt_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn released_generation_receipt_replays_without_removing_recreated_path(
+    ) -> anyhow::Result<()> {
+        let directory = tempfile::tempdir()?;
+        let path = directory.path().join("helper");
+        std::fs::write(&path, "same bytes")?;
+        let condition = EditMutationPostcondition {
+            path: path.to_string_lossy().into_owned(),
+            sha256: String::new(),
+            removed_generation: Some("historical-generation".into()),
+        };
+        // The persisted assertion is historical removal of a generation, not
+        // continuing absence of the pathname now occupied by another object.
+        assert!(postconditions_match(std::slice::from_ref(&condition)).await);
+        let metadata = MutationMetadata {
+            fingerprint: "fingerprint".into(),
+            legacy_fingerprint: None,
+            receipt_id: "edit_release".into(),
+            response_tool: "EditFiles".into(),
+            thread_id: "one".into(),
+            workspace_root: Some(directory.path().to_string_lossy().into_owned()),
+            target_paths: vec![condition.path.clone()],
+            verification: None,
+        };
+        let receipt = EditMutationReceipt {
+            temporary_release: None,
+            schema_version: 1,
+            fingerprint: metadata.fingerprint.clone(),
+            receipt_id: metadata.receipt_id.clone(),
+            tool: "EditFiles".into(),
+            status: "completed".into(),
+            committed_at_unix_ms: 1,
+            postconditions: vec![condition],
+            persisted: true,
+            verification_pending: false,
+            verification_id: None,
+            legacy_verification_id: None,
+            verification_state: None,
+            verification_execution: None,
+            uncommitted_paths: vec![],
+            next_undo_id: None,
+            undo_ids: vec![],
+        };
+        let replay = mutation_replay_result(&metadata, &receipt);
+        let envelope =
+            replay.structured_content.ok_or_else(|| anyhow::anyhow!("replay envelope missing"))?;
+        assert_eq!(envelope["data"]["mutation_replayed"], true);
+        assert_eq!(
+            envelope["data"]["released_artifacts"][0]["artifact_generation"],
+            "historical-generation"
+        );
+        assert_eq!(std::fs::read_to_string(path)?, "same bytes");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod temporary_release_outcome_tests {
+    use super::*;
+
+    #[test]
+    fn partial_and_zero_release_receipts_keep_every_recovery_outcome() -> anyhow::Result<()> {
+        for released_prefix in [false, true] {
+            let temporary = tempfile::tempdir()?;
+            let untouched = temporary.path().join("helper");
+            std::fs::write(&untouched, "replacement")?;
+            let recovery = temporary.path().join(".winx-release-retained/artifact");
+            let mut files = Vec::new();
+            if released_prefix {
+                files.push(json!({"file_path":"released-helper", "artifact_generation":"old-a", "status":"released", "reclaimed_bytes":8}));
+            }
+            files.push(json!({"file_path":untouched, "artifact_generation":"old-b", "status":"generation_conflict", "reclaimed_bytes":0, "recovery_path":recovery}));
+            let outcome = json!({"files":files,"reclaimed_bytes":if released_prefix {8} else {0},"partial":released_prefix});
+            let receipt: EditMutationReceipt = serde_json::from_value(json!({
+                "schema_version":1,"fingerprint":"release-fingerprint","receipt_id":"edit-release","tool":"EditFiles",
+                "status":if released_prefix {"completed_with_issues"} else {"failed"},"committed_at_unix_ms":1,
+                "postconditions":[],"temporary_release":outcome,"persisted":true,"verification_pending":false
+            }))?;
+            let metadata = MutationMetadata {
+                fingerprint: "release-fingerprint".into(),
+                legacy_fingerprint: None,
+                receipt_id: "edit-release".into(),
+                response_tool: "EditFiles".into(),
+                thread_id: "one".into(),
+                workspace_root: Some(temporary.path().to_string_lossy().into_owned()),
+                target_paths: vec![untouched.to_string_lossy().into_owned()],
+                verification: None,
+            };
+            let (canonical, _) =
+                canonicalize_replay_receipt_pair(&metadata, &receipt, true, vec![], None);
+            assert_eq!(serde_json::to_value(&canonical)?["temporary_release"], outcome, "receipt persistence/canonicalization must retain recoverability even with zero removals");
+            let replay = mutation_replay_result(&metadata, &canonical)
+                .structured_content
+                .ok_or_else(|| anyhow::anyhow!("missing replay envelope"))?;
+            assert_eq!(replay["data"]["temporary_release"], outcome);
+            assert_eq!(replay["data"]["mutation_replayed"], true);
+            assert_eq!(std::fs::read_to_string(untouched)?, "replacement");
+        }
+        Ok(())
     }
 }

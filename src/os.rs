@@ -2,6 +2,222 @@
 
 #![allow(unsafe_code)]
 
+#[cfg(target_os = "linux")]
+pub(crate) mod temporary {
+    //! Directory-relative Linux claims for explicitly released managed helpers.
+    #![allow(unsafe_code)]
+
+    use std::ffi::{CString, OsStr};
+    use std::fs::File;
+    use std::io;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::{Component, Path};
+
+    fn name(value: &OsStr) -> io::Result<CString> {
+        CString::new(value.as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in path"))
+    }
+
+    fn open_at(parent: &File, leaf: &CString, flags: i32) -> io::Result<File> {
+        // SAFETY: parent and the NUL-terminated name remain alive for this call.
+        let fd = unsafe {
+            libc::openat(
+                parent.as_raw_fd(),
+                leaf.as_ptr(),
+                flags | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if fd < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: openat returned a newly owned descriptor.
+        Ok(unsafe { File::from_raw_fd(fd) })
+    }
+
+    pub(crate) fn directory(path: &Path) -> io::Result<File> {
+        if !path.is_absolute() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "absolute directory required"));
+        }
+        let mut dir = File::open("/")?;
+        for component in path.components() {
+            match component {
+                Component::RootDir => {}
+                Component::Normal(part) => {
+                    dir = open_at(&dir, &name(part)?, libc::O_RDONLY | libc::O_DIRECTORY)?;
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "noncanonical directory component",
+                    ))
+                }
+            }
+        }
+        Ok(dir)
+    }
+
+    /// Enumerate a pinned directory through its kernel descriptor alias. The
+    /// caller keeps the descriptor alive for the iterator's complete lifetime.
+    pub(crate) fn directory_entries(directory: &File) -> io::Result<std::fs::ReadDir> {
+        std::fs::read_dir(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+    }
+
+    pub(crate) fn directory_child(directory: &File, child: &OsStr) -> io::Result<File> {
+        open_at(directory, &name(child)?, libc::O_RDONLY | libc::O_DIRECTORY)
+    }
+
+    pub(crate) struct Opened {
+        pub(crate) file: File,
+        parent: File,
+        leaf: CString,
+    }
+
+    pub(crate) fn open(path: &Path) -> io::Result<Opened> {
+        let parent = directory(
+            path.parent()
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "parent required"))?,
+        )?;
+        let leaf =
+            name(path.file_name().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "filename required")
+            })?)?;
+        let file = open_at(&parent, &leaf, libc::O_RDONLY | libc::O_NONBLOCK)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "regular file required"));
+        }
+        Ok(Opened { file, parent, leaf })
+    }
+
+    fn rename_noreplace(from: &File, old: &CString, to: &File, new: &CString) -> io::Result<()> {
+        // SAFETY: borrowed descriptors and CString pointers remain valid. RENAME_NOREPLACE
+        // never overwrites a concurrently installed destination.
+        if unsafe {
+            libc::renameat2(
+                from.as_raw_fd(),
+                old.as_ptr(),
+                to.as_raw_fd(),
+                new.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        } == 0
+        {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    fn unlink(parent: &File, leaf: &CString, flags: i32) -> io::Result<()> {
+        // SAFETY: directory descriptor and NUL-terminated name are valid for this call.
+        if unsafe { libc::unlinkat(parent.as_raw_fd(), leaf.as_ptr(), flags) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    pub(crate) struct Claim {
+        parent: File,
+        original: CString,
+        quarantine: File,
+        quarantine_name: CString,
+        captured_name: CString,
+        captured: bool,
+    }
+
+    impl Opened {
+        pub(crate) fn claim(&self) -> io::Result<Claim> {
+            let parent = self.parent.try_clone()?;
+            let quarantine_name =
+                CString::new(format!(".winx-release-{:032x}", rand::random::<u128>()))
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+            // SAFETY: parent and the generated single component are valid; a collision
+            // fails without opening or modifying the pre-existing directory.
+            if unsafe { libc::mkdirat(self.parent.as_raw_fd(), quarantine_name.as_ptr(), 0o700) }
+                != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            let quarantine =
+                match open_at(&self.parent, &quarantine_name, libc::O_RDONLY | libc::O_DIRECTORY) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        let _ = unlink(&self.parent, &quarantine_name, libc::AT_REMOVEDIR);
+                        return Err(error);
+                    }
+                };
+            let mut claim = Claim {
+                parent,
+                original: self.leaf.clone(),
+                quarantine,
+                quarantine_name,
+                captured_name: c"artifact".to_owned(),
+                captured: false,
+            };
+            rename_noreplace(&self.parent, &self.leaf, &claim.quarantine, &claim.captured_name)?;
+            claim.captured = true;
+            Ok(claim)
+        }
+    }
+
+    impl Claim {
+        pub(crate) fn open_captured(&self) -> io::Result<File> {
+            open_at(&self.quarantine, &self.captured_name, libc::O_RDONLY | libc::O_NONBLOCK)
+        }
+
+        pub(crate) fn recovery_name(&self) -> String {
+            format!("{}/artifact", self.quarantine_name.to_string_lossy())
+        }
+
+        pub(crate) fn remove(mut self) -> io::Result<()> {
+            unlink(&self.quarantine, &self.captured_name, 0)?;
+            self.captured = false;
+            Ok(())
+        }
+    }
+
+    impl Drop for Claim {
+        fn drop(&mut self) {
+            if self.captured {
+                // A failed recheck preserves the captured object. Restore only if
+                // its original name is vacant; otherwise retain it in quarantine.
+                if rename_noreplace(
+                    &self.quarantine,
+                    &self.captured_name,
+                    &self.parent,
+                    &self.original,
+                )
+                .is_err()
+                {
+                    return;
+                }
+            }
+            let _ = unlink(&self.parent, &self.quarantine_name, libc::AT_REMOVEDIR);
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn restoration_never_overwrites_a_concurrent_original_name() -> io::Result<()> {
+            let directory = tempfile::tempdir()?;
+            let root = directory.path().canonicalize()?;
+            let path = root.join("helper");
+            std::fs::write(&path, "captured")?;
+            let opened = open(&path)?;
+            let claim = opened.claim()?;
+            let recovery = root.join(claim.recovery_name());
+            std::fs::write(&path, "replacement")?;
+            drop(claim);
+            assert_eq!(std::fs::read_to_string(&path)?, "replacement");
+            assert_eq!(std::fs::read_to_string(recovery)?, "captured");
+            Ok(())
+        }
+    }
+}
+
 #[cfg(unix)]
 pub(crate) mod unix {
     use std::io;
@@ -600,4 +816,51 @@ pub(crate) mod windows {
             }
         }
     }
+}
+
+/// Open a regular file without following its final path component. Callers must
+/// establish the parent directory's trust separately and bound their reads.
+#[cfg(unix)]
+pub(crate) fn open_read_nofollow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "expected a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(windows)]
+pub(crate) fn open_read_nofollow(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::{MetadataExt as _, OpenOptionsExt as _};
+    // Win32 flags are kept here to avoid exposing platform mechanics to callers.
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "expected a regular file without a reparse point",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn open_read_nofollow(_path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "safe no-follow record reads are unsupported on this platform",
+    ))
 }

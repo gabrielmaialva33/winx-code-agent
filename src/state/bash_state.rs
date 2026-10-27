@@ -179,6 +179,8 @@ pub(crate) const SHELL_RESET_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 pub(crate) struct EditMutationPostcondition {
     pub path: String,
     pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed_generation: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -191,6 +193,8 @@ pub(crate) struct EditMutationReceipt {
     pub status: String,
     pub committed_at_unix_ms: u64,
     pub postconditions: Vec<EditMutationPostcondition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temporary_release: Option<crate::utils::agent_temp::release::TemporaryReleaseResult>,
     #[serde(default)]
     pub persisted: bool,
     #[serde(default)]
@@ -1145,6 +1149,7 @@ mod whitelist_range_tests {
     fn mutation_receipts_survive_snapshot_and_expire_closed() -> Result<(), &'static str> {
         let mut state = BashState::new();
         state.record_edit_mutation_receipt(EditMutationReceipt {
+            temporary_release: None,
             schema_version: 0,
             fingerprint: "fingerprint".to_string(),
             receipt_id: "edit_receipt".to_string(),
@@ -1152,6 +1157,7 @@ mod whitelist_range_tests {
             status: "completed".to_string(),
             committed_at_unix_ms: 1_000,
             postconditions: vec![EditMutationPostcondition {
+                removed_generation: None,
                 path: "/workspace/file.rs".to_string(),
                 sha256: "hash".to_string(),
             }],
@@ -1183,6 +1189,7 @@ mod whitelist_range_tests {
     {
         let mut state = BashState::new();
         state.record_edit_mutation_receipt(EditMutationReceipt {
+            temporary_release: None,
             schema_version: 1,
             fingerprint: "fingerprint".to_string(),
             receipt_id: "edit_receipt".to_string(),
@@ -1225,6 +1232,7 @@ mod whitelist_range_tests {
         legacy_id: Option<&str>,
     ) -> EditMutationReceipt {
         EditMutationReceipt {
+            temporary_release: None,
             schema_version: 1,
             fingerprint: fingerprint.to_string(),
             receipt_id: format!("edit_{fingerprint}"),
@@ -1450,6 +1458,7 @@ mod whitelist_range_tests {
             "private prior source".to_string(),
         ));
         state.record_edit_mutation_receipt(EditMutationReceipt {
+            temporary_release: None,
             schema_version: 1,
             fingerprint: "apply-fingerprint".to_string(),
             receipt_id: "edit-apply".to_string(),
@@ -1496,6 +1505,7 @@ mod whitelist_range_tests {
             ),
         ] {
             state.record_edit_mutation_receipt(EditMutationReceipt {
+                temporary_release: None,
                 schema_version: 1,
                 fingerprint: fingerprint.to_string(),
                 receipt_id: format!("edit-{fingerprint}"),

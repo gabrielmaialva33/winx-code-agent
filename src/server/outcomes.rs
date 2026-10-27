@@ -1794,6 +1794,7 @@ mod tests {
             "data": {}
         }));
         let usage = crate::utils::agent_temp::TemporaryArtifactUsage {
+            deletion_deferred: "runtime_protection_unknown",
             temporary_artifact_dir: "/workspace/.winx/tmp/session-deadbeefdeadbeef".into(),
             total_bytes: 129,
             max_total_bytes: 1_024,
@@ -1837,6 +1838,7 @@ mod tests {
             "data": {"bg_command_id": "bg-7"}
         }));
         let usage = crate::utils::agent_temp::TemporaryArtifactUsage {
+            deletion_deferred: "runtime_protection_unknown",
             temporary_artifact_dir: "/workspace/.winx/tmp/session-deadbeefdeadbeef".into(),
             total_bytes: 129,
             max_total_bytes: 1_024,

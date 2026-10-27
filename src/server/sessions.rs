@@ -385,13 +385,31 @@ fn lost_shell_recovery_note(
         state.cwd.display()
     );
     match crate::state::agent_resume::load_agent_session(thread_id) {
-        Ok(Some(record)) => format!(
-            "{base} The interactive `{}` session running before the restart did not survive — \
-             resume its conversation with `{}` (cwd {}).",
-            record.agent,
-            record.resume_command(),
-            record.cwd
-        ),
+        Ok(Some(record)) => {
+            let advice = record.recovery_advice_for(thread_id, &state.workspace_root);
+            let classification = advice.classification.as_str();
+            let detail = match advice.resume_argv {
+                Some(argv) => format!(
+                    "The recorded `{}` launch explicitly selected a conversation target. \
+                     Recovery classification={classification}, source=launch_argument, \
+                     current_conversation_verified=false. To target that recorded ID, use `{}` \
+                     (recorded cwd {}). Winx has not verified backend acceptance or the \
+                     conversation currently selected after an in-TUI switch; no recovery \
+                     command was executed.",
+                    record.agent,
+                    argv.join(" "),
+                    record.cwd
+                ),
+                None => format!(
+                    "Recorded agent: `{}`. Recovery classification={classification}, \
+                     current_conversation_verified=false. No supported, scope-bound \
+                     conversation selector is available. Directory-most-recent continuation \
+                     may select a different conversation; no recovery command was executed.",
+                    record.agent
+                ),
+            };
+            format!("{base} {detail}")
+        }
         Ok(None) => base,
         Err(error) => {
             warn!(%error, thread_id, "failed to read agent-session record");
@@ -538,6 +556,10 @@ mod rehydration_tests {
                 command: "claude".to_string(),
                 cwd: workspace.path().to_string_lossy().into_owned(),
                 launched_at_unix_ms: 1,
+                workspace_root: None,
+                scoped_thread_id: None,
+                execution_token: None,
+                conversation_selector: None,
             },
         )
         .expect("persist agent record");
@@ -553,7 +575,9 @@ mod rehydration_tests {
                 .recovery_note
                 .clone()
                 .expect("lost shell must set a recovery note");
-            assert!(note.contains("claude --continue"), "note missing resume hint: {note}");
+            assert!(note.contains("best_effort"), "missing recovery classification: {note}");
+            assert!(!note.contains("claude --continue"), "unbound hint selected latest: {note}");
+            assert!(!note.contains("resume its conversation"), "unverified identity claim: {note}");
         }
         delete_bash_state(&thread_id).ok();
         crate::state::agent_resume::clear_agent_session(&thread_id).ok();

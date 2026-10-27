@@ -1,3 +1,5 @@
+use crate::server::usage::lifecycle::{phase, Phase};
+
 use rmcp::{
     model::{
         CacheScope, CallToolRequestParams, CallToolResponse, CancelTaskParams,
@@ -389,236 +391,247 @@ impl ServerHandler for WinxService {
                     McpError::invalid_request(format!("Cannot scope remote request: {error}"), None)
                 })?;
         let mut usage = UsageEvent::start(&request, &scope, &context);
-        match self
-            .validate_workspace_coherence(
-                &request,
-                &scope,
-                affinity,
-                conversation_identity.as_deref(),
-            )
-            .await
-        {
-            Ok(coherence) => usage.set_workspace_coherence(coherence.as_str()),
-            Err(error) => {
-                usage.set_workspace_coherence("rejected");
-                let arguments = request.arguments.clone().map(serde_json::Value::Object);
-                let mut result =
-                    outcomes::tool_failure(request.name.as_ref(), &error, arguments.as_ref())?;
-                outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
-                outcomes::finalize_tool_result(&mut result);
-                scope.unscope_result(&mut result);
-                let status = outcomes::result_status(&result);
-                usage.emit(
-                    "tool_error",
-                    &status,
-                    outcomes::result_size_bytes(&result),
-                    Some(&result),
-                );
-                return Ok(result.into());
-            }
-        }
-        let compact_bash_output = supports_compact_bash_output(&context);
-        let supports_tasks =
-            context.client_capabilities().is_some_and(|capabilities| capabilities.supports_tasks());
-        let wait_policy = if tool_kind == Some(ToolKind::BashCommand) {
-            Some(Self::bash_wait_policy(&request)?)
-        } else {
-            None
-        };
-        if wait_policy == Some(BashWaitPolicy::UntilComplete) {
-            let parsed_bash: Option<BashCommand> = Self::parse_ordinary_bash_request(&request);
-            if let Some(bash) = parsed_bash.as_ref() {
-                let is_foreground_command = matches!(
-                    bash.action_json,
-                    crate::types::BashCommandAction::Command { is_background: false, .. }
-                );
-                if !is_foreground_command {
-                    let action = match &bash.action_json {
-                        crate::types::BashCommandAction::Command {
-                            is_background: true, ..
-                        } => "background_command",
-                        crate::types::BashCommandAction::Command { .. } => "foreground_command",
-                        crate::types::BashCommandAction::StatusCheck { .. } => "status_check",
-                        crate::types::BashCommandAction::SendText { .. } => "send_text",
-                        crate::types::BashCommandAction::SendSpecials { .. } => "send_specials",
-                        crate::types::BashCommandAction::SendAscii { .. } => "send_ascii",
-                        crate::types::BashCommandAction::Screen { .. } => "screen",
-                        crate::types::BashCommandAction::WaitForTurn { .. } => "wait_for_turn",
-                        crate::types::BashCommandAction::Inspect { .. } => "inspect",
-                        crate::types::BashCommandAction::Prompt { .. } => "prompt",
-                    };
-                    let error = crate::errors::WinxError::InvalidWaitPolicyForAction {
-                        wait_policy: "until_complete".to_string(),
-                        action: action.to_string(),
-                    };
+        let trace = usage.trace();
+        Box::pin(trace.scope(async {
+            let guard = phase(Phase::WorkspaceCheck);
+            let workspace_result = self
+                .validate_workspace_coherence(
+                    &request,
+                    &scope,
+                    affinity,
+                    conversation_identity.as_deref(),
+                )
+                .await;
+            guard.finish(workspace_result.is_ok());
+            match workspace_result {
+                Ok(coherence) => usage.set_workspace_coherence(coherence.as_str()),
+                Err(error) => {
+                    usage.set_workspace_coherence("rejected");
                     let arguments = request.arguments.clone().map(serde_json::Value::Object);
+                    let guard = phase(Phase::ResponseFinalize);
                     let mut result =
-                        outcomes::tool_failure("BashCommand", &error, arguments.as_ref())?;
+                        outcomes::tool_failure(request.name.as_ref(), &error, arguments.as_ref())?;
                     outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
                     outcomes::finalize_tool_result(&mut result);
                     scope.unscope_result(&mut result);
                     let status = outcomes::result_status(&result);
-                    usage.emit(
-                        "tool_error",
-                        &status,
-                        outcomes::result_size_bytes(&result),
-                        Some(&result),
-                    );
+                    let response_bytes = outcomes::result_size_bytes(&result);
+                    guard.finish(true);
+                    usage.emit("tool_error", &status, response_bytes, Some(&result));
                     return Ok(result.into());
                 }
             }
-        }
-
-        let eligible = Self::bash_task_is_eligible(&request);
-        let generation_bound_runtime = if supports_tasks && eligible {
-            let thread_id = request
-                .arguments
-                .as_ref()
-                .and_then(|arguments| arguments.get("thread_id"))
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default();
-            let (slot, session_guard) = self.tool_session_for(thread_id).await;
-            let supported = self
-                .shell_runtime
-                .supports_generation_bound_actions_for(&slot)
-                .await
-                .unwrap_or(false);
-            drop(session_guard);
-            supported
-        } else {
-            false
-        };
-        let route = wait_policy.map_or(BashTaskRoute::Synchronous, |policy| {
-            bash_task_route(supports_tasks, generation_bound_runtime, eligible, policy)
-        });
-
-        match route {
-            BashTaskRoute::Immediate => {
-                let reservation = self.reserve_bash_task(&request, &scope).await?;
-                return match self
-                    .start_reserved_bash_task(
-                        reservation,
-                        request,
-                        scope,
-                        None,
-                        compact_bash_output,
-                    )
-                    .await
-                {
-                    Ok(task) => {
-                        usage.emit("task", "working", 0, None);
-                        Ok(CallToolResponse::Task(task))
-                    }
-                    Err(error) => {
-                        usage.emit("protocol_error", "failed", 0, None);
-                        Err(error)
-                    }
-                };
-            }
-            BashTaskRoute::Adaptive => {
-                let reservation = self.reserve_bash_task(&request, &scope).await?;
-                let task_request = request.clone();
-                let inline_request =
-                    normalized_wait_request(request, BashWaitPolicy::Adaptive, true)?;
-                match self
-                    .execute_tool_call(
-                        inline_request,
-                        adaptive_action_options(compact_bash_output),
-                        effective_tool_policy.edit_permissions(),
-                    )
-                    .await
-                {
-                    Ok(execution) if outcomes::result_status(&execution.result) == "running" => {
-                        return match self
-                            .start_reserved_bash_task(
-                                reservation,
-                                task_request,
-                                scope,
-                                Some(execution),
-                                compact_bash_output,
-                            )
-                            .await
-                        {
-                            Ok(task) => {
-                                usage.emit("task", "working", 0, None);
-                                Ok(CallToolResponse::Task(task))
-                            }
-                            Err(error) => {
-                                usage.emit("protocol_error", "failed", 0, None);
-                                Err(error)
-                            }
+            let compact_bash_output = supports_compact_bash_output(&context);
+            let supports_tasks = context
+                .client_capabilities()
+                .is_some_and(|capabilities| capabilities.supports_tasks());
+            let wait_policy = if tool_kind == Some(ToolKind::BashCommand) {
+                Some(Self::bash_wait_policy(&request)?)
+            } else {
+                None
+            };
+            if wait_policy == Some(BashWaitPolicy::UntilComplete) {
+                let parsed_bash: Option<BashCommand> = Self::parse_ordinary_bash_request(&request);
+                if let Some(bash) = parsed_bash.as_ref() {
+                    let is_foreground_command = matches!(
+                        bash.action_json,
+                        crate::types::BashCommandAction::Command { is_background: false, .. }
+                    );
+                    if !is_foreground_command {
+                        let action = match &bash.action_json {
+                            crate::types::BashCommandAction::Command {
+                                is_background: true,
+                                ..
+                            } => "background_command",
+                            crate::types::BashCommandAction::Command { .. } => "foreground_command",
+                            crate::types::BashCommandAction::StatusCheck { .. } => "status_check",
+                            crate::types::BashCommandAction::SendText { .. } => "send_text",
+                            crate::types::BashCommandAction::SendSpecials { .. } => "send_specials",
+                            crate::types::BashCommandAction::SendAscii { .. } => "send_ascii",
+                            crate::types::BashCommandAction::Screen { .. } => "screen",
+                            crate::types::BashCommandAction::WaitForTurn { .. } => "wait_for_turn",
+                            crate::types::BashCommandAction::Inspect { .. } => "inspect",
+                            crate::types::BashCommandAction::Prompt { .. } => "prompt",
                         };
-                    }
-                    Ok(mut execution) => {
-                        self.release_bash_task(&reservation).await;
-                        outcomes::enforce_next_action_policy(
-                            &mut execution.result,
-                            effective_tool_policy,
-                        );
-                        scope.unscope_result(&mut execution.result);
-                        let status = outcomes::result_status(&execution.result);
-                        let outcome = if execution.result.is_error == Some(true) {
-                            "tool_error"
-                        } else {
-                            "ok"
+                        let error = crate::errors::WinxError::InvalidWaitPolicyForAction {
+                            wait_policy: "until_complete".to_string(),
+                            action: action.to_string(),
                         };
-                        usage.emit(
-                            outcome,
-                            &status,
-                            outcomes::result_size_bytes(&execution.result),
-                            Some(&execution.result),
-                        );
-                        return Ok(execution.result.into());
-                    }
-                    Err(mut error) => {
-                        self.release_bash_task(&reservation).await;
-                        scope.unscope_error(&mut error);
-                        usage.emit("protocol_error", "failed", 0, None);
-                        return Err(error);
+                        let arguments = request.arguments.clone().map(serde_json::Value::Object);
+                        let guard = phase(Phase::ResponseFinalize);
+                        let mut result =
+                            outcomes::tool_failure("BashCommand", &error, arguments.as_ref())?;
+                        outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
+                        outcomes::finalize_tool_result(&mut result);
+                        scope.unscope_result(&mut result);
+                        let status = outcomes::result_status(&result);
+                        let response_bytes = outcomes::result_size_bytes(&result);
+                        guard.finish(true);
+                        usage.emit("tool_error", &status, response_bytes, Some(&result));
+                        return Ok(result.into());
                     }
                 }
             }
-            BashTaskRoute::Synchronous => {}
-        }
 
-        let workflow_authority = super::workflow_types::WorkflowAuthority {
-            principal_key: scope.principal().map_or_else(
-                || "local".to_string(),
-                |principal| format!("http:{}", principal.id()),
-            ),
-            bash_allowed: effective_tool_policy.allows_call_kind(ToolKind::BashCommand),
-        };
-        let request = match wait_policy {
-            Some(policy) => normalized_wait_request(request, policy, false)?,
-            None => request,
-        };
-        match self
-            .execute_tool_call_with_authority(
-                request,
-                ShellActionOptions {
-                    compact_output: compact_bash_output,
-                    ..ShellActionOptions::default()
-                },
-                effective_tool_policy.edit_permissions(),
-                workflow_authority,
-            )
-            .await
-        {
-            Ok(mut execution) => {
-                let result = &mut execution.result;
-                outcomes::enforce_next_action_policy(result, effective_tool_policy);
-                scope.unscope_result(result);
-                let status = outcomes::result_status(result);
-                let outcome = if result.is_error == Some(true) { "tool_error" } else { "ok" };
-                usage.emit(outcome, &status, outcomes::result_size_bytes(result), Some(result));
-                Ok(execution.result.into())
+            let eligible = Self::bash_task_is_eligible(&request);
+            let generation_bound_runtime = if supports_tasks && eligible {
+                let thread_id = request
+                    .arguments
+                    .as_ref()
+                    .and_then(|arguments| arguments.get("thread_id"))
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let (slot, session_guard) = self.tool_session_for(thread_id).await;
+                let supported = self
+                    .shell_runtime
+                    .supports_generation_bound_actions_for(&slot)
+                    .await
+                    .unwrap_or(false);
+                drop(session_guard);
+                supported
+            } else {
+                false
+            };
+            let route = wait_policy.map_or(BashTaskRoute::Synchronous, |policy| {
+                bash_task_route(supports_tasks, generation_bound_runtime, eligible, policy)
+            });
+
+            match route {
+                BashTaskRoute::Immediate => {
+                    let reservation = self.reserve_bash_task(&request, &scope).await?;
+                    return match self
+                        .start_reserved_bash_task(
+                            reservation,
+                            request,
+                            scope,
+                            None,
+                            compact_bash_output,
+                        )
+                        .await
+                    {
+                        Ok(task) => {
+                            usage.emit("task", "working", 0, None);
+                            Ok(CallToolResponse::Task(task))
+                        }
+                        Err(error) => {
+                            usage.emit("protocol_error", "failed", 0, None);
+                            Err(error)
+                        }
+                    };
+                }
+                BashTaskRoute::Adaptive => {
+                    let reservation = self.reserve_bash_task(&request, &scope).await?;
+                    let task_request = request.clone();
+                    let inline_request =
+                        normalized_wait_request(request, BashWaitPolicy::Adaptive, true)?;
+                    match self
+                        .execute_tool_call(
+                            inline_request,
+                            adaptive_action_options(compact_bash_output),
+                            effective_tool_policy.edit_permissions(),
+                        )
+                        .await
+                    {
+                        Ok(execution)
+                            if outcomes::result_status(&execution.result) == "running" =>
+                        {
+                            return match self
+                                .start_reserved_bash_task(
+                                    reservation,
+                                    task_request,
+                                    scope,
+                                    Some(execution),
+                                    compact_bash_output,
+                                )
+                                .await
+                            {
+                                Ok(task) => {
+                                    usage.emit("task", "working", 0, None);
+                                    Ok(CallToolResponse::Task(task))
+                                }
+                                Err(error) => {
+                                    usage.emit("protocol_error", "failed", 0, None);
+                                    Err(error)
+                                }
+                            };
+                        }
+                        Ok(mut execution) => {
+                            self.release_bash_task(&reservation).await;
+                            let guard = phase(Phase::ResponseFinalize);
+                            outcomes::enforce_next_action_policy(
+                                &mut execution.result,
+                                effective_tool_policy,
+                            );
+                            scope.unscope_result(&mut execution.result);
+                            let status = outcomes::result_status(&execution.result);
+                            let outcome = if execution.result.is_error == Some(true) {
+                                "tool_error"
+                            } else {
+                                "ok"
+                            };
+                            let response_bytes = outcomes::result_size_bytes(&execution.result);
+                            guard.finish(true);
+                            usage.emit(outcome, &status, response_bytes, Some(&execution.result));
+                            return Ok(execution.result.into());
+                        }
+                        Err(mut error) => {
+                            self.release_bash_task(&reservation).await;
+                            let guard = phase(Phase::ResponseFinalize);
+                            scope.unscope_error(&mut error);
+                            guard.finish(true);
+                            usage.emit("protocol_error", "failed", 0, None);
+                            return Err(error);
+                        }
+                    }
+                }
+                BashTaskRoute::Synchronous => {}
             }
-            Err(mut error) => {
-                scope.unscope_error(&mut error);
-                usage.emit("protocol_error", "failed", 0, None);
-                Err(error)
+
+            let workflow_authority = super::workflow_types::WorkflowAuthority {
+                principal_key: scope.principal().map_or_else(
+                    || "local".to_string(),
+                    |principal| format!("http:{}", principal.id()),
+                ),
+                bash_allowed: effective_tool_policy.allows_call_kind(ToolKind::BashCommand),
+            };
+            let request = match wait_policy {
+                Some(policy) => normalized_wait_request(request, policy, false)?,
+                None => request,
+            };
+            match self
+                .execute_tool_call_with_authority(
+                    request,
+                    ShellActionOptions {
+                        compact_output: compact_bash_output,
+                        ..ShellActionOptions::default()
+                    },
+                    effective_tool_policy.edit_permissions(),
+                    workflow_authority,
+                )
+                .await
+            {
+                Ok(mut execution) => {
+                    let guard = phase(Phase::ResponseFinalize);
+                    let result = &mut execution.result;
+                    outcomes::enforce_next_action_policy(result, effective_tool_policy);
+                    scope.unscope_result(result);
+                    let status = outcomes::result_status(result);
+                    let outcome = if result.is_error == Some(true) { "tool_error" } else { "ok" };
+                    let response_bytes = outcomes::result_size_bytes(result);
+                    guard.finish(true);
+                    usage.emit(outcome, &status, response_bytes, Some(result));
+                    Ok(execution.result.into())
+                }
+                Err(mut error) => {
+                    let guard = phase(Phase::ResponseFinalize);
+                    scope.unscope_error(&mut error);
+                    guard.finish(true);
+                    usage.emit("protocol_error", "failed", 0, None);
+                    Err(error)
+                }
             }
-        }
+        }))
+        .await
     }
 }
 

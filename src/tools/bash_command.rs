@@ -435,25 +435,31 @@ async fn sync_embedded_cwd_if_current(
     }
 }
 
-/// Keep the durable agent-session record in lockstep with what the foreground
-/// PTY runs: a command that launches a known interactive agent overwrites the
-/// record; anything else clears it (the main PTY runs one foreground program
-/// at a time). The record is what lets a restart that lost the PTY surface a
-/// resume hint (`claude --continue`, ...) instead of losing the conversation
-/// silently. Best-effort — persistence failures never fail the command.
-fn record_foreground_agent_launch(bash_state: &BashState, command: &str) {
+/// Persist accepted launch evidence while the foreground command gate is held.
+/// Backend acceptance and later in-TUI conversation switches remain unverified.
+fn record_foreground_agent_launch(
+    bash_state: &BashState,
+    command: &str,
+    launch_cwd: &std::path::Path,
+) {
     use crate::state::agent_resume;
     let thread_id = &bash_state.current_thread_id;
     match agent_resume::detect_agent_launch(command) {
         Some(agent) => {
-            let record = agent_resume::AgentSessionRecord {
-                agent: agent.to_string(),
-                command: command.to_string(),
-                cwd: bash_state.cwd.to_string_lossy().into_owned(),
-                launched_at_unix_ms: agent_resume::now_unix_ms(),
-            };
+            let record = agent_resume::AgentSessionRecord::from_launch(
+                agent,
+                command,
+                launch_cwd,
+                &bash_state.workspace_root,
+                thread_id,
+                // The final guardian execution token is assigned outside this boundary.
+                None,
+            );
             if let Err(error) = agent_resume::save_agent_session(thread_id, &record) {
                 debug!(%error, agent, "failed to persist agent-session record");
+                if let Err(clear_error) = agent_resume::clear_agent_session(thread_id) {
+                    debug!(%clear_error, agent, "failed to invalidate the previous agent-session record");
+                }
             }
         }
         None => {
@@ -521,7 +527,7 @@ async fn execute_bash_action(
 
     match action {
         BashCommandAction::Command { command, is_background, allow_multi } => {
-            let result = execute_command(
+            execute_command(
                 bash_state,
                 command,
                 *is_background,
@@ -530,11 +536,7 @@ async fn execute_bash_action(
                 delivery_cursor,
                 CommandExecutionContext { options: &options, foreground_preflight_complete },
             )
-            .await;
-            if result.is_ok() && !*is_background {
-                record_foreground_agent_launch(bash_state, command);
-            }
-            result
+            .await
         }
         BashCommandAction::StatusCheck { scrollback_lines, verbose, .. } => {
             execute_status_check(
@@ -659,6 +661,7 @@ mod tests {
     use super::{
         effective_wait_for_seconds, runtime_rendered, BashCommandState, BashProcessStatus,
     };
+    use anyhow::Context;
 
     fn exited_state() -> BashCommandState {
         BashCommandState {
@@ -708,5 +711,231 @@ mod tests {
     #[test]
     fn omitted_wait_uses_the_larger_default_window() {
         assert!((effective_wait_for_seconds(None) - 15.0).abs() < f64::EPSILON);
+    }
+
+    struct SelectorRecordCleanup(String);
+
+    impl Drop for SelectorRecordCleanup {
+        fn drop(&mut self) {
+            let _ = crate::state::agent_resume::clear_agent_session(&self.0);
+        }
+    }
+
+    #[cfg(unix)]
+    async fn selector_runtime_command(
+        state: &std::sync::Arc<tokio::sync::Mutex<Option<crate::state::bash_state::BashState>>>,
+        thread_id: &str,
+        command: &str,
+        background: bool,
+    ) -> crate::errors::Result<crate::runtime::BashCommandRuntimeResult> {
+        super::handle_embedded_tool_call_detailed(
+            state,
+            crate::types::BashCommand {
+                thread_id: thread_id.to_string(),
+                wait_for_seconds: Some(0.25),
+                action_json: crate::types::BashCommandAction::Command {
+                    command: command.to_string(),
+                    is_background: background,
+                    allow_multi: false,
+                },
+            },
+            crate::runtime::ShellActionOptions::default(),
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selector_recovery_new_conversation_launch_persists_its_target_across_reload(
+    ) -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir().context("workspace")?;
+        let thread_id =
+            format!("selector_capture_{}_{}", std::process::id(), rand::random::<u64>());
+        let _cleanup = SelectorRecordCleanup(thread_id.clone());
+        let mut state = crate::state::bash_state::BashState::new();
+        state.current_thread_id = thread_id.clone();
+        state.workspace_root = workspace.path().canonicalize().context("canonical workspace")?;
+        state.cwd = state.workspace_root.clone();
+        state.initialized = true;
+        state.init_pty_shell().await.context("PTY")?;
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(Some(state)));
+        selector_runtime_command(
+            &state,
+            &thread_id,
+            "claude() { printf 'fake backend accepted selector: %s\\n' \"$*\"; }",
+            false,
+        )
+        .await
+        .context("install controlled shell fixture")?;
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        let outcome = selector_runtime_command(
+            &state,
+            &thread_id,
+            &format!("claude --session-id {id}"),
+            false,
+        )
+        .await
+        .context("accepted launch")?;
+        assert!(outcome.command_generation.is_some(), "fixture must actually start a command");
+        let recorded = crate::state::agent_resume::load_agent_session(&thread_id)
+            .context("reload persisted record")?
+            .context("accepted agent recorded")?;
+        assert_eq!(recorded.resume_command(), format!("claude --resume {id}"));
+        let encoded = serde_json::to_value(&recorded).context("serialize")?;
+        assert_eq!(encoded["conversation_selector"]["source"], "launch_argument");
+        assert_eq!(encoded["conversation_selector"]["id"], id);
+        assert_eq!(
+            encoded["workspace_root"],
+            workspace.path().canonicalize().context("workspace")?.to_string_lossy().as_ref()
+        );
+        assert_eq!(encoded["scoped_thread_id"], thread_id);
+        // This controls argv only. The fixture makes no claim about a real backend's session.
+        selector_runtime_command(
+            &state,
+            &thread_id,
+            "printf 'accepted non-agent command\\n'",
+            false,
+        )
+        .await
+        .context("accepted non-agent command")?;
+        assert!(crate::state::agent_resume::load_agent_session(&thread_id)
+            .context("cleared record")?
+            .is_none());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selector_recovery_busy_and_background_requests_preserve_the_foreground_record(
+    ) -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir().context("workspace")?;
+        let thread_id = format!("selector_busy_{}_{}", std::process::id(), rand::random::<u64>());
+        let _cleanup = SelectorRecordCleanup(thread_id.clone());
+        let mut state = crate::state::bash_state::BashState::new();
+        state.current_thread_id = thread_id.clone();
+        state.workspace_root = workspace.path().canonicalize().context("canonical workspace")?;
+        state.cwd = state.workspace_root.clone();
+        state.initialized = true;
+        state.init_pty_shell().await.context("PTY")?;
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(Some(state)));
+        selector_runtime_command(&state, &thread_id, "claude() { sleep 1; }", false)
+            .await
+            .context("install controlled shell fixture")?;
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        selector_runtime_command(&state, &thread_id, &format!("claude --session-id {id}"), false)
+            .await
+            .context("agent launch")?;
+        let before = crate::state::agent_resume::load_agent_session(&thread_id)
+            .context("record")?
+            .context("foreground record")?;
+        let _ = selector_runtime_command(
+            &state,
+            &thread_id,
+            "printf 'must not replace a busy record'",
+            false,
+        )
+        .await;
+        assert_eq!(
+            crate::state::agent_resume::load_agent_session(&thread_id)
+                .context("record after busy request")?,
+            Some(before.clone())
+        );
+        let _ =
+            selector_runtime_command(&state, &thread_id, "printf 'independent background'", true)
+                .await;
+        assert_eq!(
+            crate::state::agent_resume::load_agent_session(&thread_id)
+                .context("record after background request")?,
+            Some(before)
+        );
+        Ok(())
+    }
+    #[test]
+    fn selector_recovery_failed_accepted_launch_persistence_invalidates_older_target(
+    ) -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir().context("workspace")?;
+        let thread_id =
+            format!("selector_save_fail_{}_{}", std::process::id(), rand::random::<u64>());
+        let _cleanup = SelectorRecordCleanup(thread_id.clone());
+        let mut state = crate::state::bash_state::BashState::new();
+        state.current_thread_id = thread_id.clone();
+        state.workspace_root = workspace.path().canonicalize().context("workspace")?;
+        state.cwd = state.workspace_root.clone();
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        // This private writer is invoked only at the accepted foreground boundary.
+        super::record_foreground_agent_launch(
+            &state,
+            &format!("claude --session-id {id}"),
+            &state.cwd,
+        );
+        let prior = crate::state::agent_resume::load_agent_session(&thread_id)
+            .context("prior record")?
+            .context("accepted selector")?;
+        assert_eq!(prior.resume_command(), format!("claude --resume {id}"));
+        let oversized = format!("claude {}", "x".repeat(9 * 1024));
+        super::record_foreground_agent_launch(&state, &oversized, &state.cwd);
+        assert!(
+            crate::state::agent_resume::load_agent_session(&thread_id)
+                .context("record after failed persistence")?
+                .is_none(),
+            "a newer accepted launch must not leave the previous executable target"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn selector_recovery_launch_cwd_comes_from_the_shared_pty_after_a_prior_cd(
+    ) -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir().context("workspace")?;
+        let root = workspace.path().canonicalize().context("canonical workspace")?;
+        let new_cwd = root.join("new");
+        std::fs::create_dir(&new_cwd).context("new working directory")?;
+        let thread_id =
+            format!("selector_stale_cwd_{}_{}", std::process::id(), rand::random::<u64>());
+        let _cleanup = SelectorRecordCleanup(thread_id.clone());
+        let mut state = crate::state::bash_state::BashState::new();
+        state.current_thread_id = thread_id.clone();
+        state.workspace_root = root.clone();
+        state.cwd = root.clone();
+        state.initialized = true;
+        state.init_pty_shell().await.context("PTY")?;
+        let state = std::sync::Arc::new(tokio::sync::Mutex::new(Some(state)));
+        selector_runtime_command(&state, &thread_id, "claude() { :; }", false)
+            .await
+            .context("controlled shell fixture")?;
+        // Queued calls already hold BashState clones sharing this PTY and gate.
+        // Keep that snapshot stale while another accepted call changes the real cwd.
+        let queued_snapshot = state.lock().await.as_ref().context("initialized state")?.clone();
+        let changed = selector_runtime_command(
+            &state,
+            &thread_id,
+            &format!("cd '{}'", new_cwd.display()),
+            false,
+        )
+        .await
+        .context("prior cd")?;
+        assert_eq!(changed.result.state.cwd, new_cwd, "PTY must report the completed cd");
+        assert_eq!(queued_snapshot.cwd, root, "the queued snapshot must remain stale");
+        let queued_slot = std::sync::Arc::new(tokio::sync::Mutex::new(Some(queued_snapshot)));
+        let id = "550e8400-e29b-41d4-a716-446655440000";
+        selector_runtime_command(
+            &queued_slot,
+            &thread_id,
+            &format!("claude --session-id {id}"),
+            false,
+        )
+        .await
+        .context("launch through stale snapshot")?;
+        let recorded = crate::state::agent_resume::load_agent_session(&thread_id)
+            .context("reload")?
+            .context("accepted selector record")?;
+        assert_eq!(
+            std::path::Path::new(&recorded.cwd),
+            new_cwd.as_path(),
+            "launch evidence must use cwd at PTY submission, not the queued snapshot"
+        );
+        assert_eq!(recorded.resume_command(), format!("claude --resume {id}"));
+        Ok(())
     }
 }

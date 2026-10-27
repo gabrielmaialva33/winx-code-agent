@@ -10,7 +10,13 @@ use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
 
 use crate::errors::{Result, WinxError};
 
+mod lifecycle;
 mod selection;
+mod workflows;
+
+pub use lifecycle::WorkflowPhaseUsage;
+use workflows::WorkflowAccumulator;
+pub use workflows::{WorkflowOperationUsage, WorkflowUsage};
 
 const MAX_REPORT_EVENTS: usize = 100_000;
 
@@ -43,6 +49,7 @@ pub struct UsageReport {
     pub initialize: InitializeUsage,
     pub recovery: RecoveryUsage,
     pub execution: ExecutionUsage,
+    pub workflows: WorkflowUsage,
     pub trace_audit: TraceAudit,
 }
 
@@ -175,6 +182,7 @@ struct ReportAccumulator {
     initialize: InitializeUsage,
     recovery: RecoveryUsage,
     execution: ExecutionUsage,
+    workflows: WorkflowAccumulator,
     requested_wait_samples: Vec<u64>,
     trace_audit: TraceAudit,
     all_durations: Vec<u64>,
@@ -239,6 +247,7 @@ impl ReportAccumulator {
         }
         self.record_recovery(fields);
         self.record_execution(fields);
+        self.workflows.record(fields);
         audit_tool_event(fields, &mut self.trace_audit);
     }
 
@@ -388,6 +397,7 @@ impl ReportAccumulator {
             initialize: self.initialize,
             recovery: self.recovery,
             execution: self.execution,
+            workflows: self.workflows.finish(),
             trace_audit: self.trace_audit,
         }
     }

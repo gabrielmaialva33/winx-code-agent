@@ -1,4 +1,5 @@
 //! Non-consuming runtime capture and bounded durable history I/O.
+use crate::server::usage::lifecycle::{phase, Phase};
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -62,9 +63,13 @@ where
     T: Send + 'static,
     F: FnOnce(&ExecutionCatalog) -> HistoryResult<T> + Send + 'static,
 {
-    tokio::task::spawn_blocking(move || operation(&catalog))
+    let guard = phase(Phase::Catalog);
+    let result = tokio::task::spawn_blocking(move || operation(&catalog))
         .await
-        .map_err(|error| HistoryError::Io(std::io::Error::other(error)))?
+        .map_err(|error| HistoryError::Io(std::io::Error::other(error)))
+        .and_then(std::convert::identity);
+    guard.finish(result.is_ok());
+    result
 }
 
 pub(in crate::server) fn execution_id(outcome: &BashCommandRuntimeResult) -> Option<String> {
@@ -128,7 +133,8 @@ pub(in crate::server) async fn inspect(
     recognizer: Option<String>,
     include_output: bool,
 ) -> crate::errors::Result<BashCommandRuntimeResult> {
-    runtime
+    let guard = phase(if include_output { Phase::RuntimeCapture } else { Phase::RuntimeInspect });
+    let result = runtime
         .run_action_detailed(
             slot,
             BashCommand {
@@ -142,7 +148,9 @@ pub(in crate::server) async fn inspect(
             },
             bound_options(record),
         )
-        .await
+        .await;
+    guard.finish(result.is_ok());
+    result
 }
 
 pub(in crate::server) async fn refresh_record(

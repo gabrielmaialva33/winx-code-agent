@@ -202,6 +202,14 @@ pub struct ShellSessionStatus {
 pub type ShellRuntimeStatusFuture<'a> =
     Pin<Box<dyn Future<Output = Result<ShellSessionStatus>> + Send + 'a>>;
 
+pub type ShellRuntimeTemporaryReleaseFuture<'a> = Pin<
+    Box<
+        dyn Future<Output = Result<crate::utils::agent_temp::release::TemporaryReleaseResult>>
+            + Send
+            + 'a,
+    >,
+>;
+
 /// State transition requested by the Initialize tool.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ShellSessionTransition {
@@ -213,6 +221,20 @@ pub enum ShellSessionTransition {
 
 /// Narrow process-agnostic boundary for `BashCommand` execution.
 pub trait ShellRuntime: Send + Sync {
+    /// Execute cleanup at the authoritative runtime owner, never after a detached idle probe.
+    fn release_temporary<'a>(
+        &'a self,
+        _state: &'a Arc<Mutex<Option<BashState>>>,
+        _request: crate::utils::agent_temp::release::TemporaryReleaseRequest,
+    ) -> ShellRuntimeTemporaryReleaseFuture<'a> {
+        Box::pin(async {
+            Err(WinxError::InvalidInput(
+                "unsupported: safe temporary release requires a capable durable guardian on Linux"
+                    .into(),
+            ))
+        })
+    }
+
     fn configure_session<'a>(
         &'a self,
         bash_state: &'a mut BashState,
@@ -579,4 +601,122 @@ async fn interrupt_embedded_guarded(
         }
     }
     interrupt_pty_until_recovered(&shell, expected_generation).await
+}
+
+/// The existing operation barrier excludes native command/prompt starts. Busy,
+/// unavailable, or uninitialized owners fail closed; a foreground wait timeout
+/// does not clear `command_running`. The blocking worker owns the barrier even
+/// if its awaiting RPC disappears.
+pub(crate) async fn release_temporary_at_owner(
+    slot: &Arc<Mutex<Option<BashState>>>,
+    request: crate::utils::agent_temp::release::TemporaryReleaseRequest,
+) -> Result<crate::utils::agent_temp::release::TemporaryReleaseResult> {
+    let state = slot.lock().await;
+    let state = state.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+    if state.current_thread_id != request.thread_id
+        || state.workspace_root != request.workspace_root
+    {
+        return Err(WinxError::InvalidInput(
+            "temporary release scope differs from initialized runtime".into(),
+        ));
+    }
+    for file in &request.files {
+        if !state.is_file_edit_allowed(&file.target.file_path) {
+            return Err(WinxError::FileOperationDenied {
+                path: file.target.file_path.clone().into(),
+                message: "temporary release is not allowed in the current runtime mode".into(),
+            });
+        }
+    }
+    let barrier = lock_session_store().operation_barrier(&request.thread_id);
+    let operation = barrier
+        .try_write_owned()
+        .map_err(|_| WinxError::InvalidInput("in_use: a runtime operation is active".into()))?;
+    {
+        let shell = state.pty_shell.lock().await;
+        let shell = shell.as_ref().ok_or_else(|| {
+            WinxError::InvalidInput("unresolved_reference: runtime shell is unavailable".into())
+        })?;
+        if shell.command_running {
+            return Err(WinxError::InvalidInput("in_use: foreground execution is active".into()));
+        }
+    }
+    let backgrounds = lock_session_store().background_ids_for(&request.thread_id);
+    for id in backgrounds {
+        let shell = lock_session_store().resolve(&request.thread_id, &ShellTarget::Background(id));
+        let Some(shell) = shell else {
+            return Err(WinxError::InvalidInput(
+                "unresolved_reference: background execution state is unavailable".into(),
+            ));
+        };
+        let shell = shell.lock().await;
+        if shell.as_ref().is_none_or(|shell| shell.command_running) {
+            return Err(WinxError::InvalidInput(
+                "in_use: background execution is active or unresolved".into(),
+            ));
+        }
+    }
+    tokio::task::spawn_blocking(move || {
+        let _operation = operation;
+        crate::utils::agent_temp::release::release(&request)
+    })
+    .await
+    .map_err(|error| {
+        WinxError::CommandExecutionError(format!("temporary release worker failed: {error}"))
+    })?
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod temporary_release_runtime_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use crate::utils::agent_temp::release::{prepare, read_managed, TemporaryReleaseTarget};
+
+    #[tokio::test]
+    async fn live_background_execution_blocks_release_after_inline_return() -> anyhow::Result<()> {
+        let workspace = tempfile::tempdir()?;
+        let root = workspace.path().canonicalize()?;
+        let thread = crate::types::normalize_thread_id(&format!(
+            "release-runtime-{:032x}",
+            rand::random::<u128>()
+        ));
+        let helper =
+            crate::utils::agent_temp::session_info(&root, &thread).directory.join("helper");
+        std::fs::create_dir_all(helper.parent().unwrap())?;
+        std::fs::write(&helper, "keep")?;
+        let (text, metadata) = read_managed(&root, &thread, &helper)?
+            .ok_or_else(|| anyhow::anyhow!("generation missing"))?;
+        let target = TemporaryReleaseTarget {
+            file_path: helper.to_string_lossy().into_owned(),
+            expected_revision: format!(
+                "sha256:{}",
+                crate::tools::file_write_or_edit::hash_content(&text)
+            ),
+            artifact_generation: metadata.artifact_generation,
+        };
+        let request = prepare(&root, &thread, &[target])?;
+        let mut state = BashState::new();
+        state.current_thread_id = thread.clone();
+        state.workspace_root = root.clone();
+        state.cwd = root;
+        state.mode = crate::types::Modes::Wcgw;
+        state.init_pty_shell().await?;
+        let slot = Arc::new(Mutex::new(Some(state)));
+        let command: BashCommand = serde_json::from_value(serde_json::json!({
+            "thread_id": thread, "wait_for_seconds": 0.01,
+            "action_json": { "type": "command", "command": "sleep 30", "is_background": true, "allow_multi": false }
+        }))?;
+        EmbeddedShellRuntime
+            .run_action_detailed(&slot, command, ShellActionOptions::default())
+            .await?;
+        let outcome = release_temporary_at_owner(&slot, request).await;
+        // Clean up only the test-owned background process even if the assertion fails.
+        let ids = lock_session_store().background_ids_for(&thread);
+        for id in ids {
+            lock_session_store().remove_shell(&id);
+        }
+        assert!(outcome.is_err(), "a returned inline wait does not end execution ownership");
+        assert_eq!(std::fs::read_to_string(helper)?, "keep");
+        Ok(())
+    }
 }

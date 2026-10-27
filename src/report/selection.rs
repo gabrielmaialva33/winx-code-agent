@@ -66,7 +66,11 @@ pub(super) fn select(
     let mut recent = VecDeque::with_capacity(last_events.min(HTTP_BATCH_SIZE));
     let mut candidates = VecDeque::with_capacity(HTTP_BATCH_SIZE);
     let counts = scan(&mut sources, |position, event| {
-        if !within_time(&event, cutoff) {
+        if matches!(
+            string(&event.fields, "event"),
+            "tool_started" | "tool_phase" | "tool_phase_trace_truncated"
+        ) || !within_time(&event, cutoff)
+        {
             return;
         }
         let selected = build_filter.is_none_or(|filter| matches_build(&event, filter));

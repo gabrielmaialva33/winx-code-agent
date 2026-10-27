@@ -15,6 +15,8 @@ use crate::types::{ApplyPatch, FileWriteOrEdit, LinePatch, MultiFileEdit, UndoEd
 pub struct EditFilesWire {
     /// Optional explicit operation. Omit it for normal edits; exactly one `mode=undo`
     /// entry infers `undo`. An explicit value must agree with the listed modes.
+    /// `release_temporary` must be explicit and contain only exact managed helper
+    /// targets observed by `ReadFiles`; requires a capable idle runtime owner.
     #[serde(default)]
     pub operation: Option<EditOperation>,
     /// One unique target per entry. All apply entries are validated before writing begins.
@@ -42,7 +44,8 @@ pub struct EditFileWire {
     /// revision and visible coordinates. Reserve `search_replace` for intentional
     /// text anchoring copied exactly from the current read, use `replace` for new
     /// files or deliberate whole-file rewrites, and `undo` only as the sole entry
-    /// with its exact `undo_id`.
+    /// with its exact `undo_id`. `release_temporary` is valid only with the same
+    /// explicit operation and a fresh revision plus artifact generation.
     pub mode: EditMode,
     /// Required by `replace` and `search_replace`; forbidden by other modes. For
     /// `search_replace`, use one or more exact
@@ -50,7 +53,8 @@ pub struct EditFileWire {
     /// `@line` or `@start-end` may follow `SEARCH` to disambiguate repeated text.
     #[serde(default)]
     pub content: Option<String>,
-    /// Exact `ReadFiles.files[].revision`; required only by `line_patch`.
+    /// Exact `ReadFiles.files[].revision`; required by `line_patch` and
+    /// `release_temporary`.
     #[serde(default)]
     pub expected_revision: Option<String>,
     /// Ordered, non-overlapping, one-based changes; required only by `line_patch`.
@@ -59,6 +63,10 @@ pub struct EditFileWire {
     /// Exact receipt returned by the edit being undone; required only by `undo`.
     #[serde(default)]
     pub undo_id: Option<String>,
+    /// Exact `ReadFiles` temporary-artifact generation, required only for an
+    /// explicit `operation=release_temporary`; it is not a general deletion token.
+    #[serde(default)]
+    pub artifact_generation: Option<String>,
 }
 
 pub fn normalize_edit_call(surface: EditSurface, arguments: Value) -> Result<NormalizedEditCall> {
@@ -81,7 +89,7 @@ pub fn normalize_edit_call(surface: EditSurface, arguments: Value) -> Result<Nor
         normalize_legacy_wire(surface, domain_arguments, verification.is_some())?;
     let changes = match &command {
         EditCommand::Apply { changes } => changes.as_slice(),
-        EditCommand::Undo { .. } => &[],
+        EditCommand::Undo { .. } | EditCommand::ReleaseTemporary { .. } => &[],
     };
     validate_aggregate(changes)?;
     Ok(NormalizedEditCall {
@@ -204,6 +212,15 @@ fn normalize_new_wire(
         }
     });
     let command = match operation {
+        EditOperation::ReleaseTemporary => {
+            if request.workspace_root.as_deref().is_none_or(str::is_empty) || verification.is_some()
+            {
+                return Err(WinxError::InvalidInput(
+                    "release_temporary requires workspace_root and forbids verification".into(),
+                ));
+            }
+            release_wire_command(request.files)?
+        }
         EditOperation::Apply => {
             let changes = request
                 .files
@@ -257,7 +274,45 @@ fn normalize_new_wire(
     })
 }
 
+fn release_wire_command(files: Vec<EditFileWire>) -> Result<EditCommand> {
+    let mut targets = Vec::with_capacity(files.len());
+    for file in files {
+        if file.mode != EditMode::ReleaseTemporary
+            || file.content.is_some()
+            || file.patches.is_some()
+            || file.undo_id.is_some()
+        {
+            return Err(WinxError::InvalidInput(
+                "release_temporary accepts only exact revision and generation targets".into(),
+            ));
+        }
+        let expected_revision = file.expected_revision.ok_or_else(|| {
+            WinxError::InvalidInput("release_temporary requires expected_revision".into())
+        })?;
+        crate::tools::apply_patch::validate_revision(&expected_revision)?;
+        let artifact_generation = file
+            .artifact_generation
+            .filter(|value| !value.is_empty() && value.len() <= 256)
+            .ok_or_else(|| {
+                WinxError::InvalidInput(
+                    "release_temporary requires artifact_generation from ReadFiles".into(),
+                )
+            })?;
+        targets.push(crate::utils::agent_temp::release::TemporaryReleaseTarget {
+            file_path: file.file_path,
+            expected_revision,
+            artifact_generation,
+        });
+    }
+    Ok(EditCommand::ReleaseTemporary { files: targets })
+}
+
 fn apply_wire_change(index: usize, file: EditFileWire) -> Result<EditChange> {
+    if file.artifact_generation.is_some() || file.mode == EditMode::ReleaseTemporary {
+        return Err(WinxError::InvalidInput(
+            "temporary generation and mode require explicit operation=release_temporary".into(),
+        ));
+    }
     if file.mode == EditMode::Undo {
         return Err(WinxError::InvalidInput(format!(
             "files[{index}].mode=undo requires operation=undo and cannot be mixed with apply"
@@ -300,11 +355,17 @@ fn apply_wire_change(index: usize, file: EditFileWire) -> Result<EditChange> {
             crate::tools::apply_patch::validate_patch_count(&patches)?;
             Ok(EditChange::LinePatch { file_path: file.file_path, expected_revision, patches })
         }
+        EditMode::ReleaseTemporary => unreachable!("release handled separately"),
         EditMode::Undo => unreachable!("handled above"),
     }
 }
 
 fn reject_payload_fields(file: &EditFileWire, mode: &str) -> Result<()> {
+    if file.artifact_generation.is_some() {
+        return Err(WinxError::InvalidInput(
+            "artifact_generation is valid only for release_temporary".into(),
+        ));
+    }
     if file.content.is_some() || file.expected_revision.is_some() || file.patches.is_some() {
         return Err(WinxError::InvalidInput(format!(
             "mode={mode} does not accept content, expected_revision, or patches"
@@ -486,5 +547,92 @@ mod tests {
         assert_eq!(legacy.command.modes(), vec![EditMode::SearchReplace]);
         assert_eq!(explicit.command.modes(), vec![EditMode::Replace]);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod temporary_release_contract_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use serde_json::json;
+
+    fn release_request() -> Value {
+        json!({
+            "thread_id": "initialized-thread",
+            "workspace_root": "/initialized/workspace",
+            "operation": "release_temporary",
+            "files": [{
+                "file_path": "/initialized/workspace/.winx/tmp/session/helper.py",
+                "mode": "release_temporary",
+                "expected_revision": format!("sha256:{}", "a".repeat(64)),
+                "artifact_generation": "opaque-observed-generation"
+            }]
+        })
+    }
+
+    #[test]
+    fn explicit_temporary_release_normalizes_without_verification_or_edit_payload() {
+        let normalized = normalize_edit_call(EditSurface::EditFiles, release_request())
+            .expect("the explicit revision-and-generation release contract must normalize");
+        assert_eq!(normalized.command.operation().as_str(), "release_temporary");
+        assert_eq!(normalized.command.modes()[0].as_str(), "release_temporary");
+        assert_eq!(normalized.command.file_count(), 1);
+        assert!(normalized.verification.is_none());
+    }
+
+    #[test]
+    fn temporary_release_requires_explicit_operation_workspace_revision_and_generation() {
+        for field in ["operation", "workspace_root"] {
+            let mut request = release_request();
+            request.as_object_mut().unwrap().remove(field);
+            assert!(normalize_edit_call(EditSurface::EditFiles, request).is_err(), "{field}");
+        }
+        for field in ["expected_revision", "artifact_generation"] {
+            for replacement in [None, Some(json!("")), Some(Value::Null)] {
+                let mut request = release_request();
+                let file = request["files"][0].as_object_mut().unwrap();
+                if let Some(value) = replacement {
+                    file.insert(field.into(), value);
+                } else {
+                    file.remove(field);
+                }
+                assert!(normalize_edit_call(EditSurface::EditFiles, request).is_err(), "{field}");
+            }
+        }
+    }
+
+    #[test]
+    fn temporary_release_rejects_edit_and_verification_payloads() {
+        for (field, value) in [
+            ("content", json!("must not write")),
+            ("patches", json!([])),
+            ("undo_id", json!("old-checkpoint")),
+        ] {
+            let mut request = release_request();
+            request["files"][0][field] = value;
+            assert!(normalize_edit_call(EditSurface::EditFiles, request).is_err(), "{field}");
+        }
+        for (field, value) in
+            [("verify_command", json!("must-not-execute")), ("verify_wait_for_seconds", json!(0))]
+        {
+            let mut request = release_request();
+            request[field] = value;
+            assert!(normalize_edit_call(EditSurface::EditFiles, request).is_err(), "{field}");
+        }
+        let mut mixed = release_request();
+        mixed["files"].as_array_mut().unwrap().push(json!({
+            "file_path": "/initialized/workspace/source.rs", "mode": "replace", "content": ""
+        }));
+        assert!(normalize_edit_call(EditSurface::EditFiles, mixed).is_err());
+    }
+
+    #[test]
+    fn temporary_generation_is_rejected_for_normal_edits() {
+        let request = json!({
+            "thread_id": "initialized-thread",
+            "files": [{"file_path": "source.rs", "mode": "replace", "content": "source",
+                "artifact_generation": "not-an-edit-field"}]
+        });
+        assert!(normalize_edit_call(EditSurface::EditFiles, request).is_err());
     }
 }

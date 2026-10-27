@@ -1,3 +1,5 @@
+use crate::server::usage::lifecycle::{phase, Phase};
+
 use rmcp::model::CallToolResult;
 use rmcp::ErrorData as McpError;
 use serde_json::json;
@@ -107,7 +109,10 @@ impl WinxService {
                 .then(|| u64::try_from(timeout.as_millis()).unwrap_or(30_000)),
             until: request.until,
         };
-        match run_adapter(&adapter, context, herdr_request, authority).await {
+        let guard = phase(Phase::HerdrAdapter);
+        let result = run_adapter(&adapter, context, herdr_request, authority).await;
+        guard.finish(result.is_ok());
+        match result {
             Ok(value) => herdr_success(action, &value),
             Err(error) => herdr_failure(&error),
         }

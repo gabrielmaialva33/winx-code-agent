@@ -1033,6 +1033,36 @@ fn cache_negotiation(
 }
 
 impl ShellRuntime for DaemonShellRuntime {
+    fn release_temporary<'a>(
+        &'a self,
+        _state: &'a std::sync::Arc<tokio::sync::Mutex<Option<BashState>>>,
+        mut request: crate::utils::agent_temp::release::TemporaryReleaseRequest,
+    ) -> crate::runtime::ShellRuntimeTemporaryReleaseFuture<'a> {
+        Box::pin(async move {
+            let hello = self.negotiated_guardian(&request.thread_id).await?;
+            if !hello
+                .capabilities
+                .iter()
+                .any(|item| item == super::protocol::TEMPORARY_RELEASE_CAPABILITY)
+            {
+                return Err(WinxError::InvalidInput("the effective guardian does not support safe temporary release; no files were removed".into()));
+            }
+            request.expected_guardian_epoch = Some(hello.daemon_epoch);
+            // One disposable request bounds connect, write and read together.
+            // Its failure cannot establish whether the owner already removed files.
+            self.negotiated_request(
+                rand::random::<u64>(),
+                "session.release_temporary",
+                serde_json::to_value(request)
+                    .map_err(|error| WinxError::SerializationError(error.to_string()))?,
+            )
+            .await
+            .map_err(|error| WinxError::CommandExecutionError(format!(
+                "temporary release outcome unknown: {error}; the client will not retry automatically; inspect each requested target before retrying."
+            )))
+        })
+    }
+
     fn configure_session<'a>(
         &'a self,
         bash_state: &'a mut BashState,
@@ -1839,6 +1869,7 @@ mod tests {
         let mut snapshot = state.snapshot();
         let passed = verification_state == EditVerificationState::Passed;
         snapshot.edit_mutation_receipts.push(EditMutationReceipt {
+            temporary_release: None,
             schema_version: 1,
             fingerprint: "fingerprint".to_string(),
             receipt_id: "edit_same_request".to_string(),
@@ -1846,6 +1877,7 @@ mod tests {
             status: if passed { "completed" } else { "completed_with_issues" }.to_string(),
             committed_at_unix_ms: 1234,
             postconditions: vec![EditMutationPostcondition {
+                removed_generation: None,
                 path: "/workspace/target".to_string(),
                 sha256: "written-content".to_string(),
             }],
@@ -1971,5 +2003,138 @@ mod tests {
             state.lock().await.as_ref().expect("state").cwd,
             PathBuf::from("/new-config-cwd")
         );
+    }
+
+    #[cfg(unix)]
+    async fn temporary_release_rpc_fixture(
+    ) -> anyhow::Result<(tempfile::TempDir, DaemonShellRuntime, UnixStream, tokio::net::UnixListener)>
+    {
+        let temp = tempfile::tempdir()?;
+        let socket = temp.path().join("release.sock");
+        let listener = tokio::net::UnixListener::bind(&socket)?;
+        let runtime = DaemonShellRuntime::new(&socket);
+        let (health_stream, health_peer) = UnixStream::pair()?;
+        let guardian = HelloResult::current(
+            super::super::protocol::DaemonProcessRole::Guardian,
+            vec![super::super::protocol::TEMPORARY_RELEASE_CAPABILITY.to_string()],
+            "release-owner",
+        );
+        cache_negotiation(
+            &mut *runtime.negotiations.lock().await,
+            "release-request",
+            Arc::new(Mutex::new(NegotiatedSession {
+                control_epoch: "release-control".to_string(),
+                guardian,
+                health_stream,
+            })),
+            Instant::now(),
+        )?;
+        Ok((temp, runtime, health_peer, listener))
+    }
+
+    #[cfg(unix)]
+    async fn temporary_release_rpc_peer(
+        listener: tokio::net::UnixListener,
+        observed: Arc<AtomicUsize>,
+        close_response: bool,
+    ) -> anyhow::Result<()> {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request: RpcRequest = read_json_frame(&mut stream).await?;
+        // The baseline opens with hello; disposable negotiated requests already
+        // have a live, capable owner and send the operation on this connection.
+        if request.method == "winx.hello" {
+            let hello = HelloResult::current(
+                super::super::protocol::DaemonProcessRole::Guardian,
+                vec![super::super::protocol::TEMPORARY_RELEASE_CAPABILITY.to_string()],
+                "release-owner",
+            );
+            write_json_frame(
+                &mut stream,
+                &RpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id: request.id,
+                    result: Some(serde_json::to_value(hello)?),
+                    error: None,
+                },
+            )
+            .await?;
+            request = read_json_frame(&mut stream).await?;
+        }
+        assert_eq!(request.method, "session.release_temporary");
+        assert_eq!(request.params["expected_guardian_epoch"], "release-owner");
+        assert_eq!(request.params["thread_id"], "release-request");
+        observed.fetch_add(1, Ordering::SeqCst);
+        if !close_response {
+            let closed = read_json_frame::<_, RpcRequest>(&mut stream).await;
+            assert!(closed.is_err(), "timed-out disposable release connection must close");
+        }
+        drop(stream);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), listener.accept()).await.is_err(),
+            "an uncertain release must never be resent"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn temporary_release_rpc_request() -> crate::utils::agent_temp::release::TemporaryReleaseRequest
+    {
+        crate::utils::agent_temp::release::TemporaryReleaseRequest {
+            thread_id: "release-request".to_string(),
+            workspace_root: PathBuf::from("/workspace"),
+            files: Vec::new(),
+            expected_guardian_epoch: Some("untrusted-old-owner".to_string()),
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn temporary_release_rpc_stall_is_bounded_unknown_and_never_resent() -> anyhow::Result<()>
+    {
+        let (_temp, runtime, _health, listener) = temporary_release_rpc_fixture().await?;
+        let observed = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(temporary_release_rpc_peer(listener, observed.clone(), false));
+        let state = Arc::new(Mutex::new(None));
+        let local_admission = tokio::sync::RwLock::new(());
+        let started = tokio::time::Instant::now();
+        let result =
+            tokio::time::timeout(SESSION_CONTROL_RPC_TIMEOUT + Duration::from_secs(1), async {
+                let _call_guard = local_admission.read().await;
+                runtime.release_temporary(&state, temporary_release_rpc_request()).await
+            })
+            .await;
+        let elapsed = started.elapsed();
+        server.await??;
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        let result = result
+            .map_err(|_| anyhow::anyhow!("release RPC exceeded its bounded control deadline"))?;
+        let error = result.expect_err("a stalled release reply has an unknown outcome").to_string();
+        assert!(error.contains("release outcome unknown"), "{error}");
+        assert!(error.contains("inspect"), "{error}");
+        assert!(error.contains("not retry"), "{error}");
+        assert!(elapsed <= SESSION_CONTROL_RPC_TIMEOUT + Duration::from_millis(100));
+        assert!(
+            local_admission.try_write().is_ok(),
+            "the completed RPC must release local admission"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test(start_paused = true)]
+    async fn temporary_release_rpc_transport_loss_is_unknown_and_never_resent() -> anyhow::Result<()>
+    {
+        let (_temp, runtime, _health, listener) = temporary_release_rpc_fixture().await?;
+        let observed = Arc::new(AtomicUsize::new(0));
+        let server = tokio::spawn(temporary_release_rpc_peer(listener, observed.clone(), true));
+        let state = Arc::new(Mutex::new(None));
+        let result = runtime.release_temporary(&state, temporary_release_rpc_request()).await;
+        server.await??;
+        assert_eq!(observed.load(Ordering::SeqCst), 1);
+        let error = result.expect_err("lost release response has an unknown outcome").to_string();
+        assert!(error.contains("release outcome unknown"), "{error}");
+        assert!(error.contains("inspect"), "{error}");
+        assert!(error.contains("not retry"), "{error}");
+        Ok(())
     }
 }

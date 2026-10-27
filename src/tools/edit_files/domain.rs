@@ -21,6 +21,7 @@ const MAX_AGGREGATE_CONTENT_BYTES: usize = 64 * 1024 * 1024;
 pub enum EditOperation {
     Apply,
     Undo,
+    ReleaseTemporary,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, JsonSchema, PartialEq, Serialize)]
@@ -30,6 +31,7 @@ pub enum EditMode {
     SearchReplace,
     LinePatch,
     Undo,
+    ReleaseTemporary,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -78,6 +80,7 @@ impl EditChange {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum EditCommand {
+    ReleaseTemporary { files: Vec<crate::utils::agent_temp::release::TemporaryReleaseTarget> },
     Apply { changes: Vec<EditChange> },
     Undo { file_path: String, undo_id: Option<String>, legacy_lifo: bool },
 }
@@ -87,6 +90,7 @@ impl EditCommand {
         match self {
             Self::Apply { .. } => EditOperation::Apply,
             Self::Undo { .. } => EditOperation::Undo,
+            Self::ReleaseTemporary { .. } => EditOperation::ReleaseTemporary,
         }
     }
 
@@ -94,6 +98,7 @@ impl EditCommand {
         match self {
             Self::Apply { changes } => changes.iter().map(EditChange::mode).collect(),
             Self::Undo { .. } => vec![EditMode::Undo],
+            Self::ReleaseTemporary { files } => vec![EditMode::ReleaseTemporary; files.len()],
         }
     }
 
@@ -101,6 +106,9 @@ impl EditCommand {
         match self {
             Self::Apply { changes } => changes.iter().map(EditChange::file_path).collect(),
             Self::Undo { file_path, .. } => vec![file_path],
+            Self::ReleaseTemporary { files } => {
+                files.iter().map(|file| file.file_path.as_str()).collect()
+            }
         }
     }
 
@@ -286,6 +294,29 @@ pub struct PreparedEditContext {
     pub(crate) effective_permissions: EditPermissionSet,
 }
 
+fn validate_temporary_release_scope(
+    normalized: &NormalizedEditCall,
+    state: &BashState,
+    thread_id: &str,
+) -> Result<()> {
+    if !matches!(normalized.command, EditCommand::ReleaseTemporary { .. }) {
+        return Ok(());
+    }
+    if normalized.workspace_root.as_deref() != state.workspace_root.to_str() {
+        return Err(WinxError::InvalidInput(
+            "release_temporary requires the exact initialized workspace_root".into(),
+        ));
+    }
+    for requested in normalized.command.file_paths() {
+        crate::utils::agent_temp::release::validate_target(
+            &state.workspace_root,
+            thread_id,
+            Path::new(requested),
+        )?;
+    }
+    Ok(())
+}
+
 impl PreparedEditContext {
     pub fn prepare(
         normalized: NormalizedEditCall,
@@ -297,6 +328,7 @@ impl PreparedEditContext {
             return Err(WinxError::ThreadIdMismatch(thread_id));
         }
 
+        validate_temporary_release_scope(&normalized, state, &thread_id)?;
         let file_count = normalized.command.file_count();
         if file_count == 0 || file_count > MAX_FILES {
             return Err(WinxError::InvalidInput(format!(
@@ -335,13 +367,20 @@ impl PreparedEditContext {
                 });
             }
             let (_, resolved) = resolve_edit_path(state, requested)?;
+            crate::utils::agent_temp::validate_mutation_namespace(
+                &state.workspace_root,
+                &thread_id,
+                Path::new(requested),
+                &resolved,
+            )?;
             let target = CanonicalEditTarget::from_preflight(resolved)?;
             let resolved_string = target.identity().to_string();
             let mode_allowed = match mode {
                 EditMode::Replace => state.is_file_write_allowed(&resolved_string),
-                EditMode::SearchReplace | EditMode::LinePatch | EditMode::Undo => {
-                    state.is_file_edit_allowed(&resolved_string)
-                }
+                EditMode::SearchReplace
+                | EditMode::LinePatch
+                | EditMode::Undo
+                | EditMode::ReleaseTemporary => state.is_file_edit_allowed(&resolved_string),
             };
             if !mode_allowed {
                 return Err(WinxError::FileOperationDenied {
@@ -393,6 +432,12 @@ impl PreparedEditContext {
             // committed mutation itself may have created a previously missing
             // target, which must not invalidate an otherwise exact replay.
             let path = target.identity();
+            crate::utils::agent_temp::validate_mutation_namespace(
+                &state.workspace_root,
+                &self.thread_id,
+                target.path(),
+                target.path(),
+            )?;
             if !self.effective_permissions.allows(mode, file_count) {
                 return Err(WinxError::FileOperationDenied {
                     path: path.into(),
@@ -404,9 +449,10 @@ impl PreparedEditContext {
             }
             let allowed = match mode {
                 EditMode::Replace => state.is_file_write_allowed(path),
-                EditMode::SearchReplace | EditMode::LinePatch | EditMode::Undo => {
-                    state.is_file_edit_allowed(path)
-                }
+                EditMode::SearchReplace
+                | EditMode::LinePatch
+                | EditMode::Undo
+                | EditMode::ReleaseTemporary => state.is_file_edit_allowed(path),
             };
             if !allowed {
                 return Err(WinxError::FileOperationDenied {
@@ -423,6 +469,9 @@ impl PreparedEditContext {
 
     pub fn canonical_value(&self) -> Value {
         let command = match &self.command {
+            EditCommand::ReleaseTemporary { files } => {
+                json!({ "operation": "release_temporary", "files": files })
+            }
             EditCommand::Apply { changes } => json!({
                 "operation": "apply",
                 "files": changes
@@ -472,6 +521,7 @@ impl EditOperation {
         match self {
             Self::Apply => "apply",
             Self::Undo => "undo",
+            Self::ReleaseTemporary => "release_temporary",
         }
     }
 }
@@ -483,6 +533,7 @@ impl EditMode {
             Self::SearchReplace => "search_replace",
             Self::LinePatch => "line_patch",
             Self::Undo => "undo",
+            Self::ReleaseTemporary => "release_temporary",
         }
     }
 }

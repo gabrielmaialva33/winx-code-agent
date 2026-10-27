@@ -217,6 +217,39 @@ mod real_runtime {
     }
 
     #[tokio::test]
+    async fn lifecycle_real_catalog_wait_keeps_deadline_cursor_and_one_inspection(
+    ) -> anyhow::Result<()> {
+        use crate::server::usage::lifecycle::{Phase, UsageTrace};
+        let session = Session::new().await?;
+        let launched = session.command("sh -c 'sleep 3'", true).await?;
+        let id = launched["data"]["execution_id"].as_str().context("execution ID")?;
+        let listed = session.call("Execution", json!({"action":{"type":"list"}})).await?;
+        let cursor = listed["data"]["catalog"]["cursor"].as_str().context("cursor")?;
+        let trace = UsageTrace::for_test("Execution", "wait");
+        let started = std::time::Instant::now();
+        let waited = Box::pin(trace.scope(session.call("Execution",json!({"action":{
+            "type":"wait","execution_ids":[id],"after":cursor,"events":["exited"],"timeout_seconds":0.15
+        }})))).await?;
+        assert_eq!(waited["data"]["timed_out"], true, "{waited}");
+        assert!(waited["data"]["changes"]["executions"].as_array().is_some_and(Vec::is_empty));
+        let next_cursor =
+            waited["data"]["changes"]["cursor"].as_str().context("retained cursor")?;
+        assert_ne!(next_cursor, "");
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert_eq!(trace.test_calls(Phase::SessionAdmission), Some(1));
+        assert_eq!(trace.test_calls(Phase::RuntimeInspect), Some(1));
+        assert_eq!(trace.test_calls(Phase::RuntimeCapture), None);
+        assert_eq!(trace.test_calls(Phase::WaitIdle), Some(1));
+        assert!(trace.test_calls(Phase::Catalog).is_some_and(|calls| calls >= 3));
+        let polled = session.call("Execution",json!({"action":{
+            "type":"wait","execution_ids":[id],"after":next_cursor,"events":["exited"],"timeout_seconds":0
+        }})).await?;
+        assert_eq!(polled["data"]["timed_out"], true, "{polled}");
+        assert_eq!(polled["data"]["changes"]["resync_required"], false);
+        session.close().await
+    }
+
+    #[tokio::test]
     async fn native_agent_prompt_requires_trusted_bash_authority() -> anyhow::Result<()> {
         let session = Session::new().await?;
         let request = CallToolRequestParams::new("Agent").with_arguments(
@@ -290,15 +323,16 @@ async fn execution_wait_deadline_includes_session_context_acquisition() -> anyho
                 }
             }
         }))?;
+        let trace = crate::server::usage::lifecycle::UsageTrace::for_test("Execution", "wait");
         let started = std::time::Instant::now();
-        let result = tokio::time::timeout(
+        let result = Box::pin(tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            service.execute_tool_call(
+            trace.scope(service.execute_tool_call(
                 request,
                 ShellActionOptions::default(),
                 EditPermissionSet::default(),
-            ),
-        )
+            )),
+        ))
         .await;
         let elapsed = started.elapsed();
         drop(held);
@@ -310,6 +344,12 @@ async fn execution_wait_deadline_includes_session_context_acquisition() -> anyho
         let envelope = result.result.structured_content.unwrap_or_default();
         assert_eq!(envelope["status"], "failed", "{envelope}");
         assert_eq!(envelope["errorCode"], "execution_history_unavailable", "{envelope}");
+        assert_eq!(
+            trace.test_calls(crate::server::usage::lifecycle::Phase::SessionAdmission),
+            Some(1)
+        );
+        assert_eq!(trace.test_calls(crate::server::usage::lifecycle::Phase::WaitIdle), None);
+        assert_eq!(trace.test_calls(crate::server::usage::lifecycle::Phase::Catalog), None);
         let maximum = std::time::Duration::from_millis(maximum_ms);
         assert!(elapsed < maximum, "session admission exceeded wait budget: {elapsed:?}");
     }

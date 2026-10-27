@@ -60,3 +60,10 @@ path = "fuzz_targets/edit_files_wire.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "agent_resume"
+path = "fuzz_targets/agent_resume.rs"
+test = false
+doc = false
+bench = false

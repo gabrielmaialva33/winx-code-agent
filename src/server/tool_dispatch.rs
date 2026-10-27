@@ -1,3 +1,5 @@
+use crate::server::usage::lifecycle::{phase, Phase};
+
 use std::fmt::Write as FmtWrite;
 use std::path::Path;
 use std::process::Command;
@@ -814,14 +816,16 @@ impl WinxService {
                     });
                 let temporary_artifact_usage =
                     if let Some((workspace_root, thread_id)) = audit_target {
-                        match tokio::task::spawn_blocking(move || {
+                        let guard = phase(Phase::TempAudit);
+                        let result = tokio::task::spawn_blocking(move || {
                             crate::utils::agent_temp::maintain_and_audit_session(
                                 &workspace_root,
                                 &thread_id,
                             )
                         })
-                        .await
-                        {
+                        .await;
+                        guard.finish(matches!(&result, Ok(Ok(_))));
+                        match result {
                             Ok(Ok(usage)) => Some(usage),
                             Ok(Err(error)) => {
                                 warn!(%error, "post-Bash temporary-artifact audit failed");
@@ -1076,6 +1080,70 @@ impl WinxService {
         ))
     }
 
+    async fn handle_temporary_release(
+        &self,
+        prepared_call: &PreparedEditCall,
+        files: &[crate::utils::agent_temp::release::TemporaryReleaseTarget],
+    ) -> Result<CallToolResult, McpError> {
+        let prepared = &prepared_call.context;
+        let recovery_args = &prepared.original_arguments;
+        let tool = prepared.surface.tool_name();
+        let slot = &prepared_call.slot;
+        let request = {
+            let state = slot.lock().await;
+            let state = state
+                .as_ref()
+                .ok_or_else(|| McpError::invalid_request("session is not initialized", None))?;
+            if let Err(error) = prepared.authorize_current_state(state) {
+                return outcomes::tool_failure(tool, &error, Some(recovery_args));
+            }
+            let workspace = state.workspace_root.clone();
+            let thread = state.current_thread_id.clone();
+            let files = files.to_vec();
+            let prepared_release = tokio::task::spawn_blocking(move || {
+                crate::utils::agent_temp::release::prepare(&workspace, &thread, &files)
+            })
+            .await
+            .map_err(|error| {
+                McpError::internal_error(
+                    format!("temporary release preflight failed: {error}"),
+                    None,
+                )
+            })?;
+            match prepared_release {
+                Ok(request) => request,
+                Err(error) => return outcomes::tool_failure(tool, &error, Some(recovery_args)),
+            }
+        };
+        let released = match self.shell_runtime.release_temporary(slot, request).await {
+            Ok(result) => result,
+            Err(error) => return outcomes::tool_failure(tool, &error, Some(recovery_args)),
+        };
+        let removed = released.files.iter().filter(|file| file.status == "released").count();
+        self.checkpoint_temporary_release(prepared, &released).await;
+        let usage = crate::utils::agent_temp::maintain_and_audit_session(
+            std::path::Path::new(&prepared.canonical_workspace_root),
+            &prepared.thread_id,
+        )
+        .ok();
+        let status = if removed == released.files.len() {
+            "completed"
+        } else if removed == 0 {
+            "failed"
+        } else {
+            "completed_with_issues"
+        };
+        let mut result = CallToolResult::success(vec![ContentBlock::text(format!(
+            "Temporary release: {} file(s), {} bytes reclaimed.",
+            removed, released.reclaimed_bytes
+        ))]);
+        result.is_error = Some(status == "failed");
+        result.structured_content = Some(
+            json!({ "status": status, "tool": tool, "data": { "temporary_release": released, "temporary_artifact_usage": usage } }),
+        );
+        Ok(result)
+    }
+
     async fn handle_prepared_edit(
         &self,
         prepared_call: Option<&PreparedEditCall>,
@@ -1088,6 +1156,10 @@ impl WinxService {
         let recovery_args = &prepared.original_arguments;
         let tool = prepared.surface.tool_name();
         let slot = &prepared_call.slot;
+        if let crate::tools::edit_files::EditCommand::ReleaseTemporary { files } = &prepared.command
+        {
+            return self.handle_temporary_release(prepared_call, files).await;
+        }
         match crate::tools::edit_files::handle_prepared(slot, prepared.clone()).await {
             Ok(outcome) => {
                 self.checkpoint_committed_edit(
@@ -1564,6 +1636,7 @@ mod verification_tests {
             undo_ids: vec![Some("undo-first".to_string())],
             next_undo_id: None,
             postconditions: vec![crate::state::bash_state::EditMutationPostcondition {
+                removed_generation: None,
                 path: "/workspace/first.rs".to_string(),
                 sha256: "hash".to_string(),
             }],

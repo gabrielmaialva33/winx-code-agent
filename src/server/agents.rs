@@ -1,4 +1,5 @@
 //! Native agent workflows and an explicitly configured Herdr backend.
+use crate::server::usage::lifecycle::{phase, Phase};
 mod herdr;
 mod presentation;
 
@@ -158,11 +159,13 @@ impl WinxService {
         let mut recovery_args = serde_json::to_value(&command)
             .map_err(|error| McpError::internal_error(error.to_string(), None))?;
         recovery_args["workspace_root"] = json!(context.scope.workspace_root);
-        let outcome = match self
+        let guard = phase(Phase::PromptRpc);
+        let runtime_result = self
             .shell_runtime
             .run_action_detailed(&context.slot, command, bound_options(&record))
-            .await
-        {
+            .await;
+        guard.finish(runtime_result.is_ok());
+        let outcome = match runtime_result {
             Ok(outcome) => outcome,
             Err(error) => return outcomes::tool_failure("Agent", &error, Some(&recovery_args)),
         };

@@ -6,16 +6,18 @@
 //! dirty its working tree. File tools enforce a small path and storage budget;
 //! Bash remains governed by its own operator-selected command policy.
 
+pub mod release;
+
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
-use tracing::{debug, info};
+use tracing::info;
 
 use crate::errors::{Result, WinxError};
 
@@ -27,8 +29,8 @@ fn temp_root() -> PathBuf {
 const SESSION_PREFIX: &str = "session-";
 const SESSION_HASH_BYTES: usize = 8;
 
-/// Session directories with no filesystem activity for this long are pruned
-/// when another session initializes in the same workspace.
+/// Retained age-policy hint. Unguarded maintenance does not delete files: a
+/// capable runtime owner must establish eligibility for explicit release.
 pub const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// Workspace-wide budget shared by all managed temporary sessions.
 pub const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
@@ -92,6 +94,7 @@ pub struct TemporaryArtifactUsage {
     pub stale_pruned_files: usize,
     pub stale_pruned_bytes: u64,
     pub over_budget: bool,
+    pub deletion_deferred: &'static str,
 }
 
 impl TemporaryArtifactUsage {
@@ -161,10 +164,9 @@ pub fn session_info(workspace_root: &Path, thread_id: &str) -> AgentTempInfo {
     }
 }
 
-/// Return the session policy and best-effort prune expired sibling sessions and
-/// stale active-session helpers when the active session crosses a high-water mark.
-/// The active directory is not created here; `FileWriteOrEdit` creates it on
-/// demand through its normal parent-directory path.
+/// Return the session policy without deleting files whose runtime ownership
+/// cannot be established here. The active directory is not created here; file
+/// tools create it on demand through their normal parent-directory path.
 pub fn prepare_session(workspace_root: &Path, thread_id: &str) -> AgentTempInfo {
     let mut info = session_info(workspace_root, thread_id);
     let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -183,8 +185,8 @@ pub fn audit_session(workspace_root: &Path, thread_id: &str) -> Result<Temporary
     audit_session_impl(workspace_root, thread_id, false)
 }
 
-/// Reclaim stale active-session helpers at the configured high-water mark,
-/// then return the same bounded audit used after Bash execution.
+/// Return a bounded audit while deferring automatic deletion. This utility has
+/// no authoritative runtime admission guard, including for sibling sessions.
 pub fn maintain_and_audit_session(
     workspace_root: &Path,
     thread_id: &str,
@@ -236,7 +238,36 @@ fn audit_session_impl(
         stale_pruned_files: pruned.files,
         stale_pruned_bytes: pruned.bytes,
         over_budget,
+        deletion_deferred: "runtime_protection_unknown",
     })
+}
+
+/// Reserve guardian recovery objects from every supported file mutation.
+pub fn validate_mutation_namespace(
+    workspace_root: &Path,
+    thread_id: &str,
+    requested_path: &Path,
+    resolved_path: &Path,
+) -> Result<()> {
+    let info = session_info(workspace_root, thread_id);
+    let workspace = workspace_root
+        .canonicalize()
+        .map_or_else(|_| workspace_root.to_path_buf(), crate::utils::path::simplified);
+    for path in [requested_path, resolved_path] {
+        if workspace_relative(path, workspace_root, &workspace).as_deref().is_some_and(|relative| {
+            is_temp_relative(relative)
+                && relative.components().any(|component| {
+                    component.as_os_str().as_encoded_bytes().starts_with(b".winx-release-")
+                })
+        }) {
+            return Err(policy_error(
+                path,
+                &info,
+                "release quarantine is reserved for recovery; file mutations are denied".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Validate one `FileWriteOrEdit` target. Non-temporary project files keep their
@@ -250,6 +281,7 @@ pub fn validate_edit_target(
     previous_bytes: Option<u64>,
     new_bytes: u64,
 ) -> Result<()> {
+    validate_mutation_namespace(workspace_root, thread_id, requested_path, resolved_path)?;
     let info = session_info(workspace_root, thread_id);
     let workspace = workspace_root
         .canonicalize()
@@ -769,6 +801,13 @@ fn validate_session_relative_path(path: &Path, info: &AgentTempInfo) -> Result<(
                 "temporary paths may contain only normal filename components".to_string(),
             ));
         };
+        if name.as_encoded_bytes().starts_with(b".winx-release-") {
+            return Err(policy_error(
+                path,
+                info,
+                "release quarantine is reserved for recovery; file mutations are denied".into(),
+            ));
+        }
         count += 1;
         let bytes = name.as_encoded_bytes().len();
         if bytes > MAX_COMPONENT_BYTES {
@@ -927,148 +966,9 @@ struct PrunedArtifacts {
     bytes: u64,
 }
 
-#[derive(Debug)]
-struct PrunableArtifact {
-    path: PathBuf,
-    modified: SystemTime,
-    bytes: u64,
-    is_file: bool,
-    is_symlink: bool,
-    device: u64,
-    inode: u64,
-}
-
-#[cfg(unix)]
-fn artifact_identity(metadata: &fs::Metadata) -> (u64, u64) {
-    use std::os::unix::fs::MetadataExt;
-
-    (metadata.dev(), metadata.ino())
-}
-
-#[cfg(not(unix))]
-fn artifact_identity(_metadata: &fs::Metadata) -> (u64, u64) {
-    (0, 0)
-}
-
-fn still_matches_prunable_artifact(candidate: &PrunableArtifact, cutoff: SystemTime) -> bool {
-    let Ok(metadata) = fs::symlink_metadata(&candidate.path) else { return false };
-    let Ok(modified) = metadata.modified() else { return false };
-    let (device, inode) = artifact_identity(&metadata);
-    modified == candidate.modified
-        && modified < cutoff
-        && metadata.len() == candidate.bytes
-        && metadata.is_file() == candidate.is_file
-        && metadata.file_type().is_symlink() == candidate.is_symlink
-        && device == candidate.device
-        && inode == candidate.inode
-}
-
-/// Reclaim only old, server-managed artifacts from the active session. The
-/// high-water/target split avoids scanning-triggered deletion churn near the
-/// hard cap. Symlinks and special nodes are unlinked but never followed; any
-/// uncertain or excessive tree is retained unchanged.
-fn prune_active_session_unlocked(active: &Path, max_age: Duration) -> PrunedArtifacts {
-    let metadata = match fs::symlink_metadata(active) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return PrunedArtifacts::default();
-        }
-        Err(_) => return PrunedArtifacts::default(),
-    };
-    if !metadata.is_dir() || metadata.file_type().is_symlink() {
-        return PrunedArtifacts::default();
-    }
-
-    let cutoff = SystemTime::now().checked_sub(max_age).unwrap_or(UNIX_EPOCH);
-    let mut seen = 0usize;
-    let mut stack = vec![(active.to_path_buf(), 0usize)];
-    let mut candidates = Vec::new();
-    let mut session_files = 0usize;
-    let mut session_bytes = 0u64;
-    let mut largest_file_bytes = 0u64;
-
-    while let Some((path, depth)) = stack.pop() {
-        if seen >= MAX_SCAN_ENTRIES || depth > MAX_SCAN_DEPTH {
-            return PrunedArtifacts::default();
-        }
-        seen += 1;
-        let metadata = match fs::symlink_metadata(&path) {
-            Ok(metadata) => metadata,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return PrunedArtifacts::default(),
-        };
-        if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            let entries = match fs::read_dir(&path) {
-                Ok(entries) => entries,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(_) => return PrunedArtifacts::default(),
-            };
-            for entry in entries {
-                match entry {
-                    Ok(entry) => stack.push((entry.path(), depth + 1)),
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(_) => return PrunedArtifacts::default(),
-                }
-            }
-            continue;
-        }
-
-        session_files = session_files.saturating_add(1);
-        session_bytes = session_bytes.saturating_add(metadata.len());
-        largest_file_bytes = largest_file_bytes.max(metadata.len());
-        if let Ok(modified) = metadata.modified() {
-            if modified < cutoff {
-                let (device, inode) = artifact_identity(&metadata);
-                candidates.push(PrunableArtifact {
-                    path,
-                    modified,
-                    bytes: metadata.len(),
-                    is_file: metadata.is_file(),
-                    is_symlink: metadata.file_type().is_symlink(),
-                    device,
-                    inode,
-                });
-            }
-        }
-    }
-
-    let crossed_high_water = session_files >= ACTIVE_SESSION_PRUNE_TRIGGER_FILES
-        || session_bytes >= ACTIVE_SESSION_PRUNE_TRIGGER_BYTES
-        || largest_file_bytes > MAX_FILE_BYTES;
-    if !crossed_high_water || candidates.is_empty() {
-        return PrunedArtifacts::default();
-    }
-
-    candidates.sort_by(|left, right| {
-        left.modified.cmp(&right.modified).then_with(|| left.path.cmp(&right.path))
-    });
-    let mut pruned = PrunedArtifacts::default();
-    for candidate in candidates {
-        let needs_headroom = session_files > ACTIVE_SESSION_PRUNE_TARGET_FILES
-            || session_bytes > ACTIVE_SESSION_PRUNE_TARGET_BYTES;
-        if !needs_headroom && candidate.bytes <= MAX_FILE_BYTES {
-            continue;
-        }
-        if !still_matches_prunable_artifact(&candidate, cutoff) {
-            continue;
-        }
-        match fs::remove_file(&candidate.path) {
-            Ok(()) => {
-                session_files = session_files.saturating_sub(1);
-                session_bytes = session_bytes.saturating_sub(candidate.bytes);
-                pruned.files = pruned.files.saturating_add(1);
-                pruned.bytes = pruned.bytes.saturating_add(candidate.bytes);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => debug!(
-                path = %candidate.path.display(),
-                %error,
-                "failed to prune stale active-session helper"
-            ),
-        }
-    }
-
-    pruned
+fn prune_active_session_unlocked(_active: &Path, _max_age: Duration) -> PrunedArtifacts {
+    // This utility has no authoritative runtime owner. Age cannot prove idle.
+    PrunedArtifacts::default()
 }
 
 fn log_active_prune(active: &Path, pruned: PrunedArtifacts) {
@@ -1082,60 +982,8 @@ fn log_active_prune(active: &Path, pruned: PrunedArtifacts) {
     }
 }
 
-fn prune_sessions_unlocked(workspace_root: &Path, active: &Path, max_age: Duration) {
-    let workspace = workspace_root
-        .canonicalize()
-        .map_or_else(|_| workspace_root.to_path_buf(), crate::utils::path::simplified);
-    let root = workspace.join(temp_root());
-    if fs::symlink_metadata(&root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(&root) else { return };
-    let cutoff = SystemTime::now().checked_sub(max_age).unwrap_or(UNIX_EPOCH);
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path == active || !is_managed_session_entry(&entry) || !session_is_stale(&path, cutoff) {
-            continue;
-        }
-        if let Err(error) = fs::remove_dir_all(&path) {
-            debug!(path = %path.display(), %error, "failed to prune expired agent temp session");
-        }
-    }
-}
-
-fn is_managed_session_entry(entry: &fs::DirEntry) -> bool {
-    if !entry.file_type().is_ok_and(|kind| kind.is_dir() && !kind.is_symlink()) {
-        return false;
-    }
-    let name = entry.file_name();
-    let name = name.to_string_lossy();
-    let Some(hash) = name.strip_prefix(SESSION_PREFIX) else { return false };
-    hash.len() == SESSION_HASH_BYTES * 2 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
-/// Conservative bounded scan: any read/metadata error or an excessive tree
-/// retains the session rather than deleting data whose freshness is uncertain.
-fn session_is_stale(root: &Path, cutoff: SystemTime) -> bool {
-    let mut newest = UNIX_EPOCH;
-    let mut seen = 0usize;
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
-    while let Some((path, depth)) = stack.pop() {
-        if seen >= MAX_SCAN_ENTRIES || depth > MAX_SCAN_DEPTH {
-            return false;
-        }
-        seen += 1;
-        let Ok(metadata) = fs::symlink_metadata(&path) else { return false };
-        let Ok(modified) = metadata.modified() else { return false };
-        newest = newest.max(modified);
-        if metadata.is_dir() && !metadata.file_type().is_symlink() {
-            let Ok(entries) = fs::read_dir(&path) else { return false };
-            for entry in entries {
-                let Ok(entry) = entry else { return false };
-                stack.push((entry.path(), depth + 1));
-            }
-        }
-    }
-    newest < cutoff
+fn prune_sessions_unlocked(_workspace_root: &Path, _active: &Path, _max_age: Duration) {
+    // Sibling guardians may survive this frontend. Unknown protection retains files.
 }
 
 #[cfg(test)]
@@ -1268,7 +1116,7 @@ mod tests {
     }
 
     #[test]
-    fn prune_removes_only_expired_managed_siblings() {
+    fn unguarded_maintenance_retains_expired_sibling_sessions() {
         let workspace = TempDir::new().unwrap();
         let active = session_info(workspace.path(), "active").directory;
         let expired = session_info(workspace.path(), "expired").directory;
@@ -1282,12 +1130,12 @@ mod tests {
         let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         prune_sessions_unlocked(workspace.path(), &active, Duration::from_millis(1));
         assert!(active.exists());
-        assert!(!expired.exists());
+        assert!(expired.exists());
         assert!(unmanaged.exists());
     }
 
     #[test]
-    fn active_session_prunes_only_stale_helpers_after_high_water_mark() {
+    fn unguarded_maintenance_retains_stale_helpers_above_high_water_mark() {
         let workspace = TempDir::new().unwrap();
         let active = session_info(workspace.path(), "active").directory;
         fs::create_dir_all(active.join("old/nested")).unwrap();
@@ -1303,7 +1151,7 @@ mod tests {
 
         let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let pruned = prune_active_session_unlocked(&active, Duration::from_millis(5));
-        assert_eq!(pruned.files, 40);
+        assert_eq!(pruned.files, 0);
         // Mirror production (`audit_session_impl`): the scan root must come
         // from the canonicalized workspace, because `active` is canonical too.
         // A literal root diverges when the temp dir sits behind a symlink
@@ -1316,7 +1164,7 @@ mod tests {
             .join(temp_root());
         assert_eq!(
             temp_tree_usage(&usage_root, &active).unwrap().session_files,
-            ACTIVE_SESSION_PRUNE_TARGET_FILES
+            ACTIVE_SESSION_PRUNE_TRIGGER_FILES + 8
         );
         assert!(fresh.iter().all(|path| path.exists()), "fresh helpers must be retained");
     }
@@ -1337,30 +1185,6 @@ mod tests {
         assert_eq!(fs::read_dir(active).unwrap().count(), ACTIVE_SESSION_PRUNE_TRIGGER_FILES - 1);
     }
 
-    #[test]
-    fn stale_candidate_revalidation_rejects_a_fresh_replacement() {
-        let workspace = TempDir::new().unwrap();
-        let path = workspace.path().join("helper.txt");
-        fs::write(&path, "old").unwrap();
-        let metadata = fs::symlink_metadata(&path).unwrap();
-        let modified = metadata.modified().unwrap();
-        let (device, inode) = artifact_identity(&metadata);
-        let candidate = PrunableArtifact {
-            path: path.clone(),
-            modified,
-            bytes: metadata.len(),
-            is_file: metadata.is_file(),
-            is_symlink: metadata.file_type().is_symlink(),
-            device,
-            inode,
-        };
-        sleep(Duration::from_millis(10));
-        fs::write(&path, "fresh replacement").unwrap();
-
-        assert!(!still_matches_prunable_artifact(&candidate, SystemTime::now()));
-        assert_eq!(fs::read_to_string(path).unwrap(), "fresh replacement");
-    }
-
     #[cfg(unix)]
     #[test]
     fn active_session_pruning_never_follows_symlink_helpers() {
@@ -1378,7 +1202,7 @@ mod tests {
 
         let _guard = TEMP_IO_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let pruned = prune_active_session_unlocked(&active, Duration::from_millis(1));
-        assert!(pruned.files > 0);
+        assert_eq!(pruned.files, 0);
         assert_eq!(fs::read_to_string(outside).unwrap(), "keep");
     }
 
@@ -1562,5 +1386,102 @@ mod tests {
         let error = reserve_derived_code_map(&mut repeated_usage, &stable, &info)
             .expect_err("even one stable helper has an aggregate call budget");
         assert!(matches!(error, WinxError::DerivedCodeMapBudget { .. }));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod quarantine_namespace_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn normal_edit_files_cannot_write_the_release_quarantine() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let workspace = temporary.path().canonicalize()?;
+        let quarantine =
+            session_info(&workspace, "quarantine").directory.join(".winx-release-test");
+        fs::create_dir_all(&quarantine)?;
+        let target = quarantine.join("artifact");
+        let mut state = crate::state::bash_state::BashState::new();
+        state.current_thread_id = "quarantine".into();
+        state.workspace_root = workspace.clone();
+        state.cwd = workspace.clone();
+        state.mode = crate::types::Modes::Wcgw;
+        let normalized = crate::tools::edit_files::normalize_edit_call(
+            crate::tools::edit_files::EditSurface::EditFiles,
+            serde_json::json!({"thread_id":"quarantine", "workspace_root":workspace,
+                "files":[{"file_path":target,"mode":"replace","content":"must not replace captured bytes"}]}),
+        )?;
+        let result = async {
+            let prepared = crate::tools::edit_files::PreparedEditContext::prepare(
+                normalized,
+                &state,
+                crate::tool_policy::ToolPolicy::default().edit_permissions(),
+            )?;
+            let slot = std::sync::Arc::new(tokio::sync::Mutex::new(Some(state)));
+            crate::tools::edit_files::handle_prepared(&slot, prepared).await
+        }
+        .await;
+        assert!(result.is_err(), "ordinary file writes must not enter the private claim namespace");
+        assert!(!target.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn resolved_alias_cannot_authorize_a_quarantine_write() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let workspace = temporary.path().canonicalize()?;
+        let quarantine =
+            session_info(&workspace, "quarantine").directory.join(".winx-release-test");
+        fs::create_dir_all(&quarantine)?;
+        let target = quarantine.join("artifact");
+        fs::write(&target, "captured")?;
+        let alias = workspace.join("ordinary-alias");
+        std::os::unix::fs::symlink(&quarantine, &alias)?;
+        assert!(validate_edit_target(
+            &workspace,
+            "quarantine",
+            &alias.join("artifact"),
+            &target,
+            Some(8),
+            10
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(target)?, "captured");
+        Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod quarantine_undo_namespace_tests {
+    #[test]
+    fn undo_preflight_cannot_authorize_a_quarantined_artifact() -> anyhow::Result<()> {
+        let temporary = tempfile::tempdir()?;
+        let workspace = temporary.path().canonicalize()?;
+        let quarantine =
+            super::session_info(&workspace, "quarantine").directory.join(".winx-release-test");
+        std::fs::create_dir_all(&quarantine)?;
+        let target = quarantine.join("artifact");
+        std::fs::write(&target, "captured")?;
+        let mut state = crate::state::bash_state::BashState::new();
+        state.current_thread_id = "quarantine".into();
+        state.workspace_root = workspace.clone();
+        state.cwd = workspace.clone();
+        state.mode = crate::types::Modes::Wcgw;
+        let normalized = crate::tools::edit_files::normalize_edit_call(
+            crate::tools::edit_files::EditSurface::EditFiles,
+            serde_json::json!({"thread_id":"quarantine", "workspace_root":workspace,
+                "operation":"undo", "files":[{"file_path":target,"mode":"undo","undo_id":"unused-checkpoint"}]}),
+        )?;
+        let result = crate::tools::edit_files::PreparedEditContext::prepare(
+            normalized,
+            &state,
+            crate::tool_policy::ToolPolicy::default().edit_permissions(),
+        );
+        let error = result.err().ok_or_else(|| {
+            anyhow::anyhow!("Undo must deny the reserved namespace before checkpoint lookup")
+        })?;
+        assert!(error.to_string().contains("quarantine is reserved"), "{error}");
+        assert_eq!(std::fs::read_to_string(target)?, "captured");
+        Ok(())
     }
 }
