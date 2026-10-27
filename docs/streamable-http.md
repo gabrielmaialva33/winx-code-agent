@@ -342,6 +342,13 @@ supplied as `verify_command` on `EditFiles`, saving one network/model round trip
 `WINX_SERVER_INSTRUCTIONS` are appended after those stable rules and are also included in the `Initialize` response for
 clients that do not expose handshake instructions to the model. When unsure whether a pair is still live, call `Initialize` with `type="status"` and that pair: it answers with the bound workspace, cwd, mode, runtime and command state (`session_status` in `structuredContent`) and never creates, resets or reconfigures anything; an unknown pair returns `needs_initialize`.
 
+Reattaching an existing session also includes a best-effort `data.session_status` snapshot. A true `command_running`
+means the foreground shell was occupied when observed; missing status means unknown. The observation does not reset the
+shell or wait for its command to finish. If a new foreground command receives `command_already_running`, its
+`data.command_started` is false and `data.shell_busy` is true: the returned `status_check` observes the existing execution.
+For independent work, submit a new command with `is_background=true` and an explicit working directory. Each background
+uses a separate shell and does not inherit foreground variables or functions. Do not interrupt or reset an unrelated job.
+
 Every tool advertises an `outputSchema` and returns a common `structuredContent` envelope. Existing text and image content
 remain unchanged for older clients. Some clients expose only the structured object to the model once a tool advertises
 an `outputSchema` (observed with the ChatGPT MCP connector and Claude Code), so `output` carries the delivered text as
@@ -380,6 +387,8 @@ prevent a valid tool result from being serialized remain JSON-RPC errors. `BashC
 The shell runtime produces a separate `BashCommandState` containing process status, cwd, exit code, background ID, elapsed
 time, and optional interactive turn state. The MCP adapter and MCP Tasks consume only that typed value; rendered output,
 child output, and unescaped-looking command metadata are presentation data and cannot spoof orchestration.
+A background command's public `execution_id` is `background:<bg_command_id>` and stays the same through launch, polling,
+and retained completion. Foreground execution IDs retain their existing generation-bound format.
 `BashCommand.wait_policy` selects generic execution behavior: `adaptive` (default) keeps short calls inline and promotes
 an already-running foreground command only when Tasks and generation-bound runtime actions were negotiated; `until_complete` is accepted only for a foreground Command and creates a Task immediately or
 uses a 60-second bounded synchronous fallback; `return_early` always stays inline and caps `wait_for_seconds` at 5 seconds.
@@ -552,9 +561,24 @@ initial-file count, and effective code-writer policy strength. Command text, fil
 arguments, URLs, output, bearer tokens, and raw conversation identities are never written to this sink. Ordinary warnings and diagnostics
 continue to stderr according to `RUST_LOG` and `WINX_LOG_FORMAT`.
 
+Execution events additionally carry typed, optional `exit_code` and `output_truncated`, plus stable fingerprints in
+`execution_id`, `bg_command_id`, `verification_id`, and `mutation_receipt_id` when available. For an edit with verification,
+these execution fields describe the nested command, while the receipt still identifies the edit. `verification_status`
+and `verification_replayed` distinguish an active or completed check from a reused result; a replay does not invent a new
+process or exit code. `shell_busy` and `command_started` record observed contention without logging the active command.
+`requested_wait_policy` and `requested_wait_ms` describe the caller's explicit request, separately from measured
+`duration_ms`; they do not describe an effective runtime timeout. Unknown numeric and boolean fields remain absent,
+preserving zero and false; unavailable identifier fingerprints are empty strings. These fields are additive within
+`usage_schema=1`; older records remain valid.
+
 `winx-code-agent report` discovers rotated siblings automatically, supports build/time filters, correlates tool calls with
 HTTP requests, reports latency/bytes/recovery behavior, and audits unsafe retry invariants. It disables the usage writer
 while reading, so generating a report cannot append to, rotate, or prune the observed logs.
+
+The report's `execution` section counts observations per tool call, including status polls and verification replays.
+It summarizes observed exit codes, output truncation, available correlation IDs, replay counts, and requested waits.
+These counts are not a count of distinct processes. Missing metadata in old logs is counted as unknown, never as exit
+code zero or an untruncated result.
 
 For a quick per-tool latency view across the active and rotated files:
 

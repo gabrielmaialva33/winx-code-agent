@@ -41,6 +41,7 @@ pub struct UsageReport {
     pub response_bytes: u64,
     pub initialize: InitializeUsage,
     pub recovery: RecoveryUsage,
+    pub execution: ExecutionUsage,
     pub trace_audit: TraceAudit,
 }
 
@@ -61,6 +62,27 @@ pub struct LatencySummary {
     pub p50_ms: u64,
     pub p95_ms: u64,
     pub max_ms: u64,
+}
+
+/// Call-level execution observations, including polls and idempotent replays.
+/// Unknown metadata must never be counted as exit code zero or complete output.
+#[derive(Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionUsage {
+    pub observations: u64,
+    pub exit_codes: BTreeMap<i64, u64>,
+    pub exit_code_unknown: u64,
+    pub output_truncated: u64,
+    pub output_not_truncated: u64,
+    pub output_truncation_unknown: u64,
+    pub calls_with_execution_id: u64,
+    pub calls_with_background_id: u64,
+    pub calls_with_verification_id: u64,
+    pub calls_with_mutation_receipt_id: u64,
+    pub verification_replays: u64,
+    pub requested_wait_policies: BTreeMap<String, u64>,
+    pub requested_wait_policy_unknown: u64,
+    pub requested_wait_ms: LatencySummary,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -184,6 +206,8 @@ struct ReportAccumulator {
     tools: BTreeMap<String, ToolAccumulator>,
     initialize: InitializeUsage,
     recovery: RecoveryUsage,
+    execution: ExecutionUsage,
+    requested_wait_samples: Vec<u64>,
     trace_audit: TraceAudit,
     all_durations: Vec<u64>,
     tool_request_ids: BTreeSet<String>,
@@ -246,7 +270,64 @@ impl ReportAccumulator {
             );
         }
         self.record_recovery(fields);
+        self.record_execution(fields);
         audit_tool_event(fields, &mut self.trace_audit);
+    }
+
+    fn record_execution(&mut self, fields: &serde_json::Map<String, Value>) {
+        let tool = string(fields, "tool");
+        let edit_verification = tool == "EditFiles"
+            && (!string(fields, "verification_status").is_empty()
+                || !string(fields, "verification_id").is_empty());
+        if !matches!(tool, "BashCommand" | "VerifyEdit") && !edit_verification {
+            return;
+        }
+        let execution = &mut self.execution;
+        execution.observations = execution.observations.saturating_add(1);
+        match fields.get("exit_code").and_then(Value::as_i64) {
+            Some(code) => {
+                let count = execution.exit_codes.entry(code).or_default();
+                *count = count.saturating_add(1);
+            }
+            None => execution.exit_code_unknown = execution.exit_code_unknown.saturating_add(1),
+        }
+        match fields.get("output_truncated").and_then(Value::as_bool) {
+            Some(true) => execution.output_truncated = execution.output_truncated.saturating_add(1),
+            Some(false) => {
+                execution.output_not_truncated = execution.output_not_truncated.saturating_add(1);
+            }
+            None => {
+                execution.output_truncation_unknown =
+                    execution.output_truncation_unknown.saturating_add(1);
+            }
+        }
+        execution.calls_with_execution_id = execution
+            .calls_with_execution_id
+            .saturating_add(u64::from(!string(fields, "execution_id").is_empty()));
+        execution.calls_with_background_id = execution
+            .calls_with_background_id
+            .saturating_add(u64::from(!string(fields, "bg_command_id").is_empty()));
+        execution.calls_with_verification_id = execution
+            .calls_with_verification_id
+            .saturating_add(u64::from(!string(fields, "verification_id").is_empty()));
+        execution.calls_with_mutation_receipt_id = execution
+            .calls_with_mutation_receipt_id
+            .saturating_add(u64::from(!string(fields, "mutation_receipt_id").is_empty()));
+        if fields.get("verification_replayed").and_then(Value::as_bool) == Some(true) {
+            execution.verification_replays = execution.verification_replays.saturating_add(1);
+        }
+        match fields.get("requested_wait_policy").and_then(Value::as_str) {
+            Some(policy @ ("adaptive" | "until_complete" | "return_early")) => {
+                increment_nonempty(&mut execution.requested_wait_policies, policy);
+            }
+            _ => {
+                execution.requested_wait_policy_unknown =
+                    execution.requested_wait_policy_unknown.saturating_add(1);
+            }
+        }
+        if let Some(wait) = fields.get("requested_wait_ms").and_then(Value::as_u64) {
+            self.requested_wait_samples.push(wait);
+        }
     }
 
     fn record_recovery(&mut self, fields: &serde_json::Map<String, Value>) {
@@ -282,6 +363,7 @@ impl ReportAccumulator {
     }
 
     fn finish(mut self, window: ReportWindow<'_>) -> UsageReport {
+        self.execution.requested_wait_ms = latency(self.requested_wait_samples);
         let correlated_requests =
             self.tool_request_ids.intersection(&self.http_request_ids).count();
         let overhead = self
@@ -337,6 +419,7 @@ impl ReportAccumulator {
             response_bytes: self.response_bytes,
             initialize: self.initialize,
             recovery: self.recovery,
+            execution: self.execution,
             trace_audit: self.trace_audit,
         }
     }
@@ -585,6 +668,158 @@ mod tests {
         assert_eq!(report.trace_audit.audited_tool_events, 0);
         assert_eq!(report.trace_audit.legacy_unverifiable_tool_events, 1);
         assert!(report.trace_audit.violations.is_empty());
+        Ok(())
+    }
+
+    fn report_execution_fields(fields: &[Value]) -> Result<UsageReport> {
+        let temp = tempfile::tempdir()?;
+        let base = temp.path().join("usage.jsonl");
+        let mut file = File::create(&base)?;
+        for (index, fields) in fields.iter().enumerate() {
+            let mut fields = fields
+                .as_object()
+                .ok_or_else(|| {
+                    WinxError::SerializationError("expected object fixture".to_string())
+                })?
+                .clone();
+            fields.insert("event".into(), serde_json::json!("tool_call"));
+            fields.insert("request_id".into(), serde_json::json!(format!("request-{index}")));
+            fields.entry("usage_schema").or_insert(serde_json::json!(1));
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "timestamp": "2026-10-27T12:00:00Z",
+                    "target": "winx::usage",
+                    "fields": fields,
+                })
+            )?;
+        }
+        usage_report(Some(&base), 100, 0, None)
+    }
+
+    #[test]
+    fn execution_summary_keeps_v1_metadata_unknown() -> Result<()> {
+        let report = report_execution_fields(&[
+            serde_json::json!({"tool":"BashCommand", "result_status":"completed", "outcome":"ok"}),
+            serde_json::json!({"tool":"ReadFiles", "result_status":"completed"}),
+            serde_json::json!({"tool":"EditFiles", "result_status":"completed"}),
+        ])?;
+        assert!(report.trace_audit.healthy);
+        let value = serde_json::to_value(report)
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+        let execution = &value["execution"];
+        assert_eq!(execution["observations"], 1);
+        assert_eq!(execution["exitCodeUnknown"], 1);
+        assert_eq!(execution["exitCodes"], serde_json::json!({}));
+        assert_eq!(execution["outputTruncationUnknown"], 1);
+        assert_eq!(execution["outputNotTruncated"], 0);
+        assert_eq!(execution["requestedWaitMs"]["samples"], 0);
+        Ok(())
+    }
+
+    #[test]
+    fn execution_summary_preserves_typed_exit_codes_and_truncation() -> Result<()> {
+        let report = report_execution_fields(&[
+            serde_json::json!({"tool":"BashCommand", "exit_code":0, "output_truncated":false}),
+            serde_json::json!({"tool":"BashCommand", "exit_code":7, "output_truncated":true}),
+            serde_json::json!({"tool":"BashCommand", "exit_code":-1, "output_truncated":false}),
+            serde_json::json!({"tool":"BashCommand", "exit_code":null, "output_truncated":null}),
+            serde_json::json!({"tool":"BashCommand", "exit_code":"0", "output_truncated":"false"}),
+        ])?;
+        let value = serde_json::to_value(report)
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+        let execution = &value["execution"];
+        assert_eq!(execution["exitCodes"], serde_json::json!({"-1":1, "0":1, "7":1}));
+        assert_eq!(execution["exitCodeUnknown"], 2);
+        assert_eq!(execution["outputTruncated"], 1);
+        assert_eq!(execution["outputNotTruncated"], 2);
+        assert_eq!(execution["outputTruncationUnknown"], 2);
+        Ok(())
+    }
+
+    #[test]
+    fn execution_summary_includes_flattened_edit_verification() -> Result<()> {
+        let report = report_execution_fields(&[serde_json::json!({
+            "tool":"EditFiles", "result_status":"completed_with_issues",
+            "verification_status":"failed", "error_code":"verification_failed",
+            "exit_code":3, "output_truncated":false,
+            "execution_id":"exec-fingerprint", "verification_id":"verify-fingerprint",
+            "mutation_receipt_id":"receipt-fingerprint"
+        })])?;
+        assert_eq!(report.tools["EditFiles"].error_results, 1);
+        let value = serde_json::to_value(report)
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+        let execution = &value["execution"];
+        assert_eq!(execution["observations"], 1);
+        assert_eq!(execution["exitCodes"], serde_json::json!({"3":1}));
+        assert_eq!(execution["callsWithExecutionId"], 1);
+        assert_eq!(execution["callsWithVerificationId"], 1);
+        assert_eq!(execution["callsWithMutationReceiptId"], 1);
+        Ok(())
+    }
+
+    #[test]
+    fn execution_summary_replay_does_not_invent_zero_exit() -> Result<()> {
+        let report = report_execution_fields(&[serde_json::json!({
+            "tool":"VerifyEdit", "result_status":"completed", "outcome":"ok",
+            "verification_id":"verify-fingerprint", "verification_passed":true,
+            "verification_replayed":true
+        })])?;
+        let value = serde_json::to_value(report)
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+        let execution = &value["execution"];
+        assert_eq!(execution["observations"], 1);
+        assert_eq!(execution["verificationReplays"], 1);
+        assert_eq!(execution["exitCodeUnknown"], 1);
+        assert_eq!(execution["exitCodes"], serde_json::json!({}));
+        Ok(())
+    }
+
+    #[test]
+    fn execution_summary_counts_polls_as_observations() -> Result<()> {
+        let report = report_execution_fields(&[
+            serde_json::json!({"tool":"BashCommand", "action":"command", "result_status":"running", "execution_id":"same-execution", "bg_command_id":"same-background"}),
+            serde_json::json!({"tool":"BashCommand", "action":"status_check", "result_status":"running", "execution_id":"same-execution", "bg_command_id":"same-background"}),
+            serde_json::json!({"tool":"BashCommand", "action":"status_check", "result_status":"completed", "execution_id":"same-execution", "bg_command_id":"same-background", "exit_code":0}),
+        ])?;
+        let value = serde_json::to_value(report)
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+        let execution = &value["execution"];
+        assert_eq!(execution["observations"], 3);
+        assert_eq!(execution["callsWithExecutionId"], 3);
+        assert_eq!(execution["callsWithBackgroundId"], 3);
+        assert_eq!(execution["exitCodes"], serde_json::json!({"0":1}));
+        assert_eq!(execution["exitCodeUnknown"], 2);
+        Ok(())
+    }
+
+    #[test]
+    fn execution_summary_records_requested_wait_without_sensitive_content() -> Result<()> {
+        let report = report_execution_fields(&[
+            serde_json::json!({
+                "tool":"BashCommand", "requested_wait_policy":"return_early", "requested_wait_ms":0,
+                "duration_ms":17, "arguments":{"command":"SECRET-COMMAND"}, "output":"SECRET-OUTPUT"
+            }),
+            serde_json::json!({"tool":"BashCommand", "requested_wait_policy":"until_complete", "requested_wait_ms":5000, "duration_ms":17}),
+            serde_json::json!({"tool":"BashCommand", "requested_wait_policy":"SECRET-POLICY", "requested_wait_ms":"5000", "duration_ms":17}),
+        ])?;
+        assert_eq!(report.latency.max_ms, 17);
+        let value = serde_json::to_value(report)
+            .map_err(|error| WinxError::SerializationError(error.to_string()))?;
+        let execution = &value["execution"];
+        assert_eq!(
+            execution["requestedWaitPolicies"],
+            serde_json::json!({"return_early":1,"until_complete":1})
+        );
+        assert_eq!(execution["requestedWaitPolicyUnknown"], 1);
+        assert_eq!(execution["requestedWaitMs"]["samples"], 2);
+        assert_eq!(execution["requestedWaitMs"]["averageMs"], 2500);
+        assert_eq!(execution["requestedWaitMs"]["maxMs"], 5000);
+        let serialized = value.to_string();
+        assert!(!serialized.contains("SECRET-COMMAND"));
+        assert!(!serialized.contains("SECRET-OUTPUT"));
+        assert!(!serialized.contains("SECRET-POLICY"));
         Ok(())
     }
 }

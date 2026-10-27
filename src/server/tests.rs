@@ -12,6 +12,8 @@ use crate::types::BashCommand;
 
 #[cfg(unix)]
 mod daemon_edit_tests;
+#[cfg(unix)]
+mod session_workflow_tests;
 
 mod audit_tests {
     use super::audit_summary;

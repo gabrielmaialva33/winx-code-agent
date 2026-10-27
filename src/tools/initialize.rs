@@ -5,7 +5,7 @@ use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tracing::{info, instrument, warn};
 
@@ -74,7 +74,7 @@ pub(crate) struct InitializeOutcome {
     pub(crate) temporary_artifact_stale_pruned_bytes: u64,
     pub(crate) temporary_code_map_max_calls: usize,
     pub(crate) temporary_code_map_max_unique_files: usize,
-    /// Present only for `type = "status"` probes.
+    /// Present for explicit status probes and successfully observed existing-session attaches.
     pub(crate) session_status: Option<crate::runtime::ShellSessionStatus>,
 }
 
@@ -725,7 +725,7 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
         crate::utils::orchestration::append_initialize_instructions(&mut response);
     }
 
-    Ok(InitializeOutcome {
+    let mut outcome = InitializeOutcome {
         text: response,
         transition,
         recovered_missing_session: recovered_request.is_some(),
@@ -748,7 +748,34 @@ pub(crate) async fn handle_tool_call_with_runtime_detailed(
         temporary_code_map_max_unique_files:
             crate::utils::agent_temp::MAX_DERIVED_CODE_MAP_UNIQUE_FILES,
         session_status: None,
-    })
+    };
+    // describe_session acquires this state lock itself. Attaching must remain
+    // observational and must not wait for the foreground command to finish.
+    drop(bash_state_guard);
+    if transition == InitializeTransition::AttachedExisting {
+        if let Ok(Ok(status)) =
+            tokio::time::timeout(Duration::from_secs(1), runtime.describe_session(bash_state_arc))
+                .await
+        {
+            let instruction = if status.command_running {
+                "Foreground shell is busy. status_check observes its existing execution. For \
+                 independent work, use is_background=true with an explicit working directory; \
+                 the new shell does not inherit foreground variables or functions. Do not \
+                 interrupt or reset an unrelated execution."
+            } else {
+                "Foreground shell was idle when observed."
+            };
+            let _ = writeln!(outcome.text, "\n{instruction}");
+            outcome.session_status = Some(status);
+        } else {
+            let _ = writeln!(
+                outcome.text,
+                "\nForeground command state is currently unknown. Use Initialize type=status \
+                 to inspect the session when needed; the existing shell was preserved."
+            );
+        }
+    }
+    Ok(outcome)
 }
 
 /// `Initialize(type = "status")`: describe the live session for `thread_id`

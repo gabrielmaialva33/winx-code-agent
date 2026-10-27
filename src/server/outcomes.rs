@@ -603,7 +603,14 @@ pub(super) fn bash_success_result(
     if let Some(generation) = outcome.command_generation {
         data.insert("command_generation".to_string(), json!(generation));
     }
-    if let Some(token) = outcome.execution_token.as_ref() {
+    if let Some(background_id) = outcome.result.state.background_id.as_ref() {
+        // Each background PTY starts at generation 1. Its manager-owned ID is
+        // unique and survives reaping, unlike the foreground execution token.
+        data.insert(
+            "execution_id".to_string(),
+            Value::String(format!("background:{background_id}")),
+        );
+    } else if let Some(token) = outcome.execution_token.as_ref() {
         data.insert(
             "execution_id".to_string(),
             Value::String(format!(
@@ -1063,7 +1070,14 @@ fn error_envelope(
             error_code = "command_already_running".to_string();
             retryable = true;
             retry_after_ms = Some(1_000);
-            next_action = Some(status_check_action(arguments));
+            let mut action = status_check_action(arguments);
+            action.instruction = "The requested command did not start. This status_check observes \
+                the existing foreground execution. For independent work, submit a new command \
+                with is_background=true and an explicit working directory; the new shell does \
+                not inherit foreground variables or functions. Do not interrupt or reset an \
+                unrelated execution."
+                .to_string();
+            next_action = Some(action);
         }
         WinxError::TemporaryArtifactPolicy { temporary_artifact_dir, .. } => {
             status = ToolResultStatus::InvalidInput;
@@ -1284,6 +1298,10 @@ fn error_envelope(
             );
             data.insert("ordinary_shell_edit_fallback".to_string(), Value::Bool(false));
         }
+    }
+    if matches!(classified_error, WinxError::CommandAlreadyRunning { .. }) {
+        data.insert("command_started".to_string(), Value::Bool(false));
+        data.insert("shell_busy".to_string(), Value::Bool(true));
     }
     ToolResultEnvelope {
         status,
@@ -2480,5 +2498,78 @@ mod tests {
             .and_then(|value| value.get("data"))
             .and_then(|value| value.get("output_format"))
             .is_none());
+    }
+
+    fn background_usage_result(id: &str, retained_completion: bool) -> Value {
+        let mut outcome =
+            BashCommandRuntimeResult::legacy(crate::tools::bash_command::BashCommandResult {
+                output: String::new(),
+                state: BashCommandState {
+                    process_status: if retained_completion {
+                        crate::tools::bash_command::BashProcessStatus::Exited
+                    } else {
+                        crate::tools::bash_command::BashProcessStatus::Running
+                    },
+                    background_id: Some(id.to_string()),
+                    running_for_seconds: None,
+                    exit_code: retained_completion.then_some(0),
+                    cwd: "/workspace".into(),
+                    turn_state: None,
+                },
+            });
+        if !retained_completion {
+            outcome.command_generation = Some(1);
+            outcome.execution_token = Some(crate::runtime::ShellExecutionToken {
+                guardian_epoch: "guardian".to_string(),
+                session_epoch: "session".to_string(),
+                generation: 1,
+            });
+        }
+        bash_success_result(None, outcome, false)
+            .expect("background response")
+            .structured_content
+            .expect("structured background response")
+    }
+
+    #[test]
+    fn independent_background_commands_have_distinct_execution_ids() {
+        let first = background_usage_result("0000000000000001", false);
+        let second = background_usage_result("0000000000000002", false);
+        assert!(first["data"]["execution_id"].as_str().is_some());
+        assert!(second["data"]["execution_id"].as_str().is_some());
+        assert_ne!(first["data"]["execution_id"], second["data"]["execution_id"]);
+    }
+
+    #[test]
+    fn background_execution_id_survives_retained_completion() {
+        let started = background_usage_result("0000000000000001", false);
+        let completed = background_usage_result("0000000000000001", true);
+        assert!(completed["data"]["execution_id"].as_str().is_some());
+        assert_eq!(started["data"]["execution_id"], completed["data"]["execution_id"]);
+        assert_eq!(completed["data"]["exit_code"], 0);
+    }
+
+    #[test]
+    fn busy_shell_marks_the_rejected_command_as_not_started() {
+        let result = tool_failure(
+            "BashCommand",
+            &WinxError::CommandAlreadyRunning {
+                current_command: "existing-job".to_string(),
+                duration_seconds: 2.0,
+            },
+            Some(&json!({
+                "thread_id": "thread",
+                "workspace_root": "/workspace",
+                "action_json": {"type": "command", "command": "independent-job"}
+            })),
+        )
+        .expect("busy response");
+        let structured = result.structured_content.expect("structured busy response");
+        assert_eq!(structured["errorCode"], "command_already_running");
+        assert_eq!(structured["data"]["command_started"], false);
+        assert_eq!(structured["data"]["shell_busy"], true);
+        assert!(structured["data"].get("execution_id").is_none());
+        assert_eq!(structured["nextAction"]["arguments"]["action_json"]["type"], "status_check");
+        assert_eq!(structured["retrySameCall"], false);
     }
 }

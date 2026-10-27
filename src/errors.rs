@@ -281,7 +281,7 @@ pub enum WinxError {
     InteractiveCommandDetected { command: String },
 
     /// Command already running error
-    #[error("A command is already running: '{current_command}' (for {duration_seconds:.1}s). Use status_check, send_text, or interrupt.")]
+    #[error("The requested command did not start: the foreground shell is already running '{current_command}' (for {duration_seconds:.1}s). status_check observes that existing execution. For independent work, use is_background=true with an explicit working directory; the new shell does not inherit foreground variables or functions. Do not interrupt or reset an unrelated execution.")]
     CommandAlreadyRunning { current_command: String, duration_seconds: f64 },
 
     /// Process cleanup error

@@ -22,6 +22,7 @@ pub(super) struct UsageEvent {
     tool: String,
     action: String,
     command_kind: &'static str,
+    requested_wait: UsageWaitMetadata,
     ws: String,
     principal: String,
     thread_id: String,
@@ -58,6 +59,7 @@ pub(super) struct UsageRecoveryMetadata<'a> {
 pub(super) struct UsageResultMetadata<'a> {
     pub error_code: &'a str,
     pub recovery: UsageRecoveryMetadata<'a>,
+    pub execution: UsageExecutionMetadata,
     pub source_kind: &'a str,
     pub payload_bytes: u64,
     pub source_bytes: u64,
@@ -88,6 +90,7 @@ pub(super) fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageRes
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default(),
         recovery: usage_recovery_metadata(structured, domain_data),
+        execution: usage_execution_metadata(domain_data),
         source_kind: structured
             .and_then(|structured| structured.get("sourceKind"))
             .or_else(|| domain_data.and_then(|data| data.get("source_kind")))
@@ -175,10 +178,7 @@ fn usage_recovery_metadata<'a>(
             .and_then(|data| data.get("fresh_read_required"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
-        verification_status: domain_data
-            .and_then(|data| data.get("verification_status"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or_default(),
+        verification_status: verification_status(structured, domain_data),
         mutation_transition: domain_data
             .and_then(|data| data.get("mutation_transition"))
             .and_then(serde_json::Value::as_str)
@@ -198,6 +198,151 @@ fn usage_recovery_metadata<'a>(
             None => "",
         },
     }
+}
+
+#[derive(Default)]
+pub(super) struct UsageExecutionMetadata {
+    pub exit_code: Option<i64>,
+    pub output_truncated: Option<bool>,
+    pub execution_id: String,
+    pub bg_command_id: String,
+    pub verification_id: String,
+    pub mutation_receipt_id: String,
+    pub verification_replayed: Option<bool>,
+    pub command_started: Option<bool>,
+    pub shell_busy: Option<bool>,
+}
+
+#[derive(Default)]
+struct UsageWaitMetadata {
+    policy: Option<&'static str>,
+    milliseconds: Option<u64>,
+}
+
+fn execution_data(domain: Option<&serde_json::Value>) -> Option<&serde_json::Value> {
+    match domain.and_then(|data| data.get("verification")) {
+        Some(verification) => verification.get("data"),
+        None => domain,
+    }
+}
+
+fn execution_exit_code(domain: Option<&serde_json::Value>) -> Option<i64> {
+    let data = execution_data(domain);
+    if optional_bool(data, "command_started") == Some(false) {
+        return None;
+    }
+    data.and_then(|data| data.get("exit_code")).and_then(serde_json::Value::as_i64).or_else(|| {
+        domain
+            .and_then(|data| data.get("verification_exit_code"))
+            .and_then(serde_json::Value::as_i64)
+    })
+}
+
+fn optional_bool(data: Option<&serde_json::Value>, key: &str) -> Option<bool> {
+    data.and_then(|data| data.get(key)).and_then(serde_json::Value::as_bool)
+}
+
+fn optional_id<'a>(data: Option<&'a serde_json::Value>, key: &str) -> Option<&'a str> {
+    data.and_then(|data| data.get(key))
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+}
+
+fn fingerprinted_id(prefix: &str, id: Option<&str>) -> String {
+    id.map_or_else(String::new, |id| short_fingerprint(prefix, id))
+}
+
+fn usage_execution_metadata(domain: Option<&serde_json::Value>) -> UsageExecutionMetadata {
+    let data = execution_data(domain);
+    let command_started = optional_bool(data, "command_started");
+    let observed = if command_started == Some(false) { None } else { data };
+    UsageExecutionMetadata {
+        exit_code: execution_exit_code(domain),
+        output_truncated: optional_bool(observed, "output_truncated"),
+        execution_id: fingerprinted_id("e", optional_id(observed, "execution_id")),
+        bg_command_id: fingerprinted_id("b", optional_id(observed, "bg_command_id")),
+        verification_id: fingerprinted_id(
+            "v",
+            optional_id(domain, "verification_id").or_else(|| optional_id(data, "verification_id")),
+        ),
+        mutation_receipt_id: fingerprinted_id("m", optional_id(domain, "mutation_receipt_id")),
+        verification_replayed: optional_bool(domain, "verification_replayed")
+            .or_else(|| optional_bool(data, "verification_replayed")),
+        command_started,
+        shell_busy: optional_bool(data, "shell_busy").or_else(|| {
+            optional_bool(domain.and_then(|data| data.get("session_status")), "command_running")
+        }),
+    }
+}
+
+fn verification_status<'a>(
+    structured: Option<&'a serde_json::Value>,
+    domain: Option<&'a serde_json::Value>,
+) -> &'a str {
+    if let Some(
+        status @ ("completed" | "passed" | "failed" | "running" | "awaiting_input"
+        | "awaiting_approval"),
+    ) =
+        domain.and_then(|data| data.get("verification_status")).and_then(serde_json::Value::as_str)
+    {
+        return status;
+    }
+    let nested = domain.and_then(|data| data.get("verification"));
+    let is_verification = nested.is_some()
+        || optional_id(domain, "verification_id").is_some()
+        || string_field(domain, "action") == "verify"
+        || string_field(structured, "tool") == "VerifyEdit";
+    if !is_verification {
+        return "";
+    }
+    let status = string_field(nested.or(structured), "status");
+    // Legacy VerifyEdit deliberately reports verification_passed=false while active.
+    if matches!(status, "running" | "awaiting_input" | "awaiting_approval") {
+        return status;
+    }
+    if let Some(code) = execution_exit_code(domain) {
+        return if code == 0 { "passed" } else { "failed" };
+    }
+    match optional_bool(domain, "verification_passed") {
+        Some(true) => return "passed",
+        Some(false) => return "failed",
+        None => {}
+    }
+    if matches!(status, "failed" | "invalid_input" | "denied" | "not_found" | "recovery_exhausted")
+    {
+        return "failed";
+    }
+    ""
+}
+
+fn usage_wait_metadata(
+    tool: &str,
+    arguments: Option<&rmcp::model::JsonObject>,
+) -> UsageWaitMetadata {
+    let wait_key = match tool {
+        "BashCommand" | "VerifyEdit" => "wait_for_seconds",
+        "EditFiles" => "verify_wait_for_seconds",
+        _ => return UsageWaitMetadata::default(),
+    };
+    let policy = if tool == "BashCommand" {
+        match arguments
+            .and_then(|arguments| arguments.get("wait_policy"))
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("adaptive") => Some("adaptive"),
+            Some("until_complete") => Some("until_complete"),
+            Some("return_early") => Some("return_early"),
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let milliseconds = arguments
+        .and_then(|arguments| arguments.get(wait_key))
+        .and_then(serde_json::Value::as_f64)
+        .and_then(|seconds| std::time::Duration::try_from_secs_f64(seconds).ok())
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+    UsageWaitMetadata { policy, milliseconds }
 }
 
 impl UsageEvent {
@@ -282,6 +427,7 @@ impl UsageEvent {
             tool: request.name.to_string(),
             action,
             command_kind,
+            requested_wait: usage_wait_metadata(request.name.as_ref(), arguments),
             ws,
             principal: scope
                 .principal()
@@ -345,7 +491,8 @@ impl UsageEvent {
         let shell_reset_retry_after_seconds = u64_field(data, "shell_reset_retry_after_seconds");
         let temporary_stale_pruned_files = u64_field(data, "temporary_artifact_stale_pruned_files");
         let temporary_stale_pruned_bytes = u64_field(data, "temporary_artifact_stale_pruned_bytes");
-        let error_code = usage_result_metadata(result).error_code;
+        let metadata = usage_result_metadata(result);
+        let error_code = metadata.error_code;
         tracing::info!(
             target: "winx::usage",
             event = "tool_call",
@@ -371,6 +518,7 @@ impl UsageEvent {
             build_dirty = self.build.dirty,
             batch_items = self.batch_items,
             worker_limit = self.worker_limit,
+            shell_busy = metadata.execution.shell_busy,
             initialize_transition,
             initialize_reused,
             initialize_recovered_missing_session,
@@ -431,6 +579,17 @@ impl UsageEvent {
             batch_items,
             worker_limit = self.worker_limit,
             error_code = metadata.error_code,
+            exit_code = metadata.execution.exit_code,
+            output_truncated = metadata.execution.output_truncated,
+            execution_id = %metadata.execution.execution_id,
+            bg_command_id = %metadata.execution.bg_command_id,
+            verification_id = %metadata.execution.verification_id,
+            mutation_receipt_id = %metadata.execution.mutation_receipt_id,
+            verification_replayed = metadata.execution.verification_replayed,
+            command_started = metadata.execution.command_started,
+            shell_busy = metadata.execution.shell_busy,
+            requested_wait_policy = self.requested_wait.policy,
+            requested_wait_ms = self.requested_wait.milliseconds,
             next_action_tool = metadata.recovery.next_action_tool,
             required_read_count = metadata.recovery.required_read_count,
             retry_same_call = metadata.recovery.retry_same_call,
@@ -621,5 +780,295 @@ mod tests {
         assert!(!kind.contains("secret"));
         assert_eq!(classify_command("cargo test --all-features"), "rust_toolchain");
         assert_eq!(classify_command("/usr/bin/rg password ."), "search");
+    }
+
+    #[derive(Clone)]
+    struct UsageCapture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for UsageCapture {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn captured_usage(
+        tool: &str,
+        action: &str,
+        envelope: serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer_bytes = bytes.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(move || UsageCapture(writer_bytes.clone()))
+            .finish();
+        let usage = UsageEvent {
+            tool: tool.to_string(),
+            action: action.to_string(),
+            command_kind: "other",
+            requested_wait: UsageWaitMetadata::default(),
+            ws: String::new(),
+            principal: "test-principal".to_string(),
+            thread_id: "test-thread".to_string(),
+            request_id: "request-fixture".to_string(),
+            client_name: "test-client".to_string(),
+            client_version: "1".to_string(),
+            protocol: "test-protocol".to_string(),
+            client_session: "stateless".to_string(),
+            conversation_source: "none".to_string(),
+            conversation_id: String::new(),
+            workspace_id: "workspace-fixture".to_string(),
+            workspace_coherence: "validated".to_string(),
+            batch_items: 0,
+            worker_limit: 0,
+            build: BuildIdentity::current(),
+            started: std::time::Instant::now(),
+        };
+        let status = envelope["status"].as_str().unwrap_or("completed").to_string();
+        let mut result = CallToolResult::success(Vec::new());
+        result.structured_content = Some(envelope);
+        tracing::subscriber::with_default(subscriber, || {
+            usage.emit("ok", &status, 0, Some(&result));
+        });
+        let captured = bytes.lock().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let event: serde_json::Value = serde_json::from_slice(&captured)?;
+        Ok(event["fields"].clone())
+    }
+
+    #[test]
+    fn usage_json_preserves_zero_false_and_opaque_execution_identity() -> anyhow::Result<()> {
+        let fields = captured_usage(
+            "BashCommand",
+            "command",
+            serde_json::json!({
+                "status":"completed", "tool":"BashCommand",
+                "data": {
+                    "action":"command", "exit_code":0, "output_truncated":false,
+                    "execution_id":"execution-example", "bg_command_id":"background-example"
+                }
+            }),
+        )?;
+        assert_eq!(fields["exit_code"], 0);
+        assert_eq!(fields["output_truncated"], false);
+        assert_eq!(fields["execution_id"], "e_ce249da9eeb4e561");
+        assert_eq!(fields["bg_command_id"], "b_51d1cad915c8c310");
+        assert!(!fields.to_string().contains("execution-example"));
+        assert!(!fields.to_string().contains("background-example"));
+        Ok(())
+    }
+
+    #[test]
+    fn usage_json_uses_nested_verification_execution_and_keeps_outer_receipt() -> anyhow::Result<()>
+    {
+        let fields = captured_usage(
+            "EditFiles",
+            "",
+            serde_json::json!({
+                "status":"completed_with_issues", "tool":"EditFiles", "errorCode":"verification_failed",
+                "data": {
+                    "edit_applied":true, "output_truncated":false,
+                    "mutation_receipt_id":"receipt-example", "verification_id":"verification-example",
+                    "verification_status":"failed", "verification_passed":false,
+                    "verification_exit_code":7,
+                    "verification": {
+                        "status":"completed", "tool":"BashCommand",
+                        "data":{"action":"verify", "exit_code":7, "output_truncated":true,
+                                "execution_id":"execution-example"}
+                    }
+                }
+            }),
+        )?;
+        assert_eq!(fields["exit_code"], 7);
+        assert_eq!(fields["output_truncated"], true);
+        assert_eq!(fields["verification_status"], "failed");
+        assert_eq!(fields["execution_id"], "e_ce249da9eeb4e561");
+        assert_eq!(fields["verification_id"], "v_7cd3a6e41039e056");
+        assert_eq!(fields["mutation_receipt_id"], "m_922cfc84fd64e8f5");
+        Ok(())
+    }
+
+    #[test]
+    fn usage_json_active_legacy_verification_is_not_a_failed_check() -> anyhow::Result<()> {
+        let fields = captured_usage(
+            "VerifyEdit",
+            "verification",
+            serde_json::json!({
+                "status":"running", "tool":"VerifyEdit",
+                "data": {
+                    "verification_id":"verification-example", "verification_passed":false,
+                    "verification": {
+                        "status":"running", "tool":"BashCommand",
+                        "data":{"action":"verify", "output_truncated":false,
+                                "execution_id":"execution-example"}
+                    }
+                }
+            }),
+        )?;
+        assert_eq!(fields["verification_status"], "running");
+        assert_eq!(fields["verification_id"], "v_7cd3a6e41039e056");
+        assert!(fields.get("exit_code").is_none_or(serde_json::Value::is_null));
+        assert_eq!(fields["output_truncated"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn usage_json_approved_replay_does_not_invent_a_new_execution() -> anyhow::Result<()> {
+        let fields = captured_usage(
+            "BashCommand",
+            "verify",
+            serde_json::json!({
+                "status":"completed", "tool":"BashCommand",
+                "data": {
+                    "action":"verify", "verification_id":"verification-example",
+                    "verification_passed":true, "verification_replayed":true
+                }
+            }),
+        )?;
+        assert_eq!(fields["verification_status"], "passed");
+        assert_eq!(fields["verification_replayed"], true);
+        assert_eq!(fields["verification_id"], "v_7cd3a6e41039e056");
+        assert!(fields.get("exit_code").is_none_or(serde_json::Value::is_null));
+        assert!(fields.get("output_truncated").is_none_or(serde_json::Value::is_null));
+        assert_eq!(fields["execution_id"], "");
+        Ok(())
+    }
+
+    #[test]
+    fn usage_json_keeps_unknown_execution_fields_and_sensitive_values_private() -> anyhow::Result<()>
+    {
+        let fields = captured_usage(
+            "BashCommand",
+            "command",
+            serde_json::json!({
+                "status":"completed", "tool":"BashCommand", "output":"SECRET-OUTPUT",
+                "data": {
+                    "action":"command", "exit_code":"0", "output_truncated":"false",
+                    "execution_id":"SECRET-EXECUTION-ID", "command":"TOKEN=SECRET-COMMAND",
+                    "url":"https://private.example/?token=SECRET-URL"
+                }
+            }),
+        )?;
+        assert!(fields.get("exit_code").is_none_or(serde_json::Value::is_null));
+        assert!(fields.get("output_truncated").is_none_or(serde_json::Value::is_null));
+        assert_eq!(fields["execution_id"], "e_b87bc247c7fa135c");
+        let json = fields.to_string();
+        for sentinel in ["SECRET-OUTPUT", "SECRET-COMMAND", "SECRET-URL", "SECRET-EXECUTION-ID"] {
+            assert!(!json.contains(sentinel), "sensitive value was recorded: {sentinel}");
+        }
+        Ok(())
+    }
+    #[test]
+    fn usage_json_initialize_records_busy_state_without_recording_the_command() -> anyhow::Result<()>
+    {
+        let fields = captured_usage(
+            "Initialize",
+            "",
+            serde_json::json!({
+                "status":"completed", "tool":"Initialize",
+                "data": {
+                    "initialize_transition":"attached_existing", "initialize_reused":true,
+                    "session_status":{"command_running":true, "running_command_id":"SECRET-ACTIVE-COMMAND"}
+                }
+            }),
+        )?;
+        assert_eq!(fields["shell_busy"], true);
+        assert!(fields.get("exit_code").is_none_or(serde_json::Value::is_null));
+        assert!(!fields.to_string().contains("SECRET-ACTIVE-COMMAND"));
+        Ok(())
+    }
+
+    #[test]
+    fn usage_json_blocked_command_does_not_claim_the_blocking_execution() -> anyhow::Result<()> {
+        let fields = captured_usage(
+            "BashCommand",
+            "command",
+            serde_json::json!({
+                "status":"running", "tool":"BashCommand", "errorCode":"command_already_running",
+                "data": {
+                    "command_started":false, "shell_busy":true,
+                    "running_command":"SECRET-ACTIVE-COMMAND"
+                }
+            }),
+        )?;
+        assert_eq!(fields["command_started"], false);
+        assert_eq!(fields["shell_busy"], true);
+        assert_eq!(fields["execution_id"], "");
+        assert!(fields.get("exit_code").is_none_or(serde_json::Value::is_null));
+        assert!(!fields.to_string().contains("SECRET-ACTIVE-COMMAND"));
+        Ok(())
+    }
+
+    #[test]
+    fn usage_json_completed_legacy_verification_preserves_explicit_failure() -> anyhow::Result<()> {
+        let fields = captured_usage(
+            "VerifyEdit",
+            "verification",
+            serde_json::json!({
+                "status":"completed", "tool":"VerifyEdit",
+                "data": {
+                    "verification_id":"verification-example", "verification_passed":false,
+                    "verification":{"status":"completed", "tool":"BashCommand"}
+                }
+            }),
+        )?;
+        assert_eq!(fields["verification_status"], "failed");
+        assert!(fields.get("exit_code").is_none_or(serde_json::Value::is_null));
+        Ok(())
+    }
+
+    #[test]
+    fn usage_json_missing_nested_execution_does_not_reuse_the_edit_truncation_flag(
+    ) -> anyhow::Result<()> {
+        let fields = captured_usage(
+            "EditFiles",
+            "",
+            serde_json::json!({
+                "status":"completed_with_issues", "tool":"EditFiles",
+                "data": {
+                    "output_truncated":false, "verification_id":"verification-example",
+                    "verification_exit_code":-1,
+                    "verification":{"status":"failed", "tool":"BashCommand"}
+                }
+            }),
+        )?;
+        assert_eq!(fields["verification_id"], "v_7cd3a6e41039e056");
+        assert_eq!(fields["exit_code"], -1);
+        assert!(fields.get("output_truncated").is_none_or(serde_json::Value::is_null));
+        Ok(())
+    }
+
+    #[test]
+    fn usage_wait_metadata_preserves_explicit_zero_and_fractional_seconds() {
+        let request = serde_json::json!({"wait_policy":"return_early", "wait_for_seconds":0});
+        let wait = usage_wait_metadata("BashCommand", request.as_object());
+        assert_eq!(wait.policy, Some("return_early"));
+        assert_eq!(wait.milliseconds, Some(0));
+        let request = serde_json::json!({"verify_wait_for_seconds":0.125});
+        let wait = usage_wait_metadata("EditFiles", request.as_object());
+        assert_eq!(wait.policy, None);
+        assert_eq!(wait.milliseconds, Some(125));
+    }
+
+    #[test]
+    fn usage_wait_metadata_keeps_absent_and_invalid_values_unknown() {
+        for request in [
+            serde_json::json!({}),
+            serde_json::json!({"wait_policy":"SECRET-POLICY", "wait_for_seconds":-1}),
+            serde_json::json!({"wait_policy":false, "wait_for_seconds":"5"}),
+            serde_json::json!({"wait_policy":null, "wait_for_seconds":null}),
+        ] {
+            let wait = usage_wait_metadata("BashCommand", request.as_object());
+            assert_eq!(wait.policy, None);
+            assert_eq!(wait.milliseconds, None);
+        }
     }
 }
