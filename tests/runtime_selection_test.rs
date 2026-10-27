@@ -1,5 +1,6 @@
+use std::collections::BTreeSet;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
@@ -46,6 +47,25 @@ async fn terminate_test_daemon(socket: &Path, pid: u32) -> anyhow::Result<()> {
         let _ = DaemonClient::new(socket).shutdown().await;
         Ok(())
     }
+}
+
+/// Stop the winner of a concurrent claim and every late claimant. A loser keeps
+/// retrying the socket lock for a short window (`CLAIM_RETRY_WINDOW` in the
+/// transport); one still retrying when the winner dies inherits the dead socket
+/// and becomes a daemon nobody asked for, outliving the test's temp dir.
+async fn terminate_test_daemon_and_late_claimants(socket: &Path, pid: u32) -> anyhow::Result<()> {
+    terminate_test_daemon(socket, pid).await?;
+    let mut terminated = BTreeSet::from([pid]);
+    let deadline = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < deadline {
+        if let Ok(hello) = DaemonClient::new(socket).hello().await {
+            if terminated.insert(hello.daemon_pid) {
+                terminate_test_daemon(socket, hello.daemon_pid).await?;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -136,7 +156,6 @@ async fn concurrent_auto_spawns_converge_on_one_daemon() -> anyhow::Result<()> {
     } else {
         Err(anyhow::anyhow!("expected one daemon behind the socket, saw pids {pids:?}"))
     };
-    terminate_test_daemon(&socket, hello.daemon_pid).await?;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    terminate_test_daemon_and_late_claimants(&socket, hello.daemon_pid).await?;
     validation
 }
