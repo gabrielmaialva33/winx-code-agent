@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use crate::state::execution_history::OutputSource;
+use crate::state::execution_history::{ObservationRequest, OutputSource};
 
 #[derive(Clone, Debug, Deserialize, JsonSchema)]
 pub(super) struct ExecutionRequest {
@@ -30,6 +30,15 @@ pub(super) enum ExecutionAction {
         cursor: Option<String>,
         #[serde(default)]
         page_bytes: Option<usize>,
+    },
+    /// One bounded pass: compact metadata and independent output pages.
+    Observe {
+        #[schemars(length(min = 1, max = 32))]
+        items: Vec<ObservationRequest>,
+        /// Operation budget, not lifecycle waiting. Zero grants 250 ms.
+        #[serde(default)]
+        #[schemars(range(min = 0, max = 30))]
+        timeout_seconds: Option<f32>,
     },
     Explain {
         execution_id: String,

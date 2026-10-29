@@ -163,6 +163,8 @@ async fn changes_before_deadline(
 fn wait_reply(changes: &HistoryChanges, deadline_reached: bool, started: Instant) -> WorkflowReply {
     let timed_out = deadline_reached && changes.executions.is_empty() && !changes.resync_required;
     WorkflowReply {
+        status: super::ToolResultStatus::Completed,
+        error_code: None,
         message: if changes.resync_required {
             "The watched catalog changed retention; resynchronize with this snapshot and cursor."
         } else if timed_out {

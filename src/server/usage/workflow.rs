@@ -39,6 +39,7 @@ impl UsageWorkflowRequestMetadata {
             Some("list") => "list",
             Some("get") => "get",
             Some("read") => "read",
+            Some("observe") if tool == "Execution" => "observe",
             Some("explain") => "explain",
             Some("wait") => "wait",
             Some("prompt") if tool == "Agent" => "prompt",

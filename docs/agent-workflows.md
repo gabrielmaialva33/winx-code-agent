@@ -82,6 +82,68 @@ including after exit. A supported runtime refresh makes at most one additional f
 inspection against the same execution identity; later refreshes retry while capture remains
 pending, even without new activity. Reads continue to expose the available retained text.
 
+## Observe several executions in one call
+
+Use `observe` when a plugin client needs compact status and output together:
+
+```json
+{
+  "thread_id": "<initialized-thread>",
+  "workspace_root": "/absolute/initialized/workspace",
+  "action": {
+    "type": "observe",
+    "items": [
+      {"execution_id": "<build-id>", "page_bytes": 2048},
+      {"execution_id": "<test-id>", "source": "output", "page_bytes": 4096},
+      {"execution_id": "<test-id>", "source": "screen", "page_bytes": 2048}
+    ],
+    "timeout_seconds": 5
+  }
+}
+```
+
+The result's `data.items` follows request order. Each item has compact `execution`
+metadata, an optional `page`, a finite `status`, and an `errors` array. Process
+status, exit code, observed times, and output-pending state retain their existing
+meaning. Use `get` or `explain` for command details, runtime identities, or recognition
+evidence. A nonzero process exit is a successfully observed outcome, not a failed
+observation.
+
+Supply 1–32 items. Each page defaults to 2,048 bytes, accepts 4–65,536 bytes, and the
+sum of all requested page sizes must not exceed 65,536 bytes. This limits raw page
+text, not serialized response size or model tokens. Source defaults to `output`.
+Duplicate execution/source pairs, malformed IDs, and invalid budgets reject the
+whole request before session admission or history access.
+
+Page cursors are independent and interchangeable with `read` for the same scope,
+execution, and source. A missing execution, invalid cursor, refresh failure, or
+unreadable payload affects its item; successful siblings and available metadata
+remain. Inspect every item's `errors`, whose stages distinguish `refresh` from
+`read`. Any item error produces `completed_with_issues` and the fixed
+`execution_observation_issues` code. Retention gaps and snapshot changes retain
+the normal successful resynchronization-page semantics.
+
+The server refreshes each distinct eligible execution once, then reads all final
+metadata and pages in one catalog transaction. A refresh may include a metadata
+inspection and a full-output capture. The transaction also produces
+`data.catalog_cursor`, usable as `wait.after`; it is separate from page cursors.
+Runtime observations across different processes are not simultaneous. Unsupported
+live observation still permits retained reads; timestamps, unknown state, and
+`output_pending` expose the limits of retained information.
+
+The optional operation deadline defaults to 5 seconds and accepts finite values
+from 0 through 30; zero grants a 250 ms budget. One deadline covers session
+admission, runtime observation, and catalog access. This is a single pass without
+lifecycle waiting. An expired deadline or a catalog-wide failure returns an error
+without a success cursor. A started blocking catalog operation may finish after
+the response deadline under the existing bounded file-lock retry.
+
+Output appears once in structured item pages, with normal response redaction and
+without a concatenated top-level `output`. Neither output nor screen observation
+consumes the legacy BashCommand delivery cursor. Usage reports classify this as
+`Execution / observe / native`; the operation deadline does not add lifecycle
+wait or prompt metrics.
+
 ## Wait for changes across executions
 
 ```json

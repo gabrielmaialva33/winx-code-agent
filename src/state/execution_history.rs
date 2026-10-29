@@ -3,9 +3,15 @@
 //! Runtime identities and process states are authoritative. Stored output is a
 //! projection for reading; it never determines completion, ownership or routing.
 
+mod observation;
 mod paging;
 mod storage;
 mod update;
+
+pub use observation::{
+    validate_observation_requests, CatalogObservation, ObservationItem, ObservationRequest,
+    DEFAULT_OBSERVATION_PAGE_BYTES, MAX_OBSERVATION_ITEMS, MAX_OBSERVATION_OUTPUT_BYTES,
+};
 
 use std::path::PathBuf;
 

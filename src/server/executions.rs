@@ -1,6 +1,7 @@
 //! Session-scoped observation tools; they never send terminal input.
 use crate::server::usage::lifecycle::{phase, Phase};
 pub(super) mod history;
+mod observe;
 mod wait;
 
 use std::path::Path;
@@ -32,6 +33,8 @@ pub(super) struct WorkflowContext {
 }
 
 pub(super) struct WorkflowReply {
+    pub status: ToolResultStatus,
+    pub error_code: Option<&'static str>,
     pub message: String,
     pub output: Option<String>,
     pub data: Value,
@@ -43,9 +46,9 @@ pub(super) fn workflow_result(
 ) -> Result<CallToolResult, McpError> {
     workflow_envelope(
         tool,
-        ToolResultStatus::Completed,
+        reply.status,
         &reply.message,
-        None,
+        reply.error_code,
         reply.output,
         reply.data,
     )
@@ -88,11 +91,8 @@ pub(super) fn workflow_envelope(
     Ok(result)
 }
 
-pub(super) fn history_failure(
-    tool: &str,
-    error: &HistoryError,
-) -> Result<CallToolResult, McpError> {
-    let (status, code) = match error {
+pub(super) fn history_error_details(error: &HistoryError) -> (ToolResultStatus, &'static str) {
+    match error {
         HistoryError::NotFound => (ToolResultStatus::NotFound, "execution_not_found"),
         HistoryError::InvalidInput(_) => {
             (ToolResultStatus::InvalidInput, "invalid_workflow_request")
@@ -107,7 +107,14 @@ pub(super) fn history_failure(
         HistoryError::Io(_) | HistoryError::Json(_) => {
             (ToolResultStatus::Failed, "execution_history_unavailable")
         }
-    };
+    }
+}
+
+pub(super) fn history_failure(
+    tool: &str,
+    error: &HistoryError,
+) -> Result<CallToolResult, McpError> {
+    let (status, code) = history_error_details(error);
     workflow_envelope(tool, status, &error.to_string(), Some(code), None, json!({}))
 }
 
@@ -166,7 +173,7 @@ impl WinxService {
             tokio::time::timeout_at(timing.deadline(), operation).await.map_err(|_| {
                 HistoryError::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    "execution wait deadline elapsed before the session context could be acquired",
+                    "execution workflow deadline elapsed before the session context could be acquired",
                 ))
             })
         } else {
@@ -184,8 +191,16 @@ impl WinxService {
         let request: ExecutionRequest = serde_json::from_value(args.clone()).map_err(|error| {
             McpError::invalid_request(format!("Invalid Execution parameters: {error}"), None)
         })?;
+        if let ExecutionAction::Observe { items, .. } = &request.action {
+            if let Err(error) =
+                crate::state::execution_history::validate_observation_requests(items)
+            {
+                return history_failure("Execution", &error);
+            }
+        }
         let wait_timing = match &request.action {
-            ExecutionAction::Wait { timeout_seconds, .. } => {
+            ExecutionAction::Wait { timeout_seconds, .. }
+            | ExecutionAction::Observe { timeout_seconds, .. } => {
                 match WaitTiming::new(*timeout_seconds) {
                     Ok(timing) => Some(timing),
                     Err(error) => return history_failure("Execution", &error),
@@ -218,6 +233,8 @@ impl WinxService {
             ExecutionAction::Get { execution_id } => {
                 let record = self.execution_record(context, &execution_id, None).await?;
                 Ok(WorkflowReply {
+                    status: ToolResultStatus::Completed,
+                    error_code: None,
                     message: "Retained execution metadata.".into(),
                     output: None,
                     data: json!({ "execution": record }),
@@ -226,6 +243,8 @@ impl WinxService {
             ExecutionAction::Explain { execution_id, recognizer } => {
                 let record = self.execution_record(context, &execution_id, recognizer).await?;
                 Ok(WorkflowReply {
+                    status: ToolResultStatus::Completed,
+                    error_code: None,
                     message: "Runtime state and the recognition evidence captured with it.".into(),
                     output: None,
                     data: json!({
@@ -251,6 +270,8 @@ impl WinxService {
                 })
                 .await?;
                 Ok(WorkflowReply {
+                    status: ToolResultStatus::Completed,
+                    error_code: None,
                     message: if page.resync_required {
                         "Output retention changed; continue with next_cursor to resynchronize."
                     } else {
@@ -264,6 +285,9 @@ impl WinxService {
                         "output_activity_seq": record.output_activity_seq,
                     }),
                 })
+            }
+            ExecutionAction::Observe { items, timeout_seconds } => {
+                self.observe_executions(context, items, timeout_seconds, wait_timing).await
             }
             ExecutionAction::Wait { execution_ids, after, events, timeout_seconds } => {
                 self.wait_for_executions(
@@ -296,6 +320,8 @@ impl WinxService {
         let omitted = snapshot.executions.len().saturating_sub(limit);
         snapshot.executions.truncate(limit);
         Ok(WorkflowReply {
+            status: ToolResultStatus::Completed,
+            error_code: None,
             message: "Executions retained for this principal, thread and workspace.".into(),
             output: None,
             data: json!({ "catalog": snapshot, "omitted": omitted }),

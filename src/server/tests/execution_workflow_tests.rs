@@ -42,6 +42,8 @@ async fn execution_requires_an_initialized_session() -> anyhow::Result<()> {
 
 #[cfg(unix)]
 mod real_runtime {
+    mod observe;
+
     use super::*;
     use anyhow::{ensure, Context};
     use serde_json::Value;

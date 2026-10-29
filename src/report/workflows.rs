@@ -71,7 +71,7 @@ impl WorkflowAccumulator {
             _ => return,
         };
         let classified = fields.get("workflow_schema").and_then(Value::as_u64) == Some(1);
-        let action = if classified { action(string(fields, "action")) } else { "unknown" };
+        let action = if classified { action(tool, string(fields, "action")) } else { "unknown" };
         let backend =
             if classified { backend(string(fields, "workflow_backend")) } else { "unknown" };
         self.calls = self.calls.saturating_add(1);
@@ -218,11 +218,12 @@ impl WorkflowOperationUsage {
     }
 }
 
-fn action(value: &str) -> &'static str {
+fn action(tool: &str, value: &str) -> &'static str {
     match value {
         "list" => "list",
         "get" => "get",
         "read" => "read",
+        "observe" if tool == "Execution" => "observe",
         "explain" => "explain",
         "wait" => "wait",
         "prompt" => "prompt",
@@ -235,5 +236,83 @@ fn backend(value: &str) -> &'static str {
         "native" => "native",
         "herdr" => "herdr",
         _ => "unknown",
+    }
+}
+
+#[cfg(test)]
+mod observe_tests {
+    use anyhow::Context;
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn observe_report_preserves_action_and_counts_partial_results() -> anyhow::Result<()> {
+        let mut accumulator = WorkflowAccumulator::default();
+        for (status, error_code, bytes) in
+            [("completed", "", 512), ("completed_with_issues", "execution_observation_issues", 768)]
+        {
+            let fields = json!({
+                "usage_schema":1,"workflow_schema":1,"tool":"Execution","action":"observe",
+                "workflow_backend":"native","status":status,"error_code":error_code,
+                "duration_ms":12,"response_bytes":bytes,
+                "data":{"cursor":"SECRET-CURSOR","items":[{
+                    "execution_id":"SECRET-EXECUTION","page":{"text":"SECRET-OUTPUT"},
+                    "errors":[{"message":"SECRET-ERROR"}]
+                }]}
+            });
+            accumulator.record(fields.as_object().context("usage fields")?);
+        }
+        let report = accumulator.finish();
+        assert_eq!(report.calls, 2);
+        assert_eq!(report.operations.len(), 1);
+        let operation = report.operations.first().context("observe operation")?;
+        assert_eq!(operation.tool, "Execution");
+        assert_eq!(operation.action, "observe");
+        assert_eq!(operation.backend, "native");
+        assert_eq!(operation.calls, 2);
+        assert_eq!(operation.error_results, 1);
+        assert_eq!(operation.response_bytes, 1280);
+        assert_eq!(
+            serde_json::to_value(&operation.requested_wait_ms)?,
+            serde_json::to_value(latency(Vec::new()))?
+        );
+        assert!(operation.wait_kinds.is_empty());
+        assert!(operation.wait_outcomes.is_empty());
+        assert_eq!(operation.wait_outcome_unknown, 0);
+        assert_eq!(operation.receipt_observations, 0);
+        assert!(operation.prompt_delivery.is_empty());
+        assert!(operation.prompt_outcome.is_empty());
+        assert_eq!(operation.agent_submission_accepted, 0);
+        assert_eq!(operation.agent_input_sent_true, 0);
+        assert_eq!(operation.agent_input_may_have_been_sent_true, 0);
+        assert!(!serde_json::to_string(&report)?.contains("SECRET-"));
+        Ok(())
+    }
+
+    #[test]
+    fn observe_report_keeps_agent_and_unversioned_actions_unknown() -> anyhow::Result<()> {
+        for (tool, schema, requested_backend, expected_backend) in [
+            ("Agent", Some(1), "native", "native"),
+            ("Agent", Some(1), "herdr", "herdr"),
+            ("Execution", None, "native", "unknown"),
+        ] {
+            let fields = json!({
+                "usage_schema":1,"workflow_schema":schema,"tool":tool,"action":"observe",
+                "workflow_backend":requested_backend,"duration_ms":9,"response_bytes":42
+            });
+            let mut accumulator = WorkflowAccumulator::default();
+            accumulator.record(fields.as_object().context("usage fields")?);
+            let report = accumulator.finish();
+            assert_eq!(report.calls, 1);
+            assert_eq!(report.operations.len(), 1);
+            let operation = report.operations.first().context("unknown operation")?;
+            assert_eq!(operation.tool, tool);
+            assert_eq!(operation.action, "unknown", "{tool} {schema:?}");
+            assert_eq!(operation.backend, expected_backend);
+            assert_eq!(operation.calls, 1);
+            assert_eq!(operation.response_bytes, 42);
+        }
+        Ok(())
     }
 }

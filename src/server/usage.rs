@@ -1556,6 +1556,128 @@ mod tests {
         }
     }
     #[test]
+    fn workflow_json_observe_deadlines_are_not_wait_requests() -> anyhow::Result<()> {
+        for timeout in [None, Some(0.0), Some(0.125), Some(30.0)] {
+            let mut arguments = serde_json::json!({
+                "thread_id":"SECRET-THREAD", "workspace_root":"/SECRET-WORKSPACE",
+                "action":{"type":"observe","items":[{
+                    "execution_id":"SECRET-EXECUTION", "cursor":"SECRET-PAGE-CURSOR"
+                }]}
+            });
+            if let Some(timeout) = timeout {
+                arguments["action"]["timeout_seconds"] = serde_json::json!(timeout);
+            }
+            let wait = usage_wait_metadata("Execution", arguments.as_object());
+            assert_eq!(wait.policy, None);
+            assert_eq!(wait.milliseconds, None);
+            let fields = captured_usage_request(
+                "Execution",
+                "",
+                &arguments,
+                Some(serde_json::json!({"tool":"Execution","status":"completed","data":{}})),
+            )?;
+            assert_eq!(fields["usage_schema"], 1);
+            assert_eq!(fields["workflow_schema"], 1);
+            assert_eq!(fields["action"], "observe");
+            assert_eq!(fields["workflow_backend"], "native");
+            for key in ["workflow_wait_kind", "workflow_wait_outcome", "requested_wait_ms"] {
+                assert!(fields.get(key).is_none_or(serde_json::Value::is_null), "invented {key}");
+            }
+            assert!(!fields.to_string().contains("SECRET-"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn workflow_json_observe_is_execution_only() -> anyhow::Result<()> {
+        for (tool, arguments, backend) in [
+            ("Agent", serde_json::json!({"action":"observe","timeout_seconds":0}), "native"),
+            (
+                "Agent",
+                serde_json::json!({"backend":"herdr","action":"observe","timeout_seconds":5}),
+                "herdr",
+            ),
+            ("Execution", serde_json::json!({"action":"observe"}), "native"),
+            ("Agent", serde_json::json!({"action":{"type":"observe"}}), "native"),
+        ] {
+            let fields = captured_usage_request(
+                tool,
+                "",
+                &arguments,
+                Some(serde_json::json!({"tool":tool,"status":"invalid_input","data":{}})),
+            )?;
+            assert_eq!(fields["workflow_schema"], 1);
+            assert_eq!(fields["action"], "unknown", "{tool} {arguments}");
+            assert_eq!(fields["workflow_backend"], backend);
+            for key in ["workflow_wait_kind", "workflow_wait_outcome", "requested_wait_ms"] {
+                assert!(fields.get(key).is_none_or(serde_json::Value::is_null), "invented {key}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn workflow_json_observe_partial_reports_only_finite_summary() -> anyhow::Result<()> {
+        use crate::server::{executions::workflow_envelope, outcomes::ToolResultStatus};
+
+        let result = workflow_envelope(
+            "Execution",
+            ToolResultStatus::CompletedWithIssues,
+            "SECRET-MESSAGE",
+            Some("execution_observation_issues"),
+            None,
+            serde_json::json!({
+                "cursor":"SECRET-CATALOG-CURSOR",
+                "items":[{
+                    "execution_id":"SECRET-EXECUTION",
+                    "execution":{"process_status":"exited","exit_code":7},
+                    "page":{"text":"SECRET-OUTPUT","next_cursor":"SECRET-PAGE-CURSOR"},
+                    "errors":[{"stage":"refresh","message":"SECRET-ITEM-ERROR"}]
+                }],
+                // Even well-shaped lifecycle evidence must not reclassify observation.
+                "timed_out":true, "changes":{"resync_required":false,"executions":[]},
+                "prompt_receipt":{
+                    "prompt_id":"SECRET-PROMPT-ID","delivery":"delivered",
+                    "activity_observed":true,"outcome":"exited","generation":3,
+                    "baseline_activity_seq":7
+                },
+                "submission_status":"accepted","input_sent":true,"input_may_have_been_sent":true
+            }),
+        )?;
+        assert_eq!(result.is_error, Some(false));
+        let fields = captured_usage_request(
+            "Execution",
+            "",
+            &serde_json::json!({"action":{
+                "type":"observe","timeout_seconds":0.125,
+                "items":[{"execution_id":"SECRET-EXECUTION"}]
+            }}),
+            result.structured_content,
+        )?;
+        assert_eq!(fields["usage_schema"], 1);
+        assert_eq!(fields["workflow_schema"], 1);
+        assert_eq!(fields["action"], "observe");
+        assert_eq!(fields["workflow_backend"], "native");
+        assert_eq!(fields["error_code"], "execution_observation_issues");
+        for key in [
+            "workflow_wait_kind",
+            "workflow_wait_outcome",
+            "requested_wait_ms",
+            "prompt_receipt_present",
+            "prompt_delivery",
+            "prompt_activity_observed",
+            "prompt_outcome",
+            "agent_submission_status",
+            "agent_input_sent",
+            "agent_input_may_have_been_sent",
+        ] {
+            assert!(fields.get(key).is_none_or(serde_json::Value::is_null), "invented {key}");
+        }
+        assert!(!fields.to_string().contains("SECRET-"));
+        Ok(())
+    }
+
+    #[test]
     fn workflow_json_classifies_actual_request_shapes_with_finite_allowlists() -> anyhow::Result<()>
     {
         for (tool, arguments, action, backend, kind, wait) in [
