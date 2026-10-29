@@ -50,13 +50,16 @@ if a[1]=='explain': print(json.dumps({'agent':'claude','state':'idle','manifest_
 elif a[1]=='read': print('literal output λ',end='')
 else: print(json.dumps({'id':'x','result':{'type':'agent_prompted' if a[1]=='prompt' else 'agent_info','agent':agent}}))
 ";
+// Generous budget for fixtures whose assertions do not depend on the deadline:
+// CI runners stall, and a timeout there would masquerade as a wrong variant.
+const BUDGET_MS: u64 = 5_000;
 fn req(action: HerdrAction) -> HerdrRequest {
     HerdrRequest { action, target: Some("writer".into()), ..Default::default() }
 }
 
 #[tokio::test]
 async fn disabled_and_binding_denials_never_spawn() {
-    let f = Fixture::new(NORMAL, 1000);
+    let f = Fixture::new(NORMAL, BUDGET_MS);
     assert!(matches!(
         HerdrAdapter::disabled().run(&f.context(), req(HerdrAction::Get)).await,
         Err(HerdrError::Disabled)
@@ -84,7 +87,7 @@ async fn disabled_and_binding_denials_never_spawn() {
 
 #[tokio::test]
 async fn list_uses_configured_gets_and_real_cli_shapes_parse() {
-    let f = Fixture::new(NORMAL, 1000);
+    let f = Fixture::new(NORMAL, BUDGET_MS);
     let a = f.adapter();
     let c = f.context();
     let list = a.run(&c, HerdrRequest::default()).await.unwrap();
@@ -130,7 +133,7 @@ async fn list_uses_configured_gets_and_real_cli_shapes_parse() {
 
 #[tokio::test]
 async fn prompt_is_literal_and_session_option_cannot_escape() {
-    let f = Fixture::new(NORMAL, 1000);
+    let f = Fixture::new(NORMAL, BUDGET_MS);
     let text = "--session evil; $(touch /tmp/never-herdr) `echo nope`\n'\" & | \\";
     let mut r = req(HerdrAction::Prompt);
     r.text = Some(text.into());
@@ -146,7 +149,7 @@ async fn prompt_is_literal_and_session_option_cannot_escape() {
 
 #[tokio::test]
 async fn wrong_identity_blocks_read_explain_and_prompt() {
-    let f = Fixture::new("agent['terminal_id']='foreign'\nprint(json.dumps({'id':'x','result':{'type':'agent_info','agent':agent}}))", 1000);
+    let f = Fixture::new("agent['terminal_id']='foreign'\nprint(json.dumps({'id':'x','result':{'type':'agent_info','agent':agent}}))", BUDGET_MS);
     for action in [HerdrAction::Get, HerdrAction::Read, HerdrAction::Explain, HerdrAction::Prompt] {
         let mut r = req(action);
         if action == HerdrAction::Prompt {
@@ -162,17 +165,17 @@ async fn wrong_identity_blocks_read_explain_and_prompt() {
 
 #[tokio::test]
 async fn malformed_json_plaintext_failure_and_missing_binary_are_clean_errors() {
-    let malformed = Fixture::new("print('not json')", 1000);
+    let malformed = Fixture::new("print('not json')", BUDGET_MS);
     assert!(matches!(
         malformed.adapter().run(&malformed.context(), req(HerdrAction::Get)).await,
         Err(HerdrError::InvalidResponse(_))
     ));
-    let failure = Fixture::new("sys.stderr.write('not connected');sys.exit(9)", 1000);
+    let failure = Fixture::new("sys.stderr.write('not connected');sys.exit(9)", BUDGET_MS);
     assert!(matches!(
         failure.adapter().run(&failure.context(), req(HerdrAction::Get)).await,
         Err(HerdrError::Failed(_))
     ));
-    let f = Fixture::new(NORMAL, 1000);
+    let f = Fixture::new(NORMAL, BUDGET_MS);
     let mut config: Value = serde_json::from_slice(&fs::read(&f.config).unwrap()).unwrap();
     config["executable"] = json!(f.dir.path().join("missing"));
     fs::write(&f.config, serde_json::to_vec(&config).unwrap()).unwrap();
@@ -205,7 +208,7 @@ async fn deadline_and_both_output_pipes_are_bounded() {
         Err(HerdrError::Timeout { uncertain: false })
     ));
     for body in ["sys.stdout.write('x'*100000)", "sys.stderr.write('x'*100000)"] {
-        let f = Fixture::new(body, 1000);
+        let f = Fixture::new(body, BUDGET_MS);
         assert!(matches!(
             f.adapter().run(&f.context(), req(HerdrAction::Get)).await,
             Err(HerdrError::OutputLimit)
@@ -215,7 +218,7 @@ async fn deadline_and_both_output_pipes_are_bounded() {
 
 #[tokio::test]
 async fn invalid_prompt_and_wait_limits_fail_before_spawn() {
-    let f = Fixture::new(NORMAL, 1000);
+    let f = Fixture::new(NORMAL, BUDGET_MS);
     for text in ["has\0nul".into(), "a".repeat(16385), String::new()] {
         let mut r = req(HerdrAction::Prompt);
         r.text = Some(text);
@@ -237,10 +240,10 @@ async fn invalid_prompt_response_is_uncertain_after_exactly_one_submission() {
         "if a[1]=='prompt': sys.stderr.write('arbitrary sensitive diagnostic');sys.exit(2)\nelse: print(json.dumps({'id':'x','result':{'type':'agent_info','agent':agent}}))",
         "if a[1]=='prompt': sys.stdout.write('x'*100000)\nelse: print(json.dumps({'id':'x','result':{'type':'agent_info','agent':agent}}))",
     ] {
-        let f = Fixture::new(body, 1000);
+        let f = Fixture::new(body, BUDGET_MS);
         let mut r = req(HerdrAction::Prompt); r.text = Some("only once".into());
         let error = f.adapter().run(&f.context(), r).await.unwrap_err();
-        assert!(matches!(error, HerdrError::DeliveryUncertain(_)));
+        assert!(matches!(error, HerdrError::DeliveryUncertain(_)), "{body}: {error:?}");
         assert!(!error.to_string().contains("arbitrary sensitive diagnostic"));
         assert_eq!(f.calls().iter().filter(|c| c[1] == "prompt").count(), 1);
     }
@@ -248,7 +251,7 @@ async fn invalid_prompt_response_is_uncertain_after_exactly_one_submission() {
 
 #[test]
 fn rejects_public_config_ambiguous_aliases_and_uncanonical_workspaces() {
-    let f = Fixture::new(NORMAL, 1000);
+    let f = Fixture::new(NORMAL, BUDGET_MS);
     fs::set_permissions(&f.config, fs::Permissions::from_mode(0o644)).unwrap();
     assert!(matches!(HerdrAdapter::from_config_path(&f.config), Err(HerdrError::Configuration(_))));
     fs::set_permissions(&f.config, fs::Permissions::from_mode(0o600)).unwrap();
@@ -273,7 +276,7 @@ fn rejects_public_config_ambiguous_aliases_and_uncanonical_workspaces() {
 
 #[tokio::test]
 async fn stable_id_is_accepted_and_stdin_is_closed() {
-    let f = Fixture::new(&format!("assert sys.stdin.read()==''\n{NORMAL}"), 1000);
+    let f = Fixture::new(&format!("assert sys.stdin.read()==''\n{NORMAL}"), BUDGET_MS);
     let mut r = req(HerdrAction::Get);
     r.target = Some("terminal-1".into());
     assert_eq!(
@@ -296,7 +299,7 @@ async fn operation_deadline_includes_identity_preflight() {
 
 #[tokio::test]
 async fn irrelevant_fields_are_rejected_instead_of_silently_ignored() {
-    let f = Fixture::new(NORMAL, 1000);
+    let f = Fixture::new(NORMAL, BUDGET_MS);
     let mut r = req(HerdrAction::Get);
     r.text = Some("unused".into());
     assert!(matches!(f.adapter().run(&f.context(), r).await, Err(HerdrError::InvalidRequest(_))));
@@ -366,7 +369,7 @@ fn parse_herdr_prompt_contract(args: &[String]) -> anyhow::Result<(String, Strin
 async fn prompt_arguments_preserve_text_through_the_herdr_parser() -> anyhow::Result<()> {
     use anyhow::Context;
 
-    let fixture = Fixture::new(NORMAL, 1000);
+    let fixture = Fixture::new(NORMAL, BUDGET_MS);
     let adapter = fixture.adapter();
     let context = fixture.context();
     for text in [
