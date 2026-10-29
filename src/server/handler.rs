@@ -820,7 +820,7 @@ mod tests {
         assert_eq!(metadata.recovery.next_action_tool, "VerifyEdit");
         assert_eq!(metadata.recovery.required_read_count, 0);
         assert!(!metadata.recovery.retry_same_call);
-        assert!(metadata.recovery.edit_applied);
+        assert_eq!(metadata.recovery.edit_applied, Some(true));
         assert!(!metadata.recovery.fresh_read_required);
         assert_eq!(metadata.recovery.verification_status, "failed");
         assert_eq!(metadata.recovery.mutation_transition, "committed");
@@ -843,7 +843,7 @@ mod tests {
         assert_eq!(metadata.recovery.next_action_tool, "ReadFiles");
         assert_eq!(metadata.recovery.required_read_count, 1);
         assert!(!metadata.recovery.retry_same_call);
-        assert!(!metadata.recovery.edit_applied);
+        assert_eq!(metadata.recovery.edit_applied, Some(false));
         assert!(metadata.recovery.fresh_read_required);
         assert_eq!(metadata.recovery.verification_status, "");
         assert_eq!(metadata.recovery.recovery_attempt, 2);

@@ -35,6 +35,9 @@ use crate::config::{HttpPrincipal, HttpSessionAffinity};
 use crate::runtime::{configured_shell_runtime, ShellRuntime};
 use crate::server::{SessionIsolation, WinxService};
 
+mod observability;
+use observability::{observe_request_entry, PermitBody};
+
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
@@ -357,13 +360,13 @@ async fn enforce_route_security(
     if path != "/mcp" && !path.starts_with("/mcp/") {
         return next.run(request).await;
     }
-    let started = Instant::now();
+    let (started, method, correlation) = observe_request_entry(peer, request.method());
     if !security.rate_limiter.allow(peer.ip()).await {
-        log_rejection(peer, None, "ip_rate_limit", StatusCode::TOO_MANY_REQUESTS);
+        log_rejection(peer, None, &correlation, "ip_rate_limit", StatusCode::TOO_MANY_REQUESTS);
         return retry_response(StatusCode::TOO_MANY_REQUESTS, "request rate limit exceeded\n");
     }
     let Ok(permit) = security.concurrency.clone().try_acquire_owned() else {
-        log_rejection(peer, None, "concurrency", StatusCode::SERVICE_UNAVAILABLE);
+        log_rejection(peer, None, &correlation, "concurrency", StatusCode::SERVICE_UNAVAILABLE);
         return retry_response(StatusCode::SERVICE_UNAVAILABLE, "too many concurrent requests\n");
     };
 
@@ -376,7 +379,7 @@ async fn enforce_route_security(
             path = %request.uri().path(),
             "rejected request with missing or invalid HTTP token"
         );
-        log_rejection(peer, None, "auth", StatusCode::UNAUTHORIZED);
+        log_rejection(peer, None, &correlation, "auth", StatusCode::UNAUTHORIZED);
         return (StatusCode::UNAUTHORIZED, "missing or invalid token\n").into_response();
     };
 
@@ -385,13 +388,12 @@ async fn enforce_route_security(
         log_rejection(
             peer,
             Some(&principal_name),
+            &correlation,
             "principal_rate_limit",
             StatusCode::TOO_MANY_REQUESTS,
         );
         return retry_response(StatusCode::TOO_MANY_REQUESTS, "principal rate limit exceeded\n");
     }
-    let method = request.method().clone();
-    let correlation = RequestCorrelation::new();
     // A transport session id belongs to the principal that created it. Any
     // other authenticated principal sees it as unknown, exactly like a stale
     // id: the SDK would otherwise let it resume the stream or close it.
@@ -403,7 +405,13 @@ async fn enforce_route_security(
                 principal = %principal_name,
                 "rejected request presenting another principal's MCP session id"
             );
-            log_rejection(peer, Some(&principal_name), "foreign_session", StatusCode::NOT_FOUND);
+            log_rejection(
+                peer,
+                Some(&principal_name),
+                &correlation,
+                "foreign_session",
+                StatusCode::NOT_FOUND,
+            );
             return (StatusCode::NOT_FOUND, "session not found\n").into_response();
         }
     }
@@ -411,10 +419,7 @@ async fn enforce_route_security(
     request.extensions_mut().insert(principal);
     request.extensions_mut().insert(security.session_affinity);
     request.extensions_mut().insert(correlation.clone());
-    // The permit travels with the body: a streaming response (SSE) keeps its
-    // concurrency slot until the stream ends, not just until headers exist.
-    let response =
-        next.run(request).await.map(|body| axum::body::Body::new(PermitBody::new(body, permit)));
+    let response = next.run(request).await;
     if response.status().is_success() {
         if let Some(minted) = session_id_header(response.headers()) {
             for evicted in security.session_owners.record(&minted, &principal_name) {
@@ -432,29 +437,47 @@ async fn enforce_route_security(
             }
         }
     }
-    // One structured `winx::usage` event per authenticated request. Metadata
-    // only — the body (commands, file contents) is never logged.
+    // Preserve the legacy event and duration as the response-ready observation.
+    // Body termination is a separate metadata-only event from PermitBody.
+    let response_ready = Instant::now();
     tracing::info!(
         target: "winx::usage",
         event = "http_request",
+        phase = "response_ready",
         principal = %principal_name,
         request_id = %correlation.as_str(),
         peer = %peer,
         method = %method,
         status = response.status().as_u16(),
-        duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        duration_ms = u64::try_from(response_ready.saturating_duration_since(started).as_millis())
+            .unwrap_or(u64::MAX),
         "http request"
     );
-    response
+    // The permit travels with the body, including while a streaming response is
+    // open. An already-empty body can now log completion after response-ready.
+    response.map(|body| {
+        axum::body::Body::new(PermitBody::new(body, permit).observe(
+            correlation,
+            started,
+            response_ready,
+        ))
+    })
 }
 
 /// One redacted `winx::usage` event per admission rejection, so overload and
 /// auth failures are visible in reports instead of vanishing before the
 /// per-request event.
-fn log_rejection(peer: SocketAddr, principal: Option<&str>, reason: &str, status: StatusCode) {
+fn log_rejection(
+    peer: SocketAddr,
+    principal: Option<&str>,
+    correlation: &RequestCorrelation,
+    reason: &str,
+    status: StatusCode,
+) {
     tracing::info!(
         target: "winx::usage",
         event = "http_rejected",
+        request_id = %correlation.as_str(),
         principal = principal.unwrap_or(""),
         peer = %peer,
         reason,
@@ -462,41 +485,6 @@ fn log_rejection(peer: SocketAddr, principal: Option<&str>, reason: &str, status
         "http request rejected"
     );
 }
-
-/// Response body that owns the admission permit until the last frame is
-/// consumed or the body is dropped.
-struct PermitBody<B> {
-    inner: std::pin::Pin<Box<B>>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
-}
-
-impl<B> PermitBody<B> {
-    fn new(inner: B, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
-        Self { inner: Box::pin(inner), _permit: permit }
-    }
-}
-
-impl<B: http_body::Body> http_body::Body for PermitBody<B> {
-    type Data = B::Data;
-    type Error = B::Error;
-
-    fn poll_frame(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
-        // `Pin<Box<B>>` and the permit are both `Unpin`, so the struct is too.
-        self.get_mut().inner.as_mut().poll_frame(cx)
-    }
-
-    fn is_end_stream(&self) -> bool {
-        self.inner.is_end_stream()
-    }
-
-    fn size_hint(&self) -> http_body::SizeHint {
-        self.inner.size_hint()
-    }
-}
-
 fn retry_response(status: StatusCode, body: &'static str) -> Response {
     let mut response = (status, body).into_response();
     response.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
@@ -734,3 +722,6 @@ mod tests {
         assert_eq!(draining.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }
+
+#[cfg(test)]
+mod observability_tests;

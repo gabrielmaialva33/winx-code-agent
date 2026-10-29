@@ -397,4 +397,62 @@ mod tests {
             .expect_err("workspace changes must still require a separate session");
         assert!(matches!(error, WinxError::WorkspaceChangeRequiresNewSession { .. }));
     }
+    #[tokio::test]
+    async fn rejected_pair_preserves_binding_and_corrected_pair_still_validates() {
+        let workspace = tempfile::tempdir().expect("bound workspace");
+        let other = tempfile::tempdir().expect("other workspace");
+        let workspace_root = canonical_workspace_identity(&workspace.path().to_string_lossy());
+
+        for affinity in [HttpSessionAffinity::Thread, HttpSessionAffinity::Workspace] {
+            let service = WinxService::with_isolation(SessionIsolation::Strict);
+            let thread_id = expected_affinity_thread_id(&workspace_root, affinity, None)
+                .unwrap_or_else(|| "preserved-thread".to_string());
+            bind(&service, &thread_id, &workspace_root).await;
+            let mismatched = request(
+                "ReadFiles",
+                &serde_json::json!({
+                    "thread_id": &thread_id,
+                    "workspace_root": other.path(),
+                    "file_paths": [other.path().join("file.txt")]
+                }),
+            );
+            let error = service
+                .validate_workspace_coherence(&mismatched, &RequestScope::default(), affinity, None)
+                .await
+                .expect_err("wrong workspace must fail");
+            match affinity {
+                HttpSessionAffinity::Thread => {
+                    assert!(matches!(error, WinxError::WorkspaceBindingMismatch { .. }));
+                }
+                HttpSessionAffinity::Workspace => {
+                    assert!(matches!(error, WinxError::WorkspaceThreadMismatch { .. }));
+                }
+                HttpSessionAffinity::Conversation => {
+                    unreachable!("test uses two explicit affinities")
+                }
+            }
+            assert_eq!(service.bound_workspace(&thread_id).await, Some(workspace_root.clone()));
+
+            let corrected = request(
+                "ReadFiles",
+                &serde_json::json!({
+                    "thread_id": &thread_id,
+                    "workspace_root": workspace.path(),
+                    "file_paths": [workspace.path().join("file.txt")]
+                }),
+            );
+            assert_eq!(
+                service
+                    .validate_workspace_coherence(
+                        &corrected,
+                        &RequestScope::default(),
+                        affinity,
+                        None,
+                    )
+                    .await
+                    .expect("existing pair remains valid"),
+                WorkspaceCoherence::Validated
+            );
+        }
+    }
 }

@@ -1038,7 +1038,7 @@ fn error_envelope(
             retryable = true;
             next_action = Some(ToolNextAction {
                 tool: "Initialize".to_string(),
-                instruction: "Initialize the intended workspace once, then copy the returned thread_id/workspace_root pair into every later call."
+                instruction: "Reuse the exact thread_id/workspace_root pair returned by Initialize for the intended workspace. If that pair is unavailable, initialize the intended workspace once and use its returned pair. The rejected operation did not run; do not reset an existing shell."
                     .to_string(),
                 arguments: None,
             });
@@ -1222,6 +1222,21 @@ fn error_envelope(
             data.insert("external_targets_require_reinitialize".to_string(), Value::Bool(false));
         }
     }
+    if tool != "Initialize"
+        && matches!(
+            classified_error,
+            WinxError::WorkspaceBindingRequired { .. }
+                | WinxError::WorkspaceThreadMismatch { .. }
+                | WinxError::WorkspaceBindingMismatch { .. }
+        )
+    {
+        data.insert("operation_executed".to_string(), Value::Bool(false));
+        data.insert("binding_changed".to_string(), Value::Bool(false));
+        data.insert(
+            "recovery_strategy".to_string(),
+            Value::String("reuse_valid_pair_or_initialize".to_string()),
+        );
+    }
     if let WinxError::TemporaryArtifactPolicy { path, temporary_artifact_dir, .. } =
         classified_error
     {
@@ -1337,7 +1352,7 @@ fn status_check_action(arguments: Option<&Value>) -> ToolNextAction {
 fn initialize_workspace_action(workspace_root: &std::path::Path) -> ToolNextAction {
     ToolNextAction {
         tool: "Initialize".to_string(),
-        instruction: "Initialize this intended project as a separate coherent session, then use the returned thread_id/workspace_root pair."
+        instruction: "Reuse the exact thread_id/workspace_root pair already returned by Initialize for the intended workspace. If that pair is unavailable, call Initialize once with these arguments and use the pair it returns. Keep the existing binding; do not carry the rejected thread_id into this fallback or reset its shell."
             .to_string(),
         arguments: Some(json!({
             "type": "first_call",
@@ -1975,6 +1990,41 @@ mod tests {
     }
 
     #[test]
+    fn workspace_thread_mismatch_reports_unchanged_binding_and_safe_fallback() {
+        let error = WinxError::WorkspaceThreadMismatch {
+            thread_id: "rejected-thread".to_string(),
+            workspace_root: "/intended".into(),
+        };
+        let result = tool_failure(
+            "ReadFiles",
+            &error,
+            Some(&json!({
+                "thread_id": "rejected-thread",
+                "workspace_root": "/intended",
+                "file_paths": ["/intended/file.txt"]
+            })),
+        )
+        .expect("tool-level coherence error");
+        assert_eq!(result.is_error, Some(true));
+        let structured = result.structured_content.expect("structured coherence error");
+
+        assert_eq!(structured["status"], "conflict");
+        assert_eq!(structured["errorCode"], "workspace_thread_mismatch");
+        assert_eq!(structured["retrySameCall"], false);
+        assert_eq!(structured["data"]["operation_executed"], false);
+        assert_eq!(structured["data"]["binding_changed"], false);
+        assert_eq!(structured["data"]["recovery_strategy"], "reuse_valid_pair_or_initialize");
+        assert!(structured["data"].get("bound_workspace").is_none());
+
+        let next = &structured["nextAction"];
+        assert_eq!(next["tool"], "Initialize");
+        assert_eq!(next["arguments"]["type"], "first_call");
+        assert_eq!(next["arguments"]["any_workspace_path"], "/intended");
+        assert_eq!(next["arguments"]["thread_id"], "");
+        assert!(!next["arguments"].to_string().contains("rejected-thread"));
+    }
+
+    #[test]
     fn workspace_mismatch_has_a_safe_structured_recovery() {
         let error = WinxError::WorkspaceBindingMismatch {
             thread_id: "wrong-thread".to_string(),
@@ -1997,8 +2047,34 @@ mod tests {
         assert_eq!(structured["errorCode"], "workspace_binding_mismatch");
         assert_eq!(structured["retrySameCall"], false);
         assert_eq!(structured["data"]["bound_workspace"], "/other");
+        assert_eq!(structured["data"]["operation_executed"], false);
+        assert_eq!(structured["data"]["binding_changed"], false);
+        assert_eq!(structured["data"]["recovery_strategy"], "reuse_valid_pair_or_initialize");
         assert_eq!(structured["nextAction"]["tool"], "Initialize");
-        assert_eq!(structured["nextAction"]["arguments"]["any_workspace_path"], "/intended");
+        let arguments = &structured["nextAction"]["arguments"];
+        assert_eq!(arguments["type"], "first_call");
+        assert_eq!(arguments["any_workspace_path"], "/intended");
+        assert_eq!(arguments["thread_id"], "");
+        assert!(!arguments.to_string().contains("wrong-thread"));
+        assert!(!arguments.to_string().contains("/other"));
+    }
+
+    #[test]
+    fn workspace_binding_required_reports_operation_not_executed() {
+        let result = tool_failure(
+            "ReadFiles",
+            &WinxError::WorkspaceBindingRequired { thread_id: "known-thread".to_string() },
+            Some(&json!({"thread_id": "known-thread"})),
+        )
+        .expect("tool-level missing binding error");
+        let structured = result.structured_content.expect("structured binding error");
+        assert_eq!(structured["status"], "needs_initialize");
+        assert_eq!(structured["errorCode"], "workspace_binding_required");
+        assert_eq!(structured["retrySameCall"], false);
+        assert_eq!(structured["data"]["operation_executed"], false);
+        assert_eq!(structured["data"]["binding_changed"], false);
+        assert_eq!(structured["data"]["recovery_strategy"], "reuse_valid_pair_or_initialize");
+        assert_eq!(structured["nextAction"]["tool"], "Initialize");
     }
 
     #[test]
@@ -2063,6 +2139,7 @@ mod tests {
         assert_eq!(structured["retryable"], false);
         assert_eq!(structured["retrySameCall"], false);
         assert!(structured.get("nextAction").is_none(), "{structured}");
+        assert!(structured["data"].get("recovery_strategy").is_none());
         assert_eq!(structured["data"]["bound_workspace"], "/current/project");
         assert_eq!(structured["data"]["requested_workspace"], "/external/target");
         assert_eq!(structured["data"]["continue_with_bound_session"], true);

@@ -1176,6 +1176,7 @@ impl WinxService {
                     self.finish_edit_verification(prepared, outcome.text.clone(), bash_options)
                         .await?
                 };
+                attach_result_data(&mut result, "edit_applied", Value::Bool(true));
                 if prepared.surface == EditSurface::ApplyPatch {
                     if let Some(revision) = outcome.revisions.first() {
                         attach_result_data(

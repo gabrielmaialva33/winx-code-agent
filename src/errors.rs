@@ -162,14 +162,14 @@ pub enum WinxError {
     /// The supplied workspace and thread cannot belong to the same affinity
     /// key, so executing the request could select another project's shell.
     #[error(
-        "Session coherence check failed: thread_id `{thread_id}` does not belong to workspace_root `{workspace_root}`. No operation was executed. Initialize that workspace and preserve the returned thread_id/workspace_root pair."
+        "Session coherence check failed: thread_id `{thread_id}` does not belong to workspace_root `{workspace_root}`. No operation was executed. Reuse the exact initialized pair for the intended workspace; if unavailable, initialize it once and preserve the returned thread_id/workspace_root pair."
     )]
     WorkspaceThreadMismatch { thread_id: String, workspace_root: PathBuf },
 
     /// The requested binding disagrees with the workspace stored in the
     /// selected durable session.
     #[error(
-        "Session coherence check failed: thread_id `{thread_id}` is bound to `{bound_workspace}`, not `{requested_workspace}`. No operation was executed. Initialize the intended workspace and use its returned pair."
+        "Session coherence check failed: thread_id `{thread_id}` is bound to `{bound_workspace}`, not `{requested_workspace}`. No operation was executed. Reuse the exact initialized pair for the intended workspace; if unavailable, initialize it once and use the returned pair."
     )]
     WorkspaceBindingMismatch {
         thread_id: String,

@@ -108,6 +108,12 @@ qualquer operação, o Winx valida se a afinidade da thread, a raiz canônica in
 Vínculos ausentes ou misturados retornam um resultado estruturado `needs_initialize`/`conflict` e não chegam ao shell nem
 ao filesystem.
 
+Se o par estiver ausente ou misturado, primeiro reutilize o par exato já retornado para o workspace pretendido.
+Esses erros informam `operation_executed=false`, `binding_changed=false` e
+`recovery_strategy="reuse_valid_pair_or_initialize"`. Se o par correto não estiver disponível, siga o fallback de
+`Initialize` uma vez e use os valores retornados; não leve a thread rejeitada para essa chamada nem reinicie seu shell.
+Um conflito do próprio `Initialize` continua terminal e não oferece outra inicialização automática.
+
 Essa validação **não** restringe os alvos das ferramentas ao `workspace_root`. A raiz identifica o contexto de projeto
 que possui terminal, cwd, histórico de leitura e estado de edição. A autoridade de caminhos continua sendo uma política
 separada: por exemplo, `WINX_ALLOW_PATHS=/` ainda permite que uma sessão coerente opere em arquivos de apoio fora do
@@ -178,6 +184,10 @@ A ordem de preferência de identidade é:
 2. `X-Winx-Conversation-Id`, quando um gateway autenticado injeta um valor estável;
 3. O `thread_id` fornecido na primeira chamada;
 4. Afinidade por workspace caso nenhuma identidade de conversa seja encontrada.
+
+Entre os headers de transporte, o primeiro presente tem prioridade antes da validação do texto e de valores vazios.
+Um `Mcp-Session-Id` vazio ou inválido não permite usar o header do gateway. O fallback existente para thread/workspace
+na primeira chamada continua valendo quando não existe uma identidade de transporte utilizável.
 
 ### Afinidade por Thread (`thread`)
 
@@ -397,7 +407,48 @@ WINX_USAGE_LOG_KEEP_DAYS=7 \
 winx-code-agent serve --http --token-file ~/.config/winx-http-token
 ```
 
-Nenhum comando, conteúdo de arquivo, saída de ferramenta ou credencial é gravado nesse log de telemetria; gravam-se apenas durações, status de resultado, tamanhos de resposta, quantidade de itens do lote, limite de workers e metadados de protocolo. O `request_id` correlaciona os eventos `tool_call` e `http_request`, permitindo separar tempo da ferramenta de overhead do transporte sem expor o payload.
+Nenhum comando, conteúdo de arquivo, saída de ferramenta ou credencial é gravado nesse log. O `request_id` correlaciona
+os eventos `tool_call` e `http_request`; a diferença entre suas durações aproxima o overhead do adapter até a resposta
+ficar pronta. Ela não inclui streaming do corpo nem o tempo fora dessa janela do servidor.
+
+### Estado das edições e identidade
+
+`edit_applied` preserva três estados: `true` explícito, `false` explícito ou ausente/desconhecido. Resultados tipados
+bem-sucedidos de Apply/Undo informam `true`, inclusive quando a verificação posterior falha. Um replay mantém o resultado
+da edição identificada sem nova escrita; um lote parcialmente confirmado também pode informar `true`. Leia esse campo
+junto do status, recibo, indicação de replay e resultado da verificação. Liberar um artefato temporário não implica editar
+código. Valores antigos ausentes, nulos ou inválidos não viram `false` inventado, e os logs históricos não são reescritos.
+
+`conversation_identity_available` indica a presença de um header de conversa utilizável no transporte.
+`correlation_scope` vale `conversation` quando existe esse fingerprint, `workspace` quando existe apenas o fingerprint
+do workspace solicitado, ou `request` quando ambos faltam. São metadados disponíveis para agrupamento; eles não validam
+o vínculo nem identificam um chat que o cliente não informou. `workspace_coherence` continua registrando a validação
+separadamente, inclusive em chamadas rejeitadas. Os valores de conversa permanecem representados por fingerprints.
+
+### Limites das medições HTTP
+
+O mesmo `request_id`, gerado pelo servidor, liga os eventos de ferramenta e HTTP às novas observações:
+
+| Evento | Observação |
+| --- | --- |
+| `http_request_received` | Entrada no middleware de segurança MCP, antes da admissão e autenticação |
+| `http_request` com `phase="response_ready"` | Resposta pronta; `duration_ms` mantém o limite anterior de medição |
+| `http_response_body` | No máximo um término do corpo: `complete`, `error` ou `dropped` |
+| `http_rejected` | Recusa de admissão existente, agora ligada ao evento de entrada |
+
+O término registra `request_elapsed_ms` desde a entrada no middleware e `body_duration_ms` desde a resposta pronta.
+`complete` significa EOF observado ou sinal de fim do corpo, inclusive para corpos vazios. `error` registra a ocorrência
+de erro do corpo sem gravar seu texto. `dropped` indica descarte sem conclusão ou erro observado; isso pode ser normal
+para um stream SSE aberto. A vaga de concorrência continua ocupada até o descarte do wrapper.
+
+Essas medições terminam na interface do servidor: entrada não é aceite TCP nem envio pelo cliente, resposta pronta não
+é entrega completa, e conclusão do corpo não comprova flush do socket ou recebimento pelo cliente. Encerramento do
+processo e descarte de registros podem deixar rastros incompletos. Os eventos ajudam a localizar a demora, mas não
+atribuem sua causa a rede, túnel, conector ou cliente. Nenhum corpo, query string, credencial, header bruto de sessão
+ou texto de erro é acrescentado.
+
+`winx-code-agent report --last N` ignora `http_request_received` e `http_response_body` antes de selecionar a janela,
+com ou sem filtro de build. Eles continuam disponíveis no JSONL para diagnóstico sem deslocar chamadas reais do relatório.
 
 Uma visão rápida de latência por ferramenta pode ser gerada com:
 

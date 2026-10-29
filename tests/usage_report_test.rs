@@ -25,6 +25,40 @@ fn write_events(path: &Path, fields: &[Value]) -> TestResult {
 }
 
 #[test]
+fn auxiliary_http_lifecycle_does_not_displace_the_last_tool_http_pair() -> TestResult {
+    let temp = tempfile::tempdir()?;
+    let base = temp.path().join("usage.jsonl");
+    write_events(
+        &base,
+        &[
+            json!({"event":"http_request_received", "request_id":"selected"}),
+            json!({"event":"tool_call", "tool":"ReadFiles", "usage_schema":1,
+                "request_id":"selected", "principal":"principal-a", "duration_ms":10,
+                "build":"0.2.356+fixture", "build_version":"0.2.356"}),
+            json!({"event":"http_request", "request_id":"selected",
+                "principal":"principal-a", "status":200, "duration_ms":17}),
+            json!({"event":"http_response_body", "request_id":"selected", "outcome":"complete",
+                "request_elapsed_ms":35, "body_duration_ms":18}),
+            json!({"event":"http_response_body", "request_id":"older-stream", "outcome":"dropped",
+                "request_elapsed_ms":5000, "body_duration_ms":4990}),
+            json!({"event":"http_request_received", "request_id":"not-ready-yet"}),
+        ],
+    )?;
+    for build in [None, Some("0.2.356+fixture")] {
+        let report = usage_report(Some(&base), 2, 0, build)?;
+        assert_eq!(report.events, 2, "{build:?}");
+        assert_eq!(report.tool_calls, 1, "{build:?}");
+        assert_eq!(report.http_requests, 1, "{build:?}");
+        assert_eq!(report.correlated_requests, 1, "{build:?}");
+        assert_eq!(report.tool_calls_without_http, 0, "{build:?}");
+        assert_eq!(report.http_without_tool_call, 0, "{build:?}");
+        assert_eq!(report.http_overhead.samples, 1, "{build:?}");
+        assert_eq!(report.http_overhead.average_ms, 7, "{build:?}");
+    }
+    Ok(())
+}
+
+#[test]
 fn exact_build_preserves_http_pair_and_overhead() -> TestResult {
     let temp = tempfile::tempdir()?;
     let base = temp.path().join("usage.jsonl");

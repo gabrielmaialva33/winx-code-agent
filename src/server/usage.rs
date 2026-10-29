@@ -55,7 +55,7 @@ pub(super) struct UsageRecoveryMetadata<'a> {
     pub next_action_tool: &'a str,
     pub required_read_count: u64,
     pub retry_same_call: bool,
-    pub edit_applied: bool,
+    pub edit_applied: Option<bool>,
     pub fresh_read_required: bool,
     pub verification_status: &'a str,
     pub mutation_transition: &'a str,
@@ -181,8 +181,7 @@ fn usage_recovery_metadata<'a>(
             .unwrap_or(false),
         edit_applied: domain_data
             .and_then(|data| data.get("edit_applied"))
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+            .and_then(serde_json::Value::as_bool),
         fresh_read_required: domain_data
             .and_then(|data| data.get("fresh_read_required"))
             .and_then(serde_json::Value::as_bool)
@@ -491,6 +490,17 @@ impl UsageEvent {
         self.workspace_coherence = value.to_string();
     }
 
+    /// Available telemetry grouping source, independent of binding validation.
+    fn correlation_scope(&self) -> &'static str {
+        if !self.conversation_id.is_empty() {
+            "conversation"
+        } else if !self.workspace_id.is_empty() {
+            "workspace"
+        } else {
+            "request"
+        }
+    }
+
     pub fn emit(
         &self,
         outcome: &str,
@@ -501,7 +511,7 @@ impl UsageEvent {
         if self.tool == "Initialize" {
             self.emit_initialize(outcome, result_status, response_bytes, result);
         } else {
-            self.emit_non_initialize(outcome, result_status, response_bytes, result);
+            self.emit_non_initialize(outcome, result_status, response_bytes, self.emission(result));
         }
     }
 
@@ -574,6 +584,8 @@ impl UsageEvent {
             client_session = %self.client_session,
             conversation_source = %self.conversation_source,
             conversation_id = %self.conversation_id,
+            conversation_identity_available = !self.conversation_id.is_empty(),
+            correlation_scope = self.correlation_scope(),
             workspace_id = %self.workspace_id,
             workspace_coherence = %self.workspace_coherence,
             build = %self.build.display,
@@ -622,9 +634,8 @@ impl UsageEvent {
         outcome: &str,
         result_status: &str,
         response_bytes: usize,
-        result: Option<&CallToolResult>,
+        Emission { metadata, workflow, phases, batch_items }: Emission<'_>,
     ) {
-        let Emission { metadata, workflow, phases, batch_items } = self.emission(result);
         tracing::info!(
             target: "winx::usage",
             event = "tool_call",
@@ -678,6 +689,8 @@ impl UsageEvent {
             client_session = %self.client_session,
             conversation_source = %self.conversation_source,
             conversation_id = %self.conversation_id,
+            conversation_identity_available = !self.conversation_id.is_empty(),
+            correlation_scope = self.correlation_scope(),
             workspace_id = %self.workspace_id,
             workspace_coherence = %self.workspace_coherence,
             build = %self.build.display,
@@ -756,20 +769,10 @@ fn conversation_telemetry(context: &RequestContext<RoleServer>) -> (String, Stri
     let Some(parts) = context.extensions.get::<Parts>() else {
         return ("none".to_string(), String::new());
     };
-    for (header, source) in
-        [("mcp-session-id", "mcp_session"), ("x-winx-conversation-id", "gateway_header")]
-    {
-        if let Some(value) = parts
-            .headers
-            .get(header)
-            .and_then(|value| value.to_str().ok())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return (source.to_string(), short_fingerprint("c", value));
-        }
-    }
-    ("none".to_string(), String::new())
+    super::principal::conversation_identity_from_headers(&parts.headers).map_or_else(
+        || ("none".to_string(), String::new()),
+        |(source, value)| (source.to_string(), short_fingerprint("c", value)),
+    )
 }
 
 /// Classify a `BashCommand` call by action kind without retaining command text.
@@ -983,6 +986,75 @@ mod tests {
     }
 
     #[test]
+    fn usage_json_declares_workspace_correlation_without_conversation() -> anyhow::Result<()> {
+        let fields = captured_usage(
+            "ReadFiles",
+            "",
+            serde_json::json!({"status": "completed", "tool": "ReadFiles", "data": {}}),
+        )?;
+        assert_eq!(fields["conversation_identity_available"], false);
+        assert_eq!(fields["correlation_scope"], "workspace");
+        assert_eq!(fields["conversation_source"], "none");
+        assert_eq!(fields["conversation_id"], "");
+        assert_eq!(fields["workspace_coherence"], "validated");
+        Ok(())
+    }
+
+    // A test-only capture helper for varying the existing UsageEvent fixture.
+    // It does not construct a RequestContext or change production logging.
+    fn captured_identity_usage(usage: &UsageEvent) -> anyhow::Result<serde_json::Value> {
+        let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer_bytes = bytes.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .json()
+            .without_time()
+            .with_writer(move || UsageCapture(writer_bytes.clone()))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            usage.emit("tool_error", "conflict", 0, None);
+        });
+        let captured = bytes.lock().map_err(|error| anyhow::anyhow!(error.to_string()))?;
+        let event: serde_json::Value = serde_json::from_slice(&captured)?;
+        Ok(event["fields"].clone())
+    }
+
+    #[test]
+    fn usage_json_keeps_correlation_source_separate_from_binding_validation() -> anyhow::Result<()>
+    {
+        // A supplied workspace fingerprint can group telemetry even after rejection.
+        // It does not establish that the binding was validated.
+        for (conversation, workspace, coherence, expected_scope) in [
+            ("", "workspace-fixture", "rejected", "workspace"),
+            ("", "", "unchecked", "request"),
+            ("conversation-fixture", "workspace-fixture", "validated", "conversation"),
+        ] {
+            let mut usage = fixture_usage("ReadFiles", "", &serde_json::json!({}));
+            usage.conversation_id = if conversation.is_empty() {
+                String::new()
+            } else {
+                short_fingerprint("c", conversation)
+            };
+            usage.conversation_source =
+                if conversation.is_empty() { "none" } else { "gateway_header" }.to_string();
+            usage.workspace_id = workspace.to_string();
+            usage.workspace_coherence = coherence.to_string();
+
+            let fields = captured_identity_usage(&usage)?;
+            assert_eq!(
+                fields["conversation_identity_available"],
+                !conversation.is_empty(),
+                "{fields}"
+            );
+            assert_eq!(fields["correlation_scope"], expected_scope, "{fields}");
+            assert_eq!(fields["workspace_coherence"], coherence, "{fields}");
+            if !conversation.is_empty() {
+                assert!(!fields.to_string().contains(conversation));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn usage_json_preserves_zero_false_and_opaque_execution_identity() -> anyhow::Result<()> {
         let fields = captured_usage(
             "BashCommand",
@@ -1001,6 +1073,108 @@ mod tests {
         assert_eq!(fields["bg_command_id"], "b_51d1cad915c8c310");
         assert!(!fields.to_string().contains("execution-example"));
         assert!(!fields.to_string().contains("background-example"));
+        Ok(())
+    }
+
+    #[test]
+    fn usage_json_edit_applied_preserves_explicit_outcomes() -> anyhow::Result<()> {
+        let cases = [
+            ("completed", serde_json::json!({"edit_applied": true}), true),
+            ("conflict", serde_json::json!({"edit_applied": false}), false),
+            (
+                "completed_with_issues",
+                serde_json::json!({"edit_applied": true, "verification_status": "failed"}),
+                true,
+            ),
+            (
+                "completed_with_issues",
+                serde_json::json!({"edit_applied": true, "mutation_transition": "partial_replayed"}),
+                true,
+            ),
+            (
+                "completed",
+                serde_json::json!({"edit_applied": true, "mutation_transition": "replayed"}),
+                true,
+            ),
+            (
+                "conflict",
+                serde_json::json!({
+                    "edit_applied": false, "prior_edit_applied": true,
+                    "mutation_transition": "postcondition_changed"
+                }),
+                false,
+            ),
+        ];
+        for (status, data, expected) in cases {
+            for data in [data.clone(), serde_json::json!({"result": data})] {
+                let fields = captured_usage(
+                    "EditFiles",
+                    "",
+                    serde_json::json!({"status": status, "tool": "EditFiles", "data": data}),
+                )?;
+                assert_eq!(fields["edit_applied"].as_bool(), Some(expected));
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn usage_json_edit_applied_keeps_absence_and_non_boolean_values_unknown() -> anyhow::Result<()>
+    {
+        for data in [
+            serde_json::json!({}),
+            serde_json::json!({"edit_applied": null}),
+            serde_json::json!({"edit_applied": "false"}),
+            serde_json::json!({
+                "mutation_transition": "committed", "mutation_receipt_persisted": true
+            }),
+        ] {
+            for data in [data.clone(), serde_json::json!({"result": data})] {
+                let fields = captured_usage(
+                    "EditFiles",
+                    "",
+                    serde_json::json!({"status": "completed", "tool": "EditFiles", "data": data}),
+                )?;
+                assert!(fields.get("edit_applied").is_none_or(serde_json::Value::is_null));
+            }
+        }
+        let fields = captured_usage_request("EditFiles", "", &serde_json::json!({}), None)?;
+        assert!(fields.get("edit_applied").is_none_or(serde_json::Value::is_null));
+        Ok(())
+    }
+
+    #[test]
+    fn usage_json_edit_applied_does_not_infer_edits_from_release_or_other_tools(
+    ) -> anyhow::Result<()> {
+        let cases = [
+            (
+                "EditFiles",
+                "failed",
+                serde_json::json!({
+                    "temporary_release": {"files": [{
+                        "status": "failed", "recovery_path": "/fixture/quarantined-generation"
+                    }]},
+                    "mutation_transition": "committed", "mutation_receipt_persisted": true
+                }),
+            ),
+            (
+                "EditFiles",
+                "completed",
+                serde_json::json!({
+                    "released_artifacts": [{"file_path": "/fixture/helper", "status": "released"}],
+                    "mutation_transition": "replayed", "mutation_receipt_persisted": true
+                }),
+            ),
+            ("BashCommand", "completed", serde_json::json!({"exit_code": 0})),
+        ];
+        for (tool, status, data) in cases {
+            let fields = captured_usage(
+                tool,
+                "",
+                serde_json::json!({"status": status, "tool": tool, "data": data}),
+            )?;
+            assert!(fields.get("edit_applied").is_none_or(serde_json::Value::is_null));
+        }
         Ok(())
     }
 

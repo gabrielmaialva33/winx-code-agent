@@ -68,7 +68,11 @@ pub(super) fn select(
     let counts = scan(&mut sources, |position, event| {
         if matches!(
             string(&event.fields, "event"),
-            "tool_started" | "tool_phase" | "tool_phase_trace_truncated"
+            "tool_started"
+                | "tool_phase"
+                | "tool_phase_trace_truncated"
+                | "http_request_received"
+                | "http_response_body"
         ) || !within_time(&event, cutoff)
         {
             return;

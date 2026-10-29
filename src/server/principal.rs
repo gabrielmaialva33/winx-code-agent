@@ -86,13 +86,19 @@ pub(super) fn conversation_identity_from_context(
     context: &RequestContext<RoleServer>,
 ) -> Option<String> {
     let parts = context.extensions.get::<Parts>()?;
-    ["mcp-session-id", "x-winx-conversation-id"]
+    conversation_identity_from_headers(&parts.headers).map(|(_, value)| value.to_string())
+}
+
+/// Select the first present header before validating it, matching binding policy.
+pub(super) fn conversation_identity_from_headers(
+    headers: &axum::http::HeaderMap,
+) -> Option<(&'static str, &str)> {
+    [("mcp-session-id", "mcp_session"), ("x-winx-conversation-id", "gateway_header")]
         .into_iter()
-        .find_map(|name| parts.headers.get(name))
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(ToString::to_string)
+        .find_map(|(name, source)| headers.get(name).map(|value| (source, value)))
+        .and_then(|(source, value)| value.to_str().ok().map(|value| (source, value)))
+        .map(|(source, value)| (source, value.trim()))
+        .filter(|(_, value)| !value.is_empty())
 }
 
 pub(super) fn scope_tool_request(
@@ -353,7 +359,10 @@ fn unscope_json(value: &mut Value, replacements: &[(String, String)]) {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
-    use super::{new_task_id, scope_tool_request, task_belongs_to_principal};
+    use super::{
+        conversation_identity_from_headers, new_task_id, scope_tool_request,
+        task_belongs_to_principal,
+    };
     use crate::config::{HttpPrincipal, HttpSessionAffinity};
     use rmcp::model::CallToolRequestParams;
     use serde_json::{json, Value};
@@ -633,5 +642,85 @@ mod tests {
         let id = new_task_id(Some(&left), 7);
         assert!(task_belongs_to_principal(&id, Some(&left)));
         assert!(!task_belongs_to_principal(&id, Some(&right)));
+    }
+    #[test]
+    fn explicit_conversation_identity_does_not_merge_principal_namespaces() {
+        let request = CallToolRequestParams::new("Initialize").with_arguments(
+            json!({
+                "type": "first_call",
+                "thread_id": "same-external-thread",
+                "any_workspace_path": "/tmp"
+            })
+            .as_object()
+            .cloned()
+            .unwrap(),
+        );
+        let (left, _) = scope_tool_request(
+            request.clone(),
+            Some(principal("left")),
+            HttpSessionAffinity::Conversation,
+            Some("same-explicit-conversation"),
+        )
+        .expect("left scope");
+        let (right, _) = scope_tool_request(
+            request,
+            Some(principal("right")),
+            HttpSessionAffinity::Conversation,
+            Some("same-explicit-conversation"),
+        )
+        .expect("right scope");
+
+        let left_thread = argument(&left, "thread_id");
+        let right_thread = argument(&right, "thread_id");
+        assert_ne!(left_thread, "");
+        assert_ne!(right_thread, "");
+        assert_ne!(left_thread, right_thread);
+    }
+
+    #[test]
+    fn conversation_headers_preserve_first_present_precedence() {
+        use axum::http::{HeaderMap, HeaderValue};
+
+        let mut headers = HeaderMap::new();
+        assert_eq!(conversation_identity_from_headers(&headers), None);
+
+        headers.insert("x-winx-conversation-id", HeaderValue::from_static("gateway-conversation"));
+        assert_eq!(
+            conversation_identity_from_headers(&headers),
+            Some(("gateway_header", "gateway-conversation"))
+        );
+
+        headers.insert("mcp-session-id", HeaderValue::from_static("  legacy-session  "));
+        assert_eq!(
+            conversation_identity_from_headers(&headers),
+            Some(("mcp_session", "legacy-session"))
+        );
+
+        headers.insert("mcp-session-id", HeaderValue::from_static(""));
+        assert_eq!(
+            conversation_identity_from_headers(&headers),
+            None,
+            "empty first header must not select a different binding identity"
+        );
+
+        headers.insert("mcp-session-id", HeaderValue::from_static("   "));
+        assert_eq!(
+            conversation_identity_from_headers(&headers),
+            None,
+            "blank first header must not select a different binding identity"
+        );
+
+        headers.insert("mcp-session-id", HeaderValue::from_bytes(&[0xff]).expect("opaque header"));
+        assert_eq!(
+            conversation_identity_from_headers(&headers),
+            None,
+            "invalid first header must not select a different binding identity"
+        );
+
+        headers.remove("mcp-session-id");
+        assert_eq!(
+            conversation_identity_from_headers(&headers),
+            Some(("gateway_header", "gateway-conversation"))
+        );
     }
 }

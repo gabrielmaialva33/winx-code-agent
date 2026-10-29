@@ -117,6 +117,12 @@ Copy both values unchanged into every later stateful Winx call. Before selecting
 Winx verifies that the thread affinity, supplied canonical root, and initialized session agree. Missing or mixed bindings
 return a structured `needs_initialize`/`conflict` tool result and do not reach the shell or filesystem.
 
+For a missing or mismatched pair, first reuse the exact pair already returned for the intended workspace. These errors
+report `operation_executed=false`, `binding_changed=false`, and
+`recovery_strategy="reuse_valid_pair_or_initialize"`. If that pair is unavailable, follow the existing `Initialize`
+fallback once and use its returned values; do not carry the rejected thread into the fallback or reset its shell.
+An `Initialize` conflict remains terminal and does not offer another automatic initialization.
+
 This check does **not** confine tool targets to `workspace_root`. It identifies which project context owns the terminal,
 cwd, read history, and edit state. Path authority remains a separate policy: for example, `WINX_ALLOW_PATHS=/` still lets
 a coherent session read or edit supporting paths outside the project when its active mode permits. This separation keeps
@@ -190,6 +196,10 @@ Identity preference is:
 2. `X-Winx-Conversation-Id`, when a reviewed gateway injects a stable opaque value;
 3. the supplied first-call `thread_id`, for modern stateless clients;
 4. workspace affinity, when no conversation identity exists.
+
+Among transport headers, the first present header takes precedence before text/empty-value validation. An empty or invalid
+`Mcp-Session-Id` does not fall through to the gateway header. The existing first-call thread/workspace fallback still
+applies when no usable transport identity is available.
 
 The identity is hashed into an external ID such as `cv_project_<hash>` and is never written raw to tool results or usage
 logs. Repeating `Initialize(first_call)` with the same conversation identity reattaches even if the supplied model-generated
@@ -571,6 +581,41 @@ process or exit code. `shell_busy` and `command_started` record observed content
 preserving zero and false; unavailable identifier fingerprints are empty strings. These fields are additive within
 `usage_schema=1`; older records remain valid.
 
+### Edit state and identity
+
+`edit_applied` preserves three states: explicit `true`, explicit `false`, or absent/unknown. Successful typed Apply/Undo
+results set it to `true`, including edits followed by a failed verification. An identical receipt replay retains the
+identified edit's result without a fresh write; a committed partial batch may also be `true`. Read the result status,
+receipt/replay fields and verification status alongside it. A temporary-artifact release does not imply a source edit,
+and missing, null or malformed legacy values never become an invented `false`. Historical logs are not rewritten.
+
+`conversation_identity_available` indicates whether a usable transport conversation header was supplied.
+`correlation_scope` is `conversation` when its fingerprint exists, otherwise `workspace` when a requested workspace
+fingerprint exists, otherwise `request`. This describes available grouping metadata; it does not validate a binding
+or identify a chat that the client did not provide. `workspace_coherence` records validation independently, so a rejected
+request can still have workspace correlation. Conversation values remain fingerprinted.
+
+### HTTP measurement boundaries
+
+The same server-generated `request_id` joins the existing tool/HTTP events and the new lifecycle observations:
+
+| Event | Observation |
+| --- | --- |
+| `http_request_received` | Entry into the MCP security middleware, before admission and authentication work |
+| `http_request` with `phase="response_ready"` | Existing response-ready event; `duration_ms` keeps its previous boundary |
+| `http_response_body` | At most one body terminal: `complete`, `error`, or `dropped` |
+| `http_rejected` | Existing admission rejection, now correlated with its entry event |
+
+The body terminal carries `request_elapsed_ms` since middleware entry and `body_duration_ms` since response-ready.
+`complete` means the body yielded EOF or reported its end-of-stream hint, including empty bodies. `error` means a body
+error was observed; its text is not logged. `dropped` means the body was discarded without an observed completion or
+error, which can be normal for an open SSE stream. The concurrency permit remains held until the wrapper is dropped.
+
+These are server boundary measurements. Entry is not TCP accept or client submission; response-ready is not completed
+body delivery; body completion is not socket flush or client receipt. Process termination and dropped log records can
+leave partial traces. The events narrow where a delay occurred but cannot establish a network, tunnel, connector or
+client cause by themselves. No request/response body, query string, credential, raw session header, or error text is added.
+
 `winx-code-agent report` discovers rotated siblings automatically, supports build/time filters, correlates tool calls with
 HTTP requests, reports latency/bytes/recovery behavior, and audits unsafe retry invariants. It disables the usage writer
 while reading, so generating a report cannot append to, rotate, or prune the observed logs.
@@ -581,6 +626,8 @@ fields remain authoritative; unrelated HTTP records and conflicting ownership ar
 Legacy records can correlate when both omit the principal.
 
 `--last` limits matching **events** after build attribution, in source traversal order, so it can split a tool/HTTP pair.
+Auxiliary `tool_started`/phase events and `http_request_received`/`http_response_body` are excluded before this window,
+with or without a build filter; body and entry observations do not displace tool calls or their HTTP responses.
 `--since-minutes` controls which events are returned; an older tool may establish a recent HTTP event's build without
 being returned itself. Each report keeps opened log handles and their initial byte lengths across attribution passes,
 so later appends are considered on the next invocation. Attribution uses bounded candidate batches; sparse matches in
@@ -609,7 +656,7 @@ jq -s '
 ```
 
 Use `request_id` to correlate a `tool_call` with its `http_request`; the difference between their durations approximates
-transport/adapter overhead without exposing payloads.
+adapter overhead up to response-ready. It excludes body streaming and time outside that server window.
 
 Landlock is applied before the non-blocking logging worker is created, so the writer inherits the same domain as Tokio and
 PTY children. With `WINX_SANDBOX=1`, the usage-log path must therefore be under the startup workspace, `/tmp`, or an

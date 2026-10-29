@@ -131,6 +131,35 @@ fn undo_id(result: &Value) -> anyhow::Result<&str> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_edit_without_verification_reports_applied_across_replay_and_undo(
+) -> anyhow::Result<()> {
+    let session = DaemonEditSession::new().await?;
+    let edited = session.edit(None).await?;
+    assert_eq!(edited["status"], "completed", "{edited}");
+    assert_eq!(edited["data"]["edit_applied"], true, "{edited}");
+    assert_eq!(edited["data"]["mutation_transition"], "committed", "{edited}");
+    assert_eq!(std::fs::read_to_string(session.target())?, "edited\n");
+    let receipt_id =
+        edited["data"]["mutation_receipt_id"].as_str().context("edit omitted mutation receipt")?;
+    let undo_handle = undo_id(&edited)?;
+
+    let replay = session.edit(None).await?;
+    assert_eq!(replay["status"], "completed", "{replay}");
+    assert_eq!(replay["data"]["edit_applied"], true, "{replay}");
+    assert_eq!(replay["data"]["mutation_transition"], "replayed", "{replay}");
+    assert_eq!(replay["data"]["mutation_replayed"], true, "{replay}");
+    assert_eq!(replay["data"]["mutation_receipt_id"], receipt_id, "{replay}");
+    assert_eq!(replay["data"]["undo_ids"][0], undo_handle, "{replay}");
+    assert_eq!(std::fs::read_to_string(session.target())?, "edited\n");
+
+    let undone = session.undo(undo_handle).await?;
+    assert_eq!(undone["status"], "completed", "{undone}");
+    assert_eq!(undone["data"]["edit_applied"], true, "{undone}");
+    assert_eq!(std::fs::read_to_string(session.target())?, "original\n");
+    session.stop().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn daemon_command_preserves_undo_and_updates_cwd() -> anyhow::Result<()> {
     let session = DaemonEditSession::new().await?;
     let edited = session.edit(None).await?;
