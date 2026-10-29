@@ -18,7 +18,7 @@ impl Fixture {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("herdr-fixture");
         let calls = dir.path().join("calls");
-        let script = format!("#!/usr/bin/python3\nimport os,sys,json,time\na=sys.argv[1:]\nwith open({},'a') as f: f.write(json.dumps(a)+'\\n')\nassert set(k for k in os.environ if k.startswith('HERDR_'))=={{'HERDR_SOCKET_PATH'}}\nagent={{'terminal_id':'terminal-1','agent_status':'idle','workspace_id':'w','tab_id':'t','pane_id':'p','focused':False,'revision':1}}\n{}\n", serde_json::to_string(&calls.to_string_lossy()).unwrap(), body);
+        let script = format!("#!/usr/bin/env python3\nimport os,sys,json,time\na=sys.argv[1:]\nwith open({},'a') as f: f.write(json.dumps(a)+'\\n')\nassert set(k for k in os.environ if k.startswith('HERDR_'))=={{'HERDR_SOCKET_PATH'}}\nagent={{'terminal_id':'terminal-1','agent_status':'idle','workspace_id':'w','tab_id':'t','pane_id':'p','focused':False,'revision':1}}\n{}\n", serde_json::to_string(&calls.to_string_lossy()).unwrap(), body);
         fs::write(&exe, script).unwrap();
         fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
         let config = dir.path().join("operator.json");
