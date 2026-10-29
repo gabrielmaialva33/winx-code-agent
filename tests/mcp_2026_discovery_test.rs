@@ -3482,6 +3482,33 @@ async fn exercise_usage_read(
     Ok(())
 }
 
+async fn exercise_usage_metrics(
+    address: std::net::SocketAddr,
+    thread_id: &str,
+) -> anyhow::Result<()> {
+    let meta = modern_request_meta("usage-log-client", false);
+    let status = call_tool_json(
+        address, &meta, "usage-default-wait", "BashCommand",
+        serde_json::json!({"thread_id":thread_id,"action_json":{"type":"command","command":"true"}}),
+    ).await?;
+    assert_eq!(status["result"]["structuredContent"]["status"], "completed", "{status}");
+    let observe = call_tool_json(
+        address,
+        &meta,
+        "usage-observe",
+        "Execution",
+        serde_json::json!({"thread_id":thread_id,"action":{"type":"observe","items":[
+            {"execution_id":"usage-missing-first"},{"execution_id":"usage-missing-second"}
+        ]}}),
+    )
+    .await?;
+    assert_eq!(
+        observe["result"]["structuredContent"]["status"], "completed_with_issues",
+        "{observe}"
+    );
+    Ok(())
+}
+
 fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
     let entries = contents
         .lines()
@@ -3511,6 +3538,10 @@ fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing ReadFiles usage event: {contents}"))?;
     assert_eq!(read_call["fields"]["batch_items"], 2);
     assert_eq!(read_call["fields"]["worker_limit"], 3);
+    assert_eq!(read_call["fields"]["read_request_schema"], 1);
+    assert_eq!(read_call["fields"]["read_whole_file_requests"], 2);
+    assert_eq!(read_call["fields"]["read_bounded_range_requests"], 0);
+    assert_eq!(read_call["fields"]["read_open_ended_range_requests"], 0);
     assert_eq!(read_call["fields"]["workspace_coherence"], "validated");
     assert_eq!(read_call["fields"]["conversation_source"], "none");
     assert!(
@@ -3538,6 +3569,30 @@ fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
         }),
         "tool and HTTP events were not correlated: {contents}"
     );
+    let bash = entries
+        .iter()
+        .rev()
+        .find(|entry| {
+            entry["fields"]["event"] == "tool_call"
+                && entry["fields"]["tool"] == "BashCommand"
+                && entry["fields"]["action"] == "command"
+        })
+        .ok_or_else(|| anyhow::anyhow!("missing default-wait usage event"))?;
+    assert!(bash["fields"].get("requested_wait_ms").is_none());
+    assert!(bash["fields"].get("requested_wait_policy").is_none());
+    assert_eq!(bash["fields"]["effective_wait_policy"], "adaptive");
+    assert_eq!(bash["fields"]["effective_wait_mode"], "synchronous");
+    assert_eq!(bash["fields"]["effective_wait_ms"], 15000);
+    let observed = entries
+        .iter()
+        .find(|entry| {
+            entry["fields"]["event"] == "tool_call" && entry["fields"]["tool"] == "Execution"
+        })
+        .ok_or_else(|| anyhow::anyhow!("missing observe usage event"))?;
+    assert_eq!(observed["fields"]["batch_items"], 2);
+    assert_eq!(observed["fields"]["observe_requested_items"], 2);
+    assert_eq!(observed["fields"]["observe_returned_items"], 2);
+    assert_eq!(observed["fields"]["observe_items_with_issues"], 2);
     Ok(())
 }
 
@@ -3594,6 +3649,7 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
     assert!(command.contains(COMMAND_MARKER), "{command}");
 
     exercise_usage_read(address, workspace.path(), &thread_id).await?;
+    exercise_usage_metrics(address, &thread_id).await?;
 
     let deadline = Instant::now() + Duration::from_secs(3);
     let contents = loop {
@@ -3601,7 +3657,10 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
         let has_tool = contents.lines().any(|line| line.contains("\"event\":\"tool_call\""));
         let has_http = contents.lines().any(|line| line.contains("\"event\":\"http_request\""));
         let has_read = contents.lines().any(|line| line.contains("\"tool\":\"ReadFiles\""));
-        if has_tool && has_http && has_read {
+        let has_observe = contents.lines().any(|line| {
+            line.contains("\"event\":\"tool_call\"") && line.contains("\"tool\":\"Execution\"")
+        });
+        if has_tool && has_http && has_read && has_observe {
             break contents;
         }
         if Instant::now() >= deadline {

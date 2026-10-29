@@ -11,10 +11,13 @@ use time::{format_description::well_known::Rfc3339, Duration, OffsetDateTime};
 use crate::errors::{Result, WinxError};
 
 mod lifecycle;
+mod observations;
 mod selection;
 mod workflows;
 
 pub use lifecycle::WorkflowPhaseUsage;
+use observations::ObservationAccumulator;
+pub use observations::{EffectiveWaitUsage, ObserveUsage, ReadUsage};
 use workflows::WorkflowAccumulator;
 pub use workflows::{WorkflowOperationUsage, WorkflowUsage};
 
@@ -50,6 +53,8 @@ pub struct UsageReport {
     pub recovery: RecoveryUsage,
     pub execution: ExecutionUsage,
     pub workflows: WorkflowUsage,
+    pub reads: ReadUsage,
+    pub observations: ObserveUsage,
     pub trace_audit: TraceAudit,
 }
 
@@ -91,6 +96,8 @@ pub struct ExecutionUsage {
     pub requested_wait_policies: BTreeMap<String, u64>,
     pub requested_wait_policy_unknown: u64,
     pub requested_wait_ms: LatencySummary,
+    #[serde(flatten)]
+    pub effective_wait: EffectiveWaitUsage,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -183,6 +190,7 @@ struct ReportAccumulator {
     recovery: RecoveryUsage,
     execution: ExecutionUsage,
     workflows: WorkflowAccumulator,
+    observation_metrics: ObservationAccumulator,
     requested_wait_samples: Vec<u64>,
     trace_audit: TraceAudit,
     all_durations: Vec<u64>,
@@ -248,6 +256,7 @@ impl ReportAccumulator {
         self.record_recovery(fields);
         self.record_execution(fields);
         self.workflows.record(fields);
+        self.observation_metrics.record(fields);
         audit_tool_event(fields, &mut self.trace_audit);
     }
 
@@ -341,6 +350,8 @@ impl ReportAccumulator {
 
     fn finish(mut self, window: ReportWindow<'_>) -> UsageReport {
         self.execution.requested_wait_ms = latency(self.requested_wait_samples);
+        let (reads, observations, effective_wait) = self.observation_metrics.finish();
+        self.execution.effective_wait = effective_wait;
         let correlated_requests =
             self.tool_request_ids.intersection(&self.http_request_ids).count();
         let overhead = self
@@ -398,6 +409,8 @@ impl ReportAccumulator {
             recovery: self.recovery,
             execution: self.execution,
             workflows: self.workflows.finish(),
+            reads,
+            observations,
             trace_audit: self.trace_audit,
         }
     }

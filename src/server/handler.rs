@@ -19,7 +19,7 @@ use super::principal::{
     conversation_identity_from_context, principal_from_context, scope_tool_request,
     session_affinity_from_context, task_belongs_to_principal,
 };
-use super::usage::UsageEvent;
+use super::usage::{EffectiveWaitMode, UsageEvent};
 use super::WinxService;
 use crate::runtime::ShellActionOptions;
 use crate::tool_policy::ToolPolicy;
@@ -499,6 +499,11 @@ impl ServerHandler for WinxService {
             match route {
                 BashTaskRoute::Immediate => {
                     let reservation = self.reserve_bash_task(&request, &scope).await?;
+                    let effective_wait = usage.effective_wait_for(
+                        &request,
+                        BashWaitPolicy::UntilComplete,
+                        EffectiveWaitMode::Task,
+                    );
                     return match self
                         .start_reserved_bash_task(
                             reservation,
@@ -510,6 +515,7 @@ impl ServerHandler for WinxService {
                         .await
                     {
                         Ok(task) => {
+                            usage.record_effective_wait(effective_wait);
                             usage.emit("task", "working", 0, None);
                             Ok(CallToolResponse::Task(task))
                         }
@@ -524,6 +530,11 @@ impl ServerHandler for WinxService {
                     let task_request = request.clone();
                     let inline_request =
                         normalized_wait_request(request, BashWaitPolicy::Adaptive, true)?;
+                    let effective_wait = usage.effective_wait_for(
+                        &inline_request,
+                        BashWaitPolicy::Adaptive,
+                        EffectiveWaitMode::TaskInline,
+                    );
                     match self
                         .execute_tool_call(
                             inline_request,
@@ -535,6 +546,7 @@ impl ServerHandler for WinxService {
                         Ok(execution)
                             if outcomes::result_status(&execution.result) == "running" =>
                         {
+                            usage.record_effective_wait(effective_wait);
                             return match self
                                 .start_reserved_bash_task(
                                     reservation,
@@ -556,6 +568,7 @@ impl ServerHandler for WinxService {
                             };
                         }
                         Ok(mut execution) => {
+                            usage.record_effective_wait(effective_wait);
                             self.release_bash_task(&reservation).await;
                             let guard = phase(Phase::ResponseFinalize);
                             outcomes::enforce_next_action_policy(
@@ -598,6 +611,9 @@ impl ServerHandler for WinxService {
                 Some(policy) => normalized_wait_request(request, policy, false)?,
                 None => request,
             };
+            let effective_wait = wait_policy.and_then(|policy| {
+                usage.effective_wait_for(&request, policy, EffectiveWaitMode::Synchronous)
+            });
             match self
                 .execute_tool_call_with_authority(
                     request,
@@ -611,6 +627,7 @@ impl ServerHandler for WinxService {
                 .await
             {
                 Ok(mut execution) => {
+                    usage.record_effective_wait(effective_wait);
                     let guard = phase(Phase::ResponseFinalize);
                     let result = &mut execution.result;
                     outcomes::enforce_next_action_policy(result, effective_tool_policy);
@@ -640,6 +657,8 @@ mod tests {
     use super::super::usage::usage_result_metadata;
     use super::*;
     use rmcp::model::CallToolResult;
+
+    mod wait_metrics;
 
     #[test]
     fn cache_hints_follow_negotiated_protocol_version() {

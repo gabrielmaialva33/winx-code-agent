@@ -387,3 +387,54 @@ A Herdr wait can supply `until` with lifecycle states `idle`, `working`, `blocke
 `done`, or `unknown`, and a finite `timeout_seconds`. A prompt supplies `text` and
 omits `prompt_id`. Configuration only grants access to existing targets; it does not
 start Herdr or attach a terminal.
+
+## Usage metrics for plugin workflows
+
+Usage logs contain aggregate metadata rather than command text, file contents,
+execution cursors, or the file paths requested by these metrics.
+
+For `Execution.observe`, `batch_items` and `observe_requested_items` count requested
+entries. `observe_returned_items` counts response entries; `observe_items_with_issues`
+counts entries with at least one error, so refresh and read errors on the same entry
+count once. These are call observations, including repeated observations of the same
+execution. They are not unique process counts or evidence that a process completed.
+`observe_schema=1` identifies the new counters. Older `batch_items=0` values are
+unverifiable for observe and must not be interpreted as measured empty batches.
+
+For `ReadFiles`, `read_request_schema=1` accompanies three optional request counters:
+
+| Field | Requested shape |
+|---|---|
+| `read_whole_file_requests` | No recognized line bounds |
+| `read_bounded_range_requests` | An end bound, including `:10-20` and `:-20` |
+| `read_open_ended_range_requests` | A start with no end, including `:20-` and `:20` |
+
+Classification reuses the tool's parser and counts duplicate entries separately.
+Invalid or empty requests have unknown shape counts. These fields describe requested
+entries, not successful reads or unique files. Reading budgets, delivered contents,
+revision receipts, and visible edit coverage are unchanged.
+
+For ordinary wait-consuming `BashCommand` actions, `requested_wait_policy` and
+`requested_wait_ms` retain the client's explicit input. Optional
+`effective_wait_policy`, `effective_wait_ms`, and `effective_wait_mode` describe the
+server-selected inline allowance after defaults and caps:
+
+- `synchronous`: the allowance in the normalized synchronous request.
+- `task_inline`: the initial adaptive allowance, retained if work is promoted to a Task.
+- `task`: zero inline allowance for an immediate Task accepted by the server.
+
+The effective allowance is configuration, not elapsed waiting time or proof a command
+started. A structured runtime rejection can still report a selected allowance; failures
+before routing or inline execution leave it unavailable. A failed promotion after an
+inline execution retains that execution's allowance. `screen`, `inspect`,
+`wait_for_turn`, and `prompt` have separate observation/timeout semantics and omit
+these fields. Use `duration_ms` and phase timings to assess actual call latency.
+
+The JSON usage report exposes `reads`, `observations`, and the
+`execution.effectiveWait*` aggregates. Missing, malformed, and legacy metadata remain
+unknown rather than becoming zero samples. Effective-wait counts use only BashCommand
+calls; absence also includes actions for which this allowance is not applicable.
+`observations.partialResults` counts partial calls separately from affected items.
+Existing `errorResults` still counts nonempty error codes, including partial results.
+Recorded response bytes help locate high-volume workflows; they do not establish
+token billing or savings without a comparable workload.

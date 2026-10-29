@@ -16,10 +16,14 @@ use sha2::{Digest, Sha256};
 use super::principal::RequestScope;
 use crate::build_info::BuildIdentity;
 
+mod effective_wait;
 pub(super) mod lifecycle;
+mod observations;
 mod workflow;
 
+pub(super) use effective_wait::{EffectiveWait, EffectiveWaitMode};
 use lifecycle::{Phase, TraceSummary, UsageTrace};
+use observations::{UsageObservationRequest, UsageObservationResult};
 
 use workflow::{UsageWorkflowRequestMetadata, UsageWorkflowResultMetadata};
 
@@ -30,7 +34,9 @@ pub(super) struct UsageEvent {
     action: String,
     command_kind: &'static str,
     requested_wait: UsageWaitMetadata,
+    effective_wait: Option<EffectiveWait>,
     workflow: Option<UsageWorkflowRequestMetadata>,
+    observations: UsageObservationRequest,
     ws: String,
     principal: String,
     thread_id: String,
@@ -375,6 +381,7 @@ fn usage_action(
 struct Emission<'a> {
     metadata: UsageResultMetadata<'a>,
     workflow: UsageWorkflowResultMetadata,
+    observations: UsageObservationResult,
     phases: TraceSummary,
     batch_items: usize,
 }
@@ -440,13 +447,8 @@ impl UsageEvent {
             .and_then(|value| value.to_str().ok())
             .map_or_else(|| "stateless".to_string(), |id| short_fingerprint("s", id));
         let (conversation_source, conversation_id) = conversation_telemetry(context);
-        let batch_items = match request.name.as_ref() {
-            "ReadFiles" => arguments
-                .and_then(|arguments| arguments.get("file_paths"))
-                .and_then(serde_json::Value::as_array)
-                .map_or(0, Vec::len),
-            _ => 0,
-        };
+        let observations = UsageObservationRequest::from_request(request.name.as_ref(), arguments);
+        let batch_items = observations.batch_items;
         let worker_limit = if request.name == "ReadFiles" {
             crate::tools::read_files::configured_parallelism()
         } else {
@@ -457,7 +459,9 @@ impl UsageEvent {
             action,
             command_kind,
             requested_wait: usage_wait_metadata(request.name.as_ref(), arguments),
+            effective_wait: None,
             workflow,
+            observations,
             ws,
             principal: scope
                 .principal()
@@ -484,6 +488,32 @@ impl UsageEvent {
 
     pub(super) fn trace(&self) -> UsageTrace {
         self.trace.clone()
+    }
+
+    pub(super) fn effective_wait_for(
+        &self,
+        request: &CallToolRequestParams,
+        policy: crate::types::BashWaitPolicy,
+        mode: EffectiveWaitMode,
+    ) -> Option<EffectiveWait> {
+        if self.tool != "BashCommand"
+            || !matches!(
+                self.action.as_str(),
+                "command"
+                    | "status_check"
+                    | "send_text"
+                    | "send_specials"
+                    | "send_ascii"
+                    | "verify"
+            )
+        {
+            return None;
+        }
+        EffectiveWait::from_normalized(request.arguments.as_ref(), policy, mode)
+    }
+
+    pub(super) fn record_effective_wait(&mut self, wait: Option<EffectiveWait>) {
+        self.effective_wait = wait;
     }
 
     pub fn set_workspace_coherence(&mut self, value: &str) {
@@ -626,15 +656,20 @@ impl UsageEvent {
             .ok()
             .filter(|count| *count > 0)
             .unwrap_or(self.batch_items);
-        Emission { metadata, workflow, phases, batch_items }
+        let observations = self.observations.result(result);
+        Emission { metadata, workflow, observations, phases, batch_items }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep the compatible flat usage record in one atomic tracing event"
+    )]
     fn emit_non_initialize(
         &self,
         outcome: &str,
         result_status: &str,
         response_bytes: usize,
-        Emission { metadata, workflow, phases, batch_items }: Emission<'_>,
+        Emission { metadata, workflow, observations, phases, batch_items }: Emission<'_>,
     ) {
         tracing::info!(
             target: "winx::usage",
@@ -698,6 +733,14 @@ impl UsageEvent {
             build_revision = %self.build.revision,
             build_dirty = self.build.dirty,
             batch_items,
+            observe_schema = self.observations.observe_schema,
+            observe_requested_items = self.observations.requested_items,
+            observe_returned_items = observations.returned_items,
+            observe_items_with_issues = observations.items_with_issues,
+            read_request_schema = self.observations.read_schema,
+            read_whole_file_requests = self.observations.read_shapes.map(|shapes| shapes.whole_files),
+            read_bounded_range_requests = self.observations.read_shapes.map(|shapes| shapes.bounded_ranges),
+            read_open_ended_range_requests = self.observations.read_shapes.map(|shapes| shapes.open_ended_ranges),
             worker_limit = self.worker_limit,
             error_code = metadata.error_code,
             exit_code = metadata.execution.exit_code,
@@ -711,6 +754,9 @@ impl UsageEvent {
             shell_busy = metadata.execution.shell_busy,
             requested_wait_policy = self.requested_wait.policy,
             requested_wait_ms = self.requested_wait.milliseconds,
+            effective_wait_policy = self.effective_wait.map(|wait| wait.policy),
+            effective_wait_ms = self.effective_wait.map(|wait| wait.milliseconds),
+            effective_wait_mode = self.effective_wait.map(|wait| wait.mode),
             next_action_tool = metadata.recovery.next_action_tool,
             required_read_count = metadata.recovery.required_read_count,
             retry_same_call = metadata.recovery.retry_same_call,
@@ -879,7 +925,7 @@ fn classify_command(command: &str) -> &'static str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     #[test]
@@ -909,6 +955,8 @@ mod tests {
             Ok(())
         }
     }
+
+    mod observation_metrics;
 
     fn captured_usage(
         tool: &str,
@@ -957,14 +1005,21 @@ mod tests {
         Ok(event["fields"].clone())
     }
 
-    fn fixture_usage(tool: &str, action: &str, arguments: &serde_json::Value) -> UsageEvent {
+    pub(in crate::server) fn fixture_usage(
+        tool: &str,
+        action: &str,
+        arguments: &serde_json::Value,
+    ) -> UsageEvent {
+        let observations = UsageObservationRequest::from_request(tool, arguments.as_object());
         UsageEvent {
             tool: tool.to_string(),
             action: UsageWorkflowRequestMetadata::from_request(tool, arguments.as_object())
                 .map_or_else(|| action.to_string(), |workflow| workflow.action.to_string()),
             command_kind: "other",
             requested_wait: usage_wait_metadata(tool, arguments.as_object()),
+            effective_wait: None,
             workflow: UsageWorkflowRequestMetadata::from_request(tool, arguments.as_object()),
+            observations,
             ws: String::new(),
             principal: "test-principal".to_string(),
             thread_id: "test-thread".to_string(),
@@ -977,7 +1032,7 @@ mod tests {
             conversation_id: String::new(),
             workspace_id: "workspace-fixture".to_string(),
             workspace_coherence: "validated".to_string(),
-            batch_items: 0,
+            batch_items: observations.batch_items,
             worker_limit: 0,
             build: BuildIdentity::current(),
             started: std::time::Instant::now(),
@@ -1002,7 +1057,9 @@ mod tests {
 
     // A test-only capture helper for varying the existing UsageEvent fixture.
     // It does not construct a RequestContext or change production logging.
-    fn captured_identity_usage(usage: &UsageEvent) -> anyhow::Result<serde_json::Value> {
+    pub(in crate::server) fn captured_identity_usage(
+        usage: &UsageEvent,
+    ) -> anyhow::Result<serde_json::Value> {
         let bytes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let writer_bytes = bytes.clone();
         let subscriber = tracing_subscriber::fmt()
