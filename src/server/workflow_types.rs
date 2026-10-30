@@ -51,7 +51,10 @@ pub(super) enum ExecutionAction {
         after: Option<String>,
         #[serde(default)]
         events: Vec<ExecutionWatchEvent>,
+        /// Observation allowance; zero polls once. Explicit waits are never increased;
+        /// omitted waits use the client profile default and large waits may be capped.
         #[serde(default)]
+        #[schemars(range(min = 0))]
         timeout_seconds: Option<f32>,
     },
 }

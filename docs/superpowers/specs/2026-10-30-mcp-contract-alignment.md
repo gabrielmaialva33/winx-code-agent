@@ -1,0 +1,27 @@
+# Predictable MCP tool contracts
+
+## Intent and scope
+The user requested correcting the newly introduced wait-contract mismatch and researching current contract standards. Base: c9b8465. Preserve optimized automatic defaults and client-specific synchronous ceilings; do not silently expand explicit waits or reinterpret return_early. Changes are confined to this worktree. No commit, merge, push, production configuration, installation or restart is authorized.
+
+## Design decision
+Two approaches were considered: document the existing unconditional promotion, or make explicit requests predictable while retaining optimized defaults. The selected approach is the latter: implicit defaults may be tuned by client profile, but explicit nonnegative waits may only be capped down, never stretched. This is a local API design decision, not a timeout value mandated by MCP. Preserve task negotiation, authorization, identity binding, read budgets, output deduplication and execution receipts.
+
+## Required behavior
+1. Bash return_early retains its existing unbudgeted short-wait behavior (default 250 ms, cap 5 s), never creates a Task, and never becomes adaptive because the client is ChatGPT/Codex. Explicit wait_for_seconds including zero is not increased for any policy. Profile defaults for omitted adaptive/until_complete waits remain optimized (50 s ChatGPT/Codex, existing Claude settings); local/unknown clients keep existing ceilings. Explicit oversize finite waits may still be capped down, consistently documented.
+2. Execution.wait preserves explicit timeout_seconds, including zero; only omitted/null defaults may select the profile budget. Preserve the current lifecycle-event default where applicable and honor explicit events. Zero is one bounded catalog observation, not cancellation or a long wait. Do not change observe/Agent timeout semantics.
+3. Generated nextAction must carry the effective prior budget/policy and event selection, not turn a poll or explicit short wait into 50/90 s. For a pending until_complete foreground command use a valid adaptive status_check rather than an incompatible until_complete status_check. Do not turn background observations into long waits. Avoid immediate infinite poll loops; preserve retry advice for zero/return_early.
+4. Advertised optional-null wait inputs must behave like omission. Reject invalid types, negative or non-finite wait inputs before command side effects; do not normalize them into legitimate long waits. Model-correctable wait validation failures should be structured isError tool results; leave genuinely malformed JSON-RPC and unknown tools on the protocol-error path. Keep this change scoped to wait inputs rather than a rewrite of all dispatch errors.
+5. Update stable tool descriptors and field documentation to describe policy/client defaults, explicit wait precedence, observation versus process lifetime, and actual Initialize.status recovery (persisted state may rehydrate and start a fresh shell). Keep catalog ordering and description budget intact. Do not claim status never creates anything.
+6. Make the existing selected effective wait visible in structured synchronous tool results when available, preferably reusing EffectiveWait rather than recalculating policy. It is an observation allowance, not proof of execution, actual elapsed time, or cancellation.
+7. Correct general statements that ChatGPT only receives structuredContent: official OpenAI documentation exposes both content and structuredContent. Keep the current conservative text deduplication and full fallback. Document it as a client-specific optimization, not a core MCP requirement or guaranteed platform-wide behavior.
+
+## Standards consulted 2026-10-30
+- https://modelcontextprotocol.io/specification/2026-07-28/server/tools : input/output schema contracts, typed tool errors, state handles, deterministic discovery; conforming structuredContent is mandatory when outputSchema is declared; JSON text mirroring is SHOULD, not MUST.
+- https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning : modern metadata per request versus legacy initialization.
+- https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization : optional authorization, HTTP recommendation and separate security concerns.
+- https://developers.openai.com/plugins/reference : both content and structuredContent are model-visible; outputSchema guidance.
+- https://json-schema.org/understanding-json-schema/reference/annotations : default and description are annotations, not value injection or numeric validation.
+
+## Verification and non-goals
+TDD for changed behavior; retain RED evidence and run focused tests, real HTTP cases and the full just check gate. Tests must cover known/unknown clients, omitted/null/zero/short/large/invalid values, follow-up policy/event preservation, background/Tasks isolation, and no command side effects on validation errors. Check advertised schemas and actual results with the available contract test infrastructure; do not call partial structural tests full JSON Schema certification. No new dependencies unless unavoidable and separately justified; Rust MSRV remains 1.90.
+No wait polling rewrite, OAuth migration, wholesale typed result overhaul, or performance/billing guarantee. A dated research audit will distinguish verified conformance, deliberate compatibility trade-offs, and deferred gaps; this is not full MCP certification.

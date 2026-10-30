@@ -1,11 +1,9 @@
 //! Client-specific delivery of tool-result text.
 //!
 //! Every finalized result carries its text twice: in the `content` text blocks
-//! (MCP backwards compatibility) and in `structuredContent.output`. `ChatGPT`
-//! exposes only `structuredContent` to the model and applies a hidden budget to
-//! the whole response, so for that client the second copy is pure cost: its
-//! text blocks collapse into one pointer line. Every other client keeps both
-//! copies, as the MCP spec recommends for tools that return structured content.
+//! and in `structuredContent.output`. Both can reach the model. For the `ChatGPT`
+//! profile, Winx conservatively replaces exactly mirrored text with a pointer;
+//! other clients keep both copies and full mirroring remains configurable.
 
 use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{Map, Value};
@@ -32,8 +30,8 @@ impl ResultTextDelivery {
         Self::resolve(profile, crate::config::env_text(RESULT_TEXT_MIRROR_ENV).as_deref())
     }
 
-    /// Unset or `auto` drops the duplicate only for clients known to read just
-    /// `structuredContent`; `full`, and any unrecognized value, keeps both.
+    /// Unset or `auto` selects the `ChatGPT` optimization; `full`, and any
+    /// unrecognized value, keeps both copies.
     fn resolve(profile: ClientProfile, setting: Option<&str>) -> Self {
         let auto = setting.is_none_or(|value| value.eq_ignore_ascii_case("auto"));
         if auto && profile == ClientProfile::ChatGpt {

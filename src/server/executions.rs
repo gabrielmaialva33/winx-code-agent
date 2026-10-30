@@ -65,6 +65,7 @@ pub(super) fn workflow_envelope(
     let content =
         output.as_ref().map_or_else(Vec::new, |text| vec![ContentBlock::text(text.clone())]);
     let envelope = ToolResultEnvelope {
+        effective_wait: None,
         status,
         tool: tool.to_string(),
         message: message.to_string(),

@@ -4999,6 +4999,73 @@ fn result_texts(response: &serde_json::Value) -> Vec<String> {
 const CHATGPT_POINTER: &str = "Result is in structuredContent.output (status: completed).";
 
 #[tokio::test(flavor = "multi_thread")]
+async fn contract_wait_validation_prevents_launch_and_reports_effective_wait() -> anyhow::Result<()>
+{
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialized = response_json(
+        &initialize_modern_as(address, TEST_TOKEN, workspace.path(), "contract-wait", "openai-mcp")
+            .await?,
+    )?;
+    let thread = initialized["result"]["structuredContent"]["data"]["thread_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("missing thread"))?;
+    let call = |id, wait: serde_json::Value, command| {
+        serde_json::json!({
+            "jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{
+                "_meta":modern_request_meta("openai-mcp", false), "name":"BashCommand",
+                "arguments":{"thread_id":thread,"action_json":{"type":"command","command":command},"wait_policy":"return_early","wait_for_seconds":wait}
+            }
+        })
+    };
+    let invalid =
+        post_tool_value(address, &call("invalid", serde_json::json!(-1), "touch contract-marker"))
+            .await?;
+    assert_eq!(invalid["result"]["isError"], true, "{invalid}");
+    assert!(!workspace.path().join("contract-marker").exists());
+    let valid =
+        post_tool_value(address, &call("valid", serde_json::json!(0), "printf contract-ok"))
+            .await?;
+    assert_eq!(valid["result"]["structuredContent"]["effectiveWait"]["milliseconds"], 0, "{valid}");
+    assert_eq!(
+        valid["result"]["structuredContent"]["effectiveWait"]["policy"], "return_early",
+        "{valid}"
+    );
+    Ok(())
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn contract_task_inline_result_reports_selected_allowance() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let response = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "contract-task-inline",
+        "contract-task-client",
+    )
+    .await?;
+    let thread = initialized_thread_id(&response)?;
+    let result = call_tool_json(
+        address,
+        &modern_request_meta("contract-task-client", true),
+        "contract-task-quick",
+        "BashCommand",
+        serde_json::json!({
+            "thread_id":thread, "action_json":{"type":"command","command":"true"},
+            "wait_policy":"adaptive", "wait_for_seconds":2.0
+        }),
+    )
+    .await?;
+    let envelope = &result["result"]["structuredContent"];
+    assert_eq!(envelope["status"], "completed", "{result}");
+    assert_eq!(envelope["effectiveWait"]["policy"], "adaptive", "{result}");
+    assert_eq!(envelope["effectiveWait"]["mode"], "task_inline", "{result}");
+    assert_eq!(envelope["effectiveWait"]["milliseconds"], 2000, "{result}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn chatgpt_results_carry_their_text_only_in_structured_content() -> anyhow::Result<()> {
     let workspace = tempfile::tempdir()?;
     let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;

@@ -292,7 +292,7 @@ O handshake inicial do MCP estabelece um contrato de orquestração sequencial d
 
 Os arquivos de um lote `ReadFiles` são processados em um pool paralelo limitado (`WINX_READ_PARALLELISM`, padrão `4`, máximo `32`). A resposta e a cobertura do guard rail continuam seguindo exatamente a ordem solicitada.
 
-Cada ferramenta define um `outputSchema` e retorna um envelope `structuredContent`. Alguns clientes mostram ao modelo apenas o objeto estruturado quando a ferramenta anuncia `outputSchema` (observado no conector MCP do ChatGPT e no Claude Code); por isso `output` também carrega o texto entregue: os blocos de texto unidos em ordem, já após limites de saída e redaction. Resultados somente de imagem o omitem, assim como um resultado de `CodeMap` cujos `files`/`hits` já trazem símbolos (o texto é apenas a renderização deles); diagnósticos de `CodeMap` sem símbolos o mantêm, de modo que um cliente que consome `structuredContent` lê símbolos em `files`/`hits` e todo o resto em `output`:
+Cada ferramenta define um `outputSchema` e retorna um envelope `structuredContent`. Tanto `content` quanto `structuredContent` podem chegar ao modelo; por compatibilidade, `output` também carrega o texto entregue: os blocos de texto unidos em ordem, já após limites de saída e redaction. Resultados somente de imagem o omitem, assim como um resultado de `CodeMap` cujos `files`/`hits` já trazem símbolos (o texto é apenas a renderização deles); diagnósticos de `CodeMap` sem símbolos o mantêm, de modo que um cliente que consome `structuredContent` lê símbolos em `files`/`hits` e todo o resto em `output`:
 
 ```json
 {
@@ -317,7 +317,7 @@ Cada ferramenta define um `outputSchema` e retorna um envelope `structuredConten
 }
 ```
 
-Para clientes cujo `clientInfo.name` identifica o ChatGPT (`openai-mcp`, exceto Codex), que só lê `structuredContent`, os blocos de texto viram uma única linha de ponteiro (`Result is in structuredContent.output (status: …).`; em erros, precedida pela `message`), reduzindo à metade o tamanho de resultados grandes. `structuredContent`, imagens e `isError` ficam intactos; os demais clientes mantêm as duas cópias. `WINX_RESULT_TEXT_MIRROR=full` mantém as duas cópias para todos os clientes (padrão: `auto`).
+Para clientes cujo `clientInfo.name` identifica o ChatGPT (`openai-mcp`, exceto Codex), o Winx usa uma otimização específica e os blocos de texto espelhados viram uma única linha de ponteiro (`Result is in structuredContent.output (status: …).`; em erros, precedida pela `message`), sem garantia sobre a visibilidade em toda a plataforma. `structuredContent`, imagens e `isError` ficam intactos; os demais clientes mantêm as duas cópias. `WINX_RESULT_TEXT_MIRROR=full` mantém as duas cópias para todos os clientes (padrão: `auto`).
 
 Falhas recuperáveis retornam resposta com sucesso HTTP/JSON-RPC e `isError: true` no protocolo MCP, incluindo a próxima ação corretiva (`nextAction`).
 

@@ -1,12 +1,10 @@
 //! Per-client wait budgets for remote (HTTP) clients.
 //!
-//! Every `running` result costs a remote model a full turn (about 25 s for
-//! `ChatGPT`), which dwarfs the server-side cost of holding the request open.
-//! A budget therefore lets one call wait for completion as long as the client
-//! can safely keep a request open, and returns as soon as the command finishes
-//! or is waiting for input. Budgets only select tuning from the self-reported
-//! client name; they never grant authority, and stdio/local sessions and
-//! unknown clients keep the unbudgeted behaviour.
+//! Returning a running result requires another client round trip. Profile
+//! defaults can reduce those trips, but explicit observation allowances must
+//! never grow. These deployment choices are not protocol-defined timeout
+//! guarantees. Client names select tuning only, never authority; stdio and
+//! unknown clients retain their existing defaults and ceilings.
 
 use std::future::Future;
 
@@ -18,9 +16,6 @@ use serde_json::{json, Map, Value};
 use super::client_profile::ClientProfile;
 use crate::types::{BashCommand, BashCommandAction, BashWaitPolicy};
 
-/// Requested waits at or below this are "return early" waits; promoting
-/// budgets treat them as adaptive waits up to the full budget.
-pub(super) const SHORT_WAIT_SECONDS: f32 = 5.0;
 /// Execution wait ceiling for unbudgeted clients (the public schema range).
 pub(super) const DEFAULT_EXECUTION_WAIT_MAX_SECONDS: f32 = 30.0;
 /// Headroom between the longest budget and the HTTP request timeout for
@@ -28,7 +23,7 @@ pub(super) const DEFAULT_EXECUTION_WAIT_MAX_SECONDS: f32 = 30.0;
 const REQUEST_SAFETY_MARGIN_SECONDS: u64 = 20;
 const MAX_BUDGET_SECONDS: u64 =
     crate::http_server::REQUEST_TIMEOUT.as_secs() - REQUEST_SAFETY_MARGIN_SECONDS;
-/// Lifecycle events an Execution wait defaults to under a promoting budget, so
+/// Lifecycle events an Execution wait defaults to under this profile, so
 /// output chatter does not end the wait early.
 const LIFECYCLE_EVENTS: [&str; 4] = ["exited", "awaiting_input", "awaiting_approval", "unknown"];
 
@@ -39,32 +34,28 @@ pub(super) struct WaitBudget {
     pub sync_seconds: u16,
     /// Wait used when an adaptive call omits `wait_for_seconds`.
     pub adaptive_default_seconds: u16,
-    /// Treat `return_early` and requested waits up to [`SHORT_WAIT_SECONDS`]
-    /// as adaptive waits up to `sync_seconds` (and Execution waits up to
-    /// `execution_wait_seconds`).
-    pub promote_short_waits: bool,
+    /// Select the profile Execution default and lifecycle event selection.
+    pub profile_lifecycle_defaults: bool,
     /// Longest one `Execution` wait may block.
     pub execution_wait_seconds: u16,
 }
 
-// ChatGPT re-sends an identical call 22-26% of the time once it takes 60 s or
-// longer (1-2% below), and supports neither Tasks nor progress notifications:
-// stay 10 s under that retry zone.
+// A conservative deployment default below common one-minute request budgets.
+// Actual client timeout/retry behavior must be measured independently.
 const CHATGPT: WaitBudget = WaitBudget {
     sync_seconds: 50,
     adaptive_default_seconds: 50,
-    promote_short_waits: true,
+    profile_lifecycle_defaults: true,
     execution_wait_seconds: 50,
 };
-// Codex's MCP `tool_timeout_sec` defaults to 60 s; keep the same 10 s margin.
+// Share the conservative default; negotiated Tasks remain a separate decision.
 const CODEX: WaitBudget = CHATGPT;
-// claude.ai allows 240 s per call, but the Cloudflare tunnel in front of the
-// HTTP transport drops idle reads after 100-125 s: stay under the low end.
-// Claude already chooses its own waits well, so short waits are honoured.
+// Longer ceiling with transport headroom; explicit short waits stay short.
+// This is a Winx policy, not a universal guarantee about hosts or tunnels.
 const CLAUDE: WaitBudget = WaitBudget {
     sync_seconds: 90,
     adaptive_default_seconds: 15,
-    promote_short_waits: false,
+    profile_lifecycle_defaults: false,
     execution_wait_seconds: 90,
 };
 
@@ -110,15 +101,9 @@ impl WaitBudget {
         requested: Option<f32>,
     ) -> Option<(BashWaitPolicy, f32)> {
         let cap = f32::from(self.sync_seconds);
-        let requested = requested.map(|seconds| seconds.max(0.0));
-        let promoted =
-            if policy == BashWaitPolicy::ReturnEarly { BashWaitPolicy::Adaptive } else { policy };
         match (policy, requested) {
-            (BashWaitPolicy::ReturnEarly, _) if !self.promote_short_waits => None,
-            (_, Some(seconds)) if seconds > SHORT_WAIT_SECONDS || !self.promote_short_waits => {
-                Some((policy, seconds.min(cap)))
-            }
-            (BashWaitPolicy::ReturnEarly, None) | (_, Some(_)) => Some((promoted, cap)),
+            (BashWaitPolicy::ReturnEarly, _) => None,
+            (_, Some(seconds)) => Some((policy, seconds.min(cap))),
             (BashWaitPolicy::Adaptive, None) => {
                 Some((policy, f32::from(self.adaptive_default_seconds)))
             }
@@ -132,10 +117,10 @@ impl WaitBudget {
     pub(super) fn execution_wait_timeout(self, requested: Option<f32>) -> Option<f32> {
         let cap = f32::from(self.execution_wait_seconds);
         match requested {
-            Some(seconds) if seconds.is_nan() || seconds <= 0.0 => None,
-            _ if self.promote_short_waits => Some(cap),
-            None => None,
+            Some(seconds) if !seconds.is_finite() || seconds < 0.0 => None,
             Some(seconds) => Some(seconds.min(cap)),
+            None if self.profile_lifecycle_defaults => Some(cap),
+            None => None,
         }
     }
 
@@ -165,6 +150,7 @@ impl WaitBudget {
             .ok_or_else(|| McpError::invalid_request("Missing BashCommand arguments", None))?;
         let requested = arguments
             .get("wait_for_seconds")
+            .filter(|value| !value.is_null())
             .cloned()
             .map(serde_json::from_value::<f32>)
             .transpose()
@@ -180,8 +166,8 @@ impl WaitBudget {
         Ok(Some((request, effective)))
     }
 
-    /// Stretch an `Execution` wait to the budget and, under a promoting budget,
-    /// default its events to lifecycle changes.
+    /// Select an omitted Execution wait's profile default, cap explicit waits
+    /// down, and default only omitted events to lifecycle changes.
     pub(super) fn normalize_execution_request(
         self,
         mut request: CallToolRequestParams,
@@ -203,10 +189,8 @@ impl WaitBudget {
         if let Some(seconds) = self.execution_wait_timeout(requested) {
             action.insert("timeout_seconds".to_string(), Value::from(seconds));
         }
-        let no_events = action
-            .get("events")
-            .is_none_or(|events| events.is_null() || events.as_array().is_some_and(Vec::is_empty));
-        if self.promote_short_waits && no_events {
+        let no_events = action.get("events").is_none_or(Value::is_null);
+        if self.profile_lifecycle_defaults && no_events {
             action.insert("events".to_string(), json!(LIFECYCLE_EVENTS));
         }
         request
@@ -227,22 +211,20 @@ impl WaitBudget {
         }
     }
 
-    /// When a budgeted wait ends still running, make the follow-up a single
-    /// call that waits the full budget again.
-    pub(super) fn guide_follow_up(
-        self,
-        result: &mut CallToolResult,
-        request: &CallToolRequestParams,
-    ) {
+    /// Preserve the selected wait and event semantics in a follow-up.
+    pub(super) fn guide_follow_up(result: &mut CallToolResult, request: &CallToolRequestParams) {
         let Some(Value::Object(envelope)) = result.structured_content.as_mut() else { return };
         match request.name.as_ref() {
-            "BashCommand" => self.guide_status_check(envelope),
-            "Execution" => self.guide_execution_wait(envelope, request.arguments.as_ref()),
+            "BashCommand" => Self::guide_status_check(envelope, request.arguments.as_ref()),
+            "Execution" => Self::guide_execution_wait(envelope, request.arguments.as_ref()),
             _ => {}
         }
     }
 
-    fn guide_status_check(self, envelope: &mut Map<String, Value>) {
+    fn guide_status_check(
+        envelope: &mut Map<String, Value>,
+        prior: Option<&rmcp::model::JsonObject>,
+    ) {
         if envelope.get("status").and_then(Value::as_str) != Some("running") {
             return;
         }
@@ -254,17 +236,44 @@ impl WaitBudget {
         else {
             return;
         };
-        let foreground_status_check = arguments.get("action_json").is_some_and(|action| {
-            action.get("type").and_then(Value::as_str) == Some("status_check")
-                && action.get("bg_command_id").is_none_or(Value::is_null)
-        });
-        if !foreground_status_check {
+        let Some(action) = arguments
+            .get("action_json")
+            .filter(|action| action.get("type").and_then(Value::as_str) == Some("status_check"))
+        else {
+            return;
+        };
+        let background_id = action.get("bg_command_id").and_then(Value::as_str);
+        let background = background_id.is_some();
+        let Some(prior) = prior else { return };
+        if let Some(id) = background_id {
+            // Preserve only this background launch/poll, never borrow a foreground allowance.
+            let same_background = prior.get("action_json").is_some_and(|action| {
+                match action.get("type").and_then(Value::as_str) {
+                    Some("command") => {
+                        action.get("is_background").and_then(Value::as_bool) == Some(true)
+                    }
+                    Some("status_check") => {
+                        action.get("bg_command_id").and_then(Value::as_str) == Some(id)
+                    }
+                    _ => false,
+                }
+            });
+            if !same_background {
+                return;
+            }
+        }
+        let Some(wait) = prior.get("wait_for_seconds") else { return };
+        arguments.insert("wait_for_seconds".to_string(), wait.clone());
+        let policy = prior.get("wait_policy").and_then(Value::as_str).unwrap_or("adaptive");
+        arguments.insert(
+            "wait_policy".to_string(),
+            json!(if policy == "until_complete" { "adaptive" } else { policy }),
+        );
+        if background || wait.as_f64() == Some(0.0) || policy == "return_early" {
             return;
         }
-        arguments.insert("wait_for_seconds".to_string(), json!(self.sync_seconds));
         let instruction = format!(
-            "Call this exact status_check now, without delay: it waits up to {} s and returns as soon as the command finishes or needs input. Do not repeat the original command or interleave Execution waits.",
-            self.sync_seconds
+            "Call this exact status_check now, without delay: it waits up to {wait} s and returns as soon as the command finishes or needs input. Do not repeat the original command or interleave Execution waits."
         );
         if let Some(action) = envelope.get_mut("nextAction").and_then(Value::as_object_mut) {
             action.insert("instruction".to_string(), Value::String(instruction));
@@ -273,7 +282,6 @@ impl WaitBudget {
     }
 
     fn guide_execution_wait(
-        self,
         envelope: &mut Map<String, Value>,
         arguments: Option<&rmcp::model::JsonObject>,
     ) {
@@ -299,14 +307,17 @@ impl WaitBudget {
             return;
         };
         action.insert("after".to_string(), Value::String(cursor));
-        action.insert("timeout_seconds".to_string(), json!(self.execution_wait_seconds));
+        let seconds = action.get("timeout_seconds").and_then(Value::as_f64).unwrap_or(5.0);
+        if seconds == 0.0 {
+            envelope.insert("retryAfterMs".to_string(), json!(1000));
+        }
         envelope.insert(
             "nextAction".to_string(),
             json!({
                 "tool": "Execution",
                 "instruction": format!(
-                    "No watched execution changed yet. Call this exact wait now: it waits up to {} s and returns as soon as a watched execution exits or needs input.",
-                    self.execution_wait_seconds
+                    "No watched execution changed yet. Respect retryAfterMs when present, then call this exact wait; its observation allowance is {} s.",
+                    seconds
                 ),
                 "arguments": Value::Object(next),
             }),
@@ -336,17 +347,74 @@ mod tests {
     }
 
     #[test]
+    fn contract_return_early_is_never_promoted() {
+        assert_eq!(budget(ClientProfile::ChatGpt).bash_wait(RETURN_EARLY, Some(1.0)), None);
+    }
+
+    #[test]
+    fn contract_explicit_short_execution_wait_is_preserved() {
+        assert_eq!(budget(ClientProfile::ChatGpt).execution_wait_timeout(Some(0.25)), Some(0.25));
+    }
+
+    #[test]
+    fn contract_follow_up_keeps_wait_and_events() {
+        let mut result = CallToolResult::success(Vec::new());
+        result.structured_content =
+            Some(json!({"data":{"timed_out":true,"changes":{"cursor":"c"}}}));
+        let request = request(
+            "Execution",
+            &json!({"action":{"type":"wait","timeout_seconds":0,"events":["output"]}}),
+        );
+        WaitBudget::guide_follow_up(&mut result, &request);
+        let result = result.structured_content.expect("structured");
+        assert_eq!(result["nextAction"]["arguments"]["action"]["timeout_seconds"], 0);
+        assert_eq!(result["nextAction"]["arguments"]["action"]["events"], json!(["output"]));
+        assert_eq!(result["retryAfterMs"], 1000);
+    }
+
+    #[test]
+    fn contract_bash_follow_up_preserves_zero_and_uses_valid_policy() {
+        for (policy, expected) in [("until_complete", "adaptive"), ("return_early", "return_early")]
+        {
+            let mut result = CallToolResult::success(Vec::new());
+            result.structured_content = Some(json!({"status":"running","retryAfterMs":1000,
+                "nextAction":{"tool":"BashCommand","arguments":{"action_json":{"type":"status_check"}}}}));
+            let request =
+                request("BashCommand", &json!({"wait_policy":policy,"wait_for_seconds":0}));
+            WaitBudget::guide_follow_up(&mut result, &request);
+            let result = result.structured_content.expect("structured");
+            assert_eq!(result["nextAction"]["arguments"]["wait_for_seconds"], 0);
+            assert_eq!(result["nextAction"]["arguments"]["wait_policy"], expected);
+            assert_eq!(result["retryAfterMs"], 1000);
+        }
+    }
+
+    #[test]
+    fn contract_null_bash_wait_is_omission() {
+        let request = request(
+            "BashCommand",
+            &json!({"thread_id":"t","action_json":{"type":"command","command":"true"},"wait_for_seconds":null}),
+        );
+        let bash = super::super::WinxService::parse_ordinary_bash_request(&request);
+        let normalized = budget(ClientProfile::ChatGpt)
+            .normalize_bash_request(&request, bash.as_ref(), ADAPTIVE)
+            .expect("null is valid")
+            .expect("eligible");
+        assert_eq!(normalized.0.arguments.expect("arguments")["wait_for_seconds"], 50.0);
+    }
+
+    #[test]
     fn budget_table_values_stay_under_client_and_transport_timeouts() {
         assert_eq!(WaitBudget::for_profile(ClientProfile::Other), None);
         for profile in [ClientProfile::ChatGpt, ClientProfile::Codex] {
             let budget = budget(profile);
             assert_eq!(budget.sync_seconds, 50, "{profile:?} must stay under 60 s");
             assert_eq!(budget.execution_wait_seconds, 50);
-            assert!(budget.promote_short_waits);
+            assert!(budget.profile_lifecycle_defaults);
         }
         let claude = budget(ClientProfile::Claude);
         assert_eq!((claude.sync_seconds, claude.execution_wait_seconds), (90, 90));
-        assert!(!claude.promote_short_waits);
+        assert!(!claude.profile_lifecycle_defaults);
         let timeout = crate::http_server::REQUEST_TIMEOUT.as_secs();
         for profile in [ClientProfile::ChatGpt, ClientProfile::Codex, ClientProfile::Claude] {
             let budget = budget(profile);
@@ -358,22 +426,18 @@ mod tests {
     }
 
     #[test]
-    fn chatgpt_and_codex_promote_short_waits_and_cap_long_ones() {
+    fn chatgpt_and_codex_preserve_short_waits_and_cap_long_ones() {
         for profile in [ClientProfile::ChatGpt, ClientProfile::Codex] {
             let budget = budget(profile);
+            assert_eq!(budget.bash_wait(RETURN_EARLY, Some(1.0)), None);
+            assert_eq!(budget.bash_wait(RETURN_EARLY, None), None);
             let cases = [
-                (RETURN_EARLY, Some(1.0), ADAPTIVE, 50.0),
-                (RETURN_EARLY, Some(5.0), ADAPTIVE, 50.0),
-                (RETURN_EARLY, Some(0.0), ADAPTIVE, 50.0),
-                (RETURN_EARLY, None, ADAPTIVE, 50.0),
-                (RETURN_EARLY, Some(10.0), RETURN_EARLY, 10.0),
                 (ADAPTIVE, None, ADAPTIVE, 50.0),
-                (ADAPTIVE, Some(2.0), ADAPTIVE, 50.0),
-                (ADAPTIVE, Some(-3.0), ADAPTIVE, 50.0),
-                (ADAPTIVE, Some(30.0), ADAPTIVE, 30.0),
+                (ADAPTIVE, Some(0.0), ADAPTIVE, 0.0),
+                (ADAPTIVE, Some(2.0), ADAPTIVE, 2.0),
                 (ADAPTIVE, Some(500.0), ADAPTIVE, 50.0),
                 (UNTIL_COMPLETE, None, UNTIL_COMPLETE, 50.0),
-                (UNTIL_COMPLETE, Some(3.0), UNTIL_COMPLETE, 50.0),
+                (UNTIL_COMPLETE, Some(3.0), UNTIL_COMPLETE, 3.0),
                 (UNTIL_COMPLETE, Some(120.0), UNTIL_COMPLETE, 50.0),
             ];
             for (policy, requested, expected_policy, expected_seconds) in cases {
@@ -398,12 +462,12 @@ mod tests {
     }
 
     #[test]
-    fn execution_waits_stretch_to_the_budget_but_keep_polls_and_invalid_values() {
+    fn execution_waits_keep_short_values_and_cap_long_ones() {
         let chatgpt = budget(ClientProfile::ChatGpt);
         assert_eq!(chatgpt.execution_wait_timeout(None), Some(50.0));
-        assert_eq!(chatgpt.execution_wait_timeout(Some(20.0)), Some(50.0));
+        assert_eq!(chatgpt.execution_wait_timeout(Some(20.0)), Some(20.0));
         assert_eq!(chatgpt.execution_wait_timeout(Some(500.0)), Some(50.0));
-        assert_eq!(chatgpt.execution_wait_timeout(Some(0.0)), None);
+        assert_eq!(chatgpt.execution_wait_timeout(Some(0.0)), Some(0.0));
         assert_eq!(chatgpt.execution_wait_timeout(Some(-1.0)), None);
         assert_eq!(chatgpt.execution_wait_timeout(Some(f32::NAN)), None);
         let claude = budget(ClientProfile::Claude);
@@ -432,13 +496,12 @@ mod tests {
                 &json!({"thread_id":"t","action_json":action,"wait_for_seconds":1}),
             );
             let bash = super::super::WinxService::parse_ordinary_bash_request(&request);
-            let normalized =
-                chatgpt.normalize_bash_request(&request, bash.as_ref(), RETURN_EARLY)?;
+            let normalized = chatgpt.normalize_bash_request(&request, bash.as_ref(), ADAPTIVE)?;
             assert_eq!(normalized.is_some(), budgeted, "{action}");
             if let Some((request, policy)) = normalized {
                 assert_eq!(policy, ADAPTIVE);
                 let arguments = request.arguments.expect("arguments");
-                assert_eq!(arguments["wait_for_seconds"], json!(50.0));
+                assert_eq!(arguments["wait_for_seconds"], json!(1.0));
             }
         }
         Ok(())
@@ -453,14 +516,14 @@ mod tests {
                 "action":{"type":"wait","execution_ids":["e"],"timeout_seconds":20}}),
         ));
         let action = &normalized.arguments.expect("arguments")["action"];
-        assert_eq!(action["timeout_seconds"], json!(50.0));
+        assert_eq!(action["timeout_seconds"], json!(20.0));
         assert_eq!(action["events"], json!(LIFECYCLE_EVENTS));
 
         let explicit = chatgpt.normalize_execution_request(request("Execution", &json!({"thread_id":"t","workspace_root":"/w",
                 "action":{"type":"wait","execution_ids":["e"],"events":["output"],"timeout_seconds":0}}),
         ));
         let action = &explicit.arguments.expect("arguments")["action"];
-        assert_eq!(action["timeout_seconds"], json!(0));
+        assert_eq!(action["timeout_seconds"], json!(0.0));
         assert_eq!(action["events"], json!(["output"]));
 
         let claude = budget(ClientProfile::Claude).normalize_execution_request(request(
@@ -497,8 +560,8 @@ mod tests {
                 "thread_id": "t", "action_json": {"type": "status_check", "status_check": true}
             }}
         }));
-        let request = request("BashCommand", &json!({"thread_id":"t"}));
-        budget(ClientProfile::ChatGpt).guide_follow_up(&mut result, &request);
+        let request = request("BashCommand", &json!({"thread_id":"t", "wait_for_seconds":50}));
+        WaitBudget::guide_follow_up(&mut result, &request);
         let structured = result.structured_content.expect("structured");
         assert_eq!(structured["nextAction"]["arguments"]["wait_for_seconds"], 50);
         assert!(structured.get("retryAfterMs").is_none());
@@ -514,10 +577,36 @@ mod tests {
                 "action_json": {"type": "status_check", "bg_command_id": "bg1"}
             }}
         }));
-        budget(ClientProfile::ChatGpt).guide_follow_up(&mut background, &request);
+        WaitBudget::guide_follow_up(&mut background, &request);
         let structured = background.structured_content.expect("structured");
         assert!(structured["nextAction"]["arguments"].get("wait_for_seconds").is_none());
         assert_eq!(structured["retryAfterMs"], 1000);
+    }
+
+    #[test]
+    fn background_follow_up_preserves_explicit_observation_allowance() {
+        for seconds in [0.0, 0.25, 1.0] {
+            let mut result = CallToolResult::success(Vec::new());
+            result.structured_content = Some(json!({
+                "status":"running", "retryAfterMs":1000,
+                "nextAction":{"tool":"BashCommand","arguments":{
+                    "action_json":{"type":"status_check","bg_command_id":"bg1"}
+                }}
+            }));
+            let prior = request(
+                "BashCommand",
+                &json!({
+                    "action_json":{"type":"command","command":"long-running-fixture","is_background":true},
+                    "wait_policy":"return_early", "wait_for_seconds":seconds
+                }),
+            );
+            WaitBudget::guide_follow_up(&mut result, &prior);
+            let envelope = result.structured_content.expect("structured");
+            assert_eq!(envelope["nextAction"]["arguments"]["wait_for_seconds"], seconds);
+            assert_eq!(envelope["nextAction"]["arguments"]["wait_policy"], "return_early");
+            assert_eq!(envelope["nextAction"]["arguments"]["action_json"]["bg_command_id"], "bg1");
+            assert_eq!(envelope["retryAfterMs"], 1000);
+        }
     }
 
     #[test]
@@ -532,20 +621,20 @@ mod tests {
             &json!({"thread_id":"t","workspace_root":"/w",
                 "action":{"type":"wait","execution_ids":["e"],"timeout_seconds":50.0}}),
         );
-        budget(ClientProfile::ChatGpt).guide_follow_up(&mut result, &request);
+        WaitBudget::guide_follow_up(&mut result, &request);
         let structured = result.structured_content.expect("structured");
         let next = &structured["nextAction"];
         assert_eq!(next["tool"], "Execution");
         assert_eq!(next["arguments"]["thread_id"], "t");
         assert_eq!(next["arguments"]["action"]["after"], "cursor-2");
-        assert_eq!(next["arguments"]["action"]["timeout_seconds"], 50);
+        assert_eq!(next["arguments"]["action"]["timeout_seconds"], 50.0);
 
         let mut changed = CallToolResult::success(Vec::new());
         changed.structured_content = Some(json!({
             "status": "completed",
             "data": {"timed_out": false, "changes": {"cursor": "cursor-3"}}
         }));
-        budget(ClientProfile::ChatGpt).guide_follow_up(&mut changed, &request);
+        WaitBudget::guide_follow_up(&mut changed, &request);
         assert!(changed.structured_content.expect("structured").get("nextAction").is_none());
     }
 }

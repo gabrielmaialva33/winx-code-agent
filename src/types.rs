@@ -100,10 +100,9 @@ pub enum InitializeType {
     /// workspace or project directory during the conversation.
     UserAskedChangeWorkspace,
 
-    /// Read-only probe of an existing session: reports its workspace, cwd,
-    /// mode, runtime and whether a command is still running. Never creates,
-    /// resets or reconfigures anything; an unknown session answers
-    /// `needs_initialize` with the safe next call.
+    /// Probe an existing session's workspace, cwd, mode, runtime and command
+    /// state. Persisted sessions may rehydrate and start a fresh shell; an
+    /// unknown session answers `needs_initialize` with the safe next call.
     Status,
 }
 
@@ -792,12 +791,11 @@ pub struct BashCommand {
     /// The action to perform (command, status check, etc.)
     pub action_json: BashCommandAction,
 
-    /// Requested inline wait in seconds. With the default adaptive policy this
-    /// defaults to 15 without Tasks and is capped to the short promotion window
-    /// with Tasks; `return_early` caps it at 5; the synchronous `until_complete`
-    /// fallback uses 60. Runtime waits never exceed the selected policy's cap.
+    /// Observation allowance in seconds, not process lifetime. Explicit values
+    /// are capped down; defaults depend on policy, transport and client profile.
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
     pub wait_for_seconds: Option<f32>,
 
     /// The thread ID for this session
@@ -818,6 +816,7 @@ impl<'de> Deserialize<'de> for BashCommand {
 
         let wait_for_seconds = map
             .remove("wait_for_seconds")
+            .filter(|value| !value.is_null())
             .map(serde_json::from_value)
             .transpose()
             .map_err(serde::de::Error::custom)?;

@@ -121,13 +121,12 @@ impl ToolKind {
 
     pub const fn descriptor(self) -> ToolDescriptor {
         let (access, world) = match self {
-            Self::Initialize
-            | Self::ReadFiles
-            | Self::ReadImage
-            | Self::CodeMap
-            | Self::Execution => (ToolAccess::ReadOnly, ToolWorld::Closed),
+            Self::ReadFiles | Self::ReadImage | Self::CodeMap | Self::Execution => {
+                (ToolAccess::ReadOnly, ToolWorld::Closed)
+            }
             Self::ContextSave => (ToolAccess::Neutral, ToolWorld::Closed),
-            Self::UndoEdit => (ToolAccess::Destructive, ToolWorld::Closed),
+            // Initialize also supports reset and mode changes; hints cover every action.
+            Self::Initialize | Self::UndoEdit => (ToolAccess::Destructive, ToolWorld::Closed),
             Self::BashCommand
             | Self::Agent
             | Self::FileWriteOrEdit

@@ -258,7 +258,7 @@ MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、�
 
 `ReadFiles` 批次中的文件会在受限并行池中处理（`WINX_READ_PARALLELISM`，默认 `4`，最大 `32`），但响应内容和读取保护范围始终严格按请求顺序发布。
 
-每个工具均声明了 `outputSchema` 并返回统一的 `structuredContent` 封装。某些客户端在工具声明 `outputSchema` 后只向模型展示结构化对象（在 ChatGPT MCP 连接器和 Claude Code 中观察到），因此 `output` 也会携带实际交付的文本：按顺序拼接的文本块，且已经过输出限制和脱敏处理。仅包含图片的结果会省略该字段；当 `CodeMap` 结果的 `files`/`hits` 已包含符号时也会省略（其文本只是这些符号的渲染），而没有符号的 `CodeMap` 诊断结果会保留该字段，因此只消费 `structuredContent` 的客户端从 `files`/`hits` 读取符号，其余内容从 `output` 读取：
+每个工具均声明了 `outputSchema` 并返回统一的 `structuredContent` 封装。`content` 和 `structuredContent` 都可能提供给模型；为兼容起见， `output` 也会携带实际交付的文本：按顺序拼接的文本块，且已经过输出限制和脱敏处理。仅包含图片的结果会省略该字段；当 `CodeMap` 结果的 `files`/`hits` 已包含符号时也会省略（其文本只是这些符号的渲染），而没有符号的 `CodeMap` 诊断结果会保留该字段，因此只消费 `structuredContent` 的客户端从 `files`/`hits` 读取符号，其余内容从 `output` 读取：
 
 ```json
 {
@@ -283,7 +283,7 @@ MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、�
 }
 ```
 
-对于 `clientInfo.name` 标识为 ChatGPT 的客户端（`openai-mcp`，Codex 除外），由于它只读取 `structuredContent`，文本内容块会被替换为一行指引（`Result is in structuredContent.output (status: …).`；错误结果会在前面附上 `message`），使大型结果的传输体积减半。`structuredContent`、图片块和 `isError` 保持不变；其他客户端仍保留两份文本。设置 `WINX_RESULT_TEXT_MIRROR=full` 可让所有客户端都保留两份（默认值为 `auto`）。
+对于 `clientInfo.name` 标识为 ChatGPT 的客户端（`openai-mcp`，Codex 除外），Winx 针对该客户端优化，将完全镜像的文本内容块替换为一行指引（`Result is in structuredContent.output (status: …).`；错误结果会在前面附上 `message`），这不保证整个平台的可见性。`structuredContent`、图片块和 `isError` 保持不变；其他客户端仍保留两份文本。设置 `WINX_RESULT_TEXT_MIRROR=full` 可让所有客户端都保留两份（默认值为 `auto`）。
 
 可恢复的执行失败在 HTTP/JSON-RPC 层面返回成功，而在 MCP 层面设置 `isError: true`，并附带明确的下一步修复动作（`nextAction`）。
 

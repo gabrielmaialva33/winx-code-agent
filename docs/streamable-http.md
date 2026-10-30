@@ -351,7 +351,7 @@ shell-runtime failure. A repeated reset within five minutes and without new fail
 allowed absolute targets, or start a new conversation for a genuinely different project. A finite post-edit check can be
 supplied as `verify_command` on `EditFiles`, saving one network/model round trip. Extra
 `WINX_SERVER_INSTRUCTIONS` are appended after those stable rules and are also included in the `Initialize` response for
-clients that do not expose handshake instructions to the model. When unsure whether a pair is still live, call `Initialize` with `type="status"` and that pair: it answers with the bound workspace, cwd, mode, runtime and command state (`session_status` in `structuredContent`) and never creates, resets or reconfigures anything; an unknown pair returns `needs_initialize`.
+clients that do not expose handshake instructions to the model. When unsure whether a pair is still live, call `Initialize` with `type="status"` and that pair: it answers with the bound workspace, cwd, mode, runtime and command state (`session_status` in `structuredContent`). Persisted state may rehydrate and start a fresh shell; an unknown pair returns `needs_initialize`.
 
 Reattaching an existing session also includes a best-effort `data.session_status` snapshot. A true `command_running`
 means the foreground shell was occupied when observed; missing status means unknown. The observation does not reset the
@@ -360,24 +360,22 @@ shell or wait for its command to finish. If a new foreground command receives `c
 For independent work, submit a new command with `is_background=true` and an explicit working directory. Each background
 uses a separate shell and does not inherit foreground variables or functions. Do not interrupt or reset an unrelated job.
 
-Every tool advertises an `outputSchema` and returns a common `structuredContent` envelope. Existing text and image content
-remain unchanged for older clients. Some clients expose only the structured object to the model once a tool advertises
-an `outputSchema` (observed with the ChatGPT MCP connector and Claude Code), so `output` carries the delivered text as
-well: the text blocks joined in order after output limits and redaction. Image-only results omit it, and so does a
-`CodeMap` result whose `files`/`hits` already carry symbols (its text is a rendering of them); `CodeMap` diagnostics
+Every tool advertises an `outputSchema` and returns a common `structuredContent` envelope.
+Text presentation depends on the client delivery policy below; image blocks are preserved.
+Both `content` and `structuredContent` can reach the model. `output` carries text joined after limits and redaction.
+Image-only results omit `output`, as does a `CodeMap` result whose `files`/`hits` already carry symbols; diagnostics
 without symbols keep it, so a client that consumes `structuredContent` reads symbols from `files`/`hits` and everything
 else from `output`.
 
-Carrying the text twice doubles every response, and ChatGPT both reads only `structuredContent` and truncates a tool
-response past a hidden budget. For a client whose `clientInfo.name` identifies ChatGPT (`openai-mcp` or `chatgpt…`, but
-not Codex), Winx therefore replaces the text content blocks with one pointer line, such as
-`Result is in structuredContent.output (status: completed).`, which roughly halves the wire size of large `ReadFiles`
-and `BashCommand` results. `structuredContent` stays complete and redacted; image blocks stay in place; `isError` is
+For a client whose `clientInfo.name` identifies ChatGPT (`openai-mcp` or `chatgpt…`, but
+not Codex), Winx uses a client-specific optimization and replaces exactly mirrored text blocks with one pointer line, such as
+`Result is in structuredContent.output (status: completed).`. This is not a platform-wide visibility guarantee. `structuredContent` stays complete and redacted; image blocks stay in place; `isError` is
 unchanged, and an error pointer also repeats the envelope `message` (capped at 512 bytes) so the failure stays readable
 inside the result. A result whose text is not mirrored exactly in `structuredContent` keeps its text. Codex, Claude and
-every other client keep both copies, as the MCP specification recommends. Detection uses the self-reported client name
-and only selects this wire shape, never authority. Set `WINX_RESULT_TEXT_MIRROR=full` to keep both copies for every
-client; unset or `auto` is the default, and any other value also behaves as `full`.
+every other client retain the text mirror. This is not the same as serializing the complete JSON envelope into text,
+which MCP recommends for backwards compatibility. The profile-specific choice is a documented interoperability trade-off.
+Detection selects wire shape only, never authority. `WINX_RESULT_TEXT_MIRROR=full` restores text mirroring for every client;
+unset or `auto` selects the optimization, and an unrecognized value also keeps the full text mirror.
 
 The main fields are:
 
@@ -415,10 +413,10 @@ A background command's public `execution_id` is `background:<bg_command_id>` and
 and retained completion. Foreground execution IDs retain their existing generation-bound format.
 `BashCommand.wait_policy` selects generic execution behavior: `adaptive` (default) keeps short calls inline and promotes
 an already-running foreground command only when Tasks and generation-bound runtime actions were negotiated; `until_complete` is accepted only for a foreground Command and creates a Task immediately or
-uses a 60-second bounded synchronous fallback; `return_early` always stays inline and caps `wait_for_seconds` at 5 seconds.
+uses a bounded synchronous fallback; `return_early` always stays inline and caps `wait_for_seconds` at 5 seconds.
 Using `until_complete` with a background, status, input, screen, or wait action returns a normal recoverable tool result
 (`errorCode: wait_policy_incompatible_with_action`) whose `nextAction.arguments` corrects the policy to `return_early`.
-`wait_for_seconds` is bounded by the chosen policy. Task routing never depends on client
+Explicit nonnegative waits, including zero, are only capped down. Omitted adaptive synchronous waits default to 15 seconds locally and for Claude HTTP, and 50 seconds for ChatGPT/Codex HTTP. `return_early` defaults to 0.25 seconds; synchronous `until_complete` defaults to the client ceiling (60 locally, 50 for ChatGPT/Codex, 90 for Claude). Execution wait defaults to 5 seconds locally and for Claude, and 50 for ChatGPT/Codex HTTP. These are observation allowances, not process lifetime limits or cancellation. Synchronous results may expose the selected allowance as `effectiveWait` in milliseconds. Task routing never depends on client
 identity. A client that advertises the `io.winx/compact-bash-output` extension receives the runtime's trailer-free payload;
 without that explicit capability, the historical text output is unchanged.
 

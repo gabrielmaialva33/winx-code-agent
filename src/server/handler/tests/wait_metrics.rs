@@ -17,7 +17,6 @@ fn effective_wait_emission_follows_normalized_route_and_preserves_request() -> a
         (Some("adaptive"), false, Some(0.0), "synchronous", 0, Some(0)),
         (Some("adaptive"), true, Some(0.0), "task_inline", 0, Some(0)),
         (Some("return_early"), true, Some(0.125), "synchronous", 125, Some(125)),
-        (Some("adaptive"), false, Some(-1.0), "synchronous", 0, None),
     ];
     for (requested_policy, tasks, seconds, expected_mode, expected_ms, requested_ms) in cases {
         let mut arguments = json!({"thread_id":"wait-fixture",

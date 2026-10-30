@@ -52,7 +52,7 @@ pub(super) struct RequiredRead {
 //
 // Text content remains the backwards-compatible human-readable result. Some
 // clients expose only this object to the model once a tool advertises an
-// `outputSchema` (observed with the ChatGPT MCP connector and Claude Code), so
+// `outputSchema`, so
 // `output` carries the delivered text as well instead of leaving the model
 // with byte counts alone. For ChatGPT the text blocks then shrink to a pointer
 // (`result_delivery`). Doc comments here become `outputSchema`
@@ -72,6 +72,9 @@ pub(super) struct ToolResultEnvelope {
     pub error_code: Option<String>,
     pub retryable: bool,
     pub retry_same_call: bool,
+    /// Selected observation allowance, not elapsed time or cancellation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective_wait: Option<EffectiveWaitResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -81,6 +84,31 @@ pub(super) struct ToolResultEnvelope {
     #[schemars(schema_with = "open_object_schema")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<Value>,
+}
+
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+pub(super) struct EffectiveWaitResult {
+    pub policy: String,
+    pub mode: String,
+    pub milliseconds: u64,
+}
+
+/// Reuse the selected typed allowance; this does not imply process completion.
+pub(super) fn attach_effective_wait(
+    result: &mut CallToolResult,
+    wait: Option<super::usage::EffectiveWait>,
+) {
+    if let (Some(wait), Some(Value::Object(envelope))) = (wait, result.structured_content.as_mut())
+    {
+        envelope.insert(
+            "effectiveWait".to_string(),
+            serde_json::json!({
+                "policy": wait.policy,
+                "mode": wait.mode,
+                "milliseconds": wait.milliseconds,
+            }),
+        );
+    }
 }
 
 /// Winx only emits object payloads in these extensible result fields. Avoid
@@ -240,6 +268,7 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
         error_code: None,
         retryable: false,
         retry_same_call: false,
+        effective_wait: None,
         retry_after_ms: None,
         next_action: None,
         required_reads: Vec::new(),
@@ -628,6 +657,7 @@ pub(super) fn bash_success_result(
         error_code: None,
         retryable: false,
         retry_same_call: false,
+        effective_wait: None,
         retry_after_ms: (status == ToolResultStatus::Running).then_some(1_000),
         next_action,
         required_reads: Vec::new(),
@@ -1354,6 +1384,7 @@ fn error_envelope(
         error_code: Some(error_code),
         retryable,
         retry_same_call: false,
+        effective_wait: None,
         retry_after_ms,
         next_action,
         required_reads,

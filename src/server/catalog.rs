@@ -166,7 +166,7 @@ fn bash_command_input_schema() -> Arc<serde_json::Map<String, Value>> {
             wait.insert(
                 "description".to_string(),
                 Value::String(
-                    "Requested inline wait in seconds. Adaptive defaults to 15 seconds without Tasks and uses a short promotion window with Tasks; return_early is capped at 5 seconds; the synchronous until_complete fallback uses 60 seconds. The selected wait_policy always supplies the final cap."
+                    "Observation allowance in seconds, not process lifetime. Omitted/null selects a policy default; explicit finite nonnegative values, including zero, are never increased. return_early defaults to 0.25 s and caps at 5 s. Synchronous adaptive defaults: 15 s local/unknown or Claude HTTP, 50 s ChatGPT/Codex HTTP. Synchronous ceilings: 60 s local/unknown, 50 s ChatGPT/Codex HTTP, 90 s Claude HTTP. Negotiated Tasks use a short inline promotion window."
                         .to_string(),
                 ),
             );
@@ -177,7 +177,7 @@ fn bash_command_input_schema() -> Arc<serde_json::Map<String, Value>> {
                 "type": "string",
                 "enum": ["adaptive", "return_early", "until_complete"],
                 "default": "adaptive",
-                "description": "Execution delivery policy. Adaptive is bounded inline and may promote a foreground Command to an MCP Task; return_early never creates a Task; until_complete is valid only for a foreground Command, creates a Task when safely supported, and otherwise waits synchronously for at most 60 seconds."
+                "description": "Execution delivery policy. adaptive uses a bounded inline allowance and may promote a running foreground Command to a negotiated MCP Task. return_early never creates a Task or changes policy; its cap is 5 seconds. until_complete is valid only for a finite foreground Command: use a Task when supported, otherwise the policy/client synchronous ceiling. Expiring an observation wait does not cancel the process."
             }),
         );
     }

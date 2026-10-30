@@ -460,3 +460,5 @@ empty budget still emits numeric zeros and `temporary_over_budget=false`. Fields
 are observations from that call, not a cache of another tool's last audit. Historical
 records without this marker may contain fabricated zeros: do not infer cleanup from
 them. This change does not delete files or alter quota/retention policies.
+
+For `Execution.wait`, an explicit nonnegative timeout is never increased; zero performs one bounded catalog observation. Omitted/null waits use the profile default (5 seconds locally and for Claude HTTP, 50 for ChatGPT/Codex HTTP). Follow-up waits retain the effective timeout and event selection. `effectiveWait` in synchronous structured results reports the selected allowance, not elapsed time or cancellation.

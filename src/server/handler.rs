@@ -106,12 +106,19 @@ fn normalized_wait_request(
         .ok_or_else(|| McpError::invalid_request("Missing BashCommand arguments", None))?;
     let requested = arguments
         .get("wait_for_seconds")
+        .filter(|value| !value.is_null())
         .cloned()
         .map(serde_json::from_value::<f32>)
         .transpose()
         .map_err(|error| {
             McpError::invalid_request(format!("Invalid wait_for_seconds: {error}"), None)
         })?;
+    if requested.is_some_and(|seconds| !seconds.is_finite() || seconds < 0.0) {
+        return Err(McpError::invalid_request(
+            "wait_for_seconds must be a finite nonnegative number",
+            None,
+        ));
+    }
     let (default, maximum) = match (policy, task_inline) {
         (BashWaitPolicy::Adaptive, true) => {
             (ADAPTIVE_TASK_INLINE_SECONDS, ADAPTIVE_TASK_INLINE_SECONDS)
@@ -432,6 +439,43 @@ impl ServerHandler for WinxService {
             }
             let compact_bash_output = supports_compact_bash_output(&context);
             let wait_budget = WaitBudget::from_context(&context);
+            let wait_field = match tool_kind {
+                Some(ToolKind::BashCommand) => request
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("wait_for_seconds"))
+                    .map(|v| ("wait_for_seconds", v)),
+                Some(ToolKind::Execution) => request
+                    .arguments
+                    .as_ref()
+                    .and_then(|a| a.get("action"))
+                    .filter(|a| a.get("type").and_then(serde_json::Value::as_str) == Some("wait"))
+                    .and_then(|a| a.get("timeout_seconds"))
+                    .map(|v| ("timeout_seconds", v)),
+                _ => None,
+            };
+            if let Some((name, _value)) = wait_field.filter(|(_, value)| {
+                !value.is_null()
+                    && value.as_f64().is_none_or(|n| n < 0.0 || n > f64::from(f32::MAX))
+            }) {
+                let error = crate::errors::WinxError::InvalidInput(format!(
+                    "{name} must be a finite nonnegative number"
+                ));
+                let arguments = request.arguments.clone().map(serde_json::Value::Object);
+                let mut result =
+                    outcomes::tool_failure(request.name.as_ref(), &error, arguments.as_ref())?;
+                outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
+                outcomes::finalize_tool_result(&mut result);
+                text_delivery.apply(&mut result);
+                scope.unscope_result(&mut result);
+                usage.emit(
+                    "tool_error",
+                    &outcomes::result_status(&result),
+                    outcomes::result_size_bytes(&result),
+                    Some(&result),
+                );
+                return Ok(result.into());
+            }
             let supports_tasks = context
                 .client_capabilities()
                 .is_some_and(|capabilities| capabilities.supports_tasks());
@@ -582,6 +626,7 @@ impl ServerHandler for WinxService {
                             usage.record_effective_wait(effective_wait);
                             self.release_bash_task(&reservation).await;
                             let guard = phase(Phase::ResponseFinalize);
+                            outcomes::attach_effective_wait(&mut execution.result, effective_wait);
                             outcomes::enforce_next_action_policy(
                                 &mut execution.result,
                                 effective_tool_policy,
@@ -645,9 +690,8 @@ impl ServerHandler for WinxService {
                     usage.effective_wait_for(&request, policy, EffectiveWaitMode::Synchronous)
                 })
                 .or_else(|| usage.effective_execution_wait(&request));
-            let follow_up = wait_budget
-                .filter(|_| matches!(tool_kind, Some(ToolKind::BashCommand | ToolKind::Execution)))
-                .map(|budget| (budget, request.clone()));
+            let follow_up = matches!(tool_kind, Some(ToolKind::BashCommand | ToolKind::Execution))
+                .then(|| request.clone());
             match Box::pin(WaitBudget::scope_execution_ceiling(
                 wait_budget,
                 self.execute_tool_call_with_authority(
@@ -667,8 +711,9 @@ impl ServerHandler for WinxService {
                     usage.record_effective_wait(effective_wait);
                     let guard = phase(Phase::ResponseFinalize);
                     let result = &mut execution.result;
-                    if let Some((budget, request)) = follow_up.as_ref() {
-                        budget.guide_follow_up(result, request);
+                    outcomes::attach_effective_wait(result, effective_wait);
+                    if let Some(request) = follow_up.as_ref() {
+                        WaitBudget::guide_follow_up(result, request);
                     }
                     outcomes::enforce_next_action_policy(result, effective_tool_policy);
                     text_delivery.apply(result);
@@ -934,5 +979,14 @@ mod tests {
         assert_eq!(normalized(BashWaitPolicy::UntilComplete, None), 60.0);
         assert_eq!(normalized(BashWaitPolicy::ReturnEarly, Some(500.0)), 5.0);
         assert_eq!(normalized(BashWaitPolicy::ReturnEarly, None), 0.25);
+    }
+
+    #[test]
+    fn contract_negative_bash_wait_is_rejected() {
+        let request =
+            CallToolRequestParams::new("BashCommand").with_arguments(serde_json::Map::from_iter([
+                ("wait_for_seconds".to_string(), serde_json::json!(-1)),
+            ]));
+        assert!(normalized_wait_request(request, BashWaitPolicy::Adaptive, false).is_err());
     }
 }
