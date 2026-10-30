@@ -129,7 +129,7 @@ mod observation_usage_regressions {
             json!({"event":"tool_call", "tool":"BashCommand", "effective_wait_policy":"until_complete",
                 "effective_wait_mode":"task", "effective_wait_ms":1}),
             json!({"event":"tool_call", "tool":"BashCommand", "effective_wait_policy":"adaptive",
-                "effective_wait_mode":"synchronous", "effective_wait_ms":60001}),
+                "effective_wait_mode":"synchronous", "effective_wait_ms":120_001}),
             json!({"event":"tool_call", "tool":"VerifyEdit", "effective_wait_policy":"adaptive",
                 "effective_wait_mode":"synchronous", "effective_wait_ms":15000}),
         ])?;

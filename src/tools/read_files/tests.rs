@@ -85,8 +85,9 @@ fn rendered(source: &str, start: usize, end: usize) -> String {
     )
 }
 
+/// The guard key exactly as production derives it (no Windows `\\?\` prefix).
 fn canonical(path: &Path) -> String {
-    path.canonicalize().unwrap().to_string_lossy().into_owned()
+    crate::utils::path::simplified(path.canonicalize().unwrap()).to_string_lossy().into_owned()
 }
 
 async fn guard(slot: &Slot, path: &Path) -> Option<FileWhitelistData> {
