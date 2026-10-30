@@ -187,9 +187,10 @@ impl WinxService {
     /// known `thread_id` self-heals here instead of failing with
     /// `BashStateNotInitialized` and burning a model round-trip on re-Initialize.
     ///
-    /// `Initialize` deliberately keeps the raw [`Self::session_for`]: its
-    /// recovery semantics (downgrading `reset_shell`/`user_asked_mode_change`
-    /// to `first_call`) depend on observing the missing live state.
+    /// `Initialize` transitions deliberately keep the raw [`Self::session_for`]:
+    /// their recovery semantics (downgrading `reset_shell`/`user_asked_mode_change`
+    /// to `first_call`) depend on observing the missing live state. Only the
+    /// read-only `status` probe rehydrates like an ordinary tool.
     pub(super) async fn tool_session_for(
         &self,
         thread_id: &str,
@@ -594,5 +595,116 @@ mod rehydration_tests {
     async fn empty_thread_id_never_rehydrates() {
         let (slot, _guard) = service(true).tool_session_for("").await;
         assert!(slot.lock().await.is_none());
+    }
+
+    fn status_probe(thread_id: &str, workspace: &std::path::Path) -> serde_json::Value {
+        serde_json::json!({
+            "type": "status",
+            "any_workspace_path": workspace,
+            "mode_name": "wcgw",
+            "thread_id": thread_id
+        })
+    }
+
+    fn tool_request(arguments: &serde_json::Value) -> rmcp::model::CallToolRequestParams {
+        rmcp::model::CallToolRequestParams::new("Initialize")
+            .with_arguments(arguments.as_object().expect("request object").clone())
+    }
+
+    // Regression: after an adapter restart a stateless client's first call was
+    // a status probe of its known pair, which failed `not_initialized` and
+    // forced a full first_call although the snapshot survived on disk.
+    #[tokio::test]
+    async fn status_probe_rehydrates_a_persisted_session_after_restart() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let thread_id = unique_thread_id("status");
+        persist_snapshot(&thread_id, workspace.path());
+        let arguments = status_probe(&thread_id, workspace.path());
+
+        let service = service(false);
+        let coherence = service
+            .validate_workspace_coherence(
+                &tool_request(&arguments),
+                &crate::server::principal::RequestScope::default(),
+                crate::config::HttpSessionAffinity::Thread,
+                None,
+            )
+            .await
+            .expect("known pair must validate after restart");
+        assert_eq!(coherence, crate::server::coherence::WorkspaceCoherence::Validated);
+
+        let result = service.handle_initialize(Some(arguments)).await.expect("status result");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let structured = result.structured_content.clone().expect("structured status");
+        assert_eq!(structured["initialize_transition"], "status", "{structured}");
+        assert_eq!(structured["initialize_recovered_missing_session"], true, "{structured}");
+        let text = &result.content[0].as_text().expect("status text").text;
+        assert!(text.contains("[session recovery]"), "lost shell must be reported: {text}");
+        let state = service.bound_workspace(&thread_id).await.expect("rehydrated binding");
+        assert_eq!(state, workspace.path());
+        delete_bash_state(&thread_id).ok();
+    }
+
+    #[tokio::test]
+    async fn non_strict_status_probe_rehydrates_a_persisted_session() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let thread_id = unique_thread_id("status_local");
+        persist_snapshot(&thread_id, workspace.path());
+        let service = WinxService::with_runtime(
+            SessionIsolation::Lenient,
+            Arc::new(StubRuntime { attached_existing: true }),
+        );
+
+        let result = service
+            .handle_initialize(Some(status_probe(&thread_id, workspace.path())))
+            .await
+            .expect("status result");
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        let structured = result.structured_content.clone().expect("structured status");
+        assert_eq!(structured["initialize_transition"], "status", "{structured}");
+        // The live shell survived, so there is nothing to recover or report.
+        assert_eq!(structured["initialize_recovered_missing_session"], false, "{structured}");
+        delete_bash_state(&thread_id).ok();
+    }
+
+    #[tokio::test]
+    async fn status_probe_keeps_cross_workspace_pairs_fail_closed_after_restart() {
+        let bound = tempfile::tempdir().expect("bound workspace");
+        let other = tempfile::tempdir().expect("other workspace");
+        let thread_id = unique_thread_id("status_mismatch");
+        persist_snapshot(&thread_id, bound.path());
+        let arguments = status_probe(&thread_id, other.path());
+        let scope = crate::server::principal::RequestScope::default();
+
+        let service = service(true);
+        let error = service
+            .validate_workspace_coherence(
+                &tool_request(&arguments),
+                &scope,
+                crate::config::HttpSessionAffinity::Thread,
+                None,
+            )
+            .await
+            .expect_err("persisted pair belongs to another workspace");
+        assert!(matches!(error, WinxError::WorkspaceBindingMismatch { .. }), "{error:?}");
+
+        // A workspace-derived id that does not match the path never loads a
+        // snapshot; it stays an unknown session.
+        let fresh = WinxService::with_runtime(
+            SessionIsolation::Strict,
+            Arc::new(StubRuntime { attached_existing: true }),
+        );
+        let error = fresh
+            .validate_workspace_coherence(
+                &tool_request(&arguments),
+                &scope,
+                crate::config::HttpSessionAffinity::Workspace,
+                None,
+            )
+            .await
+            .expect_err("invented workspace id must fail");
+        assert!(matches!(error, WinxError::BashStateNotInitialized), "{error:?}");
+        assert!(fresh.bound_workspace(&thread_id).await.is_none(), "must not rehydrate");
+        delete_bash_state(&thread_id).ok();
     }
 }

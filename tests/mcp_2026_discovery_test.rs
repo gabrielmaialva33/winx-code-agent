@@ -4921,3 +4921,52 @@ async fn status_probe_reports_the_bound_session_without_mutating_it() -> anyhow:
     assert!(pwd.contains(&workspace.path().display().to_string()), "{pwd}");
     Ok(())
 }
+
+/// Regression: a stateless client whose first call after a server restart is a
+/// status probe of its known pair must get the persisted session back, not
+/// `not_initialized` followed by a full `first_call`.
+#[tokio::test(flavor = "multi_thread")]
+async fn status_probe_restores_a_persisted_session_after_server_restart() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let thread_id = {
+        let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+        let initialize = initialize_modern_as(
+            address,
+            TEST_TOKEN,
+            workspace.path(),
+            "restart_seed",
+            "restart-seed",
+        )
+        .await?;
+        assert!(initialize.starts_with("HTTP/1.1 200"), "{initialize}");
+        initialized_thread_id(&initialize)?
+    };
+
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let probe = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": "status-after-restart",
+        "method": "tools/call",
+        "params": {
+            "_meta": modern_request_meta("restart-probe", false),
+            "name": "Initialize",
+            "arguments": {
+                "type": "status",
+                "any_workspace_path": workspace.path(),
+                "mode_name": "wcgw",
+                "thread_id": thread_id
+            }
+        }
+    })
+    .to_string();
+    let status = post_json(address, "2026-07-28", "tools/call", &probe).await?;
+    let status_json = response_json(&status)?;
+    assert_ne!(status_json["result"]["isError"], true, "{status}");
+    let data = &status_json["result"]["structuredContent"]["data"];
+    assert_eq!(data["initialize_transition"], "status", "{status}");
+    assert_eq!(data["thread_id"], thread_id, "{status}");
+    // The embedded PTY died with the old process: the probe says so once.
+    assert_eq!(data["initialize_recovered_missing_session"], true, "{status}");
+    assert!(status.contains("[session recovery]"), "{status}");
+    Ok(())
+}

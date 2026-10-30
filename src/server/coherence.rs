@@ -53,7 +53,13 @@ impl WinxService {
 
         if ToolKind::parse(request.name.as_ref()) == Some(ToolKind::Initialize) {
             return self
-                .validate_remote_initialize(arguments, &internal_thread_id, &external_thread_id)
+                .validate_remote_initialize(
+                    arguments,
+                    &internal_thread_id,
+                    &external_thread_id,
+                    affinity,
+                    conversation_identity,
+                )
                 .await;
         }
 
@@ -69,13 +75,12 @@ impl WinxService {
         // saved-task resumes derive their id before the final workspace is
         // known (playground, snapshot), so for them the established binding
         // below is what ties the id to the workspace Initialize returned.
-        let affinity_mismatch =
-            expected_affinity_thread_id(&requested_workspace, affinity, conversation_identity)
-                .is_some_and(|expected| {
-                    external_thread_id != expected
-                        && expected_scratch_thread_id(affinity, conversation_identity).as_deref()
-                            != Some(external_thread_id.as_str())
-                });
+        let affinity_mismatch = affinity_thread_mismatch(
+            &requested_workspace,
+            &external_thread_id,
+            affinity,
+            conversation_identity,
+        );
 
         let bound_workspace =
             if let Some(workspace) = self.bound_workspace(&internal_thread_id).await {
@@ -121,6 +126,8 @@ impl WinxService {
         arguments: Option<&rmcp::model::JsonObject>,
         internal_thread_id: &str,
         external_thread_id: &str,
+        affinity: HttpSessionAffinity,
+        conversation_identity: Option<&str>,
     ) -> Result<WorkspaceCoherence> {
         let kind = string_argument(arguments, "type").unwrap_or_else(|| "first_call".to_string());
         let workspace = string_argument(arguments, "any_workspace_path").unwrap_or_default();
@@ -142,8 +149,26 @@ impl WinxService {
         }
 
         let requested_workspace = canonical_initialize_workspace(&workspace)?;
+        let mut bound_workspace = self.bound_workspace(internal_thread_id).await;
+        // Stateless clients probe a known pair with `status` after a gap. After
+        // an adapter restart the registry is empty although the snapshot
+        // survived, so rehydrate exactly like the other tools do instead of
+        // forcing a full first_call. An id that does not derive from this
+        // workspace never loads a snapshot and stays an unknown session.
+        if bound_workspace.is_none()
+            && kind == "status"
+            && !affinity_thread_mismatch(
+                &requested_workspace,
+                external_thread_id,
+                affinity,
+                conversation_identity,
+            )
+        {
+            drop(self.tool_session_for(internal_thread_id).await);
+            bound_workspace = self.bound_workspace(internal_thread_id).await;
+        }
         let mut recovering_missing_session = false;
-        if let Some(bound_workspace) = self.bound_workspace(internal_thread_id).await {
+        if let Some(bound_workspace) = bound_workspace {
             let bound_workspace = canonical_workspace_identity(&bound_workspace.to_string_lossy());
             if requested_workspace != bound_workspace {
                 return Err(WinxError::WorkspaceBindingMismatch {
@@ -166,6 +191,24 @@ impl WinxService {
             WorkspaceCoherence::Validated
         })
     }
+}
+
+/// Whether a workspace-derived affinity id disagrees with the supplied one.
+/// Scratch ids are derived before their playground exists, so they are
+/// vouched for by the established binding instead.
+fn affinity_thread_mismatch(
+    requested_workspace: &std::path::Path,
+    external_thread_id: &str,
+    affinity: HttpSessionAffinity,
+    conversation_identity: Option<&str>,
+) -> bool {
+    expected_affinity_thread_id(requested_workspace, affinity, conversation_identity).is_some_and(
+        |expected| {
+            external_thread_id != expected
+                && expected_scratch_thread_id(affinity, conversation_identity).as_deref()
+                    != Some(external_thread_id)
+        },
+    )
 }
 
 fn canonical_binding_root(workspace: &str) -> Result<PathBuf> {

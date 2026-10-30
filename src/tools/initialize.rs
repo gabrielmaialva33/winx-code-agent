@@ -805,6 +805,10 @@ async fn describe_session_status(
         )
     };
     let status = runtime.describe_session(bash_state_arc).await?;
+    // Show-once note left by a restart rehydration that lost the PTY; taken only
+    // once the probe can report it.
+    let recovery_note =
+        bash_state_arc.lock().await.as_mut().and_then(|state| state.recovery_note.take());
     let temporary_artifact =
         crate::utils::agent_temp::session_info(&workspace_root, &bound_thread_id);
     let mut response = String::new();
@@ -823,6 +827,9 @@ async fn describe_session_status(
         );
     }
     let _ = writeln!(response, "command_running={}", status.command_running);
+    if let Some(note) = recovery_note.as_deref() {
+        let _ = writeln!(response, "[session recovery] {note}");
+    }
     if !status.background_command_ids.is_empty() {
         let _ = writeln!(response, "background_command_ids={:?}", status.background_command_ids);
     }
@@ -838,7 +845,7 @@ async fn describe_session_status(
     Ok(InitializeOutcome {
         text: response,
         transition: InitializeTransition::Status,
-        recovered_missing_session: false,
+        recovered_missing_session: recovery_note.is_some(),
         context_bytes: 0,
         guidelines_bytes: 0,
         initial_files_count: 0,

@@ -572,7 +572,15 @@ impl WinxService {
             thread_id = generate_thread_id();
             initialize.thread_id.clone_from(&thread_id);
         }
-        let (slot, _session_guard) = self.session_for(&thread_id).await;
+        // A status probe of a known thread rehydrates its persisted session like
+        // any other tool; transitions keep the raw slot so their recovery can
+        // observe missing live state.
+        let (slot, _session_guard) = if initialize.init_type == crate::types::InitializeType::Status
+        {
+            self.tool_session_for(&thread_id).await
+        } else {
+            self.session_for(&thread_id).await
+        };
 
         match crate::tools::initialize::handle_tool_call_with_runtime_detailed(
             self.shell_runtime.as_ref(),
