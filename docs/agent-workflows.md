@@ -338,6 +338,17 @@ was delivered, and must not trigger an automatic resend.
 
 ### Operator configuration
 
+Successful `Initialize` responses, including `type=status`, expose
+`data.agent_backends.herdr`. `configuration_present=false` reports
+`availability=disabled` and `reason=configuration_missing`. Presence of the variable
+reports `availability=unknown` and `reason=configuration_not_validated`: it does not
+prove that the file, executable, server, target or caller's binding is valid.
+This hint performs no configuration-file reads or subprocess calls, never includes
+configuration paths or target identities, and grants no authority. A `herdr_disabled`
+result additionally marks `operator_action_required=true` and `input_sent=false`;
+ask the operator to configure the adapter rather than retrying unchanged requests.
+The native backend remains separate; Herdr target aliases are not native execution IDs.
+
 Set `WINX_HERDR_CONFIG` to an operator-owned JSON configuration file. On Unix the file
 must be private (mode `0600`); it is limited to 256 KiB and rejects unknown fields.
 
@@ -438,3 +449,14 @@ calls; absence also includes actions for which this allowance is not applicable.
 Existing `errorResults` still counts nonempty error codes, including partial results.
 Recorded response bytes help locate high-volume workflows; they do not establish
 token billing or savings without a comparable workload.
+
+`CodeMap` source/payload telemetry reads canonical root `source_kind` and
+`payload_bytes`, even when the shared `data` envelope is present. Legacy camelCase
+root and nested layouts remain supported; typed canonical fields take precedence.
+
+`temporary_usage_schema=1` marks optional temporary-budget measurements. Missing or
+malformed counts/booleans are omitted, not synthesized as zero or false. A measured
+empty budget still emits numeric zeros and `temporary_over_budget=false`. Fields
+are observations from that call, not a cache of another tool's last audit. Historical
+records without this marker may contain fabricated zeros: do not infer cleanup from
+them. This change does not delete files or alter quota/retention policies.

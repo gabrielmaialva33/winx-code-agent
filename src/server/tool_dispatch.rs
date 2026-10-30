@@ -635,6 +635,9 @@ impl WinxService {
                     "temporary_code_map_max_calls": outcome.temporary_code_map_max_calls,
                     "temporary_code_map_max_unique_files": outcome.temporary_code_map_max_unique_files,
                     "session_status": outcome.session_status,
+                    "agent_backends": {
+                        "herdr": crate::tools::herdr::HerdrAdapter::configuration_hint(),
+                    },
                 }));
                 Ok(result)
             }

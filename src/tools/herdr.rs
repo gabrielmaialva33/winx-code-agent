@@ -132,6 +132,17 @@ impl HerdrAdapter {
         Self { config: None }
     }
 
+    /// A configuration hint, not a health probe or a grant of target authority.
+    /// Do not open the configured path or start a process during discovery.
+    pub(crate) fn configuration_hint() -> Value {
+        let present = std::env::var_os("WINX_HERDR_CONFIG").is_some();
+        json!({
+            "configuration_present": present,
+            "availability": if present { "unknown" } else { "disabled" },
+            "reason": if present { "configuration_not_validated" } else { "configuration_missing" },
+        })
+    }
+
     pub fn from_env() -> Result<Self, HerdrError> {
         match std::env::var_os("WINX_HERDR_CONFIG") {
             None => Ok(Self::disabled()),

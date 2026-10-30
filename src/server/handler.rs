@@ -815,11 +815,11 @@ mod tests {
             }
         }));
         let metadata = usage_result_metadata(Some(&temporary));
-        assert_eq!(metadata.temporary_session_files, 129);
-        assert_eq!(metadata.temporary_session_bytes, 4096);
-        assert_eq!(metadata.temporary_stale_pruned_files, 32);
-        assert_eq!(metadata.temporary_stale_pruned_bytes, 2048);
-        assert!(metadata.temporary_over_budget);
+        assert_eq!(metadata.temporary_session_files, Some(129));
+        assert_eq!(metadata.temporary_session_bytes, Some(4096));
+        assert_eq!(metadata.temporary_stale_pruned_files, Some(32));
+        assert_eq!(metadata.temporary_stale_pruned_bytes, Some(2048));
+        assert_eq!(metadata.temporary_over_budget, Some(true));
 
         let edit_follow_up = result_with(serde_json::json!({
             "errorCode": "verification_failed",

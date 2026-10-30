@@ -151,18 +151,18 @@ fn herdr_failure(error: &HerdrError) -> Result<CallToolResult, McpError> {
         HerdrError::Timeout { uncertain: false } => (ToolResultStatus::Failed, "herdr_timeout"),
         HerdrError::Failed(_) => (ToolResultStatus::Failed, "herdr_failed"),
     };
-    workflow_envelope(
-        "Agent",
-        status,
-        &error.to_string(),
-        Some(code),
-        None,
-        json!({
-            "backend": "herdr",
-            "input_may_have_been_sent": matches!(error, HerdrError::Timeout { uncertain: true } | HerdrError::DeliveryUncertain(_)),
-            "automatic_resend_allowed": false,
-        }),
-    )
+    let mut data = json!({
+        "backend": "herdr",
+        "input_may_have_been_sent": matches!(error, HerdrError::Timeout { uncertain: true } | HerdrError::DeliveryUncertain(_)),
+        "automatic_resend_allowed": false,
+    });
+    if matches!(error, HerdrError::Disabled) {
+        data["backend_availability"] = json!("disabled");
+        data["operator_action_required"] = json!(true);
+        data["configuration_env"] = json!("WINX_HERDR_CONFIG");
+        data["input_sent"] = json!(false);
+    }
+    workflow_envelope("Agent", status, &error.to_string(), Some(code), None, data)
 }
 
 #[cfg(all(test, unix))]
@@ -172,6 +172,24 @@ mod tests {
     use crate::types::Modes;
     use anyhow::{ensure, Context};
     use std::{fs, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn uncertain_herdr_delivery_is_not_reported_as_disabled_or_unsent() -> anyhow::Result<()> {
+        for error in [
+            HerdrError::Timeout { uncertain: true },
+            HerdrError::DeliveryUncertain("lost response".into()),
+        ] {
+            let result = herdr_failure(&error)?;
+            let envelope = result.structured_content.context("envelope")?;
+            assert_eq!(envelope["status"], "completed_with_issues");
+            assert_eq!(envelope["data"]["input_may_have_been_sent"], true);
+            assert_eq!(envelope["data"]["automatic_resend_allowed"], false);
+            assert!(envelope["data"].get("input_sent").is_none());
+            assert!(envelope["data"].get("backend_availability").is_none());
+            assert!(envelope["data"].get("operator_action_required").is_none());
+        }
+        Ok(())
+    }
 
     #[test]
     fn herdr_prompt_success_confirms_submission_only() -> anyhow::Result<()> {

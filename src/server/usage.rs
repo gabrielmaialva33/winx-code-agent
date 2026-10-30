@@ -80,11 +80,11 @@ pub(super) struct UsageResultMetadata<'a> {
     pub source_bytes: u64,
     pub image_transcoded: bool,
     pub image_deduplicated: bool,
-    pub temporary_session_files: u64,
-    pub temporary_session_bytes: u64,
-    pub temporary_stale_pruned_files: u64,
-    pub temporary_stale_pruned_bytes: u64,
-    pub temporary_over_budget: bool,
+    pub temporary_session_files: Option<u64>,
+    pub temporary_session_bytes: Option<u64>,
+    pub temporary_stale_pruned_files: Option<u64>,
+    pub temporary_stale_pruned_bytes: Option<u64>,
+    pub temporary_over_budget: Option<bool>,
     pub edit_file_count: u64,
 }
 
@@ -106,16 +106,40 @@ pub(super) fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageRes
             .unwrap_or_default(),
         recovery: usage_recovery_metadata(structured, domain_data),
         execution: usage_execution_metadata(domain_data),
+        // CodeMap keeps canonical metadata at the root even when data exists.
+        // Parse each candidate before falling back to a legacy layout.
         source_kind: structured
-            .and_then(|structured| structured.get("sourceKind"))
-            .or_else(|| domain_data.and_then(|data| data.get("source_kind")))
+            .and_then(|value| value.get("source_kind"))
             .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                structured
+                    .and_then(|value| value.get("sourceKind"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| {
+                domain_data
+                    .and_then(|value| value.get("source_kind"))
+                    .and_then(serde_json::Value::as_str)
+            })
             .unwrap_or_default(),
         payload_bytes: structured
-            .and_then(|structured| structured.get("payloadBytes"))
-            .or_else(|| domain_data.and_then(|data| data.get("payload_bytes")))
-            .or_else(|| domain_data.and_then(|data| data.get("delivered_bytes")))
+            .and_then(|value| value.get("payload_bytes"))
             .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                structured
+                    .and_then(|value| value.get("payloadBytes"))
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .or_else(|| {
+                domain_data
+                    .and_then(|value| value.get("payload_bytes"))
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .or_else(|| {
+                domain_data
+                    .and_then(|value| value.get("delivered_bytes"))
+                    .and_then(serde_json::Value::as_u64)
+            })
             .unwrap_or(0),
         source_bytes: domain_data
             .and_then(|data| data.get("source_bytes"))
@@ -131,20 +155,16 @@ pub(super) fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageRes
             .unwrap_or(false),
         temporary_session_files: temporary
             .and_then(|temporary| temporary.get("session_files"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+            .and_then(serde_json::Value::as_u64),
         temporary_session_bytes: temporary
             .and_then(|temporary| temporary.get("session_bytes"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+            .and_then(serde_json::Value::as_u64),
         temporary_stale_pruned_files: temporary
             .and_then(|temporary| temporary.get("stale_pruned_files"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+            .and_then(serde_json::Value::as_u64),
         temporary_stale_pruned_bytes: temporary
             .and_then(|temporary| temporary.get("stale_pruned_bytes"))
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0),
+            .and_then(serde_json::Value::as_u64),
         temporary_over_budget: temporary
             .and_then(|temporary| temporary.get("over_budget"))
             .and_then(serde_json::Value::as_bool)
@@ -152,8 +172,7 @@ pub(super) fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageRes
                 temporary
                     .and_then(|temporary| temporary.get("temporary_artifact_cleanup_required"))
                     .and_then(serde_json::Value::as_bool)
-            })
-            .unwrap_or(false),
+            }),
         edit_file_count: domain_data
             .and_then(|data| data.get("file_count"))
             .and_then(serde_json::Value::as_u64)
@@ -772,6 +791,7 @@ impl UsageEvent {
             source_bytes = metadata.source_bytes,
             image_transcoded = metadata.image_transcoded,
             image_deduplicated = metadata.image_deduplicated,
+            temporary_usage_schema = 1_u64,
             temporary_session_files = metadata.temporary_session_files,
             temporary_session_bytes = metadata.temporary_session_bytes,
             temporary_stale_pruned_files = metadata.temporary_stale_pruned_files,
@@ -957,6 +977,7 @@ pub(super) mod tests {
     }
 
     mod observation_metrics;
+    mod result_metadata;
 
     fn captured_usage(
         tool: &str,

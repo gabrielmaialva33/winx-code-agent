@@ -1,6 +1,10 @@
 // Windows: these tests drive a real Unix shell or PTY session. They return
 // once native Windows shell support lands with the daemon port.
 #![cfg(unix)]
+#[path = "support/backend_hints.rs"]
+mod backend_hints;
+#[path = "support/usage_metadata.rs"]
+mod usage_metadata;
 
 use std::collections::HashMap;
 use std::net::TcpListener as StdTcpListener;
@@ -3650,6 +3654,7 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
 
     exercise_usage_read(address, workspace.path(), &thread_id).await?;
     exercise_usage_metrics(address, &thread_id).await?;
+    let codemap_bytes = usage_metadata::exercise(address, workspace.path(), &thread_id).await?;
 
     let deadline = Instant::now() + Duration::from_secs(3);
     let contents = loop {
@@ -3660,7 +3665,10 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
         let has_observe = contents.lines().any(|line| {
             line.contains("\"event\":\"tool_call\"") && line.contains("\"tool\":\"Execution\"")
         });
-        if has_tool && has_http && has_read && has_observe {
+        let has_codemap = contents.lines().any(|line| {
+            line.contains("\"event\":\"tool_call\"") && line.contains("\"tool\":\"CodeMap\"")
+        });
+        if has_tool && has_http && has_read && has_observe && has_codemap {
             break contents;
         }
         if Instant::now() >= deadline {
@@ -3681,7 +3689,8 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
         assert_eq!(mode, 0o600, "usage log must be private: {}", usage_log.display());
     }
 
-    assert_usage_entries(&contents)
+    assert_usage_entries(&contents)?;
+    usage_metadata::assert_entries(&contents, codemap_bytes)
 }
 
 /// Post one `tools/call` request and parse the JSON-RPC response body.
