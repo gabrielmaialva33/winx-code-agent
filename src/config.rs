@@ -64,6 +64,7 @@ pub struct HttpPrincipal {
     id: String,
     token_digest: [u8; 32],
     tool_policy: ToolPolicy,
+    weak_token: bool,
 }
 
 impl std::fmt::Debug for HttpPrincipal {
@@ -111,7 +112,8 @@ impl HttpPrincipal {
             let _ = write!(output, "{byte:02x}");
             output
         });
-        Ok(Self { name, id, token_digest, tool_policy })
+        let weak_token = token.len() < MIN_HTTP_TOKEN_BYTES;
+        Ok(Self { name, id, token_digest, tool_policy, weak_token })
     }
 
     pub fn name(&self) -> &str {
@@ -120,6 +122,13 @@ impl HttpPrincipal {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Whether this principal was admitted below the minimum token length
+    /// (`--allow-weak-token`). Such a token is guessable, so it keeps the
+    /// failed-auth lockout of its source IP.
+    pub fn has_weak_token(&self) -> bool {
+        self.weak_token
     }
 
     pub fn session_prefix(&self) -> String {

@@ -18,10 +18,10 @@ Winx 通过经过身份验证的 **Streamable HTTP** 端点向 ChatGPT、云端�
 | 认证机制 | `Authorization: Bearer <token>` |
 | 最小 Token 长度 | 32 字节 |
 | 远程会话亲和性 | `workspace`（工作区亲和） |
-| 请求体上限 | 64 MiB |
+| 请求体上限 | 16 MiB |
 | 请求超时时间 | 120 秒 |
 | 全局并发上限 | 32 个并发请求 |
-| 单来源 IP 限流 | 120 请求/分钟 |
+| 单来源 IP 认证失败限流 | 120 次失败/分钟 |
 | 单主体限流 | 120 请求/分钟 |
 | 认证失败延迟响应 | 100 毫秒 |
 | 未使用 Guardian TTL | 1,800 秒（30 分钟） |
@@ -417,10 +417,15 @@ winx-code-agent serve --http \
 | 异常条件 | HTTP 响应 | 备注 |
 | :--- | :--- | :--- |
 | Token 缺失或无效 | `401 Unauthorized` | 延迟 100ms 响应 |
-| 单 IP 请求频次超限 | `429 Too Many Requests` | 包含 `Retry-After: 1` 头部 |
+| 单 IP 认证失败次数超限 | `429 Too Many Requests` | 延迟响应；包含 `Retry-After: 1` 头部 |
+| 单主体请求频次超限 | `429 Too Many Requests` | 包含 `Retry-After: 1` 头部 |
 | 全局并发配额耗尽 | `503 Service Unavailable` | 包含 `Retry-After: 1` 头部 |
 | 请求执行超过 120 秒 | `408 Request Timeout` | 中止该次请求 |
-| 请求体大于 64 MiB | `413 Payload Too Large` | 在 MCP 分发前直接拒绝 |
+| 请求体大于 16 MiB（声明长度或流式） | `413 Payload Too Large` | 在 MCP 分发前直接拒绝 |
+
+准入流程先认证（常数时间摘要比较，不读取请求体）。只有认证失败的请求消耗单来源 IP 窗口，且每次失败都延迟 100 毫秒、
+不占用并发许可。已认证请求随后依次经过单主体限流、会话归属检查，最后才获取全局并发许可。因此在隧道后面，无效流量无法让
+合法主体收到 `429` 或 `503`。16 MiB 上限同时适用于声明的 `Content-Length` 与流式请求体。
 
 ## CLI 选项速查
 
@@ -438,7 +443,7 @@ winx-code-agent serve --http \
 | `--allowed-host <HOST>` | 显式允许的 Host 域名白名单 |
 | `--allow-query-token` | 允许通过 URL 参数 `?token=...` 传递凭证 |
 | `--max-concurrency <N>` | 全局最大并发请求数（默认 32） |
-| `--requests-per-minute <N>` | 单 IP 每分钟最大请求数（默认 120） |
+| `--requests-per-minute <N>` | 单来源 IP 每分钟最大认证失败次数（默认 120） |
 | `--principal-requests-per-minute <N>` | 单个已认证主体每分钟最大请求数（默认 120），用于同一隧道后的公平分配 |
 
 ## 安全边界说明

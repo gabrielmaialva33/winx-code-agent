@@ -23,8 +23,8 @@ rmcp = { version = "3.1.2", features = [
 axum = "0.8"
 # Response-body wrapper that keeps the admission permit until a stream ends.
 http-body = "1"
-# Tower middleware for the HTTP transport: request body-size cap + per-request
-# timeout on the network-reachable RCE endpoint.
+# Tower middleware for the HTTP transport: per-request timeout on the
+# network-reachable RCE endpoint. The body cap is MAX_BODY_BYTES in http_server.
 tower-http = { version = "0.7", features = ["limit", "timeout"] }
 tower = { version = "0.5", features = ["limit"] }
 

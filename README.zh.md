@@ -538,10 +538,10 @@ winx-code-agent serve --http \
 | 监听地址 | `127.0.0.1:8000`；非回环地址需指定 `--allow-non-loopback` |
 | 认证机制 | `Authorization: Bearer <token>` |
 | 最小 Token 长度 | 32 字节（除非使用 `--allow-weak-token`） |
-| 请求体上限 | 64 MiB |
+| 请求体上限 | 16 MiB |
 | 请求超时 | 120 秒 |
 | 全局并发数 | 32 个请求 |
-| 速率限制 | 每个来源 IP 限制 120 次/分钟 |
+| 认证失败限流 | 每个来源 IP 120 次失败/分钟 |
 | 认证失败延迟响应 | 100 毫秒（防时序攻击） |
 
 > [!WARNING]

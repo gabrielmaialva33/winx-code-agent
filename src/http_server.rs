@@ -28,7 +28,6 @@ use rmcp::transport::streamable_http_server::{
 };
 use serde::Serialize;
 use tokio::sync::{Mutex, Semaphore};
-use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::config::{HttpPrincipal, HttpSessionAffinity};
@@ -40,12 +39,20 @@ use observability::{observe_request_entry, PermitBody};
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
+/// The one effective request-body limit. It drives both the declared-length
+/// precheck and the SDK's streaming read limit, and at the default concurrency
+/// bounds buffered request bodies to 32 x 16 MiB = 512 MiB (bodies are only
+/// read after admission). Over HTTP this, not EditFiles' larger aggregate
+/// content cap, bounds a tool call; the SDK default it replaces was 4 MiB.
+pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_RATE_TRACKED_IPS: usize = 4_096;
 const INVALID_AUTH_DELAY: Duration = Duration::from_millis(100);
 pub const DEFAULT_MAX_CONCURRENCY: usize = 32;
+/// Fixed-window budget of failed authentication attempts per source IP.
+/// Authenticated requests never consume it, so junk traffic sharing a tunnel's
+/// source IP cannot rate-limit a valid principal.
 pub const DEFAULT_REQUESTS_PER_MINUTE: u32 = 120;
 /// Fixed-window request budget per authenticated principal. Behind one reverse
 /// proxy every client shares a single source IP, so the IP window alone cannot
@@ -87,6 +94,7 @@ pub struct HttpServerOptions {
     pub allow_non_loopback: bool,
     pub session_affinity: HttpSessionAffinity,
     pub max_concurrency: usize,
+    /// Failed-authentication attempts allowed per source IP and minute.
     pub requests_per_minute: u32,
     pub principal_requests_per_minute: u32,
 }
@@ -136,13 +144,42 @@ pub async fn start_http_server_with_runtime(
     let bind = validate_options(&options)?;
     let principal_names =
         options.principals.iter().map(|principal| principal.name().to_string()).collect::<Vec<_>>();
+    let allow_query_token = options.allow_query_token;
+    let health_state = Arc::new(HealthState { ready: AtomicBool::new(true) });
+    let app = build_app(options, shell_runtime, Arc::clone(&health_state));
+
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    tracing::warn!(
+        bind = %bind,
+        principals = ?principal_names,
+        route = "/mcp",
+        "Winx remote MCP is network-reachable; keep it behind authenticated HTTPS"
+    );
+    if allow_query_token {
+        tracing::warn!(
+            "query-token authentication is enabled; URLs may expose credentials in proxy logs/history"
+        );
+    }
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown_signal(health_state))
+        .await?;
+    Ok(())
+}
+
+/// Assemble the complete HTTP application for already-validated options.
+fn build_app(
+    options: HttpServerOptions,
+    shell_runtime: Arc<dyn ShellRuntime>,
+    health_state: Arc<HealthState>,
+) -> Router {
     let shared_concurrency = Arc::new(Semaphore::new(options.max_concurrency));
-    let shared_rate_limiter = Arc::new(RateLimiter::new(options.requests_per_minute));
+    let auth_failure_limiter = Arc::new(RateLimiter::new(options.requests_per_minute));
     let principal_rate_limiter = Arc::new(RateLimiter::new(options.principal_requests_per_minute));
 
     let mut config = StreamableHttpServerConfig::default();
     config.legacy_session_mode = true;
     config.allowed_hosts.extend(options.extra_hosts);
+    config.max_request_body_bytes = MAX_BODY_BYTES;
 
     let shared = WinxService::with_runtime(SessionIsolation::Strict, shell_runtime);
     let session_manager = Arc::new(LocalSessionManager::default());
@@ -153,7 +190,7 @@ pub async fn start_http_server_with_runtime(
         allow_query: options.allow_query_token,
         session_affinity: options.session_affinity,
         concurrency: shared_concurrency,
-        rate_limiter: shared_rate_limiter,
+        auth_failure_limiter,
         principal_rate_limiter,
         session_owners: Arc::new(SessionOwners::default()),
         session_manager,
@@ -166,33 +203,38 @@ pub async fn start_http_server_with_runtime(
         .nest_service("/mcp", mcp_service)
         .layer(TimeoutLayer::with_status_code(StatusCode::REQUEST_TIMEOUT, REQUEST_TIMEOUT))
         .layer(middleware::from_fn_with_state(security, enforce_route_security))
-        .layer(RequestBodyLimitLayer::new(MAX_BODY_BYTES));
+        .layer(middleware::from_fn(reject_declared_oversized_body));
     // Keep OAuth discovery probes and every unrelated path outside bearer auth.
     // Winx does not advertise OAuth metadata, so those routes should be ordinary
     // 404s instead of 401s that encourage clients to start a nonexistent flow.
-    let health_state = Arc::new(HealthState { ready: AtomicBool::new(true) });
     let health_routes = Router::new()
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
-        .with_state(Arc::clone(&health_state));
-    let app = Router::new().merge(health_routes).merge(protected_mcp);
+        .with_state(health_state);
+    Router::new().merge(health_routes).merge(protected_mcp)
+}
 
-    let listener = tokio::net::TcpListener::bind(bind).await?;
-    tracing::warn!(
-        bind = %bind,
-        principals = ?principal_names,
-        route = "/mcp",
-        "Winx remote MCP is network-reachable; keep it behind authenticated HTTPS"
-    );
-    if options.allow_query_token {
-        tracing::warn!(
-            "query-token authentication is enabled; URLs may expose credentials in proxy logs/history"
-        );
+/// Answer 413 for a declared oversized body before authentication or dispatch.
+///
+/// Streamed bodies without `Content-Length` are bounded by the SDK while it
+/// reads them (`max_request_body_bytes`, also a 413). tower-http's
+/// `RequestBodyLimitLayer` is deliberately not used: the SDK turns the body
+/// error it injects into a 500, so chunked overflows would not answer 413.
+async fn reject_declared_oversized_body(request: Request, next: Next) -> Response {
+    let declared = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let limit = u64::try_from(MAX_BODY_BYTES).unwrap_or(u64::MAX);
+    if declared.is_some_and(|length| length > limit) {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("Payload Too Large: request body exceeds {MAX_BODY_BYTES} bytes"),
+        )
+            .into_response();
     }
-    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-        .with_graceful_shutdown(shutdown_signal(health_state))
-        .await?;
-    Ok(())
+    next.run(request).await
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -275,7 +317,7 @@ struct RouteSecurity {
     allow_query: bool,
     session_affinity: HttpSessionAffinity,
     concurrency: Arc<Semaphore>,
-    rate_limiter: Arc<RateLimiter<IpAddr>>,
+    auth_failure_limiter: Arc<RateLimiter<IpAddr>>,
     principal_rate_limiter: Arc<RateLimiter<String>>,
     session_owners: Arc<SessionOwners>,
     session_manager: Arc<LocalSessionManager>,
@@ -361,27 +403,23 @@ async fn enforce_route_security(
         return next.run(request).await;
     }
     let (started, method, correlation) = observe_request_entry(peer, request.method());
-    if !security.rate_limiter.allow(peer.ip()).await {
-        log_rejection(peer, None, &correlation, "ip_rate_limit", StatusCode::TOO_MANY_REQUESTS);
-        return retry_response(StatusCode::TOO_MANY_REQUESTS, "request rate limit exceeded\n");
-    }
-    let Ok(permit) = security.concurrency.clone().try_acquire_owned() else {
-        log_rejection(peer, None, &correlation, "concurrency", StatusCode::SERVICE_UNAVAILABLE);
-        return retry_response(StatusCode::SERVICE_UNAVAILABLE, "too many concurrent requests\n");
-    };
-
+    // Authenticate before touching shared capacity. Behind a tunnel every caller
+    // shares one source IP, so junk traffic must not be able to spend the
+    // window or the concurrency permits a valid principal needs. The check is a
+    // constant-time digest comparison of headers only; the body is never read.
     let Some(principal) =
         authenticate_request(&request, &security.principals, security.allow_query)
     else {
-        tokio::time::sleep(INVALID_AUTH_DELAY).await;
-        tracing::warn!(
-            peer = %peer,
-            path = %request.uri().path(),
-            "rejected request with missing or invalid HTTP token"
-        );
-        log_rejection(peer, None, &correlation, "auth", StatusCode::UNAUTHORIZED);
-        return (StatusCode::UNAUTHORIZED, "missing or invalid token\n").into_response();
+        return reject_failed_auth(&security, peer, &correlation, request.uri().path()).await;
     };
+
+    // A guessable token gets no answer that distinguishes it while its source
+    // IP is over the failed-auth budget; strong tokens are not locked out.
+    if principal.has_weak_token() && security.auth_failure_limiter.exhausted(&peer.ip()).await {
+        tokio::time::sleep(INVALID_AUTH_DELAY).await;
+        log_rejection(peer, None, &correlation, "ip_rate_limit", StatusCode::TOO_MANY_REQUESTS);
+        return retry_response(StatusCode::TOO_MANY_REQUESTS, "request rate limit exceeded\n");
+    }
 
     let principal_name = principal.name().to_string();
     if !security.principal_rate_limiter.allow(principal_name.clone()).await {
@@ -415,6 +453,16 @@ async fn enforce_route_security(
             return (StatusCode::NOT_FOUND, "session not found\n").into_response();
         }
     }
+    let Ok(permit) = security.concurrency.clone().try_acquire_owned() else {
+        log_rejection(
+            peer,
+            Some(&principal_name),
+            &correlation,
+            "concurrency",
+            StatusCode::SERVICE_UNAVAILABLE,
+        );
+        return retry_response(StatusCode::SERVICE_UNAVAILABLE, "too many concurrent requests\n");
+    };
     let mut request = request;
     request.extensions_mut().insert(principal);
     request.extensions_mut().insert(security.session_affinity);
@@ -464,6 +512,29 @@ async fn enforce_route_security(
     })
 }
 
+/// Failed authentication: the only traffic that spends the per-IP window.
+///
+/// Every failure is delayed, including those already over budget, so an
+/// over-budget guess is never answered faster. No concurrency permit is held
+/// while waiting. A strong valid token still succeeds while its IP is over
+/// budget (its 32-byte minimum makes guessing infeasible); a weak one does not.
+async fn reject_failed_auth(
+    security: &RouteSecurity,
+    peer: SocketAddr,
+    correlation: &RequestCorrelation,
+    path: &str,
+) -> Response {
+    let within_budget = security.auth_failure_limiter.allow(peer.ip()).await;
+    tokio::time::sleep(INVALID_AUTH_DELAY).await;
+    if !within_budget {
+        log_rejection(peer, None, correlation, "ip_rate_limit", StatusCode::TOO_MANY_REQUESTS);
+        return retry_response(StatusCode::TOO_MANY_REQUESTS, "request rate limit exceeded\n");
+    }
+    tracing::warn!(peer = %peer, path = %path, "rejected request with missing or invalid HTTP token");
+    log_rejection(peer, None, correlation, "auth", StatusCode::UNAUTHORIZED);
+    (StatusCode::UNAUTHORIZED, "missing or invalid token\n").into_response()
+}
+
 /// One redacted `winx::usage` event per admission rejection, so overload and
 /// auth failures are visible in reports instead of vanishing before the
 /// per-request event.
@@ -499,7 +570,7 @@ struct RateWindow {
 }
 
 #[derive(Debug)]
-/// Fixed-window limiter keyed by source IP (pre-auth abuse control) or by
+/// Fixed-window limiter keyed by source IP (failed-auth budget) or by
 /// authenticated principal (fairness behind a shared proxy).
 struct RateLimiter<K> {
     requests_per_window: u32,
@@ -534,6 +605,16 @@ impl<K: std::hash::Hash + Eq + Clone> RateLimiter<K> {
         }
         window.count = window.count.saturating_add(1);
         true
+    }
+
+    /// Whether `peer` has spent its budget in the current window, without
+    /// consuming any of it.
+    async fn exhausted(&self, peer: &K) -> bool {
+        let windows = self.windows.lock().await;
+        windows.get(peer).is_some_and(|window| {
+            Instant::now().duration_since(window.started_at) < RATE_WINDOW
+                && window.count >= self.requests_per_window
+        })
     }
 }
 
@@ -725,3 +806,6 @@ mod tests {
 
 #[cfg(test)]
 mod observability_tests;
+
+#[cfg(test)]
+mod security_tests;

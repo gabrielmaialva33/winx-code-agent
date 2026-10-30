@@ -85,7 +85,7 @@ fn security() -> Arc<RouteSecurity> {
         allow_query: false,
         session_affinity: HttpSessionAffinity::Workspace,
         concurrency: Arc::new(Semaphore::new(1)),
-        rate_limiter: Arc::new(RateLimiter::new(100)),
+        auth_failure_limiter: Arc::new(RateLimiter::new(100)),
         principal_rate_limiter: Arc::new(RateLimiter::new(100)),
         session_owners: Arc::new(SessionOwners::default()),
         session_manager: Arc::new(LocalSessionManager::default()),
@@ -211,7 +211,7 @@ fn scripted(step: BodyStep) -> Body {
 async fn received_is_logged_before_waiting_for_admission() {
     let (capture, _guard) = capture_usage();
     let security = security();
-    let admission_lock = security.rate_limiter.windows.lock().await;
+    let admission_lock = security.principal_rate_limiter.windows.lock().await;
     let mut router = router(security.clone(), Response::new(Body::empty()));
     let mut call = Box::pin(router.call(request()));
     assert!(call.as_mut().poll(&mut Context::from_waker(Waker::noop())).is_pending());

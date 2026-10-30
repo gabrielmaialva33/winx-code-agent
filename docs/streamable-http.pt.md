@@ -18,10 +18,10 @@ Como esse endpoint concede recursos reais de shell e acesso ao sistema de arquiv
 | Autenticação | `Authorization: Bearer <token>` |
 | Comprimento mínimo do token | 32 bytes |
 | Afinidade de sessão remota | `workspace` |
-| Limite de corpo da requisição | 64 MiB |
+| Limite de corpo da requisição | 16 MiB |
 | Timeout de requisição | 120 segundos |
 | Concorrência global | 32 requisições simultâneas |
-| Rate limit por IP de origem | 120 requisições por minuto |
+| Limite por IP de origem | 120 falhas de autenticação por minuto |
 | Rate limit por principal | 120 requisições por minuto |
 | Atraso em falha de autenticação | 100 ms |
 | TTL de guardian nunca utilizado | 1.800 segundos (30 minutos) |
@@ -502,10 +502,17 @@ winx-code-agent serve --http \
 | Condição | Resposta | Detalhes |
 | :--- | :--- | :--- |
 | Token ausente ou inválido | `401 Unauthorized` | Resposta atrasada em 100 ms |
-| Limite de requisições por IP excedido | `429 Too Many Requests` | Inclui cabeçalho `Retry-After: 1` |
+| IP excedeu o limite de falhas de autenticação | `429 Too Many Requests` | Atrasada; inclui `Retry-After: 1` |
+| Principal excedeu seu limite | `429 Too Many Requests` | Inclui cabeçalho `Retry-After: 1` |
 | Concorrência global esgotada | `503 Service Unavailable` | Inclui cabeçalho `Retry-After: 1` |
 | Requisição exceder 120 segundos | `408 Request Timeout` | A requisição é encerrada |
-| Corpo maior que 64 MiB | `413 Payload Too Large` | Rejeitado antes do dispatch |
+| Corpo maior que 16 MiB (declarado ou em streaming) | `413 Payload Too Large` | Rejeitado antes do dispatch |
+
+A admissão autentica primeiro (comparação de digest em tempo constante, sem ler o corpo). Só tentativas com falha
+consomem a janela por IP de origem, e toda falha é atrasada em 100 ms sem ocupar permissão de concorrência. Requisições
+autenticadas passam depois pelo limite por principal, pela verificação de dono da sessão e só então pela concorrência
+global. Atrás de um túnel, tráfego inválido não consegue fazer um principal válido receber `429` ou `503`. Um único
+limite de 16 MiB vale tanto para `Content-Length` declarado quanto para corpo em streaming.
 
 ## Referência da CLI
 
@@ -524,7 +531,7 @@ winx-code-agent serve --http \
 | `--allowed-host <HOST>` | Autoriza cabeçalhos `Host` adicionais |
 | `--allow-query-token` | Permite passar o token via `?token=...` na URL |
 | `--max-concurrency <N>` | Limite global de requisições concorrentes (padrão: 32) |
-| `--requests-per-minute <N>` | Limite de requisições por IP (padrão: 120) |
+| `--requests-per-minute <N>` | Falhas de autenticação por IP de origem (padrão: 120) |
 | `--principal-requests-per-minute <N>` | Limite de requisições por principal autenticado (padrão: 120); mantém justiça quando todos chegam pelo mesmo túnel |
 
 ## Limite de Segurança

@@ -90,7 +90,8 @@ an OpenAI-hosted MCP endpoint.
   plan/commit engine, removing overlapping choices while preserving read evidence, canonical path binding, atomic writes,
   receipts, and recovery.
 - **Fail-closed network defaults:** loopback-only binding, 32-byte minimum tokens, chmod-600 token files, DNS-rebinding
-  host checks, body/time/concurrency limits, per-IP rate limiting, and delayed invalid-auth responses.
+  host checks, body/time/concurrency limits, auth-first admission with per-IP failed-auth limiting, and delayed
+  invalid-auth responses.
 - **Agent-native terminal semantics:** foreground and background commands, status polling, interactive input, stable TUI
   snapshots, turn detection, real exit codes, and bounded output.
 - **Execution and agent workflows:** durable scoped history, non-consuming output pages, state explanations, wait-any,
@@ -786,10 +787,10 @@ requirements.
 | Bind address                 | `127.0.0.1:8000`; non-loopback requires `--allow-non-loopback` |
 | Authentication               | `Authorization: Bearer <token>`                                |
 | Minimum token length         | 32 bytes, unless `--allow-weak-token` is explicitly set        |
-| Request body                 | 64 MiB maximum                                                 |
+| Request body                 | 16 MiB maximum                                                 |
 | Request timeout              | 120 seconds                                                    |
 | Concurrent requests          | 32 globally                                                    |
-| Rate limit                   | 120 requests/minute per source IP                              |
+| Failed-auth rate limit       | 120 failed attempts/minute per source IP                       |
 | Principal rate limit         | 120 requests/minute per authenticated principal                |
 | Invalid authentication delay | 100 ms                                                         |
 | Query token                  | Disabled; requires `--allow-query-token`                       |

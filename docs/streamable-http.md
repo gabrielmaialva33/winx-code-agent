@@ -21,10 +21,10 @@ refuses non-loopback binding unless explicitly acknowledged, bounds request cost
 | Authentication           | `Authorization: Bearer <token>` |
 | Minimum token length     | 32 bytes                        |
 | Remote session affinity  | `workspace`                     |
-| Request body limit       | 64 MiB                          |
+| Request body limit       | 16 MiB                          |
 | Request timeout          | 120 seconds                     |
 | Global concurrency       | 32 requests                     |
-| Per-source-IP rate limit | 120 requests per minute         |
+| Per-source-IP auth limit | 120 failed attempts per minute  |
 | Per-principal rate limit | 120 requests per minute         |
 | Invalid-auth delay       | 100 ms                          |
 | Never-used guardian TTL  | 1,800 seconds (30 minutes)      |
@@ -45,9 +45,10 @@ Private tunnel / VPN / authenticated HTTPS reverse proxy
        ▼
 127.0.0.1:8000/mcp
        │
-       ├─ Host and body validation
-       ├─ Timeout, rate, and concurrency limits
-       ├─ Principal authentication
+       ├─ Host and declared-body-size validation
+       ├─ Principal authentication (failures: per-IP window + delay)
+       ├─ Per-principal rate, session-owner, and concurrency limits
+       ├─ Timeout and streaming body limit
        ├─ Session-affinity resolution
        └─ thread_id / MCP Task scoping
               │
@@ -745,15 +746,28 @@ through bearer authentication. `/mcp` remains protected and returns `401` for a 
 | Condition                                       | Response                  | Notes                        |
 |-------------------------------------------------|---------------------------|------------------------------|
 | Missing or invalid token                        | `401 Unauthorized`        | Delayed by 100 ms            |
-| Source IP exceeds the window                    | `429 Too Many Requests`   | Includes `Retry-After: 1`    |
+| Source IP exceeds its failed-auth window        | `429 Too Many Requests`   | Delayed; `Retry-After: 1`    |
+| Principal exceeds its window                    | `429 Too Many Requests`   | Includes `Retry-After: 1`    |
 | Global concurrency exhausted                    | `503 Service Unavailable` | Includes `Retry-After: 1`    |
 | Request exceeds 120 seconds                     | `408 Request Timeout`     | Request is terminated        |
-| Body exceeds 64 MiB                             | `413 Payload Too Large`   | Rejected before MCP dispatch |
+| Body exceeds 16 MiB (declared or streamed)      | `413 Payload Too Large`   | Rejected before MCP dispatch |
 | Public bind without acknowledgement             | Startup failure           | Prefer a private edge        |
 | Missing, weak, duplicate, or unsafe credentials | Startup failure           | Fix the credential source    |
 
-The rate limiter uses the TCP peer address seen by Winx. Several users behind one reverse proxy may share one window.
-Winx intentionally does not trust forwarded-IP headers by default.
+Admission authenticates first. The bearer (or opt-in query) token is checked with a constant-time digest comparison
+before any shared capacity is spent, and the body is not read. Only failed attempts consume the per-source-IP window,
+and every failure, including one already over budget, is delayed by 100 ms without holding a concurrency permit.
+Authenticated requests then pass the per-principal window, the session-owner check, and finally take one of the global
+concurrency permits. Behind a tunnel every caller shares one source IP, so junk traffic cannot make a valid principal
+receive `429` or `503`. A valid strong token is still accepted while its IP is over the failed-auth budget, where the
+32-byte minimum makes guessing infeasible. A token admitted with `--allow-weak-token` (local tests only) keeps the
+lockout: while its IP is over budget it gets the same delayed `429` as a wrong guess.
+
+The per-IP window uses the TCP peer address seen by Winx. Winx intentionally does not trust forwarded-IP headers.
+
+One constant sets the 16 MiB body limit: a declared `Content-Length` above it is refused before authentication, and a
+streamed body is cut off at the same byte count while the MCP SDK reads it. Both answer `413`. At the default
+concurrency this bounds buffered request bodies to 512 MiB.
 
 ## CLI reference
 
@@ -772,7 +786,7 @@ Winx intentionally does not trust forwarded-IP headers by default.
 | `--allowed-host <HOST>`       | Extend accepted Host authorities; repeatable       |
 | `--allow-query-token`         | Accept `?token=...`; disabled by default           |
 | `--max-concurrency <N>`       | Global simultaneous-request cap, default `32`      |
-| `--requests-per-minute <N>`   | Per-source-IP limit, default `120`                 |
+| `--requests-per-minute <N>`   | Failed-auth attempts per source IP, default `120`  |
 
 ## MCP request requirements
 
@@ -881,8 +895,10 @@ identity system.
 
 ### `429` or `503`
 
-Lower polling/parallelism first. Raise `--requests-per-minute` or `--max-concurrency` only after measuring machine and
-client behavior. Remember that a reverse proxy may collapse many users into one source IP.
+An authenticated client receiving `429` has exhausted its own principal window; lower polling/parallelism or raise
+`--principal-requests-per-minute`. A `429` on unauthenticated requests means the source IP spent its failed-auth
+budget; fix the credential rather than raising `--requests-per-minute`. A `503` means the global permits are busy;
+raise `--max-concurrency` only after measuring machine and client behavior.
 
 ## Security boundary
 

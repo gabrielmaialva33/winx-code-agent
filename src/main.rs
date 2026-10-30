@@ -105,7 +105,8 @@ enum Commands {
         )]
         max_concurrency: usize,
 
-        /// Fixed-window request limit per source IP.
+        /// Fixed-window limit of failed authentication attempts per source IP.
+        /// Authenticated requests are limited per principal instead.
         #[arg(
             long,
             default_value_t = winx_code_agent::http_server::DEFAULT_REQUESTS_PER_MINUTE

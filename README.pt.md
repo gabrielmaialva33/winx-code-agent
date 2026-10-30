@@ -543,10 +543,10 @@ winx-code-agent serve --http \
 | Endereço de Bind | `127.0.0.1:8000`; endereços externos exigem `--allow-non-loopback` |
 | Autenticação | `Authorization: Bearer <token>` |
 | Tamanho mínimo do token | 32 bytes (exceto com `--allow-weak-token`) |
-| Limite de corpo da requisição | 64 MiB |
+| Limite de corpo da requisição | 16 MiB |
 | Timeout de requisição | 120 segundos |
 | Concorrência global | 32 requisições |
-| Limite de taxa (Rate limit) | 120 requisições/minuto por IP de origem |
+| Limite de falhas de autenticação | 120 tentativas/minuto por IP de origem |
 | Atraso em autenticação inválida | 100 ms |
 
 > [!WARNING]
