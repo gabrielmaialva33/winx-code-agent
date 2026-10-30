@@ -57,6 +57,74 @@ pub fn env_text(name: &str) -> Option<String> {
     std::env::var(name).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
 }
 
+/// Default visible-content budget for one `ReadFiles` call. 48 KiB of numbered
+/// source is roughly 12-16k tokens: under Claude Code's ~25k-token tool-result
+/// cap and claude.ai's ~150k-character cap with room for the structured
+/// receipts, and below the sizes at which `ChatGPT` was observed to drop
+/// content silently. It leaves the median call (~36 KB) untouched.
+pub const DEFAULT_READ_CALL_BUDGET_BYTES: usize = 48 * 1024;
+/// Default cap for one whole-file or open-ended read. Files above ~32 KiB
+/// (~800 lines) are where an outline plus targeted ranges beats a raw dump, and
+/// the remaining 16 KiB of the call budget still serves other batch items.
+pub const DEFAULT_READ_FILE_BUDGET_BYTES: usize = 32 * 1024;
+/// Default window in which an unchanged repeat is compacted: off. Under
+/// workspace affinity a new chat inherits the thread of an earlier one, so it
+/// could be told a file is "unchanged" that it never saw. Opt in with
+/// `WINX_READ_UNCHANGED_TTL_SECS` (e.g. 900) for per-conversation threads.
+pub const DEFAULT_READ_UNCHANGED_TTL_SECS: u64 = 0;
+/// Smallest accepted non-zero byte budget; tiny budgets only produce slivers.
+pub const MIN_READ_BUDGET_BYTES: usize = 1024;
+
+/// Response-size policy for `ReadFiles`. `None` disables a byte budget.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReadResponseBudget {
+    /// Visible file bytes per call, shared by every item in a batch.
+    pub call_bytes: Option<usize>,
+    /// Cap for one whole-file or open-ended item. Explicit `start-end` ranges
+    /// are deliberate and are bounded only by the call budget.
+    pub file_bytes: Option<usize>,
+    /// How long an unchanged, still-guarded repeat is compacted. Zero disables.
+    pub unchanged_ttl: std::time::Duration,
+}
+
+impl Default for ReadResponseBudget {
+    fn default() -> Self {
+        Self::parse(None, None, None)
+    }
+}
+
+impl ReadResponseBudget {
+    /// Read `WINX_READ_CALL_BUDGET_BYTES`, `WINX_READ_FILE_BUDGET_BYTES` and
+    /// `WINX_READ_UNCHANGED_TTL_SECS`.
+    pub fn from_env() -> Self {
+        Self::parse(
+            env_text("WINX_READ_CALL_BUDGET_BYTES").as_deref(),
+            env_text("WINX_READ_FILE_BUDGET_BYTES").as_deref(),
+            env_text("WINX_READ_UNCHANGED_TTL_SECS").as_deref(),
+        )
+    }
+
+    /// `0` disables a value; unparsable input keeps the default, and non-zero
+    /// byte budgets are raised to [`MIN_READ_BUDGET_BYTES`]. The per-file cap
+    /// never exceeds the call budget.
+    pub fn parse(call: Option<&str>, file: Option<&str>, ttl: Option<&str>) -> Self {
+        fn bytes(value: Option<&str>, default: usize) -> Option<usize> {
+            match value.map(str::trim).map(str::parse::<usize>) {
+                Some(Ok(0)) => None,
+                Some(Ok(bytes)) => Some(bytes.max(MIN_READ_BUDGET_BYTES)),
+                Some(Err(_)) | None => Some(default),
+            }
+        }
+        let call_bytes = bytes(call, DEFAULT_READ_CALL_BUDGET_BYTES);
+        let file_bytes = bytes(file, DEFAULT_READ_FILE_BUDGET_BYTES)
+            .map(|file| call_bytes.map_or(file, |call| file.min(call)));
+        let ttl_secs = ttl
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(DEFAULT_READ_UNCHANGED_TTL_SECS);
+        Self { call_bytes, file_bytes, unchanged_ttl: std::time::Duration::from_secs(ttl_secs) }
+    }
+}
+
 /// Authenticated HTTP principal. Only a SHA-256 token digest is retained.
 #[derive(Clone)]
 pub struct HttpPrincipal {
@@ -376,6 +444,33 @@ mod tests {
         assert!(principal.matches_token(token));
         assert!(!principal.matches_token("0123456789abcdef0123456789abcdeg"));
         assert!(!format!("{principal:?}").contains(token));
+    }
+
+    #[test]
+    fn read_budget_parsing_has_safe_defaults_bounds_and_opt_outs() {
+        use super::{ReadResponseBudget, DEFAULT_READ_CALL_BUDGET_BYTES};
+        use std::time::Duration;
+
+        let defaults = ReadResponseBudget::default();
+        assert_eq!(defaults.call_bytes, Some(DEFAULT_READ_CALL_BUDGET_BYTES));
+        assert_eq!(defaults.file_bytes, Some(32 * 1024));
+        assert_eq!(defaults.unchanged_ttl, Duration::ZERO);
+
+        let invalid = ReadResponseBudget::parse(Some("lots"), Some("-1"), Some("soon"));
+        assert_eq!(invalid, defaults);
+
+        let disabled = ReadResponseBudget::parse(Some("0"), Some("0"), Some("0"));
+        assert_eq!(disabled.call_bytes, None);
+        assert_eq!(disabled.file_bytes, None);
+        assert!(disabled.unchanged_ttl.is_zero());
+
+        // A per-file cap can never exceed the shared call budget, and tiny
+        // budgets are raised to a useful minimum.
+        let clamped = ReadResponseBudget::parse(Some("10"), Some("999999"), None);
+        assert_eq!(clamped.call_bytes, Some(1024));
+        assert_eq!(clamped.file_bytes, Some(1024));
+        let file_only = ReadResponseBudget::parse(Some("0"), Some("4096"), None);
+        assert_eq!((file_only.call_bytes, file_only.file_bytes), (None, Some(4096)));
     }
 
     #[cfg(unix)]

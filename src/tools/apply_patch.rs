@@ -204,6 +204,7 @@ mod tests {
         let read = crate::tools::read_files::handle_tool_call_detailed(
             &state,
             ReadFiles {
+                force: false,
                 file_paths: vec![path.to_string_lossy().into_owned()],
                 thread_id: "patch-test".to_string(),
                 start_line_nums: vec![Some(2)],
@@ -255,6 +256,7 @@ mod tests {
         let read = crate::tools::read_files::handle_tool_call_detailed(
             &state,
             ReadFiles {
+                force: false,
                 file_paths: vec![path.to_string_lossy().into_owned()],
                 thread_id: "coverage-test".to_string(),
                 start_line_nums: vec![Some(2)],

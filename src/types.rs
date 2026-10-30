@@ -513,6 +513,10 @@ pub struct ReadFiles {
     #[serde(default)]
     pub thread_id: String,
 
+    /// Resend content even if this thread already received it unchanged.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub force: bool,
+
     // Internal fields - not part of MCP schema (parsed from file_paths)
     #[serde(skip)]
     #[schemars(skip)]
@@ -534,6 +538,8 @@ impl<'de> Deserialize<'de> for ReadFiles {
             file_paths: Option<Vec<String>>,
             #[serde(default)]
             thread_id: Option<String>,
+            #[serde(default)]
+            force: bool,
         }
 
         let input = serde_json::Value::deserialize(deserializer)?;
@@ -567,7 +573,13 @@ impl<'de> Deserialize<'de> for ReadFiles {
             end_line_nums.push(end);
         }
 
-        Ok(ReadFiles { file_paths: clean_file_paths, thread_id, start_line_nums, end_line_nums })
+        Ok(ReadFiles {
+            file_paths: clean_file_paths,
+            thread_id,
+            force: helper.force,
+            start_line_nums,
+            end_line_nums,
+        })
     }
 }
 

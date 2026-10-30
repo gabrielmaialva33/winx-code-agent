@@ -613,6 +613,7 @@ async fn test_read_files_single_file() -> Result<()> {
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     let read = ReadFiles {
+        force: false,
         file_paths: vec![file_path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],
@@ -651,6 +652,7 @@ async fn test_read_files_multiple_files() -> Result<()> {
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     let read = ReadFiles {
+        force: false,
         file_paths: vec![file1.to_string_lossy().to_string(), file2.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None, None],
@@ -691,6 +693,7 @@ async fn test_read_files_with_line_range() -> Result<()> {
 
     // Test with explicit line range
     let read = ReadFiles {
+        force: false,
         file_paths: vec![file_path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![Some(2)],
@@ -762,6 +765,7 @@ async fn test_file_write_or_edit_treats_search_marker_as_edit_even_with_high_per
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     let read = ReadFiles {
+        force: false,
         file_paths: vec![file_path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],
@@ -808,6 +812,7 @@ async fn test_read_files_nonexistent() -> Result<()> {
     winx_code_agent::tools::initialize::handle_tool_call(&bash_state_arc, init).await?;
 
     let read = ReadFiles {
+        force: false,
         file_paths: vec![temp_dir.path().join("nonexistent.txt").to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],

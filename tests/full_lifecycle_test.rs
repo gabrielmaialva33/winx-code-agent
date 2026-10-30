@@ -85,6 +85,7 @@ async fn test_full_lifecycle_workflow() -> Result<()> {
 
         // 5. ReadFiles: Verify content
         let read_cmd = ReadFiles {
+            force: false,
             file_paths: vec![data_file.to_string_lossy().to_string()],
             thread_id: String::new(),
             start_line_nums: vec![],

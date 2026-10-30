@@ -47,6 +47,7 @@ async fn read_file_before_edit(
     file_path: &std::path::Path,
 ) -> Result<()> {
     let read_files = ReadFiles {
+        force: false,
         file_paths: vec![file_path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],
@@ -64,6 +65,7 @@ async fn read_file_range_before_edit(
     end: usize,
 ) -> Result<()> {
     let read_files = ReadFiles {
+        force: false,
         file_paths: vec![format!("{}:{start}-{end}", file_path.to_string_lossy())],
         thread_id: String::new(),
         start_line_nums: vec![Some(start)],
@@ -240,6 +242,7 @@ def add(a: int, b: int) -> int:
 
     // Read the file to add it to whitelist
     let read_files = ReadFiles {
+        force: false,
         file_paths: vec![file_path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],
@@ -422,6 +425,7 @@ async fn test_whitelist_after_read() -> Result<()> {
 
     // Read the file first (adds to whitelist)
     let read_files = ReadFiles {
+        force: false,
         file_paths: vec![file_path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],
@@ -507,6 +511,7 @@ if __name__ == "__main__":
 
     // Read file to populate whitelist
     let read_files = ReadFiles {
+        force: false,
         file_paths: vec![file_path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],
@@ -850,6 +855,7 @@ async fn test_search_replace_not_found() -> Result<()> {
 
     // Read to populate whitelist
     let read_files = ReadFiles {
+        force: false,
         file_paths: vec![file_path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],
@@ -909,6 +915,7 @@ async fn test_empty_replacement() -> Result<()> {
 
     // Read to populate whitelist
     let read_files = ReadFiles {
+        force: false,
         file_paths: vec![file_path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],
@@ -969,6 +976,7 @@ async fn test_overwrite_existing_file_full_content() -> Result<()> {
 
     // Read to populate whitelist
     let read_files = ReadFiles {
+        force: false,
         file_paths: vec![file_path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],

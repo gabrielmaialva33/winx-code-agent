@@ -167,6 +167,23 @@ const MAX_WHITELIST_FILES: usize = 1_024;
 /// from resending the same unchanged image in one conversation.
 const IMAGE_DELIVERY_CACHE_CAP: usize = 32;
 
+/// Recent complete `ReadFiles` deliveries remembered per live session. Only
+/// path, requested range, hash and time are kept, never file contents, and the
+/// ledger is never persisted: a restart must resend content.
+const READ_DELIVERY_CACHE_CAP: usize = 256;
+
+/// One range that `ReadFiles` returned in full to this thread.
+#[derive(Debug, Clone)]
+pub(crate) struct ReadDelivery {
+    pub path: String,
+    pub start_line: Option<usize>,
+    pub end_line: Option<usize>,
+    pub file_hash: String,
+    pub delivered_at: std::time::SystemTime,
+    thread_id: String,
+    delivered_instant: Instant,
+}
+
 /// Recent committed-edit receipts retained per logical session. The records
 /// contain only request/file fingerprints and are persisted so an MCP adapter
 /// restart cannot blindly repeat a mutation whose response was lost.
@@ -289,6 +306,7 @@ pub struct BashState {
     /// Canonical `CodeMap` calls are intentionally not counted.
     pub derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage,
     image_deliveries: VecDeque<String>,
+    read_deliveries: VecDeque<ReadDelivery>,
     edit_mutation_receipts: VecDeque<EditMutationReceipt>,
     /// Adapter-local reset evidence. It intentionally is not persisted or sent
     /// to a guardian: a process restart is already a new recovery boundary.
@@ -332,6 +350,7 @@ impl BashState {
             edit_checkpoint_metadata: VecDeque::new(),
             derived_code_map_usage: crate::utils::agent_temp::DerivedCodeMapUsage::default(),
             image_deliveries: VecDeque::new(),
+            read_deliveries: VecDeque::new(),
             edit_mutation_receipts: VecDeque::new(),
             last_shell_reset_at: None,
             shell_runtime_failure_since_reset: false,
@@ -535,6 +554,67 @@ impl BashState {
         while self.image_deliveries.len() > IMAGE_DELIVERY_CACHE_CAP {
             self.image_deliveries.pop_front();
         }
+    }
+
+    /// Complete deliveries that may be compacted as unchanged repeats: same
+    /// thread, younger than `ttl`, and still backed by an edit guard for the
+    /// same hash that covers the delivered range. A SEARCH conflict, edit or
+    /// undo removes or replaces the guard and therefore disqualifies the entry,
+    /// so content is always resent when the model's view may be stale.
+    pub(crate) fn unchanged_read_candidates(
+        &self,
+        ttl: Duration,
+        now: Instant,
+    ) -> Vec<ReadDelivery> {
+        if ttl.is_zero() {
+            return Vec::new();
+        }
+        self.read_deliveries
+            .iter()
+            .filter(|delivery| delivery.thread_id == self.current_thread_id)
+            .filter(|delivery| now.saturating_duration_since(delivery.delivered_instant) <= ttl)
+            .filter(|delivery| {
+                self.whitelist_for_overwrite.get(&delivery.path).is_some_and(|guard| {
+                    let start = delivery.start_line.unwrap_or(1).max(1);
+                    let end = delivery.end_line.unwrap_or(guard.total_lines).min(guard.total_lines);
+                    guard.file_hash == delivery.file_hash
+                        && (guard.total_lines == 0 || guard.covers_range(start, end))
+                })
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Remember that one requested range was returned in full. Callers record
+    /// its read coverage for the same hash first.
+    pub(crate) fn record_read_delivery(
+        &mut self,
+        path: &str,
+        start_line: Option<usize>,
+        end_line: Option<usize>,
+        file_hash: &str,
+    ) {
+        self.read_deliveries.retain(|delivery| {
+            !(delivery.path == path
+                && delivery.start_line == start_line
+                && delivery.end_line == end_line)
+        });
+        self.read_deliveries.push_back(ReadDelivery {
+            path: path.to_string(),
+            start_line,
+            end_line,
+            file_hash: file_hash.to_string(),
+            delivered_at: std::time::SystemTime::now(),
+            thread_id: self.current_thread_id.clone(),
+            delivered_instant: Instant::now(),
+        });
+        while self.read_deliveries.len() > READ_DELIVERY_CACHE_CAP {
+            self.read_deliveries.pop_front();
+        }
+    }
+
+    fn forget_read_deliveries(&mut self, path: &str) {
+        self.read_deliveries.retain(|delivery| delivery.path != path);
     }
 
     /// Record a pre-edit checkpoint for `UndoEdit`, dropping the oldest past the
@@ -756,6 +836,7 @@ impl BashState {
             }
             Some(existing) => {
                 *existing = FileWhitelistData::new(file_hash, ranges, total_lines);
+                self.forget_read_deliveries(path);
             }
             None => {
                 self.whitelist_for_overwrite.insert(
@@ -770,6 +851,8 @@ impl BashState {
 
     /// Replace a whitelist entry after a successful edit or undo.
     pub fn set_whitelist_entry(&mut self, path: &str, entry: FileWhitelistData) {
+        // An edit or undo changed what the model must believe about this file.
+        self.forget_read_deliveries(path);
         self.whitelist_for_overwrite.insert(path.to_string(), entry);
         self.touch_whitelist(path);
         self.enforce_whitelist_cap();
@@ -777,6 +860,8 @@ impl BashState {
 
     /// Remove a whitelist entry and its LRU metadata.
     pub fn remove_whitelist_entry(&mut self, path: &str) -> Option<FileWhitelistData> {
+        // A revoked permit (SEARCH conflict, partial edit) must force a resend.
+        self.forget_read_deliveries(path);
         self.whitelist_recency.retain(|candidate| candidate != path);
         self.whitelist_for_overwrite.remove(path)
     }
@@ -915,6 +1000,7 @@ impl BashState {
         }
         if image_identity_changed {
             self.image_deliveries.clear();
+            self.read_deliveries.clear();
         }
         self.initialized = true;
     }

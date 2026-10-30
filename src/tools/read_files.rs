@@ -1,8 +1,10 @@
 //! Implementation of the `ReadFiles` tool.
 //!
-//! This module provides the implementation for the `ReadFiles` tool, which is used
-//! to read and display the contents of files, optionally with line numbers and
-//! line range filtering.
+//! Reads one or many files with line numbers and optional line ranges. Every
+//! call is bounded by a response budget ([`ReadResponseBudget`]): an item over
+//! budget returns its head at a line boundary plus the exact next range to
+//! request, and an unchanged, still-guarded repeat in the same thread returns a
+//! compact marker instead of resending identical content.
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -10,11 +12,13 @@ use std::collections::HashMap;
 use std::fmt::Write as FmtWrite;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Instant, SystemTime};
 use tokio::sync::Mutex;
 use tracing::{debug, instrument};
 
+use crate::config::{ReadResponseBudget, MIN_READ_BUDGET_BYTES};
 use crate::errors::{ErrorRecovery, Result, WinxError};
-use crate::state::bash_state::BashState;
+use crate::state::bash_state::{BashState, ReadDelivery};
 use crate::types::ReadFiles;
 use crate::utils::mmap::read_file_to_string;
 use crate::utils::path::{expand_user, validate_path_in_workspace};
@@ -24,15 +28,43 @@ const CODING_MAX_TOKENS: usize = 24_000;
 const NONCODING_MAX_TOKENS: usize = 8_000;
 const DEFAULT_READ_PARALLELISM: usize = 4;
 const MAX_READ_PARALLELISM: usize = 32;
+/// Repeats smaller than this are resent: the marker would save too little to
+/// justify a possible `force=true` round trip.
+const MIN_UNCHANGED_ELISION_BYTES: usize = 512;
+/// Above this multiple of the chunk budget, the continuation also points at
+/// `CodeMap`, which navigates a large file far more cheaply than paging.
+const OUTLINE_HINT_CHUNKS: usize = 4;
 
 type ReadCoverage = (Vec<(usize, usize)>, String, usize);
 
+/// Byte limits one worker applies while rendering. `render` bounds the text it
+/// formats and tokenizes; `horizon` bounds the line sizes it measures so the
+/// ordered phase can size the next chunk without rendering it.
+#[derive(Clone, Copy, Debug)]
+struct WorkerCaps {
+    render: Option<usize>,
+    horizon: usize,
+}
+
+impl WorkerCaps {
+    const UNBOUNDED: Self = Self { render: None, horizon: 0 };
+}
+
 #[derive(Debug)]
 struct FileReadResult {
+    /// Complete numbered lines starting at `first_line`.
     content: String,
-    truncated: bool,
+    /// Cumulative rendered byte end of each requested line from `first_line`,
+    /// measured up to the worker horizon (it may run past `content`).
+    line_ends: Vec<usize>,
+    first_line: usize,
+    /// Last requested line, clamped to the file.
+    last_requested_line: usize,
+    /// Rendered size of the whole requested range, as if nothing were cut.
+    requested_bytes: usize,
+    /// `(tokens, limit)` when the per-file token budget cut `content`.
+    token_limit: Option<(usize, usize)>,
     canonical_path: String,
-    visible_range: (usize, usize),
     file_hash: String,
     total_lines: usize,
 }
@@ -49,6 +81,12 @@ pub struct ReadFileRevision {
     pub truncated: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_start_line: Option<usize>,
+    /// Inclusive end of a continuation chunk that fits the per-file budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_end_line: Option<usize>,
+    /// Content was elided because this thread already holds it unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unchanged: bool,
     #[serde(rename = "temporary_artifact", skip_serializing_if = "Option::is_none")]
     pub temporary_artifact: Option<crate::utils::agent_temp::release::TemporaryArtifactMetadata>,
 }
@@ -60,6 +98,33 @@ pub struct ReadLineRange {
     pub end_line: usize,
 }
 
+/// Budget accounting for one call. Byte counts are rendered (numbered) text.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadBudgetReport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub call_bytes: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_bytes: Option<usize>,
+    pub returned_bytes: usize,
+    pub truncated_files: usize,
+    pub unchanged_files: usize,
+    /// Requested bytes withheld by truncation.
+    pub omitted_bytes: usize,
+    /// Bytes not resent because the content was unchanged.
+    pub unchanged_bytes: usize,
+    /// Exact `file_paths` entries not read because the call budget ran out.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub deferred: Vec<String>,
+}
+
+impl ReadBudgetReport {
+    /// Whether the budget changed this response; otherwise it is not reported.
+    pub fn is_notable(&self) -> bool {
+        self.truncated_files > 0 || self.unchanged_files > 0 || !self.deferred.is_empty()
+    }
+}
+
 #[derive(Clone)]
 struct FileReadRequest {
     index: usize,
@@ -69,84 +134,138 @@ struct FileReadRequest {
     end_line_num: Option<usize>,
 }
 
-#[derive(Default)]
+impl FileReadRequest {
+    /// Explicit `start-end` (or `-end`) ranges are deliberate and exempt from
+    /// the per-file cap; whole-file and open-ended reads are not.
+    fn is_bounded(&self) -> bool {
+        self.end_line_num.is_some()
+    }
+
+    fn spec(&self) -> String {
+        format!("{}{}", self.clean_path, range_format(self.start_line_num, self.end_line_num))
+    }
+}
+
+/// A complete requested range to remember for unchanged-repeat compaction.
+struct DeliveredRange {
+    path: String,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+    file_hash: String,
+}
+
+/// Coverage that an elided repeat re-confirms. It is applied only while the
+/// guard still holds the same hash, so it can refresh but never re-grant a
+/// permit that a concurrent SEARCH conflict revoked.
+struct RefreshedCoverage {
+    path: String,
+    range: (usize, usize),
+    file_hash: String,
+}
+
+struct ReadBudgetState {
+    budget: ReadResponseBudget,
+    remaining: Option<usize>,
+    unchanged_candidates: Vec<ReadDelivery>,
+    report: ReadBudgetReport,
+}
+
+impl ReadBudgetState {
+    fn new(budget: ReadResponseBudget, unchanged_candidates: Vec<ReadDelivery>) -> Self {
+        Self {
+            budget,
+            remaining: budget.call_bytes,
+            unchanged_candidates,
+            report: ReadBudgetReport {
+                call_bytes: budget.call_bytes,
+                file_bytes: budget.file_bytes,
+                ..ReadBudgetReport::default()
+            },
+        }
+    }
+
+    /// Size used to recommend a continuation chunk.
+    fn chunk_bytes(&self) -> Option<usize> {
+        self.budget.file_bytes.or(self.budget.call_bytes)
+    }
+
+    /// Worker caps for one request before any batch item has been consumed.
+    fn worker_caps(&self, request: &FileReadRequest) -> WorkerCaps {
+        let render = if request.is_bounded() {
+            self.budget.call_bytes
+        } else {
+            min_option(self.budget.file_bytes, self.budget.call_bytes)
+        };
+        render.map_or(WorkerCaps::UNBOUNDED, |render| WorkerCaps {
+            render: Some(render),
+            horizon: render.saturating_add(self.chunk_bytes().unwrap_or(render)),
+        })
+    }
+
+    fn unchanged_delivery(
+        &self,
+        request: &FileReadRequest,
+        result: &FileReadResult,
+    ) -> Option<SystemTime> {
+        if result.requested_bytes < MIN_UNCHANGED_ELISION_BYTES {
+            return None;
+        }
+        self.unchanged_candidates
+            .iter()
+            .find(|delivery| {
+                delivery.path == result.canonical_path
+                    && delivery.start_line == request.start_line_num
+                    && delivery.end_line == request.end_line_num
+                    && delivery.file_hash == result.file_hash
+            })
+            .map(|delivery| delivery.delivered_at)
+    }
+}
+
+fn min_option(left: Option<usize>, right: Option<usize>) -> Option<usize> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (value, None) | (None, value) => value,
+    }
+}
+
 struct ReadBatchState {
     message: String,
     file_ranges: HashMap<String, ReadCoverage>,
+    refreshed: Vec<RefreshedCoverage>,
+    delivered: Vec<DeliveredRange>,
     stats_paths: Vec<PathBuf>,
     successful_files: usize,
     revisions: Vec<ReadFileRevision>,
     errors: Vec<WinxError>,
+    budget: ReadBudgetState,
 }
 
 impl ReadBatchState {
+    fn new(budget: ReadBudgetState) -> Self {
+        Self {
+            message: String::new(),
+            file_ranges: HashMap::new(),
+            refreshed: Vec::new(),
+            delivered: Vec::new(),
+            stats_paths: Vec::new(),
+            successful_files: 0,
+            revisions: Vec::new(),
+            errors: Vec::new(),
+            budget,
+        }
+    }
+
     /// Add one worker result to the ordered response. Returns `true` when the
-    /// visible batch must stop because this file exhausted its token budget.
-    fn record_result(
-        &mut self,
-        request: &FileReadRequest,
-        result: Result<FileReadResult>,
-        total_files: usize,
-    ) -> bool {
+    /// call budget is exhausted and the remaining items must be deferred.
+    fn record_result(&mut self, request: &FileReadRequest, result: Result<FileReadResult>) -> bool {
         match result {
             Ok(result) => {
-                let FileReadResult {
-                    content,
-                    truncated,
-                    canonical_path,
-                    visible_range,
-                    file_hash,
-                    total_lines,
-                } = result;
-                self.successful_files = self.successful_files.saturating_add(1);
-                let revision = revision_from_hash(&file_hash);
-                let entry = self
-                    .file_ranges
-                    .entry(canonical_path.clone())
-                    .or_insert_with(|| (Vec::new(), file_hash.clone(), total_lines));
-                if entry.1 != file_hash || entry.2 != total_lines {
-                    // The same path can be requested more than once in one
-                    // batch. If it changed between reads, keep coverage only
-                    // for the version whose hash will guard the next edit.
-                    *entry = (Vec::new(), file_hash, total_lines);
+                if let Some(delivered_at) = self.budget.unchanged_delivery(request, &result) {
+                    self.record_unchanged(request, &result, delivered_at);
+                    return false;
                 }
-                entry.0.push(visible_range);
-                self.revisions.push(ReadFileRevision {
-                    path: canonical_path.clone(),
-                    revision,
-                    total_lines,
-                    visible_ranges: (visible_range.0 <= visible_range.1)
-                        .then_some(ReadLineRange {
-                            start_line: visible_range.0,
-                            end_line: visible_range.1,
-                        })
-                        .into_iter()
-                        .collect(),
-                    truncated,
-                    temporary_artifact: None,
-                    next_start_line: truncated
-                        .then_some(visible_range.1.saturating_add(1))
-                        .filter(|line| *line <= total_lines),
-                });
-                let _ = write!(
-                    self.message,
-                    "\n{}{}\n```\n{content}\n```",
-                    request.clean_path,
-                    range_format(request.start_line_num, request.end_line_num)
-                );
-                self.stats_paths.push(PathBuf::from(canonical_path));
-
-                if truncated {
-                    let remaining = total_files.saturating_sub(request.index + 1);
-                    if remaining > 0 {
-                        let _ = write!(
-                            self.message,
-                            "\n\n(Not reading the remaining {remaining} file(s) due to the \
-                             token limit. Call ReadFiles again for them.)"
-                        );
-                    }
-                }
-                truncated
+                self.record_content(request, result)
             }
             Err(error) => {
                 let _ = write!(self.message, "\nError reading {}: {error}", request.requested_path);
@@ -155,6 +274,226 @@ impl ReadBatchState {
             }
         }
     }
+
+    fn record_unchanged(
+        &mut self,
+        request: &FileReadRequest,
+        result: &FileReadResult,
+        delivered_at: SystemTime,
+    ) {
+        let revision = revision_from_hash(&result.file_hash);
+        let range = (result.first_line, result.last_requested_line);
+        self.successful_files = self.successful_files.saturating_add(1);
+        self.budget.report.unchanged_files = self.budget.report.unchanged_files.saturating_add(1);
+        self.budget.report.unchanged_bytes =
+            self.budget.report.unchanged_bytes.saturating_add(result.requested_bytes);
+        self.refreshed.push(RefreshedCoverage {
+            path: result.canonical_path.clone(),
+            range,
+            file_hash: result.file_hash.clone(),
+        });
+        self.revisions.push(ReadFileRevision {
+            path: result.canonical_path.clone(),
+            revision: revision.clone(),
+            total_lines: result.total_lines,
+            visible_ranges: visible_ranges(range),
+            truncated: false,
+            next_start_line: None,
+            next_end_line: None,
+            unchanged: true,
+            temporary_artifact: None,
+        });
+        let _ = write!(
+            self.message,
+            "\n{}\n[unchanged: identical to the copy already returned in full at {} \
+             (revision {revision}); lines {}-{} remain valid edit evidence. Re-request with \
+             force=true only if that copy is no longer in your context.]",
+            request.spec(),
+            describe_delivery_time(delivered_at),
+            range.0,
+            range.1,
+        );
+        self.stats_paths.push(PathBuf::from(&result.canonical_path));
+    }
+
+    #[expect(clippy::too_many_lines, reason = "one ordered budget decision per item")]
+    fn record_content(&mut self, request: &FileReadRequest, result: FileReadResult) -> bool {
+        let per_file = if request.is_bounded() { None } else { self.budget.budget.file_bytes };
+        let allowed = min_option(per_file, self.budget.remaining);
+        let call_limited = self.budget.remaining.is_some_and(|remaining| {
+            per_file.is_none_or(|file| remaining < file) && result.content.len() > remaining
+        });
+        let (kept_lines, kept_bytes) = visible_prefix(&result.content, allowed);
+        let shown_something = self.budget.report.returned_bytes > 0;
+        if call_limited
+            && shown_something
+            && (kept_lines == 0 || allowed.is_some_and(|bytes| bytes < MIN_READ_BUDGET_BYTES))
+        {
+            // Only a sliver would fit after earlier items: defer the whole
+            // item so the next call can return it intact.
+            self.budget.report.deferred.push(request.spec());
+            return true;
+        }
+
+        let FileReadResult {
+            content,
+            line_ends,
+            first_line,
+            last_requested_line,
+            requested_bytes,
+            token_limit,
+            canonical_path,
+            file_hash,
+            total_lines,
+            ..
+        } = result;
+        let next_start = first_line.saturating_add(kept_lines);
+        let truncated = next_start <= last_requested_line;
+        let visible = (first_line, next_start.saturating_sub(1));
+        let revision = revision_from_hash(&file_hash);
+        let next_end = truncated.then(|| {
+            next_chunk_end(&line_ends, kept_lines, kept_bytes, self.budget.chunk_bytes())
+                .map_or(last_requested_line, |line| first_line.saturating_add(line))
+                .clamp(next_start, last_requested_line)
+        });
+
+        self.successful_files = self.successful_files.saturating_add(1);
+        let entry = self
+            .file_ranges
+            .entry(canonical_path.clone())
+            .or_insert_with(|| (Vec::new(), file_hash.clone(), total_lines));
+        if entry.1 != file_hash || entry.2 != total_lines {
+            // The same path can be requested more than once in one batch. If
+            // it changed between reads, keep coverage only for the version
+            // whose hash will guard the next edit.
+            *entry = (Vec::new(), file_hash.clone(), total_lines);
+        }
+        entry.0.push(visible);
+        if truncated {
+            self.budget.report.truncated_files =
+                self.budget.report.truncated_files.saturating_add(1);
+            self.budget.report.omitted_bytes = self
+                .budget
+                .report
+                .omitted_bytes
+                .saturating_add(requested_bytes.saturating_sub(kept_bytes));
+        } else {
+            self.delivered.push(DeliveredRange {
+                path: canonical_path.clone(),
+                start_line: request.start_line_num,
+                end_line: request.end_line_num,
+                file_hash: file_hash.clone(),
+            });
+        }
+        self.budget.report.returned_bytes =
+            self.budget.report.returned_bytes.saturating_add(kept_bytes);
+        if let Some(remaining) = self.budget.remaining.as_mut() {
+            *remaining = remaining.saturating_sub(kept_bytes);
+        }
+        self.revisions.push(ReadFileRevision {
+            path: canonical_path.clone(),
+            revision: revision.clone(),
+            total_lines,
+            visible_ranges: visible_ranges(visible),
+            truncated,
+            next_start_line: truncated.then_some(next_start),
+            next_end_line: next_end,
+            unchanged: false,
+            temporary_artifact: None,
+        });
+
+        let _ = write!(self.message, "\n{}\n```\n{}\n```", request.spec(), &content[..kept_bytes]);
+        if let Some(next_end) = next_end {
+            let limit = match token_limit {
+                Some((tokens, max_tokens)) if kept_bytes == content.len() => {
+                    format!("{tokens} tokens exceeded the {max_tokens}-token file limit")
+                }
+                _ => format!("{}-byte response budget", allowed.unwrap_or(kept_bytes)),
+            };
+            let shown = if kept_lines == 0 {
+                format!("line {next_start} alone exceeds the {limit}")
+            } else {
+                format!("lines {}-{} of {total_lines} shown ({limit})", visible.0, visible.1)
+            };
+            let outline = self
+                .budget
+                .chunk_bytes()
+                .filter(|chunk| requested_bytes > chunk.saturating_mul(OUTLINE_HINT_CHUNKS))
+                .filter(|_| outline_supported(&request.clean_path))
+                .map_or("", |_| " CodeMap outline maps this file's symbols more cheaply.");
+            let _ = write!(
+                self.message,
+                "\n[truncated: {shown}; {} more bytes requested. Next: ReadFiles \"{}:{next_start}-\
+                 {next_end}\" (revision {revision}).{outline}]",
+                requested_bytes.saturating_sub(kept_bytes),
+                request.clean_path,
+            );
+        }
+        self.stats_paths.push(PathBuf::from(canonical_path));
+        call_limited && truncated
+    }
+}
+
+fn visible_ranges((start, end): (usize, usize)) -> Vec<ReadLineRange> {
+    (start <= end)
+        .then_some(ReadLineRange { start_line: start, end_line: end })
+        .into_iter()
+        .collect()
+}
+
+/// Longest prefix of complete lines that fits `allowed` bytes.
+fn visible_prefix(content: &str, allowed: Option<usize>) -> (usize, usize) {
+    let allowed = allowed.unwrap_or(usize::MAX);
+    let mut lines = 0;
+    let mut bytes = 0;
+    for line in content.split_inclusive('\n') {
+        if bytes + line.len() > allowed {
+            break;
+        }
+        bytes += line.len();
+        lines += 1;
+    }
+    (lines, bytes)
+}
+
+/// Zero-based index (relative to the first requested line) of the last line
+/// of a continuation that fits `chunk` bytes. `None` means "to the end".
+fn next_chunk_end(
+    line_ends: &[usize],
+    kept_lines: usize,
+    kept_bytes: usize,
+    chunk: Option<usize>,
+) -> Option<usize> {
+    let chunk = chunk?;
+    let rest = line_ends.get(kept_lines..).filter(|rest| !rest.is_empty())?;
+    let fitting = rest.partition_point(|end| end.saturating_sub(kept_bytes) <= chunk);
+    // A single oversized line still advances; the bounded follow-up then
+    // reports it explicitly instead of looping on an empty chunk.
+    Some(kept_lines + fitting.max(1) - 1)
+}
+
+fn outline_supported(file_path: &str) -> bool {
+    Path::new(file_path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(crate::utils::symbols::supports)
+}
+
+/// UTC wall-clock time plus age, without enabling `time` formatting features.
+fn describe_delivery_time(at: SystemTime) -> String {
+    let utc = time::OffsetDateTime::from(at);
+    let age = SystemTime::now().duration_since(at).unwrap_or_default().as_secs();
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z, {}m{:02}s ago",
+        utc.year(),
+        u8::from(utc.month()),
+        utc.day(),
+        utc.hour(),
+        utc.minute(),
+        utc.second(),
+        age / 60,
+        age % 60
+    )
 }
 
 /// Complete result of one batched read. The MCP adapter keeps a batch with
@@ -169,6 +508,7 @@ pub struct ReadFilesOutcome {
     pub successful_files: usize,
     pub files: Vec<ReadFileRevision>,
     pub errors: Vec<WinxError>,
+    pub budget: ReadBudgetReport,
 }
 
 /// Maximum amount of data to read from a file
@@ -185,7 +525,23 @@ fn range_format(start_line_num: Option<usize>, end_line_num: Option<usize>) -> S
     }
 }
 
+/// Rendered size of one line exactly as `read_file` formats it.
+fn rendered_line_bytes(line_number: usize, line: &str, show_line_numbers: bool) -> usize {
+    let prefix = if show_line_numbers { decimal_digits(line_number) + 1 } else { 0 };
+    prefix + line.len() + 1
+}
+
+fn decimal_digits(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
 #[instrument(level = "debug", skip(file_path))]
+#[expect(clippy::too_many_arguments, reason = "one blocking worker call with explicit inputs")]
 fn read_file(
     file_path: &str,
     max_tokens: Option<usize>,
@@ -194,6 +550,7 @@ fn read_file(
     show_line_numbers: bool,
     start_line_num: Option<usize>,
     end_line_num: Option<usize>,
+    caps: WorkerCaps,
 ) -> Result<FileReadResult> {
     let file_path_expanded = expand_user(file_path);
     let path = if Path::new(&file_path_expanded).is_absolute() {
@@ -238,27 +595,38 @@ fn read_file(
         ));
     }
 
-    let effective_start = start_line_num.unwrap_or(1);
-    let effective_end = end_line_num.unwrap_or(total_lines);
-
-    let filtered_lines =
-        if lines.is_empty() { &[] } else { &lines[start_idx..end_idx.min(lines.len())] };
+    let first_line = start_idx + 1;
+    let requested = &lines[start_idx..end_idx];
+    // Render only what the budget can return, but measure every requested line
+    // (cheap arithmetic) so the response reports exact omitted bytes and an
+    // exact next chunk. Huge files are therefore never fully formatted or
+    // tokenized just to be cut afterwards.
+    let render_cap = caps.render.unwrap_or(usize::MAX);
     let mut result_content = String::new();
-
-    if show_line_numbers {
-        for (i, line) in filtered_lines.iter().enumerate() {
-            let line_num = start_idx + i + 1;
-            let _ = writeln!(result_content, "{line_num} {line}");
+    let mut content_lines = 0;
+    let mut line_ends = Vec::new();
+    let mut requested_bytes = 0_usize;
+    for (offset, line) in requested.iter().enumerate() {
+        let line_number = first_line + offset;
+        requested_bytes = requested_bytes.saturating_add(rendered_line_bytes(
+            line_number,
+            line,
+            show_line_numbers,
+        ));
+        if requested_bytes <= caps.horizon {
+            line_ends.push(requested_bytes);
         }
-    } else {
-        for line in filtered_lines {
-            result_content.push_str(line);
-            result_content.push('\n');
+        if requested_bytes <= render_cap && content_lines == offset {
+            if show_line_numbers {
+                let _ = writeln!(result_content, "{line_number} {line}");
+            } else {
+                result_content.push_str(line);
+                result_content.push('\n');
+            }
+            content_lines += 1;
         }
     }
 
-    let mut truncated = false;
-    let mut last_shown = effective_end;
     let max_tokens = max_tokens.unwrap_or_else(|| select_max_tokens(file_path));
     // Byte-level BPE emits at most one token per input byte. Small payloads are
     // therefore proven to fit without initializing the tokenizer; larger ones
@@ -274,29 +642,20 @@ fn read_file(
             (count, ids)
         };
 
+    let mut token_limit = None;
     if tokens_count > max_tokens {
         truncate_to_token_budget(&mut result_content, max_tokens, token_ids);
-        // Tell the agent exactly where to resume so the tail isn't silently lost.
-        let kept_lines = result_content.lines().count();
-        last_shown = (start_idx + kept_lines).min(total_lines);
-        let resume_from = last_shown + 1;
-        let _ = write!(
-            result_content,
-            "\n(...truncated) Showing up to line {last_shown} of {total_lines} total lines \
-             ({tokens_count} tokens exceeded limit {max_tokens}). Continue reading from line \
-             {resume_from} using the syntax {file_path}:{resume_from}-{total_lines}"
-        );
-        truncated = true;
+        token_limit = Some((tokens_count, max_tokens));
     }
-
-    let canon_path = path.to_string_lossy().to_string();
-    let effective_end_line = if truncated { last_shown } else { effective_end };
 
     Ok(FileReadResult {
         content: result_content,
-        truncated,
-        canonical_path: canon_path,
-        visible_range: (effective_start, effective_end_line.min(total_lines.max(1))),
+        line_ends,
+        first_line,
+        last_requested_line: end_idx,
+        requested_bytes,
+        token_limit,
+        canonical_path: path.to_string_lossy().to_string(),
         file_hash,
         total_lines,
     })
@@ -429,12 +788,13 @@ async fn execute_read_requests(
     cwd: &Path,
     workspace_root: &Path,
     show_line_numbers: bool,
+    budget: ReadBudgetState,
 ) -> ReadBatchState {
-    let mut state = ReadBatchState::default();
+    let mut state = ReadBatchState::new(budget);
 
     // Files are independent, so perform blocking filesystem/tokenizer work in a
     // bounded pool. Results are still consumed in request order, preserving the
-    // stable response and the rule that a truncated file stops the visible batch.
+    // stable response and the rule that an exhausted call budget defers the rest.
     'batches: for batch in requests.chunks(configured_parallelism()) {
         let mut tasks = Vec::with_capacity(batch.len());
         for request in batch.iter().cloned() {
@@ -443,6 +803,7 @@ async fn execute_read_requests(
             let worker_root = workspace_root.to_path_buf();
             let start_line_num = request.start_line_num;
             let end_line_num = request.end_line_num;
+            let caps = state.budget.worker_caps(&request);
             let task = tokio::task::spawn_blocking(move || {
                 read_file(
                     &worker_path,
@@ -452,6 +813,7 @@ async fn execute_read_requests(
                     show_line_numbers,
                     start_line_num,
                     end_line_num,
+                    caps,
                 )
             });
             tasks.push((request, task));
@@ -465,15 +827,33 @@ async fn execute_read_requests(
                     request.clean_path
                 )))
             });
-            if state.record_result(&request, result, requests.len()) {
+            if state.record_result(&request, result) {
                 // Running blocking jobs cannot be cancelled, but abort prevents
                 // queued work from starting. Only returned content is guarded.
                 for (_, pending) in tasks {
                     pending.abort();
                 }
+                let deferred = &mut state.budget.report.deferred;
+                deferred.extend(requests[request.index + 1..].iter().map(FileReadRequest::spec));
                 break 'batches;
             }
         }
+    }
+    if !state.budget.report.deferred.is_empty() {
+        let quoted = state
+            .budget
+            .report
+            .deferred
+            .iter()
+            .map(|spec| format!("\"{spec}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let _ = write!(
+            state.message,
+            "\n\n[response budget reached ({} bytes); not read: {quoted}. Call ReadFiles again \
+             for exactly these.]",
+            state.budget.report.call_bytes.unwrap_or(state.budget.report.returned_bytes),
+        );
     }
     state
 }
@@ -494,10 +874,14 @@ async fn persist_read_stats(workspace_root: &Path, stats_paths: Vec<PathBuf>) {
     }
 }
 
+/// Text-only library API. Direct callers always receive content: unchanged
+/// repeats are compacted only for MCP callers through
+/// [`handle_tool_call_detailed`].
 pub async fn handle_tool_call(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
-    read_files: ReadFiles,
+    mut read_files: ReadFiles,
 ) -> Result<String> {
+    read_files.force = true;
     let outcome = handle_tool_call_detailed(bash_state_arc, read_files).await?;
     if outcome.successful_files == 0 {
         if let Some(error) = outcome.errors.into_iter().next() {
@@ -511,13 +895,35 @@ pub async fn handle_tool_call_detailed(
     bash_state_arc: &Arc<Mutex<Option<BashState>>>,
     read_files: ReadFiles,
 ) -> Result<ReadFilesOutcome> {
-    let (cwd, workspace_root, temporary_thread) = {
+    handle_tool_call_with_budget(bash_state_arc, read_files, ReadResponseBudget::from_env()).await
+}
+
+/// [`handle_tool_call_detailed`] with an explicit budget instead of the
+/// environment, for embedding and deterministic tests.
+#[expect(clippy::too_many_lines, reason = "snapshot, read and commit share one guard lifecycle")]
+pub async fn handle_tool_call_with_budget(
+    bash_state_arc: &Arc<Mutex<Option<BashState>>>,
+    read_files: ReadFiles,
+    budget: ReadResponseBudget,
+) -> Result<ReadFilesOutcome> {
+    // Compaction needs an explicit thread: an anonymous call may resolve to
+    // whichever session was last active, which is not proof of what this
+    // conversation already holds.
+    let compact_repeats =
+        !read_files.force && !crate::types::normalize_thread_id(&read_files.thread_id).is_empty();
+    let (cwd, workspace_root, temporary_thread, unchanged_candidates) = {
         let bash_state_guard = bash_state_arc.lock().await;
         let bash_state = bash_state_guard.as_ref().ok_or(WinxError::BashStateNotInitialized)?;
+        let candidates = if compact_repeats {
+            bash_state.unchanged_read_candidates(budget.unchanged_ttl, Instant::now())
+        } else {
+            Vec::new()
+        };
         (
             bash_state.cwd.clone(),
             bash_state.workspace_root.clone(),
             bash_state.current_thread_id.clone(),
+            candidates,
         )
     };
 
@@ -533,16 +939,24 @@ pub async fn handle_tool_call_detailed(
             end_line_num: read_files.end_line_nums.get(index).copied().flatten(),
         })
         .collect::<Vec<_>>();
-    let batch =
-        execute_read_requests(&requests, &cwd, &workspace_root, read_files.show_line_numbers())
-            .await;
+    let batch = execute_read_requests(
+        &requests,
+        &cwd,
+        &workspace_root,
+        read_files.show_line_numbers(),
+        ReadBudgetState::new(budget, unchanged_candidates),
+    )
+    .await;
     let ReadBatchState {
         message,
         file_ranges,
+        refreshed,
+        delivered,
         stats_paths,
         successful_files,
         mut revisions,
         errors,
+        budget,
     } = batch;
     let temporary_workspace = workspace_root.clone();
     revisions = tokio::task::spawn_blocking(move || {
@@ -573,91 +987,47 @@ pub async fn handle_tool_call_detailed(
         for (path, (ranges, file_hash, total_lines)) in file_ranges {
             bash_state.record_read_coverage(&path, ranges, file_hash, total_lines);
         }
+        for refresh in refreshed {
+            let guarded_lines = bash_state
+                .whitelist_for_overwrite
+                .get(&refresh.path)
+                .filter(|guard| guard.file_hash == refresh.file_hash)
+                .map(|guard| guard.total_lines);
+            if let Some(total_lines) = guarded_lines {
+                bash_state.record_read_coverage(
+                    &refresh.path,
+                    [refresh.range],
+                    refresh.file_hash,
+                    total_lines,
+                );
+            }
+        }
+        for delivery in delivered {
+            // Remember only content whose hash is the one now guarding edits;
+            // a same-batch re-read of a changed file supersedes older copies.
+            let guarded = bash_state
+                .whitelist_for_overwrite
+                .get(&delivery.path)
+                .is_some_and(|guard| guard.file_hash == delivery.file_hash);
+            if guarded {
+                bash_state.record_read_delivery(
+                    &delivery.path,
+                    delivery.start_line,
+                    delivery.end_line,
+                    &delivery.file_hash,
+                );
+            }
+        }
     }
 
-    Ok(ReadFilesOutcome { text: message, successful_files, files: revisions, errors })
+    Ok(ReadFilesOutcome {
+        text: message,
+        successful_files,
+        files: revisions,
+        errors,
+        budget: budget.report,
+    })
 }
 
 #[cfg(test)]
-mod tests {
-    use std::fmt::Write as _;
-
-    use super::{parse_read_parallelism, read_file, trim_to_last_line_boundary};
-    use crate::state::bash_state::FileWhitelistData;
-
-    #[test]
-    fn token_cut_never_exposes_a_partial_line() {
-        let mut content = "complete line\npartial line suffix".to_string();
-        content.truncate("complete line\npartial".len());
-        trim_to_last_line_boundary(&mut content);
-        assert_eq!(content, "complete line\n");
-
-        let mut first_line_only = "partial first line".to_string();
-        first_line_only.truncate(7);
-        trim_to_last_line_boundary(&mut first_line_only);
-        assert!(first_line_only.is_empty(), "expected empty first_line_only");
-    }
-
-    #[test]
-    fn token_truncation_whitelists_only_complete_visible_lines() -> anyhow::Result<()> {
-        let temp = tempfile::tempdir()?;
-        let path = temp.path().join("large.txt");
-        let mut source = String::new();
-        for line in 1..=200 {
-            writeln!(source, "line {line}: enough repeated content to consume tokens quickly")?;
-        }
-        std::fs::write(&path, source)?;
-        let path = path.to_str().ok_or_else(|| anyhow::anyhow!("fixture path is not UTF-8"))?;
-
-        let result = read_file(path, Some(50), temp.path(), temp.path(), false, None, None)?;
-
-        assert!(result.truncated);
-        let visible = result
-            .content
-            .split_once("\n(...truncated)")
-            .map(|(visible, _)| visible)
-            .ok_or_else(|| anyhow::anyhow!("truncation marker is missing"))?;
-        let visible_lines = visible.lines().count();
-        assert_eq!(result.visible_range, (1, visible_lines));
-        let coverage = FileWhitelistData::new(
-            result.file_hash,
-            vec![result.visible_range],
-            result.total_lines,
-        );
-        assert!(!coverage.is_read_enough());
-        assert_eq!(coverage.get_unread_ranges(), vec![(visible_lines + 1, result.total_lines)]);
-        Ok(())
-    }
-
-    #[test]
-    fn oversized_first_line_records_no_read_coverage() -> anyhow::Result<()> {
-        let temp = tempfile::tempdir()?;
-        let path = temp.path().join("single-line.txt");
-        std::fs::write(&path, "x".repeat(10_000))?;
-        let path = path.to_str().ok_or_else(|| anyhow::anyhow!("fixture path is not UTF-8"))?;
-
-        let result = read_file(path, Some(10), temp.path(), temp.path(), false, None, None)?;
-
-        assert!(result.truncated);
-        assert!(result.content.starts_with("\n(...truncated) Showing up to line 0"));
-        assert_eq!(result.visible_range, (1, 0));
-        let coverage = FileWhitelistData::new(
-            result.file_hash,
-            vec![result.visible_range],
-            result.total_lines,
-        );
-        assert!(coverage.line_ranges_read.is_empty(), "expected empty coverage.line_ranges_read");
-        assert_eq!(coverage.get_unread_ranges(), vec![(1, 1)]);
-        Ok(())
-    }
-
-    #[test]
-    fn parallelism_uses_safe_defaults_and_bounds() {
-        assert_eq!(parse_read_parallelism(None), 4);
-        assert_eq!(parse_read_parallelism(Some("invalid")), 4);
-        assert_eq!(parse_read_parallelism(Some("0")), 4);
-        assert_eq!(parse_read_parallelism(Some("1")), 1);
-        assert_eq!(parse_read_parallelism(Some("8")), 8);
-        assert_eq!(parse_read_parallelism(Some("999")), 32);
-    }
-}
+mod tests;

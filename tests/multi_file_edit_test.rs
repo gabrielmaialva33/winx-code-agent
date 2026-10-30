@@ -39,6 +39,7 @@ async fn init_state(dir: &TempDir) -> Result<Arc<Mutex<Option<BashState>>>> {
 
 async fn read_file(arc: &Arc<Mutex<Option<BashState>>>, path: &std::path::Path) -> Result<()> {
     let rf = ReadFiles {
+        force: false,
         file_paths: vec![path.to_string_lossy().to_string()],
         thread_id: String::new(),
         start_line_nums: vec![None],
