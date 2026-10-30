@@ -5,6 +5,7 @@
 
 mod agents;
 mod catalog;
+mod client_profile;
 mod coherence;
 mod executions;
 mod handler;

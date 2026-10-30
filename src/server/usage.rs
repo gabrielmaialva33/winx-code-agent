@@ -42,6 +42,7 @@ pub(super) struct UsageEvent {
     thread_id: String,
     request_id: String,
     client_name: String,
+    client_profile: &'static str,
     client_version: String,
     protocol: String,
     client_session: String,
@@ -443,6 +444,7 @@ impl UsageEvent {
         let client = context.client_info();
         let client_name =
             client.as_ref().map_or("unknown", |client| client.name.as_str()).to_string();
+        let client_profile = super::client_profile::ClientProfile::from_context(context);
         let client_version =
             client.as_ref().map_or("unknown", |client| client.version.as_str()).to_string();
         let protocol = context
@@ -488,6 +490,7 @@ impl UsageEvent {
             thread_id,
             request_id,
             client_name,
+            client_profile: client_profile.as_str(),
             client_version,
             protocol,
             client_session,
@@ -628,6 +631,7 @@ impl UsageEvent {
             thread_id = %self.thread_id,
             request_id = %self.request_id,
             client_name = %self.client_name,
+            client_profile = self.client_profile,
             client_version = %self.client_version,
             protocol = %self.protocol,
             client_session = %self.client_session,
@@ -738,6 +742,7 @@ impl UsageEvent {
             thread_id = %self.thread_id,
             request_id = %self.request_id,
             client_name = %self.client_name,
+            client_profile = self.client_profile,
             client_version = %self.client_version,
             protocol = %self.protocol,
             client_session = %self.client_session,
@@ -1046,6 +1051,7 @@ pub(super) mod tests {
             thread_id: "test-thread".to_string(),
             request_id: "request-fixture".to_string(),
             client_name: "test-client".to_string(),
+            client_profile: "other",
             client_version: "1".to_string(),
             protocol: "test-protocol".to_string(),
             client_session: "stateless".to_string(),
