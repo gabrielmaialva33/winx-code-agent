@@ -275,6 +275,32 @@ impl ExecutionCatalog {
         })
     }
 
+    /// Foreground records a new launch must reconcile first: still running or
+    /// with output not yet captured.
+    pub fn pending_foreground(
+        &self,
+        scope: &ExecutionScope,
+        now: u64,
+    ) -> HistoryResult<Vec<ExecutionRecord>> {
+        // Unlike `list`, this clones only the matching records and mints no
+        // event cursor: it runs before every foreground launch.
+        storage::transaction(self, scope, now, |transaction| {
+            let mut pending = transaction
+                .index
+                .executions
+                .iter()
+                .filter(|record| {
+                    record.background_id.is_none()
+                        && (record.process_status == ExecutionProcessStatus::Running
+                            || record.output_pending)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            pending.sort_by_key(|record| std::cmp::Reverse(record.sequence));
+            Ok(pending)
+        })
+    }
+
     pub fn read(
         &self,
         scope: &ExecutionScope,

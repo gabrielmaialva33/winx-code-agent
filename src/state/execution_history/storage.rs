@@ -373,9 +373,18 @@ fn atomic_json(path: &Path, value: &impl Serialize) -> HistoryResult<()> {
     let parent =
         path.parent().ok_or_else(|| HistoryError::InvalidInput("missing history parent".into()))?;
     let mut temporary = tempfile::Builder::new().prefix(".history-").tempfile_in(parent)?;
-    serde_json::to_writer(&mut temporary, value)?;
-    temporary.flush()?;
+    write_json_once(&mut temporary, value)?;
     temporary.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
+/// Serialize in memory, then hand the writer one buffer. `NamedTempFile` is
+/// unbuffered, so streaming `serde_json` into it issued one write(2) per JSON
+/// token: ~10k syscalls per full index and ~40 ms per `BashCommand`.
+fn write_json_once(writer: &mut impl Write, value: &impl Serialize) -> HistoryResult<()> {
+    let bytes = serde_json::to_vec(value)?;
+    writer.write_all(&bytes)?;
+    writer.flush()?;
     Ok(())
 }
 
@@ -416,4 +425,46 @@ fn scope_key(scope: &ExecutionScope) -> String {
         let _ = write!(output, "{byte:02x}");
         output
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Counts `write` calls the way the kernel would see them on an unbuffered file.
+    #[derive(Default)]
+    struct CountingWriter {
+        writes: usize,
+        bytes: Vec<u8>,
+    }
+
+    impl Write for CountingWriter {
+        fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(buffer);
+            Ok(buffer.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn history_json_reaches_the_file_in_one_write() -> HistoryResult<()> {
+        let index = HistoryIndex {
+            version: 1,
+            scope_key: "scope".into(),
+            epoch: "epoch".into(),
+            sequence: 7,
+            floor_sequence: 0,
+            executions: Vec::new(),
+        };
+        let mut writer = CountingWriter::default();
+        write_json_once(&mut writer, &index)?;
+        assert_eq!(writer.writes, 1, "one syscall-sized write, not one per JSON token");
+        let decoded: HistoryIndex = serde_json::from_slice(&writer.bytes)?;
+        assert_eq!(decoded.sequence, 7);
+        Ok(())
+    }
 }

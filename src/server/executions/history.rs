@@ -341,17 +341,14 @@ impl WinxService {
             return;
         }
         let query_scope = scope.clone();
-        let Ok(snapshot) =
-            history_call(catalog.clone(), move |catalog| catalog.list(&query_scope, now_ms()))
-                .await
+        let Ok(pending) = history_call(catalog.clone(), move |catalog| {
+            catalog.pending_foreground(&query_scope, now_ms())
+        })
+        .await
         else {
             return;
         };
-        for record in snapshot.executions.iter().filter(|record| {
-            record.background_id.is_none()
-                && (record.process_status == ExecutionProcessStatus::Running
-                    || record.output_pending)
-        }) {
+        for record in &pending {
             if let Err(error) =
                 refresh_record(self.shell_runtime.as_ref(), slot, &catalog, &scope, record, None)
                     .await

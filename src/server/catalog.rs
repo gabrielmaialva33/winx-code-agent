@@ -333,23 +333,53 @@ const EXECUTION_DESCRIPTION: &str =
 const AGENT_DESCRIPTION: &str =
     "Observe/prompt explicit native or configured Herdr targets. Native: target, prompt_id, text; same ID/payload returns receipt without resending. Delivery is not completion; never auto-resend uncertain input. Prompts need BashCommand + wcgw. Herdr rejects prompt_id.";
 
+/// Every tool in `ToolKind::ALL` order. Descriptions and schemas depend only
+/// on the build, so the catalog is generated once per process; per-principal
+/// policies only filter it.
 static WINX_TOOLS: OnceLock<Vec<Tool>> = OnceLock::new();
 static WINX_PROMPTS: OnceLock<Vec<Prompt>> = OnceLock::new();
+#[cfg(test)]
+static CATALOG_BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn catalog() -> &'static [Tool] {
+    WINX_TOOLS.get_or_init(build_winx_tools)
+}
 
 pub(super) fn winx_tools() -> Vec<Tool> {
     winx_tools_for_policy(ToolPolicy::default())
 }
 
 pub(super) fn winx_tools_for_policy(policy: ToolPolicy) -> Vec<Tool> {
-    WINX_TOOLS
-        .get_or_init(build_winx_tools)
+    ToolKind::ALL
         .iter()
-        .filter(|tool| policy.allows(tool.name.as_ref()))
-        .cloned()
+        .zip(catalog())
+        .filter(|(kind, _)| policy.allows_kind(**kind))
+        .map(|(_, tool)| tool.clone())
         .collect()
 }
 
+/// Borrow one advertised tool without cloning the catalog. Used on every
+/// HTTP `tools/call` for header/schema validation.
+pub(super) fn winx_tool(name: &str, policy: ToolPolicy) -> Option<&'static Tool> {
+    let kind = ToolKind::parse(name).filter(|kind| policy.allows_kind(*kind))?;
+    let index = ToolKind::ALL.iter().position(|candidate| *candidate == kind)?;
+    catalog().get(index)
+}
+
+#[cfg(test)]
+pub(super) fn catalog_builds() -> usize {
+    CATALOG_BUILDS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 fn build_winx_tools() -> Vec<Tool> {
+    #[cfg(test)]
+    CATALOG_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ToolKind::ALL.into_iter().map(build_winx_tool).collect()
+}
+
+/// Uncached catalog generation for benchmarks; production code uses `catalog`.
+#[doc(hidden)]
+pub fn build_tool_catalog_uncached() -> Vec<Tool> {
     ToolKind::ALL.into_iter().map(build_winx_tool).collect()
 }
 
@@ -468,4 +498,27 @@ pub(super) fn server_icon_data_uri() -> &'static str {
         let png = include_bytes!("../../.github/assets/icon-96.png");
         format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png))
     })
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::tool_policy::ToolProfile;
+
+    #[test]
+    fn catalog_is_built_once_and_lookup_respects_policy() {
+        for _ in 0..3 {
+            assert!(winx_tool("BashCommand", ToolPolicy::default()).is_some());
+            let _ = winx_tools();
+        }
+        assert_eq!(catalog_builds(), 1, "catalog must be generated once per process");
+        let read_only = ToolPolicy::from_profile(ToolProfile::ReadOnly);
+        assert!(winx_tool("BashCommand", read_only).is_none());
+        assert!(winx_tool("NoSuchTool", ToolPolicy::default()).is_none());
+        for tool in winx_tools_for_policy(read_only) {
+            let borrowed = winx_tool(tool.name.as_ref(), read_only).map(|tool| tool.name.clone());
+            assert_eq!(borrowed, Some(tool.name));
+        }
+        assert_eq!(catalog_builds(), 1);
+    }
 }

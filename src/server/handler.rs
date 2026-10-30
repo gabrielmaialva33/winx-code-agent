@@ -13,7 +13,9 @@ use rmcp::{
     ErrorData as McpError, ServerHandler,
 };
 
-use super::catalog::{server_icon_data_uri, winx_prompts, winx_tools, winx_tools_for_policy};
+use super::catalog::{
+    server_icon_data_uri, winx_prompts, winx_tool, winx_tools, winx_tools_for_policy,
+};
 use super::client_profile::ClientProfile;
 use super::outcomes;
 use super::principal::{
@@ -167,7 +169,7 @@ impl ServerHandler for WinxService {
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {
-        winx_tools().into_iter().find(|tool| tool.name == name)
+        winx_tool(name, ToolPolicy::default()).cloned()
     }
 
     async fn get_task(

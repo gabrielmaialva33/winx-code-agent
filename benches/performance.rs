@@ -144,6 +144,7 @@ fn benchmark_read_files_batch(criterion: &mut Criterion) {
     bash_state.workspace_root.clone_from(&root);
     let bash_state = Arc::new(Mutex::new(Some(bash_state)));
     let request = ReadFiles {
+        force: false,
         start_line_nums: vec![None; file_paths.len()],
         end_line_nums: vec![None; file_paths.len()],
         file_paths,
@@ -175,6 +176,107 @@ fn benchmark_read_files_batch(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn history_capture(
+    id: &str,
+    output: &str,
+    now: u64,
+    exited: bool,
+) -> winx_code_agent::state::execution_history::ExecutionCapture {
+    use winx_code_agent::state::execution_history::{CapturedOutput, ExecutionCapture};
+    use winx_code_agent::tools::bash_command::{BashCommandState, BashProcessStatus};
+    ExecutionCapture {
+        execution_id: id.to_string(),
+        execution_token: Some(winx_code_agent::runtime::ShellExecutionToken {
+            guardian_epoch: "guardian".to_string(),
+            session_epoch: "session".to_string(),
+            generation: 1,
+        }),
+        command_generation: Some(1),
+        state: BashCommandState {
+            process_status: if exited {
+                BashProcessStatus::Exited
+            } else {
+                BashProcessStatus::Running
+            },
+            background_id: None,
+            running_for_seconds: None,
+            exit_code: exited.then_some(0),
+            cwd: std::path::PathBuf::from("/workspace"),
+            turn_state: None,
+        },
+        output: CapturedOutput::Snapshot(output.to_string()),
+        screen: None,
+        explanation: None,
+        prompt_receipt: None,
+        activity_seq: Some(now),
+        observed_at_unix_ms: now,
+        label: Some("cargo test --all-features --locked".to_string()),
+        output_truncated: false,
+        dropped_output_file: None,
+    }
+}
+
+/// One `BashCommand` performs three history transactions: the pre-launch
+/// reconciliation scan, the launch record, and the post-inspect update. The
+/// catalog is pre-filled to its 128-record cap like a long-lived session.
+fn benchmark_execution_history(criterion: &mut Criterion) {
+    use winx_code_agent::state::execution_history::{
+        ExecutionCatalog, ExecutionScope, HistoryLimits,
+    };
+    // CARGO_TARGET_TMPDIR is on the real filesystem, unlike a tmpfs /tmp.
+    let workspace = or_abort(tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")));
+    let catalog = ExecutionCatalog::new(workspace.path().join("history"), HistoryLimits::default());
+    let scope = ExecutionScope {
+        thread_id: "benchmark".to_string(),
+        workspace_root: workspace.path().to_path_buf(),
+    };
+    let output = "test result: ok. 42 passed; 0 failed\n".repeat(64);
+    for index in 0..128_u64 {
+        or_abort(catalog.record(
+            &scope,
+            history_capture(&format!("seed-{index}"), &output, 1_000 + index, true),
+        ));
+    }
+
+    let mut group = criterion.benchmark_group("execution_history");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    group.bench_function("list_full_index", |bencher| {
+        bencher.iter(|| black_box(or_abort(catalog.list(&scope, 10_000)).executions.len()));
+    });
+    group.bench_function("pending_foreground_scan", |bencher| {
+        bencher.iter(|| black_box(or_abort(catalog.pending_foreground(&scope, 10_000)).len()));
+    });
+    let mut sequence = 0_u64;
+    group.bench_function("bash_command_cycle", |bencher| {
+        bencher.iter(|| {
+            sequence += 1;
+            let now = 20_000 + sequence * 10;
+            let id = format!("run-{sequence}");
+            black_box(or_abort(catalog.pending_foreground(&scope, now)).len());
+            or_abort(catalog.record(&scope, history_capture(&id, &output, now, false)));
+            black_box(or_abort(
+                catalog.update_existing(&scope, history_capture(&id, &output, now + 1, true)),
+            ));
+        });
+    });
+    group.finish();
+}
+
+fn benchmark_tool_catalog(criterion: &mut Criterion) {
+    use rmcp::ServerHandler as _;
+    let service = winx_code_agent::WinxService::new();
+    let mut group = criterion.benchmark_group("tool_catalog");
+    group.bench_function("build_uncached", |bencher| {
+        bencher.iter(|| black_box(winx_code_agent::server::build_tool_catalog_uncached().len()));
+    });
+    group.bench_function("get_tool_lookup", |bencher| {
+        bencher.iter(|| black_box(service.get_tool(black_box("BashCommand")).is_some()));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_thread_ids,
@@ -182,6 +284,8 @@ criterion_group!(
     benchmark_terminal_rendering_cold,
     benchmark_redaction,
     benchmark_output_compression,
-    benchmark_read_files_batch
+    benchmark_read_files_batch,
+    benchmark_execution_history,
+    benchmark_tool_catalog
 );
 criterion_main!(benches);

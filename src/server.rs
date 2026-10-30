@@ -40,6 +40,10 @@ use sessions::SessionRegistry;
 
 pub use sessions::SessionIsolation;
 
+/// Benchmark hook: regenerate the tool catalog without the process cache.
+#[doc(hidden)]
+pub use catalog::build_tool_catalog_uncached;
+
 /// Shared shell state for one logical Winx session.
 pub type SharedBashState = Arc<Mutex<Option<BashState>>>;
 

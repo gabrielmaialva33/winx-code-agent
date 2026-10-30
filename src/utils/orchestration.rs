@@ -45,11 +45,24 @@ const DISALLOW_INSTRUCTION: &str = "As soon as you encounter \"The user has chos
 /// Instructions advertised in the MCP handshake. The stable defaults come
 /// first so clients that truncate this field still receive the orchestration
 /// contract; operator-provided rules are appended without requiring a rebuild.
+///
+/// Stateless HTTP clients get a fresh one-shot service per request, so this is
+/// on the per-request path; the text is rebuilt only when the operator
+/// variable changes.
 pub fn server_instructions() -> String {
+    static CACHE: std::sync::Mutex<Option<(Option<String>, String)>> = std::sync::Mutex::new(None);
+    let extra = crate::config::env_text("WINX_SERVER_INSTRUCTIONS");
+    let mut cache = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((cached_extra, text)) = cache.as_ref() {
+        if *cached_extra == extra {
+            return text.clone();
+        }
+    }
     let mut instructions = format!("{DEFAULT_INSTRUCTIONS}\n\n{DISALLOW_INSTRUCTION}");
-    if let Some(extra) = crate::config::env_text("WINX_SERVER_INSTRUCTIONS") {
+    if let Some(extra) = extra.as_deref() {
         let _ = write!(instructions, "\n\nOperator instructions:\n{extra}");
     }
+    *cache = Some((extra, instructions.clone()));
     instructions
 }
 
