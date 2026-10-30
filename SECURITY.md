@@ -102,7 +102,9 @@ prefers `Mcp-Session-Id`, accepts an edge-provided `X-Winx-Conversation-Id`, and
 the identity is hashed and never returned or logged raw. A gateway must strip untrusted copies before injecting its header.
 `--session-affinity thread` remains the caller-owned option and requires stable IDs plus explicit cleanup.
 
-Optional `WINX_USAGE_LOG` telemetry is filtered to metadata-only `winx::usage` events. It includes hashed request/session
+Optional `WINX_USAGE_LOG` telemetry is filtered to metadata-only `winx::usage` events. The usage-log variables and
+`WINX_HTTP_TOKEN` are removed from agent shells, so commands run through Winx can neither read the bearer token from
+their environment nor append to the operator's usage log. It includes hashed request/session
 correlation, tool/action, principal, scoped thread, client/protocol, outcome, duration, and response size. It must never
 include command text, file contents, tool output, bearer tokens, or raw conversation identities; regression tests enforce
 that boundary. On Unix each initial/rotated file is opened with `O_NOFOLLOW` and mode `0600`, existing broader modes are

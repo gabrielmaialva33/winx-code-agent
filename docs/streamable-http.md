@@ -571,6 +571,16 @@ initial-file count, and effective code-writer policy strength. Command text, fil
 arguments, URLs, output, bearer tokens, and raw conversation identities are never written to this sink. Ordinary warnings and diagnostics
 continue to stderr according to `RUST_LOG` and `WINX_LOG_FORMAT`.
 
+While `WINX_USAGE_LOG` is set, `winx::usage` events are written only to that file and not duplicated to stderr, so a
+supervisor that captures stderr does not store each event twice. Add an explicit `winx::usage` directive to `RUST_LOG`
+(for example `RUST_LOG=winx::usage=info`) to mirror them on stderr anyway. Without a usage file, stderr remains the usage
+sink: usage events stay visible there at the default verbosity, for journald or `tee` collection.
+
+The usage-log variables (`WINX_USAGE_LOG`, `WINX_USAGE_LOG_ROTATION`, `WINX_USAGE_LOG_KEEP_DAYS`) and `WINX_HTTP_TOKEN`
+configure the server process only and are removed from every agent shell. A `cargo test` or nested `winx-code-agent`
+started through Winx therefore cannot append synthetic traffic to the production log; set the variable inside the
+command when a nested run should log usage.
+
 Execution events additionally carry typed, optional `exit_code` and `output_truncated`, plus stable fingerprints in
 `execution_id`, `bg_command_id`, `verification_id`, and `mutation_receipt_id` when available. For an edit with verification,
 these execution fields describe the nested command, while the receipt still identifies the edit. `verification_status`

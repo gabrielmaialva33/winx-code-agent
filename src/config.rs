@@ -11,6 +11,14 @@ use crate::tool_policy::{ToolPolicy, ToolProfile};
 /// Minimum accepted HTTP bearer-token length in bytes.
 pub const MIN_HTTP_TOKEN_BYTES: usize = 32;
 
+/// Server-process configuration that agent commands must never inherit. A Winx
+/// shell otherwise passes the server's environment to every command, so a
+/// nested `cargo test` or `winx-code-agent` run by an agent would append
+/// synthetic events to the operator's usage log, and any command could read the
+/// HTTP bearer token. An explicit assignment in the command itself still works.
+pub const SERVER_ONLY_ENV: [&str; 4] =
+    ["WINX_USAGE_LOG", "WINX_USAGE_LOG_ROTATION", "WINX_USAGE_LOG_KEEP_DAYS", "WINX_HTTP_TOKEN"];
+
 /// How remote `Initialize(first_call)` requests select a durable shell session.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, clap::ValueEnum)]
 pub enum HttpSessionAffinity {

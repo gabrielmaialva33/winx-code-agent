@@ -560,7 +560,7 @@ Todas são opcionais. Variáveis booleanas aceitam `1/true/yes/on` e `0/false/no
 | :--- | :--- |
 | `RUST_LOG` | Verbosidade dos logs, ex: `winx_code_agent=info`. |
 | `WINX_LOG_FORMAT` | Defina como `json` para logs operacionais JSONL no stderr; deixe ausente para formato legível. É separado do log de eventos de uso. |
-| `WINX_USAGE_LOG` | Caminho para gravação de eventos de uso em JSONL assíncrono. |
+| `WINX_USAGE_LOG` | Caminho para gravação de eventos de uso em JSONL assíncrono. Enquanto definido, os eventos não são duplicados no stderr, salvo se `RUST_LOG` citar `winx::usage`. Shells de agente não herdam `WINX_USAGE_LOG*` nem `WINX_HTTP_TOKEN`. |
 | `WINX_HTTP_TOKEN` | Bearer token HTTP para modo single-principal quando argumentos CLI não são informados. |
 | `WINX_RUNTIME` | Seleção de runtime no Unix: `daemon` (padrão) ou `embedded`. |
 | `WINX_EMBEDDED` | Valor verdadeiro (`1`, `true`) força o runtime in-process. |

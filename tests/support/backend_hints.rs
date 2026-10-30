@@ -5,13 +5,11 @@ async fn configured_server(
     config: Option<PathBuf>,
 ) -> anyhow::Result<(std::net::SocketAddr, ServerProcess)> {
     spawn_server_on_free_port(move |address| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"));
+        let mut command = winx_server_command();
         command
             .args(["serve", "--http", "--bind", &address.to_string(), "--token", TEST_TOKEN])
             .env("WINX_EMBEDDED", "1")
             .env_remove("WINX_HERDR_CONFIG")
-            .env_remove("WINX_USAGE_LOG")
-            .env_remove("WINX_USAGE_LOG_ROTATION")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());

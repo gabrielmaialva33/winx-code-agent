@@ -66,6 +66,36 @@ const WCGW_PROMPT_END: &str = "──➤";
 /// on a cold start.
 const PROMPT_BOOTSTRAP_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Environment every agent shell starts with, on top of the inherited one.
+fn configure_agent_environment(
+    cmd: &mut CommandBuilder,
+    workspace_root: Option<&Path>,
+    temporary_artifact_dir: Option<&Path>,
+) {
+    // Set up environment for proper terminal behavior
+    cmd.env("TERM", "xterm-256color");
+    cmd.env("COLORTERM", "truecolor");
+    cmd.env("PAGER", "cat");
+    cmd.env("GIT_PAGER", "cat");
+    // Agent commands (and the prompt bootstrap line) must not end up in the
+    // user's ~/.bash_history: bash skips saving history when HISTFILE is
+    // empty. Set before exec so it also holds under `bash -r`, which forbids
+    // changing HISTFILE afterwards.
+    cmd.env("HISTFILE", "");
+    cmd.env("COLUMNS", DEFAULT_COLS.to_string());
+    cmd.env("ROWS", DEFAULT_ROWS.to_string());
+    // Server telemetry and credentials stay with the server process.
+    for key in crate::config::SERVER_ONLY_ENV {
+        cmd.env_remove(key);
+    }
+    if let Some(workspace_root) = workspace_root {
+        cmd.env("WINX_WORKSPACE_ROOT", workspace_root);
+    }
+    if let Some(temporary_artifact_dir) = temporary_artifact_dir {
+        cmd.env("WINX_TEMP_DIR", temporary_artifact_dir);
+    }
+}
+
 fn attachable_command(restricted_mode: bool) -> (CommandBuilder, Option<String>, ShellKind) {
     let requested = crate::config::env_text("WINX_ATTACH_TERMINAL")
         .or_else(|| crate::config::env_text("WINX_USE_SCREEN"))
@@ -704,24 +734,7 @@ impl PtyShell {
             ));
         }
 
-        // Set up environment for proper terminal behavior
-        cmd.env("TERM", "xterm-256color");
-        cmd.env("COLORTERM", "truecolor");
-        cmd.env("PAGER", "cat");
-        cmd.env("GIT_PAGER", "cat");
-        // Agent commands (and the prompt bootstrap line) must not end up in the
-        // user's ~/.bash_history: bash skips saving history when HISTFILE is
-        // empty. Set before exec so it also holds under `bash -r`, which forbids
-        // changing HISTFILE afterwards.
-        cmd.env("HISTFILE", "");
-        cmd.env("COLUMNS", DEFAULT_COLS.to_string());
-        cmd.env("ROWS", DEFAULT_ROWS.to_string());
-        if let Some(workspace_root) = workspace_root {
-            cmd.env("WINX_WORKSPACE_ROOT", workspace_root);
-        }
-        if let Some(temporary_artifact_dir) = temporary_artifact_dir {
-            cmd.env("WINX_TEMP_DIR", temporary_artifact_dir);
-        }
+        configure_agent_environment(&mut cmd, workspace_root, temporary_artifact_dir);
         // Per-shell random nonce embedded in the prompt so command output can't
         // forge the completion marker. 64 bits of entropy in hex.
         let nonce = format!("{:016x}", rand::random::<u64>());

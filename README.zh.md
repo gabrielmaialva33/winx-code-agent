@@ -555,7 +555,7 @@ winx-code-agent serve --http \
 | :--- | :--- |
 | `RUST_LOG` | 日志详细度，例如 `winx_code_agent=info`。 |
 | `WINX_LOG_FORMAT` | 设为 `json` 时在 stderr 输出 JSONL 运行日志；未设置时使用人类可读格式。它与隐私安全的使用事件日志相互独立。 |
-| `WINX_USAGE_LOG` | 异步记录 `winx::usage` JSONL 格式遥测事件的文件路径。 |
+| `WINX_USAGE_LOG` | 异步记录 `winx::usage` JSONL 格式遥测事件的文件路径。设置后事件不会重复输出到 stderr，除非 `RUST_LOG` 显式包含 `winx::usage`。代理 Shell 不会继承 `WINX_USAGE_LOG*` 与 `WINX_HTTP_TOKEN`。 |
 | `WINX_HTTP_TOKEN` | 未配置命令行凭证时的单主体默认 Bearer Token。 |
 | `WINX_RUNTIME` | Unix 运行时模式：`daemon`（默认）或 `embedded`。 |
 | `WINX_EMBEDDED` | 设为 `1` 强制启用进程内运行（跳过守护进程）。 |

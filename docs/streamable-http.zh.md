@@ -366,6 +366,10 @@ winx-code-agent serve --http --token-file ~/.config/winx-http-token
 
 日志文件权限严格限定为 `0600`。命令文本、文件内容、Token 及原始对话标识绝不会写入遥测日志中；日志仅记录时延、结果状态、响应大小、批次项数、worker 上限和协议元数据。可通过 `request_id` 关联 `tool_call` 与 `http_request`，从而在不暴露负载的情况下区分工具耗时和传输开销。
 
+设置 `WINX_USAGE_LOG` 后，`winx::usage` 事件只写入该文件，不再重复输出到 stderr；如需同时输出到 stderr，请在 `RUST_LOG`
+中显式加入 `winx::usage` 指令。未配置使用日志文件时，stderr 仍是这些事件的输出目标。使用日志相关变量与 `WINX_HTTP_TOKEN`
+会从所有代理 Shell 中移除，因此通过 Winx 运行的 `cargo test` 不会向生产日志写入合成流量。
+
 可使用以下命令快速查看各工具的延迟分布：
 
 ```bash

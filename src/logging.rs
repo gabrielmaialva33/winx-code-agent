@@ -167,6 +167,7 @@ impl Write for SecureUsageWriter {
 ///
 /// `WINX_USAGE_LOG` enables a non-blocking file writer filtered to the
 /// `winx::usage` target. The sink never receives command text or file contents.
+/// While it is active, usage events are not also written to stderr.
 /// Call this only after the optional Landlock domain has been applied so the
 /// writer thread inherits the same filesystem restrictions as every other child.
 pub fn initialize(verbose: bool, debug: bool) -> Result<LoggingGuard> {
@@ -187,14 +188,17 @@ fn initialize_inner(verbose: bool, debug: bool, usage_enabled: bool) -> Result<L
     } else {
         tracing::Level::WARN
     };
-    let filter = tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into());
-    let filter = match "winx::usage=info".parse() {
-        Ok(directive) => filter.add_directive(directive),
-        Err(_) => filter,
-    };
+    let usage = if usage_enabled { usage_log_writer()? } else { None };
+    let mut filter = tracing_subscriber::EnvFilter::from_default_env().add_directive(level.into());
+    let rust_log = std::env::var("RUST_LOG").ok();
+    if let Some(directive) = stderr_usage_directive(rust_log.as_deref(), usage.is_some()) {
+        // The directive is static and cannot fail to parse.
+        if let Ok(directive) = directive.parse() {
+            filter = filter.add_directive(directive);
+        }
+    }
     let stderr_json = crate::config::env_text("WINX_LOG_FORMAT")
         .is_some_and(|format| format.eq_ignore_ascii_case("json"));
-    let usage = if usage_enabled { usage_log_writer()? } else { None };
 
     let guard = match (stderr_json, usage) {
         (true, Some((writer, guard))) => {
@@ -247,6 +251,26 @@ fn initialize_inner(verbose: bool, debug: bool, usage_enabled: bool) -> Result<L
         }
     };
     Ok(LoggingGuard { _usage: guard })
+}
+
+/// Decide where `winx::usage` events go on stderr.
+///
+/// Without a usage file, stderr is the only persistent usage sink (journald or
+/// a `tee`'d log), so usage events stay visible at the default WARN level. With
+/// a usage file they are written there only: duplicating them to stderr doubled
+/// log volume and put a synchronous write on the request path. An explicit
+/// `winx::usage` directive in `RUST_LOG` always wins, in both directions.
+fn stderr_usage_directive(rust_log: Option<&str>, usage_file: bool) -> Option<&'static str> {
+    let explicit = rust_log.is_some_and(|value| {
+        value.split(',').any(|directive| {
+            directive.trim().split(['=', '[']).next().map(str::trim) == Some("winx::usage")
+        })
+    });
+    match (explicit, usage_file) {
+        (true, _) => None,
+        (false, true) => Some("winx::usage=off"),
+        (false, false) => Some("winx::usage=info"),
+    }
 }
 
 fn usage_json_layer<S>(writer: NonBlocking) -> impl tracing_subscriber::Layer<S>
@@ -371,6 +395,22 @@ mod tests {
     use super::UsageRotation;
     #[cfg(unix)]
     use std::io::Write as _;
+
+    #[test]
+    fn usage_events_reach_stderr_only_without_a_usage_file() {
+        use super::stderr_usage_directive as directive;
+
+        assert_eq!(directive(None, false), Some("winx::usage=info"));
+        assert_eq!(directive(None, true), Some("winx::usage=off"));
+        // Broader targets do not count as asking for usage events on stderr.
+        assert_eq!(directive(Some("winx=debug,info"), true), Some("winx::usage=off"));
+        assert_eq!(directive(Some("winx::usage_extra=info"), true), Some("winx::usage=off"));
+        // An explicit directive is left to RUST_LOG, whichever way it points.
+        assert_eq!(directive(Some("warn, winx::usage=info"), true), None);
+        assert_eq!(directive(Some("winx::usage"), true), None);
+        assert_eq!(directive(Some("winx::usage[span]=debug"), true), None);
+        assert_eq!(directive(Some("winx::usage=off"), false), None);
+    }
 
     #[test]
     fn usage_rotation_retention_is_bounded_and_explicit() {

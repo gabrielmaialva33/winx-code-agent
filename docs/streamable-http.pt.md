@@ -411,6 +411,11 @@ Nenhum comando, conteúdo de arquivo, saída de ferramenta ou credencial é grav
 os eventos `tool_call` e `http_request`; a diferença entre suas durações aproxima o overhead do adapter até a resposta
 ficar pronta. Ela não inclui streaming do corpo nem o tempo fora dessa janela do servidor.
 
+Com `WINX_USAGE_LOG` definido, os eventos `winx::usage` vão apenas para esse arquivo e não são duplicados no stderr; uma
+diretiva explícita `winx::usage` no `RUST_LOG` volta a espelhá-los. Sem arquivo de uso, o stderr continua sendo o destino
+desses eventos. As variáveis de log de uso e `WINX_HTTP_TOKEN` são removidas de todo shell de agente, então um
+`cargo test` executado pelo Winx não grava tráfego sintético no log de produção.
+
 ### Estado das edições e identidade
 
 `edit_applied` preserva três estados: `true` explícito, `false` explícito ou ausente/desconhecido. Resultados tipados

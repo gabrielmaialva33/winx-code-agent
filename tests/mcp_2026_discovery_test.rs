@@ -37,6 +37,22 @@ impl Drop for ServerProcess {
     }
 }
 
+/// Usage-log configuration a test server must never inherit from the caller.
+const USAGE_LOG_ENV: [&str; 3] =
+    ["WINX_USAGE_LOG", "WINX_USAGE_LOG_ROTATION", "WINX_USAGE_LOG_KEEP_DAYS"];
+
+/// Every test server starts without the caller's usage sink, so `cargo test`
+/// launched from a deployed host or a Winx shell cannot append synthetic
+/// traffic to the production usage log. Tests that assert on usage output set
+/// a temporary `WINX_USAGE_LOG` on the returned command.
+fn winx_server_command() -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"));
+    for key in USAGE_LOG_ENV {
+        command.env_remove(key);
+    }
+    command
+}
+
 fn spawn_single_token_server(address: std::net::SocketAddr) -> anyhow::Result<ServerProcess> {
     spawn_single_token_server_with_affinity(address, "workspace")
 }
@@ -44,7 +60,7 @@ fn spawn_single_token_server(address: std::net::SocketAddr) -> anyhow::Result<Se
 fn spawn_single_token_root_access_server(
     address: std::net::SocketAddr,
 ) -> anyhow::Result<ServerProcess> {
-    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+    let child = winx_server_command()
         .args(["serve", "--http", "--bind", &address.to_string(), "--token", TEST_TOKEN])
         .env("WINX_EMBEDDED", "1")
         .env("WINX_ALLOW_PATHS", "/")
@@ -58,7 +74,7 @@ fn spawn_single_token_root_access_server(
 fn spawn_single_token_allowlist_server(
     address: std::net::SocketAddr,
 ) -> anyhow::Result<ServerProcess> {
-    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+    let child = winx_server_command()
         .args([
             "serve",
             "--http",
@@ -85,7 +101,7 @@ fn spawn_single_token_server_with_tools(
     address: std::net::SocketAddr,
     tools: &[&str],
 ) -> anyhow::Result<ServerProcess> {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"));
+    let mut command = winx_server_command();
     command.args(["serve", "--http", "--bind", &address.to_string(), "--token", TEST_TOKEN]);
     for tool in tools {
         command.args(["--allow-tool", tool]);
@@ -107,7 +123,7 @@ fn spawn_single_token_server_with_affinity(
     address: std::net::SocketAddr,
     affinity: &str,
 ) -> anyhow::Result<ServerProcess> {
-    let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+    let child = winx_server_command()
         .args([
             "serve",
             "--http",
@@ -3600,6 +3616,65 @@ fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// With a usage file configured, usage events used to be formatted to stderr as
+// well, so a server whose stderr is tee'd to a log wrote every event twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn usage_events_skip_stderr_when_usage_file_is_configured() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let logs = tempfile::tempdir()?;
+    let usage_log = logs.path().join("usage.jsonl");
+    let stderr_log = logs.path().join("stderr.jsonl");
+    let (usage_for_server, stderr_for_server) = (usage_log.clone(), stderr_log.clone());
+    let (address, server) = spawn_server_on_free_port(move |address| {
+        let child = winx_server_command()
+            // --verbose admits INFO, the level usage events are emitted at.
+            .args(["--verbose", "serve", "--http", "--bind", &address.to_string()])
+            .args(["--token", TEST_TOKEN])
+            .env("WINX_EMBEDDED", "1")
+            .env("WINX_LOG_FORMAT", "json")
+            .env_remove("RUST_LOG")
+            .env("WINX_USAGE_LOG", &usage_for_server)
+            .env("WINX_USAGE_LOG_ROTATION", "never")
+            .env("WINX_USAGE_LOG_KEEP_DAYS", "0")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(std::fs::File::create(&stderr_for_server)?))
+            .spawn()?;
+        Ok(ServerProcess(child))
+    })
+    .await?;
+
+    initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "usage-stderr-test",
+        "usage-stderr-client",
+    )
+    .await?;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let contents = std::fs::read_to_string(&usage_log).unwrap_or_default();
+        if contents.contains("\"event\":\"tool_call\"")
+            && contents.contains("\"event\":\"http_request\"")
+        {
+            break;
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("usage log was not flushed: {contents}");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    // Stderr writes are synchronous, so every usage event already logged would
+    // be on stderr by now; stopping the server just ends the file cleanly.
+    drop(server);
+
+    let stderr = std::fs::read_to_string(&stderr_log)?;
+    assert!(stderr.contains("\"level\":\"INFO\""), "stderr capture saw no INFO logs: {stderr}");
+    assert!(!stderr.contains("winx::usage"), "usage events duplicated to stderr: {stderr}");
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> {
     const COMMAND_MARKER: &str = "winx-command-content-must-not-be-logged";
@@ -3609,7 +3684,7 @@ async fn usage_log_is_jsonl_correlated_and_content_free() -> anyhow::Result<()> 
     let usage_log = logs.path().join("usage.jsonl");
     let usage_log_for_server = usage_log.clone();
     let (address, _server) = spawn_server_on_free_port(move |address| {
-        let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+        let child = winx_server_command()
             .args(["serve", "--http", "--bind", &address.to_string(), "--token", TEST_TOKEN])
             .env("WINX_EMBEDDED", "1")
             .env("WINX_USAGE_LOG", &usage_log_for_server)
@@ -4553,7 +4628,7 @@ async fn http_principals_isolate_the_same_external_thread_id() -> anyhow::Result
 
     let principal_config_for_server = principal_config.clone();
     let (address, _server) = spawn_server_on_free_port(move |address| {
-        let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+        let child = winx_server_command()
             .args([
                 "serve",
                 "--http",
@@ -4647,7 +4722,7 @@ async fn http_principals_cannot_touch_each_others_transport_sessions() -> anyhow
     )?;
     let principal_config_for_server = principal_config.clone();
     let (address, _server) = spawn_server_on_free_port(move |address| {
-        let child = Command::new(env!("CARGO_BIN_EXE_winx-code-agent"))
+        let child = winx_server_command()
             .args(["serve", "--http", "--bind", &address.to_string(), "--principal-config"])
             .arg(&principal_config_for_server)
             .env("WINX_EMBEDDED", "1")
