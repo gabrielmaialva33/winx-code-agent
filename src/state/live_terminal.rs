@@ -179,6 +179,17 @@ impl LiveTerminal {
         self.parser.screen().cursor_position()
     }
 
+    /// Visible text on the cursor row, left of the cursor. A program blocked on
+    /// a line prompt (`Password: `, `[y/N] `) leaves the cursor right after it.
+    pub fn cursor_line_prefix(&self) -> String {
+        let screen = self.parser.screen();
+        let (row, col) = screen.cursor_position();
+        if col == 0 {
+            return String::new();
+        }
+        screen.contents_between(row, 0, row, col)
+    }
+
     /// Diff the current screen against the snapshot the client last saw, update
     /// the baseline, and return only what changed. Positional (the terminal is a
     /// grid that redraws in place), 1-based rows to match the rest of winx.
@@ -317,6 +328,16 @@ mod tests {
         let mut t = LiveTerminal::new(10, 40);
         t.feed(b"abc");
         assert_eq!(t.cursor_position(), (0, 3), "cursor should sit after 'abc' on row 0");
+    }
+
+    #[test]
+    fn cursor_line_prefix_reads_the_pending_prompt() {
+        let mut t = LiveTerminal::new(10, 40);
+        assert_eq!(t.cursor_line_prefix(), "");
+        t.feed(b"building\r\nPassword: ");
+        assert_eq!(t.cursor_line_prefix(), "Password: ");
+        t.feed(b"\r\n");
+        assert_eq!(t.cursor_line_prefix(), "");
     }
 
     #[test]

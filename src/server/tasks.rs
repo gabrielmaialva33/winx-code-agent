@@ -633,6 +633,8 @@ fn task_action_options(
         expected_guardian_epoch: None,
         require_generation_binding: true,
         cancellation_key: Some(cancellation_key.to_string()),
+        // MCP Task polls are client-paced; they never use profile budgets.
+        return_when_awaiting_input: false,
         launch_cancelled: Some(launch_cancelled),
         #[cfg(test)]
         force_clear_to_run_failure: false,

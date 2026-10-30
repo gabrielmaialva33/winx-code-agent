@@ -45,7 +45,8 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// read after admission). Over HTTP this, not EditFiles' larger aggregate
 /// content cap, bounds a tool call; the SDK default it replaces was 4 MiB.
 pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+/// Whole-request deadline. Client-profile wait budgets stay below it with margin.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 const RATE_WINDOW: Duration = Duration::from_secs(60);
 const MAX_RATE_TRACKED_IPS: usize = 4_096;
 const INVALID_AUTH_DELAY: Duration = Duration::from_millis(100);

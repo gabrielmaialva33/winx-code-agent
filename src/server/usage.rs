@@ -534,6 +534,19 @@ impl UsageEvent {
         EffectiveWait::from_normalized(request.arguments.as_ref(), policy, mode)
     }
 
+    /// Effective lifecycle wait of an `Execution` wait, read from the request
+    /// after client-profile normalization. Execution waits are event-driven,
+    /// so they report as adaptive synchronous waits.
+    pub(super) fn effective_execution_wait(
+        &self,
+        request: &CallToolRequestParams,
+    ) -> Option<EffectiveWait> {
+        if self.tool != "Execution" || self.action != "wait" {
+            return None;
+        }
+        EffectiveWait::execution_wait(request.arguments.as_ref())
+    }
+
     pub(super) fn record_effective_wait(&mut self, wait: Option<EffectiveWait>) {
         self.effective_wait = wait;
     }

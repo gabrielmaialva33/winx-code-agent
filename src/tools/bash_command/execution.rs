@@ -219,6 +219,7 @@ pub(super) async fn execute_command(
         delivery_cursor,
         options.compact_output,
         None,
+        options.return_when_awaiting_input,
     )
     .await
 }

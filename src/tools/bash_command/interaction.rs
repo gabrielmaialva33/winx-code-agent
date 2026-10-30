@@ -85,6 +85,7 @@ pub(super) async fn execute_send_text(
         delivery_cursor,
         compact_output,
         Some(identity.1),
+        false,
     )
     .await
 }
@@ -171,6 +172,7 @@ pub(super) async fn execute_send_specials(
         delivery_cursor,
         compact_output,
         Some(identity.1),
+        false,
     )
     .await?;
     if is_interrupt && result.result.state.is_running() {
@@ -228,6 +230,7 @@ pub(super) async fn execute_send_ascii(
         delivery_cursor,
         compact_output,
         Some(identity.1),
+        false,
     )
     .await?;
     if is_interrupt && result.result.state.is_running() {

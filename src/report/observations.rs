@@ -142,7 +142,7 @@ impl ObservationAccumulator {
             _ => None,
         };
         let milliseconds = optional_number(fields, "effective_wait_ms")
-            .filter(|milliseconds| *milliseconds <= 60_000)
+            .filter(|milliseconds| *milliseconds <= 120_000)
             .filter(|milliseconds| mode != Some("task") || *milliseconds == 0);
         if let (Some(policy), Some(mode), Some(milliseconds)) = (policy, mode, milliseconds) {
             increment_nonempty(&mut wait.effective_wait_policies, policy);

@@ -50,4 +50,16 @@ impl EffectiveWait {
         };
         Some(Self { policy, milliseconds, mode })
     }
+
+    /// An `Execution` wait's `timeout_seconds`, defaulting like the validator.
+    pub fn execution_wait(arguments: Option<&JsonObject>) -> Option<Self> {
+        let seconds = match arguments?.get("action")?.get("timeout_seconds") {
+            None | Some(Value::Null) => 5.0,
+            Some(value) => value.as_f64()?,
+        };
+        let milliseconds =
+            u64::try_from(std::time::Duration::try_from_secs_f64(seconds).ok()?.as_millis())
+                .ok()?;
+        Some(Self { policy: "adaptive", milliseconds, mode: "synchronous" })
+    }
 }

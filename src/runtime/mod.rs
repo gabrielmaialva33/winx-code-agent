@@ -94,6 +94,8 @@ pub struct ShellExecutionToken {
     pub generation: u64,
 }
 
+// Independent wire flags; each defaults off for older peers.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ShellActionOptions {
     pub compact_output: bool,
@@ -114,6 +116,11 @@ pub struct ShellActionOptions {
     /// guardian before an execution token exists.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancellation_key: Option<String>,
+    /// Return a foreground command or status wait early once the program is
+    /// quiet at an input prompt. Set only for client-profile budgeted waits;
+    /// older guardians ignore it and simply wait the full budget.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub return_when_awaiting_input: bool,
     /// In-process launch gate. Skipped on the wire; control/guardian safety is
     /// represented by the serializable preconditions above.
     #[serde(skip)]
@@ -132,7 +139,8 @@ impl ShellActionOptions {
             && self.expected_execution.is_none()
             && self.expected_guardian_epoch.is_none()
             && !self.require_generation_binding
-            && self.cancellation_key.is_none();
+            && self.cancellation_key.is_none()
+            && !self.return_when_awaiting_input;
         #[cfg(test)]
         {
             is_default && !self.force_clear_to_run_failure

@@ -4,6 +4,7 @@
 //! in focused submodules under `tools/bash_command/`.
 
 mod execution;
+mod input_wait;
 mod interaction;
 mod output;
 mod tui;

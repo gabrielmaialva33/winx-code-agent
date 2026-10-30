@@ -22,6 +22,7 @@ use super::principal::{
 };
 use super::result_delivery::ResultTextDelivery;
 use super::usage::{EffectiveWaitMode, UsageEvent};
+use super::wait_budget::WaitBudget;
 use super::WinxService;
 use crate::runtime::ShellActionOptions;
 use crate::tool_policy::ToolPolicy;
@@ -428,6 +429,7 @@ impl ServerHandler for WinxService {
                 }
             }
             let compact_bash_output = supports_compact_bash_output(&context);
+            let wait_budget = WaitBudget::from_context(&context);
             let supports_tasks = context
                 .client_capabilities()
                 .is_some_and(|capabilities| capabilities.supports_tasks());
@@ -615,29 +617,57 @@ impl ServerHandler for WinxService {
                 ),
                 bash_allowed: effective_tool_policy.allows_call_kind(ToolKind::BashCommand),
             };
-            let request = match wait_policy {
-                Some(policy) => normalized_wait_request(request, policy, false)?,
-                None => request,
+            let budgeted = match (wait_policy, wait_budget) {
+                (Some(policy), Some(budget)) => {
+                    let bash = Self::parse_ordinary_bash_request(&request);
+                    budget.normalize_bash_request(&request, bash.as_ref(), policy)?
+                }
+                _ => None,
             };
-            let effective_wait = wait_policy.and_then(|policy| {
-                usage.effective_wait_for(&request, policy, EffectiveWaitMode::Synchronous)
-            });
-            match self
-                .execute_tool_call_with_authority(
+            let return_when_awaiting_input = budgeted.is_some();
+            let (request, effective_policy) = match (budgeted, wait_policy) {
+                (Some((request, policy)), _) => (request, Some(policy)),
+                (None, Some(policy)) => {
+                    (normalized_wait_request(request, policy, false)?, Some(policy))
+                }
+                (None, None) => (request, None),
+            };
+            let request = match wait_budget {
+                Some(budget) if tool_kind == Some(ToolKind::Execution) => {
+                    budget.normalize_execution_request(request)
+                }
+                _ => request,
+            };
+            let effective_wait = effective_policy
+                .and_then(|policy| {
+                    usage.effective_wait_for(&request, policy, EffectiveWaitMode::Synchronous)
+                })
+                .or_else(|| usage.effective_execution_wait(&request));
+            let follow_up = wait_budget
+                .filter(|_| matches!(tool_kind, Some(ToolKind::BashCommand | ToolKind::Execution)))
+                .map(|budget| (budget, request.clone()));
+            match Box::pin(WaitBudget::scope_execution_ceiling(
+                wait_budget,
+                self.execute_tool_call_with_authority(
                     request,
                     ShellActionOptions {
                         compact_output: compact_bash_output,
+                        return_when_awaiting_input,
                         ..ShellActionOptions::default()
                     },
                     effective_tool_policy.edit_permissions(),
                     workflow_authority,
-                )
-                .await
+                ),
+            ))
+            .await
             {
                 Ok(mut execution) => {
                     usage.record_effective_wait(effective_wait);
                     let guard = phase(Phase::ResponseFinalize);
                     let result = &mut execution.result;
+                    if let Some((budget, request)) = follow_up.as_ref() {
+                        budget.guide_follow_up(result, request);
+                    }
                     outcomes::enforce_next_action_policy(result, effective_tool_policy);
                     text_delivery.apply(result);
                     scope.unscope_result(result);

@@ -5,7 +5,7 @@ use std::time::Instant;
 use serde_json::json;
 
 use super::history::{history_call, now_ms};
-use super::{bounded_timeout, WorkflowContext, WorkflowReply};
+use super::{bounded_timeout, bounded_timeout_up_to, WorkflowContext, WorkflowReply};
 use crate::server::workflow_types::ExecutionWatchEvent;
 use crate::server::WinxService;
 use crate::state::execution_history::{
@@ -24,15 +24,26 @@ pub(in crate::server) struct WaitTiming {
 
 impl WaitTiming {
     pub(in crate::server) fn new(timeout_seconds: Option<f32>) -> HistoryResult<Self> {
-        let timeout = bounded_timeout(timeout_seconds)?;
+        Ok(Self::from_timeout(bounded_timeout(timeout_seconds)?))
+    }
+
+    /// Like [`Self::new`], validated against a client-profile wait ceiling.
+    pub(in crate::server) fn up_to(
+        timeout_seconds: Option<f32>,
+        ceiling: f32,
+    ) -> HistoryResult<Self> {
+        Ok(Self::from_timeout(bounded_timeout_up_to(timeout_seconds, ceiling)?))
+    }
+
+    fn from_timeout(timeout: std::time::Duration) -> Self {
         // Zero still allows one bounded catalog poll, but no lifecycle waiting.
         let budget =
             if timeout.is_zero() { std::time::Duration::from_millis(250) } else { timeout };
-        Ok(Self {
+        Self {
             started: Instant::now(),
             deadline: tokio::time::Instant::now() + budget,
             poll_only: timeout.is_zero(),
-        })
+        }
     }
 
     pub(super) fn deadline(self) -> tokio::time::Instant {

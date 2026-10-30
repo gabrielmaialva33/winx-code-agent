@@ -1575,6 +1575,11 @@ impl PtyShell {
         self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).cursor_position()
     }
 
+    /// Text left of the cursor on its row (see [`LiveTerminal::cursor_line_prefix`]).
+    pub(crate) fn live_cursor_line_prefix(&self) -> String {
+        self.live.lock().unwrap_or_else(std::sync::PoisonError::into_inner).cursor_line_prefix()
+    }
+
     /// Diff the live screen against what the client last saw, returning only the
     /// changed lines when the change is small (huge token savings over many
     /// polls). Updates the baseline as a side effect. See [`ScreenUpdate`].

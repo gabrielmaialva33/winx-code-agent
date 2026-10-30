@@ -6,6 +6,7 @@ use regex::Regex;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
+use super::input_wait::InputWaitWatch;
 use super::{
     main_shell, runtime_rendered, BashCommandState, BashProcessStatus, SharedPtyShell,
     ShellDeliveryCursor,
@@ -290,7 +291,7 @@ pub(super) async fn clear_to_run_async(shell: &SharedPtyShell, max_wait_secs: f6
 }
 
 #[allow(clippy::too_many_lines)]
-#[allow(clippy::too_many_arguments)] // shell/rendering controls are intentionally kept explicit
+#[allow(clippy::too_many_arguments, clippy::fn_params_excessive_bools)] // shell/rendering controls are intentionally kept explicit
 pub(super) async fn wait_for_output(
     bash_state: &mut BashState,
     shell: &SharedPtyShell,
@@ -301,16 +302,21 @@ pub(super) async fn wait_for_output(
     mut delivery_cursor: Option<&mut ShellDeliveryCursor>,
     compact_output: bool,
     expected_generation: Option<u64>,
+    return_when_awaiting_input: bool,
 ) -> Result<BashCommandRuntimeResult> {
     let start = Instant::now();
-    let (generation, legacy_delivered) = {
+    let (generation, legacy_delivered, mut input_watch) = {
         let guard = shell.lock().await;
         match guard.as_ref() {
             Some(shell) => {
                 ensure_expected_generation(shell.command_generation(), expected_generation)?;
-                (shell.command_generation(), shell.delivered_output())
+                (
+                    shell.command_generation(),
+                    shell.delivered_output(),
+                    return_when_awaiting_input.then(|| InputWaitWatch::new(shell, start)),
+                )
             }
-            None => (0, String::new()),
+            None => (0, String::new(), None),
         }
     };
     let mut previously_delivered = match delivery_cursor.as_deref_mut() {
@@ -321,6 +327,7 @@ pub(super) async fn wait_for_output(
         None => legacy_delivered,
     };
     let mut complete = false;
+    let mut awaiting_input = false;
 
     loop {
         if start.elapsed().as_secs_f64() >= timeout_secs {
@@ -329,6 +336,14 @@ pub(super) async fn wait_for_output(
         complete = poll_shell_generation(shell, expected_generation).await?;
         if complete {
             break;
+        }
+        if let Some(watch) = input_watch.as_mut() {
+            let guard = shell.lock().await;
+            awaiting_input =
+                guard.as_ref().is_some_and(|shell| watch.awaiting_input(shell, Instant::now()));
+            if awaiting_input {
+                break;
+            }
         }
         sleep(Duration::from_millis(POLL_INTERVAL_MS)).await;
     }
@@ -351,7 +366,7 @@ pub(super) async fn wait_for_output(
         }
     }
 
-    if !complete && is_status_check {
+    if !complete && !awaiting_input && is_status_check {
         let mut patience = OUTPUT_WAIT_PATIENCE;
         let (mut last_incremental, _) = wcgw_incremental_text(&output, &previously_delivered);
         if last_incremental.is_empty() {
@@ -428,7 +443,8 @@ pub(super) async fn wait_for_output(
     let (running_for, exit_code, shell_cwd, scratch, dropped_output_file, shell_output_truncated) =
         read_status_extras(shell, complete, expected_generation).await?;
     let cwd = shell_cwd.as_deref().unwrap_or(&bash_state.cwd);
-    let state = status_state(background_id, !complete, running_for, exit_code, cwd, None);
+    let turn_state = (!complete && awaiting_input).then_some(TurnState::AwaitingInput);
+    let state = status_state(background_id, !complete, running_for, exit_code, cwd, turn_state);
     let status = render_status(bash_state, &state);
     Ok(runtime_rendered(
         format!("{rendered}{scratch}"),
@@ -590,6 +606,7 @@ pub(super) async fn execute_status_check(
         delivery_cursor.as_deref_mut(),
         options.compact_output,
         options.expected_generation,
+        options.return_when_awaiting_input && !is_background,
     )
     .await?;
 
@@ -624,7 +641,9 @@ pub(super) async fn execute_status_check(
             guard.as_mut().and_then(|shell| shell.last_returned_hash.replace(fingerprint))
         };
         if previous_hash == Some(fingerprint) {
-            let state = status_state(background_id, running, running_for, exit_code, &cwd, None);
+            let turn_state = response.result.state.turn_state.filter(|_| running);
+            let state =
+                status_state(background_id, running, running_for, exit_code, &cwd, turn_state);
             let status = render_status(bash_state, &state);
             return Ok(runtime_rendered(
                 "no new output since last check".to_string(),

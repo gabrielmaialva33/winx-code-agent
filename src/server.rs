@@ -18,6 +18,7 @@ mod sessions;
 mod tasks;
 mod tool_dispatch;
 mod usage;
+mod wait_budget;
 mod workflow_types;
 
 #[cfg(test)]

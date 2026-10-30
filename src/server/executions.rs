@@ -119,9 +119,17 @@ pub(super) fn history_failure(
 }
 
 pub(super) fn bounded_timeout(value: Option<f32>) -> HistoryResult<Duration> {
+    bounded_timeout_up_to(value, super::wait_budget::DEFAULT_EXECUTION_WAIT_MAX_SECONDS)
+}
+
+/// Validate a workflow timeout against `ceiling`, which only a client-profile
+/// wait budget raises above the public 30 s range.
+pub(super) fn bounded_timeout_up_to(value: Option<f32>, ceiling: f32) -> HistoryResult<Duration> {
     let seconds = value.unwrap_or(5.0);
-    if !seconds.is_finite() || !(0.0..=30.0).contains(&seconds) {
-        return Err(HistoryError::InvalidInput("timeout_seconds must be between 0 and 30".into()));
+    if !seconds.is_finite() || !(0.0..=ceiling).contains(&seconds) {
+        return Err(HistoryError::InvalidInput(format!(
+            "timeout_seconds must be between 0 and {ceiling}"
+        )));
     }
     Ok(Duration::from_secs_f32(seconds))
 }
@@ -199,8 +207,18 @@ impl WinxService {
             }
         }
         let wait_timing = match &request.action {
-            ExecutionAction::Wait { timeout_seconds, .. }
-            | ExecutionAction::Observe { timeout_seconds, .. } => {
+            // Only a lifecycle wait may use a client-profile budget above 30 s;
+            // an observation is a single bounded pass.
+            ExecutionAction::Wait { timeout_seconds, .. } => {
+                match WaitTiming::up_to(
+                    *timeout_seconds,
+                    super::wait_budget::execution_wait_ceiling(),
+                ) {
+                    Ok(timing) => Some(timing),
+                    Err(error) => return history_failure("Execution", &error),
+                }
+            }
+            ExecutionAction::Observe { timeout_seconds, .. } => {
                 match WaitTiming::new(*timeout_seconds) {
                     Ok(timing) => Some(timing),
                     Err(error) => return history_failure("Execution", &error),
