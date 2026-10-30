@@ -366,7 +366,20 @@ an `outputSchema` (observed with the ChatGPT MCP connector and Claude Code), so 
 well: the text blocks joined in order after output limits and redaction. Image-only results omit it, and so does a
 `CodeMap` result whose `files`/`hits` already carry symbols (its text is a rendering of them); `CodeMap` diagnostics
 without symbols keep it, so a client that consumes `structuredContent` reads symbols from `files`/`hits` and everything
-else from `output`. The main fields are:
+else from `output`.
+
+Carrying the text twice doubles every response, and ChatGPT both reads only `structuredContent` and truncates a tool
+response past a hidden budget. For a client whose `clientInfo.name` identifies ChatGPT (`openai-mcp` or `chatgpt…`, but
+not Codex), Winx therefore replaces the text content blocks with one pointer line, such as
+`Result is in structuredContent.output (status: completed).`, which roughly halves the wire size of large `ReadFiles`
+and `BashCommand` results. `structuredContent` stays complete and redacted; image blocks stay in place; `isError` is
+unchanged, and an error pointer also repeats the envelope `message` (capped at 512 bytes) so the failure stays readable
+inside the result. A result whose text is not mirrored exactly in `structuredContent` keeps its text. Codex, Claude and
+every other client keep both copies, as the MCP specification recommends. Detection uses the self-reported client name
+and only selects this wire shape, never authority. Set `WINX_RESULT_TEXT_MIRROR=full` to keep both copies for every
+client; unset or `auto` is the default, and any other value also behaves as `full`.
+
+The main fields are:
 
 ```json
 {

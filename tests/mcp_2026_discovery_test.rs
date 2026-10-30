@@ -50,6 +50,8 @@ fn winx_server_command() -> Command {
     for key in USAGE_LOG_ENV {
         command.env_remove(key);
     }
+    // Result wire shape must not depend on the caller's environment either.
+    command.env_remove("WINX_RESULT_TEXT_MIRROR");
     command
 }
 
@@ -4968,5 +4970,90 @@ async fn status_probe_restores_a_persisted_session_after_server_restart() -> any
     // The embedded PTY died with the old process: the probe says so once.
     assert_eq!(data["initialize_recovered_missing_session"], true, "{status}");
     assert!(status.contains("[session recovery]"), "{status}");
+    Ok(())
+}
+
+fn spawn_single_token_full_mirror_server(
+    address: std::net::SocketAddr,
+) -> anyhow::Result<ServerProcess> {
+    let child = winx_server_command()
+        .args(["serve", "--http", "--bind", &address.to_string(), "--token", TEST_TOKEN])
+        .env("WINX_EMBEDDED", "1")
+        .env("WINX_RESULT_TEXT_MIRROR", "full")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    Ok(ServerProcess(child))
+}
+
+fn result_texts(response: &serde_json::Value) -> Vec<String> {
+    response["result"]["content"]
+        .as_array()
+        .map(|content| {
+            content.iter().filter_map(|item| item["text"].as_str().map(str::to_string)).collect()
+        })
+        .unwrap_or_default()
+}
+
+const CHATGPT_POINTER: &str = "Result is in structuredContent.output (status: completed).";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn chatgpt_results_carry_their_text_only_in_structured_content() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) = spawn_server_on_free_port(spawn_single_token_server).await?;
+    let initialized = response_json(
+        &initialize_modern_as(address, TEST_TOKEN, workspace.path(), "chatgpt-wire", "openai-mcp")
+            .await?,
+    )?;
+    assert_eq!(result_texts(&initialized), [CHATGPT_POINTER], "{initialized}");
+    let structured = &initialized["result"]["structuredContent"];
+    assert!(
+        structured["output"].as_str().is_some_and(|output| output.contains("thread_id=")),
+        "{initialized}"
+    );
+    let thread_id = structured["data"]["thread_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Initialize has no data.thread_id: {initialized}"))?
+        .to_string();
+
+    let command = "printf 'winx-%s\\n' alpha beta";
+    let chatgpt =
+        response_json(&bash_as(address, TEST_TOKEN, &thread_id, "openai-mcp", command).await?)?;
+    assert_eq!(chatgpt["result"]["isError"], false, "{chatgpt}");
+    assert_eq!(result_texts(&chatgpt), [CHATGPT_POINTER], "{chatgpt}");
+    let output = chatgpt["result"]["structuredContent"]["output"].as_str().unwrap_or_default();
+    assert!(output.contains("winx-alpha") && output.contains("winx-beta"), "{chatgpt}");
+
+    // Every other client keeps the backwards-compatible text copy.
+    let other = response_json(
+        &bash_as(address, TEST_TOKEN, &thread_id, "long-verification-client", command).await?,
+    )?;
+    let text = result_texts(&other).join("\n");
+    assert!(text.contains("winx-alpha") && text.contains("winx-beta"), "{other}");
+    assert_eq!(other["result"]["structuredContent"]["output"], text.as_str(), "{other}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn full_text_mirror_opt_out_keeps_chatgpt_text_content() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let (address, _server) =
+        spawn_server_on_free_port(spawn_single_token_full_mirror_server).await?;
+    let initialized = initialize_modern_as(
+        address,
+        TEST_TOKEN,
+        workspace.path(),
+        "chatgpt-full-mirror",
+        "openai-mcp",
+    )
+    .await?;
+    let thread_id = initialized_thread_id(&initialized)?;
+    let response = response_json(
+        &bash_as(address, TEST_TOKEN, &thread_id, "openai-mcp", "printf 'winx-full\\n'").await?,
+    )?;
+    let text = result_texts(&response).join("\n");
+    assert!(text.contains("winx-full"), "{response}");
+    assert_eq!(response["result"]["structuredContent"]["output"], text.as_str(), "{response}");
     Ok(())
 }

@@ -317,6 +317,8 @@ Cada ferramenta define um `outputSchema` e retorna um envelope `structuredConten
 }
 ```
 
+Para clientes cujo `clientInfo.name` identifica o ChatGPT (`openai-mcp`, exceto Codex), que só lê `structuredContent`, os blocos de texto viram uma única linha de ponteiro (`Result is in structuredContent.output (status: …).`; em erros, precedida pela `message`), reduzindo à metade o tamanho de resultados grandes. `structuredContent`, imagens e `isError` ficam intactos; os demais clientes mantêm as duas cópias. `WINX_RESULT_TEXT_MIRROR=full` mantém as duas cópias para todos os clientes (padrão: `auto`).
+
 Falhas recuperáveis retornam resposta com sucesso HTTP/JSON-RPC e `isError: true` no protocolo MCP, incluindo a próxima ação corretiva (`nextAction`).
 
 `BashCommand.wait_policy=until_complete` só é válido para um comando finito em foreground. Seu uso com ações de

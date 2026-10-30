@@ -70,13 +70,35 @@ fn disabled() -> bool {
     crate::config::env_flag("WINX_NO_REDACT")
 }
 
+/// Upper bound on full rule sweeps per call. One sweep is the common case; a
+/// second only runs after a match, and real input settles there.
+const MAX_SWEEPS: usize = 4;
+
 /// Scrub credential patterns from `text`. Returns `Cow::Borrowed` (no allocation)
 /// when nothing matched, so the common case is cheap. The `regex` crate is
 /// linear-time, so this is safe on adversarial/large input.
+///
+/// The result is a fixpoint: a marker can complete a match for an earlier rule
+/// (its `[` supplies the trailing `\b` an AWS key lacked when a bearer token
+/// followed it directly), so after any match the rules sweep again until the
+/// text stops changing. Callers can redact once and rely on
+/// `redact(redact(x)) == redact(x)`.
 pub fn redact(text: &str) -> Cow<'_, str> {
     if disabled() || text.is_empty() {
         return Cow::Borrowed(text);
     }
+    let Some(mut owned) = sweep(text) else { return Cow::Borrowed(text) };
+    for _ in 1..MAX_SWEEPS {
+        match sweep(&owned) {
+            Some(next) => owned = next,
+            None => break,
+        }
+    }
+    Cow::Owned(owned)
+}
+
+/// One pass of every rule in order; `None` when nothing matched.
+fn sweep(text: &str) -> Option<String> {
     let mut owned: Option<String> = None;
     for (name, re) in rules() {
         let current: &str = owned.as_deref().unwrap_or(text);
@@ -89,7 +111,7 @@ pub fn redact(text: &str) -> Cow<'_, str> {
             owned = Some(replaced);
         }
     }
-    owned.map_or(Cow::Borrowed(text), Cow::Owned)
+    owned
 }
 
 /// Recursively redact every string inside a JSON value (for `structuredContent`).
@@ -140,6 +162,18 @@ mod tests {
             let twice = redact(&once).into_owned();
             prop_assert_eq!(once, twice);
         }
+    }
+
+    #[test]
+    fn redaction_reaches_a_fixpoint_when_a_marker_completes_a_match() {
+        // The bearer marker supplies the `\b` the AWS key lacked: one sweep
+        // leaves the key behind, so `redact` must sweep again before returning.
+        let line = " AKIAIOSFODNN7EXAMPLEbearer abcdefghijklmnopqrstuvwxyz";
+        let single = sweep(line).unwrap();
+        assert!(single.contains("AKIAIOSFODNN7EXAMPLE"), "{single}");
+        let red = redact(line).into_owned();
+        assert!(!red.contains("AKIAIOSFODNN7EXAMPLE"), "{red}");
+        assert_eq!(redact(&red), red.as_str());
     }
 
     #[test]

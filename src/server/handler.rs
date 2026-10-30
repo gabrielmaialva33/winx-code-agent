@@ -14,11 +14,13 @@ use rmcp::{
 };
 
 use super::catalog::{server_icon_data_uri, winx_prompts, winx_tools, winx_tools_for_policy};
+use super::client_profile::ClientProfile;
 use super::outcomes;
 use super::principal::{
     conversation_identity_from_context, principal_from_context, scope_tool_request,
     session_affinity_from_context, task_belongs_to_principal,
 };
+use super::result_delivery::ResultTextDelivery;
 use super::usage::{EffectiveWaitMode, UsageEvent};
 use super::WinxService;
 use crate::runtime::ShellActionOptions;
@@ -342,6 +344,8 @@ impl ServerHandler for WinxService {
         let effective_tool_policy = principal
             .as_ref()
             .map_or_else(ToolPolicy::default, super::super::config::HttpPrincipal::tool_policy);
+        // Wire shape only: never consulted for authority.
+        let text_delivery = ResultTextDelivery::for_client(ClientProfile::from_context(&context));
 
         // Parse edit arguments once into the typed domain before any capability
         // decision. This avoids policy decisions based on loosely typed/raw
@@ -361,6 +365,7 @@ impl ServerHandler for WinxService {
                         outcomes::tool_failure(request.name.as_ref(), &error, Some(&arguments))?;
                     outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
                     outcomes::finalize_tool_result(&mut result);
+                    text_delivery.apply(&mut result);
                     return Ok(result.into());
                 }
             }
@@ -413,6 +418,7 @@ impl ServerHandler for WinxService {
                         outcomes::tool_failure(request.name.as_ref(), &error, arguments.as_ref())?;
                     outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
                     outcomes::finalize_tool_result(&mut result);
+                    text_delivery.apply(&mut result);
                     scope.unscope_result(&mut result);
                     let status = outcomes::result_status(&result);
                     let response_bytes = outcomes::result_size_bytes(&result);
@@ -463,6 +469,7 @@ impl ServerHandler for WinxService {
                             outcomes::tool_failure("BashCommand", &error, arguments.as_ref())?;
                         outcomes::enforce_next_action_policy(&mut result, effective_tool_policy);
                         outcomes::finalize_tool_result(&mut result);
+                        text_delivery.apply(&mut result);
                         scope.unscope_result(&mut result);
                         let status = outcomes::result_status(&result);
                         let response_bytes = outcomes::result_size_bytes(&result);
@@ -575,6 +582,7 @@ impl ServerHandler for WinxService {
                                 &mut execution.result,
                                 effective_tool_policy,
                             );
+                            text_delivery.apply(&mut execution.result);
                             scope.unscope_result(&mut execution.result);
                             let status = outcomes::result_status(&execution.result);
                             let outcome = if execution.result.is_error == Some(true) {
@@ -631,6 +639,7 @@ impl ServerHandler for WinxService {
                     let guard = phase(Phase::ResponseFinalize);
                     let result = &mut execution.result;
                     outcomes::enforce_next_action_policy(result, effective_tool_policy);
+                    text_delivery.apply(result);
                     scope.unscope_result(result);
                     let status = outcomes::result_status(result);
                     let outcome = if result.is_error == Some(true) { "tool_error" } else { "ok" };

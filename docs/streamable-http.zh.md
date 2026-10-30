@@ -283,6 +283,8 @@ MCP 握手协议定义了确定性的调用序列约束：仅初始化一次、�
 }
 ```
 
+对于 `clientInfo.name` 标识为 ChatGPT 的客户端（`openai-mcp`，Codex 除外），由于它只读取 `structuredContent`，文本内容块会被替换为一行指引（`Result is in structuredContent.output (status: …).`；错误结果会在前面附上 `message`），使大型结果的传输体积减半。`structuredContent`、图片块和 `isError` 保持不变；其他客户端仍保留两份文本。设置 `WINX_RESULT_TEXT_MIRROR=full` 可让所有客户端都保留两份（默认值为 `auto`）。
+
 可恢复的执行失败在 HTTP/JSON-RPC 层面返回成功，而在 MCP 层面设置 `isError: true`，并附带明确的下一步修复动作（`nextAction`）。
 
 `BashCommand.wait_policy=until_complete` 仅适用于有限的前台命令。若用于后台、状态、输入、屏幕或等待操作，

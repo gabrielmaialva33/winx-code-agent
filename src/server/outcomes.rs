@@ -54,7 +54,8 @@ pub(super) struct RequiredRead {
 // clients expose only this object to the model once a tool advertises an
 // `outputSchema` (observed with the ChatGPT MCP connector and Claude Code), so
 // `output` carries the delivered text as well instead of leaving the model
-// with byte counts alone. Doc comments here become `outputSchema`
+// with byte counts alone. For ChatGPT the text blocks then shrink to a pointer
+// (`result_delivery`). Doc comments here become `outputSchema`
 // descriptions repeated for every tool in `tools/list`; keep them short.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -835,6 +836,13 @@ fn content_text(result: &CallToolResult) -> Option<String> {
 /// joined text is redacted once more as a whole, so `output` is never less
 /// redacted than `content` even when a secret straddles two blocks. Idempotent.
 pub(super) fn mirror_text_output(result: &mut CallToolResult) {
+    mirror_text(result, true);
+}
+
+/// `redact_joined = false` is only sound when every text block is already
+/// redacted and there is at most one of them: the joined text is then exactly
+/// that block, and `redact` returns a fixpoint, so another pass cannot change it.
+fn mirror_text(result: &mut CallToolResult, redact_joined: bool) {
     let text = content_text(result);
     let Some(Value::Object(envelope)) = result.structured_content.as_mut() else { return };
     let tool = envelope.get("tool").and_then(Value::as_str).unwrap_or_default();
@@ -844,7 +852,14 @@ pub(super) fn mirror_text_output(result: &mut CallToolResult) {
     }
     match text {
         Some(text) => {
-            let text = crate::utils::redact::redact(&text).into_owned();
+            let text = if redact_joined {
+                match crate::utils::redact::redact(&text) {
+                    std::borrow::Cow::Owned(scrubbed) => scrubbed,
+                    std::borrow::Cow::Borrowed(_) => text,
+                }
+            } else {
+                text
+            };
             envelope.insert("output".to_string(), Value::String(text));
         }
         None => {
@@ -858,7 +873,7 @@ pub(super) fn mirror_text_output(result: &mut CallToolResult) {
 /// duplicate would double the model-visible payload of the largest responses.
 /// Results without symbols keep the mirror, because only the text carries the
 /// diagnostic (an unreadable file, an oversized first result, a failure).
-fn code_map_symbols_are_structured(tool: &str, structured: &Map<String, Value>) -> bool {
+pub(super) fn code_map_symbols_are_structured(tool: &str, structured: &Map<String, Value>) -> bool {
     tool == "CodeMap"
         && ["files", "hits"].iter().any(|key| {
             structured.get(*key).and_then(Value::as_array).is_some_and(|items| !items.is_empty())
@@ -869,9 +884,22 @@ fn code_map_symbols_are_structured(tool: &str, structured: &Map<String, Value>) 
 /// structured payload, then mirror the final text into `structuredContent`.
 /// Every `CallToolResult` that leaves the server passes through here, including
 /// the early returns that bypass the ordinary dispatch pipeline.
+///
+/// Each byte of delivered text is scanned once: the stale `output` copy is
+/// dropped before `redact_json` (it is rebuilt from the redacted blocks), and a
+/// single text block is mirrored as-is because `redact` already returned its
+/// fixpoint. Several blocks are joined and redacted again as a whole, so a
+/// secret straddling two blocks is still scrubbed from `output`.
 pub(super) fn finalize_tool_result(result: &mut CallToolResult) {
+    if let Some(Value::Object(envelope)) = result.structured_content.as_mut() {
+        // Sound only because `mirror_text` always rewrites or removes `output`
+        // for an object envelope.
+        envelope.remove("output");
+    }
+    let mut text_blocks = 0usize;
     for content in &mut result.content {
         if let ContentBlock::Text(text) = content {
+            text_blocks += 1;
             if let std::borrow::Cow::Owned(scrubbed) = crate::utils::redact::redact(&text.text) {
                 text.text = scrubbed;
             }
@@ -880,7 +908,7 @@ pub(super) fn finalize_tool_result(result: &mut CallToolResult) {
     if let Some(structured) = result.structured_content.as_mut() {
         crate::utils::redact::redact_json(structured);
     }
-    mirror_text_output(result);
+    mirror_text(result, text_blocks > 1);
 }
 
 fn bash_success_status(state: &BashCommandState) -> ToolResultStatus {

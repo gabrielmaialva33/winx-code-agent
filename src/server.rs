@@ -13,6 +13,7 @@ mod mutations;
 mod outcomes;
 mod principal;
 mod recovery;
+mod result_delivery;
 mod sessions;
 mod tasks;
 mod tool_dispatch;
