@@ -191,12 +191,14 @@ mod real_runtime {
     #[tokio::test]
     async fn wait_any_returns_changed_execution_and_preserves_nonzero_exit() -> anyhow::Result<()> {
         let session = Session::new().await?;
+        // Take the cursor before launching: on a slow runner the first command
+        // can exit before a later list, and its exit would precede the cursor.
+        let listed = session.call("Execution", json!({ "action": { "type": "list" } })).await?;
+        let cursor = listed["data"]["catalog"]["cursor"].as_str().context("catalog cursor")?;
         let first = session.command("sh -c 'sleep 0.6; exit 3'", true).await?;
         let second = session.command("sh -c 'sleep 1.2; exit 0'", true).await?;
         let first_id = first["data"]["execution_id"].as_str().context("first ID")?;
         let second_id = second["data"]["execution_id"].as_str().context("second ID")?;
-        let listed = session.call("Execution", json!({ "action": { "type": "list" } })).await?;
-        let cursor = listed["data"]["catalog"]["cursor"].as_str().context("catalog cursor")?;
         let waited = session
             .call(
                 "Execution",
