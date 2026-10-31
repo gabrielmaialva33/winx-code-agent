@@ -553,14 +553,11 @@ fn command_args(pane: &str, request: HerdrRequest) -> (Vec<String>, &'static str
             ""
         }
         HerdrAction::Prompt => {
-            // Stop session routing before both positionals. A separator in TEXT's
-            // original argv slot is escaped by Herdr and becomes literal text.
-            let mut text = request.text.unwrap_or_default();
-            // Herdr strips one leading verbatim escape even after `--`.
-            if text.starts_with('\u{1}') {
-                text.insert(0, '\u{1}');
-            }
-            args.extend(["prompt".into(), "--".into(), pane.into(), text]);
+            // Herdr 0.9 reads `agent prompt <target> <text> [options]` with TEXT
+            // as a raw positional: no leading `--` (it would become the target)
+            // and no escaping. `validate_request` rejects the few exact values
+            // Herdr's global argv scanners would consume before it is reached.
+            args.extend(["prompt".into(), pane.into(), request.text.unwrap_or_default()]);
             "agent_prompted"
         }
         HerdrAction::Wait => {
@@ -610,6 +607,12 @@ fn validate_request(request: &HerdrRequest, allow_prompt: bool) -> Result<(), He
                 "prompt must be nonempty, at most 16 KiB and contain no NUL",
             ));
         }
+        if herdr_consumes_argument(text) {
+            return Err(invalid_request(
+                "prompt text equal to a Herdr global option (--session, --remote, --handoff, \
+                 --remote-keybindings, --help, -h) would not be delivered literally; rephrase it",
+            ));
+        }
     }
     if request.lines.is_some_and(|lines| !(1..=1000).contains(&lines)) {
         return Err(invalid_request("lines must be between 1 and 1000"));
@@ -622,6 +625,19 @@ fn validate_request(request: &HerdrRequest, allow_prompt: bool) -> Result<(), He
         ));
     }
     Ok(())
+}
+
+/// Whether Herdr 0.9's process-wide argv scanners (session and remote
+/// selection, help) would consume `argument` wherever it appears, so a prompt
+/// with exactly this text would be rerouted or dropped instead of delivered.
+/// These scanners match whole arguments, so any longer text is passed through.
+fn herdr_consumes_argument(argument: &str) -> bool {
+    matches!(
+        argument,
+        "--session" | "--remote" | "--handoff" | "--remote-keybindings" | "--help" | "-h"
+    ) || ["--session=", "--remote=", "--remote-keybindings="]
+        .iter()
+        .any(|prefix| argument.starts_with(prefix))
 }
 
 fn valid_target(value: &str) -> bool {

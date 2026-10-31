@@ -55,7 +55,7 @@ const REAL_CLI: &str = r"
 foreign={'terminal_id':'terminal-9','agent_status':'idle','workspace_id':'w','tab_id':'t','pane_id':'q','focused':True,'revision':1}
 if a[1]=='list':
     print(json.dumps({'id':'cli:agent:list','result':{'type':'agent_list','agents':[foreign,agent]}}));sys.exit(0)
-target=a[3] if len(a)>3 and a[2]=='--' else (a[2] if len(a)>2 else '')
+target=a[2] if len(a)>2 else ''
 if target not in (agent['pane_id'],foreign['pane_id']):
     print(json.dumps({'id':'cli:agent:'+a[1],'error':{'code':'agent_not_found','message':'agent target '+target+' not found'}}));sys.exit(1)
 ";
@@ -155,7 +155,7 @@ async fn prompt_is_literal_and_session_option_cannot_escape() {
         vec![
             json!(["agent", "list"]),
             json!(["agent", "get", "p"]),
-            json!(["agent", "prompt", "--", "p", text])
+            json!(["agent", "prompt", "p", text])
         ]
     );
 }
@@ -331,51 +331,39 @@ async fn irrelevant_fields_are_rejected_instead_of_silently_ignored() {
     assert_eq!(f.calls(), Vec::<Value>::new());
 }
 
-// This is the relevant external CLI contract, not the adapter's argv builder.
-// Herdr src/session.rs stops routing at `--`; schema/agents.rs declares TEXT as
-// verbatim positional slot 1; cli/projection.rs protects that raw argv slot
-// before passing the operands to Clap. Keep the parser here transport-free.
+// This is the relevant external CLI contract (Herdr v0.9.5), not the adapter's
+// argv builder. main.rs runs session::configure_from_args and
+// remote::extract_remote_args over the whole argv (each stops at `--`, which it
+// keeps), spec::print_requested_help scans for `--help`/`-h`, then
+// cli/agent.rs `agent_prompt` takes args[0] as TARGET and args[1] verbatim as
+// TEXT, parsing only the remaining arguments as options.
 fn parse_herdr_prompt_contract(args: &[String]) -> anyhow::Result<(String, String, bool)> {
     use anyhow::{bail, ensure, Context};
-    use clap::{Arg, ArgAction, Command};
 
-    let mut cleaned = Vec::new();
-    let mut index = 0;
-    while index < args.len() {
-        let token = &args[index];
-        if token == "--" {
-            cleaned.extend_from_slice(&args[index..]);
-            break;
+    for token in args.iter().take_while(|token| token.as_str() != "--") {
+        if matches!(token.as_str(), "--session" | "--remote" | "--handoff" | "--remote-keybindings")
+            || ["--session=", "--remote=", "--remote-keybindings="]
+                .iter()
+                .any(|prefix| token.starts_with(prefix))
+        {
+            bail!("a global Herdr scanner consumed {token:?}");
         }
-        if token == "--session" || token.starts_with("--session=") {
-            bail!("literal prompt selected a different Herdr session");
+    }
+    if let Some(help) = args.iter().position(|arg| matches!(arg.as_str(), "--help" | "-h")) {
+        ensure!(args[..help].iter().any(|arg| arg == "--"), "help would be printed instead");
+    }
+    ensure!(args.first().map(String::as_str) == Some("agent"));
+    ensure!(args.get(1).map(String::as_str) == Some("prompt"));
+    let target = args.get(2).context("prompt target")?.clone();
+    let text = args.get(3).context("prompt text")?.clone();
+    let mut wait = false;
+    for option in &args[4..] {
+        match option.as_str() {
+            "--wait" => wait = true,
+            other => bail!("unknown option: {other}"),
         }
-        cleaned.push(token.clone());
-        index += 1;
     }
-    ensure!(cleaned.first().map(String::as_str) == Some("agent"));
-    ensure!(cleaned.get(1).map(String::as_str) == Some("prompt"));
-    let mut operands: Vec<String> = cleaned.into_iter().skip(2).collect();
-    // The adapter emits no prompt options. Therefore Herdr's verbatim slot is
-    // fixed, including when a caller places `--` where TEXT normally appears.
-    if let Some(text_slot) =
-        operands.get_mut(1).filter(|text| text.starts_with('-') || text.starts_with('\u{1}'))
-    {
-        text_slot.insert(0, '\u{1}');
-    }
-    let matches = Command::new("herdr agent prompt")
-        .args_override_self(true)
-        .arg(Arg::new("target").index(1).required(true))
-        .arg(Arg::new("text").index(2).required(true))
-        .arg(Arg::new("wait").long("wait").action(ArgAction::SetTrue))
-        .arg(Arg::new("until").long("until").action(ArgAction::Append).requires("wait"))
-        .arg(Arg::new("timeout").long("timeout").requires("wait"))
-        .no_binary_name(true)
-        .try_get_matches_from(operands)?;
-    let target = matches.get_one::<String>("target").context("parsed target")?.clone();
-    let text = matches.get_one::<String>("text").context("parsed prompt text")?;
-    let text = text.strip_prefix('\u{1}').unwrap_or(text).to_string();
-    Ok((target, text, matches.get_flag("wait")))
+    Ok((target, text, wait))
 }
 
 #[tokio::test]
@@ -387,16 +375,13 @@ async fn prompt_arguments_preserve_text_through_the_herdr_parser() -> anyhow::Re
     let context = fixture.context();
     for text in [
         "ordinary prompt",
-        "--session=foreign",
-        "--session",
+        "--session foreign is just words",
         "--wait",
         "--until",
         "--timeout=5",
         "--",
-        "-h",
-        "\u{1}leading escape",
-        "\u{1}\u{1}double escape",
-        "\u{1}--session=foreign",
+        "- [ ] markdown task",
+        "\u{1}leading control byte",
         "literal; $(no shell) `no command`\n'\" & | \\",
     ] {
         let mut request = req(HerdrAction::Prompt);
@@ -417,6 +402,32 @@ async fn prompt_arguments_preserve_text_through_the_herdr_parser() -> anyhow::Re
         assert!(!wait, "literal prompt must not enable a CLI wait option");
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn prompts_herdr_would_consume_are_rejected_before_spawn() {
+    let fixture = Fixture::new(NORMAL, BUDGET_MS);
+    for text in [
+        "--session",
+        "--session=foreign",
+        "--remote",
+        "--remote=host",
+        "--handoff",
+        "--remote-keybindings=server",
+        "--help",
+        "-h",
+    ] {
+        let mut request = req(HerdrAction::Prompt);
+        request.text = Some(text.into());
+        assert!(
+            matches!(
+                fixture.adapter().run(&fixture.context(), request).await,
+                Err(HerdrError::InvalidRequest(_))
+            ),
+            "{text}"
+        );
+    }
+    assert_eq!(fixture.calls(), Vec::<Value>::new(), "nothing was spawned");
 }
 
 #[tokio::test]
