@@ -191,20 +191,25 @@ impl HerdrAdapter {
         validate_request(&request, context.allow_prompt)?;
         let deadline = Instant::now() + Duration::from_millis(config.deadline_ms);
         if request.action == HerdrAction::List {
+            // One `agent list` call, filtered to the configured stable IDs in
+            // configuration order. Unconfigured agents never leave this function.
+            let live = config.list(context, deadline).await?;
             let mut agents = Vec::new();
             let mut seen = BTreeSet::new();
             let mut aggregate_bytes = 16;
             for id in binding.targets.values() {
-                if seen.insert(id) {
-                    let agent = config.get(context, id, deadline).await?;
-                    aggregate_bytes += serde_json::to_vec(&agent)
+                if !seen.insert(id) {
+                    continue;
+                }
+                if let Some(agent) = live.iter().find(|agent| agent["terminal_id"] == **id) {
+                    aggregate_bytes += serde_json::to_vec(agent)
                         .map_err(|_| invalid_response("cannot encode agent"))?
                         .len()
                         + 1;
                     if aggregate_bytes > STDOUT_LIMIT {
                         return Err(HerdrError::OutputLimit);
                     }
-                    agents.push(agent);
+                    agents.push(agent.clone());
                 }
             }
             let result = json!({ "agents": agents });
@@ -229,17 +234,14 @@ impl HerdrAdapter {
                 HerdrError::Denied("target is not configured for this principal/workspace".into())
             })?;
 
+        // Every targeted action first verifies the stable ID through `agent get`
+        // on the pane currently hosting it; explain and read return no identity.
+        let (agent, pane) = config.get(context, id, deadline).await?;
         if request.action == HerdrAction::Get {
-            return Ok(json!({ "agent": config.get(context, id, deadline).await? }));
-        }
-        // Explain and read do not return terminal identity. Verify the stable ID
-        // before invoking them, and also before delivering a prompt.
-        if matches!(request.action, HerdrAction::Read | HerdrAction::Explain | HerdrAction::Prompt)
-        {
-            config.get(context, id, deadline).await?;
+            return Ok(json!({ "agent": agent }));
         }
         let action = request.action;
-        let (args, expected_type) = command_args(id, request);
+        let (args, expected_type) = command_args(&pane, request);
         let output =
             execute_cli(config, context, &args, deadline, action == HerdrAction::Prompt).await?;
         parse_output(action, output, id, expected_type)
@@ -325,15 +327,44 @@ impl HerdrConfig {
             .ok_or_else(|| HerdrError::Denied("principal/workspace binding is absent".into()))
     }
 
+    /// Live agents as reported by `agent list`.
+    async fn list(
+        &self,
+        context: &HerdrContext,
+        deadline: Instant,
+    ) -> Result<Vec<Value>, HerdrError> {
+        let args = vec!["agent".into(), "list".into()];
+        let output = execute_cli(self, context, &args, deadline, false).await?;
+        parse_agent_list(&output)
+    }
+
+    /// Resolve and verify a configured stable terminal ID.
+    ///
+    /// Herdr agent commands address a pane ID or a live agent name, never a
+    /// terminal ID, and pane IDs change when a pane moves. The terminal ID is the
+    /// stable handle, so look up the pane hosting it now, then confirm through
+    /// `agent get` on that pane that the same terminal answers. Returns the agent
+    /// and the pane to address follow-up commands to.
     async fn get(
         &self,
         context: &HerdrContext,
         id: &str,
         deadline: Instant,
-    ) -> Result<Value, HerdrError> {
-        let args = vec!["agent".into(), "get".into(), id.into()];
+    ) -> Result<(Value, String), HerdrError> {
+        let pane = self
+            .list(context, deadline)
+            .await?
+            .iter()
+            .find(|agent| agent["terminal_id"] == id)
+            .and_then(|agent| agent["pane_id"].as_str())
+            .filter(|pane| valid_target(pane))
+            .map(str::to_string)
+            .ok_or_else(|| {
+                HerdrError::Unavailable("configured terminal hosts no live agent".into())
+            })?;
+        let args = vec!["agent".into(), "get".into(), pane.clone()];
         let output = execute_cli(self, context, &args, deadline, false).await?;
-        parse_agent(&output, id, "agent_info")
+        Ok((parse_agent(&output, id, "agent_info")?, pane))
     }
 }
 
@@ -435,6 +466,21 @@ async fn read_bounded(
     }
 }
 
+fn parse_agent_list(output: &[u8]) -> Result<Vec<Value>, HerdrError> {
+    let response: Value = serde_json::from_slice(output)
+        .map_err(|_| invalid_response("stdout is not a JSON success envelope"))?;
+    if !response["id"].is_string()
+        || response.get("error").is_some()
+        || response["result"]["type"] != "agent_list"
+    {
+        return Err(invalid_response("unexpected response envelope/type"));
+    }
+    response["result"]["agents"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| invalid_response("agent list is not an array"))
+}
+
 fn parse_agent(output: &[u8], id: &str, expected_type: &str) -> Result<Value, HerdrError> {
     let response: Value = serde_json::from_slice(output)
         .map_err(|_| invalid_response("stdout is not a JSON success envelope"))?;
@@ -485,17 +531,18 @@ fn parse_output(
     }
 }
 
-fn command_args(id: &str, request: HerdrRequest) -> (Vec<String>, &'static str) {
+/// Argv for a targeted action, addressed to the verified hosting `pane`.
+fn command_args(pane: &str, request: HerdrRequest) -> (Vec<String>, &'static str) {
     let mut args = vec!["agent".into()];
     let expected_type = match request.action {
         HerdrAction::Explain => {
-            args.extend(["explain".into(), id.into(), "--json".into()]);
+            args.extend(["explain".into(), pane.into(), "--json".into()]);
             ""
         }
         HerdrAction::Read => {
             args.extend([
                 "read".into(),
-                id.into(),
+                pane.into(),
                 "--source".into(),
                 "recent".into(),
                 "--lines".into(),
@@ -513,13 +560,13 @@ fn command_args(id: &str, request: HerdrRequest) -> (Vec<String>, &'static str) 
             if text.starts_with('\u{1}') {
                 text.insert(0, '\u{1}');
             }
-            args.extend(["prompt".into(), "--".into(), id.into(), text]);
+            args.extend(["prompt".into(), "--".into(), pane.into(), text]);
             "agent_prompted"
         }
         HerdrAction::Wait => {
             args.extend([
                 "wait".into(),
-                id.into(),
+                pane.into(),
                 "--timeout".into(),
                 request.timeout_ms.unwrap_or(1000).to_string(),
             ]);

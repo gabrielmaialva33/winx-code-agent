@@ -380,6 +380,12 @@ limited to 64 KiB stdout and 16 KiB stderr; listing is capped at 32 configured t
 64 KiB total. Read limits default to 100 lines and cap at 1000. The adapter removes inherited
 `HERDR_*` environment variables and sets `HERDR_SOCKET_PATH` from trusted configuration.
 It validates target identity using the configured binding and the CLI response.
+Targets are stable terminal IDs (`terminal_id` in `herdr agent list`). Herdr agent
+commands address panes, not terminals, so each targeted action first resolves the
+configured terminal to the pane hosting it now with `agent list`, verifies it with
+`agent get`, then addresses that pane; a moved pane keeps working and a terminal with
+no live agent fails as unavailable before anything is sent. Terminal IDs do not survive
+a Herdr server restart, so update the configuration after one.
 
 For example, observe the configured target with:
 

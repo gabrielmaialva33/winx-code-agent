@@ -15,10 +15,14 @@ struct Fixture {
 }
 impl Fixture {
     fn new(body: &str, deadline_ms: u64) -> Self {
+        Self::with_setup("", body, deadline_ms)
+    }
+    /// `setup` edits the live `agent` before the shared CLI behaviour runs.
+    fn with_setup(setup: &str, body: &str, deadline_ms: u64) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("herdr-fixture");
         let calls = dir.path().join("calls");
-        let script = format!("#!/usr/bin/env python3\nimport os,sys,json,time\na=sys.argv[1:]\nwith open({},'a') as f: f.write(json.dumps(a)+'\\n')\nassert set(k for k in os.environ if k.startswith('HERDR_'))=={{'HERDR_SOCKET_PATH'}}\nagent={{'terminal_id':'terminal-1','agent_status':'idle','workspace_id':'w','tab_id':'t','pane_id':'p','focused':False,'revision':1}}\n{}\n", serde_json::to_string(&calls.to_string_lossy()).unwrap(), body);
+        let script = format!("#!/usr/bin/env python3\nimport os,sys,json,time\na=sys.argv[1:]\nwith open({},'a') as f: f.write(json.dumps(a)+'\\n')\nassert set(k for k in os.environ if k.startswith('HERDR_'))=={{'HERDR_SOCKET_PATH'}}\nagent={{'terminal_id':'terminal-1','agent_status':'idle','workspace_id':'w','tab_id':'t','pane_id':'p','focused':False,'revision':1}}\n{}\n{}\n{}\n", serde_json::to_string(&calls.to_string_lossy()).unwrap(), setup, REAL_CLI, body);
         fs::write(&exe, script).unwrap();
         fs::set_permissions(&exe, fs::Permissions::from_mode(0o700)).unwrap();
         let config = dir.path().join("operator.json");
@@ -44,8 +48,18 @@ impl Fixture {
             .collect()
     }
 }
+/// Real Herdr CLI behaviour every fixture inherits: `agent list` reports live
+/// agents, and targeted agent commands accept a pane ID or agent name but never a
+/// terminal ID. `FOREIGN` is a live agent the operator did not configure.
+const REAL_CLI: &str = r"
+foreign={'terminal_id':'terminal-9','agent_status':'idle','workspace_id':'w','tab_id':'t','pane_id':'q','focused':True,'revision':1}
+if a[1]=='list':
+    print(json.dumps({'id':'cli:agent:list','result':{'type':'agent_list','agents':[foreign,agent]}}));sys.exit(0)
+target=a[3] if len(a)>3 and a[2]=='--' else (a[2] if len(a)>2 else '')
+if target not in (agent['pane_id'],foreign['pane_id']):
+    print(json.dumps({'id':'cli:agent:'+a[1],'error':{'code':'agent_not_found','message':'agent target '+target+' not found'}}));sys.exit(1)
+";
 const NORMAL: &str = r"
-if a[1]=='list': sys.exit(88)
 if a[1]=='explain': print(json.dumps({'agent':'claude','state':'idle','manifest_source':'builtin'}))
 elif a[1]=='read': print('literal output λ',end='')
 else: print(json.dumps({'id':'x','result':{'type':'agent_prompted' if a[1]=='prompt' else 'agent_info','agent':agent}}))
@@ -86,13 +100,18 @@ async fn disabled_and_binding_denials_never_spawn() {
 }
 
 #[tokio::test]
-async fn list_uses_configured_gets_and_real_cli_shapes_parse() {
+async fn list_filters_configured_agents_and_real_cli_shapes_parse() {
     let f = Fixture::new(NORMAL, BUDGET_MS);
     let a = f.adapter();
     let c = f.context();
     let list = a.run(&c, HerdrRequest::default()).await.unwrap();
-    assert_eq!(list["agents"][0]["terminal_id"], "terminal-1");
-    assert_eq!(f.calls(), vec![json!(["agent", "get", "terminal-1"])]);
+    assert_eq!(
+        list["agents"],
+        json!([{"terminal_id":"terminal-1","agent_status":"idle",
+        "workspace_id":"w","tab_id":"t","pane_id":"p","focused":false,"revision":1}]),
+        "the unconfigured agent is never listed"
+    );
+    assert_eq!(f.calls(), vec![json!(["agent", "list"])]);
     assert_eq!(
         a.run(&c, req(HerdrAction::Get)).await.unwrap()["agent"]["terminal_id"],
         "terminal-1"
@@ -106,22 +125,15 @@ async fn list_uses_configured_gets_and_real_cli_shapes_parse() {
     r.until = vec![HerdrStatus::Idle, HerdrStatus::Done];
     assert!(a.run(&c, r).await.is_ok());
     let calls = f.calls();
-    assert!(calls.contains(&json!(["agent", "explain", "terminal-1", "--json"])));
+    assert!(calls.contains(&json!(["agent", "get", "p"])));
+    assert!(calls.contains(&json!(["agent", "explain", "p", "--json"])));
     assert!(calls.contains(&json!([
-        "agent",
-        "read",
-        "terminal-1",
-        "--source",
-        "recent",
-        "--lines",
-        "17",
-        "--format",
-        "text"
+        "agent", "read", "p", "--source", "recent", "--lines", "17", "--format", "text"
     ])));
     assert!(calls.contains(&json!([
         "agent",
         "wait",
-        "terminal-1",
+        "p",
         "--timeout",
         "123",
         "--until",
@@ -141,8 +153,9 @@ async fn prompt_is_literal_and_session_option_cannot_escape() {
     assert_eq!(
         f.calls(),
         vec![
-            json!(["agent", "get", "terminal-1"]),
-            json!(["agent", "prompt", "--", "terminal-1", text])
+            json!(["agent", "list"]),
+            json!(["agent", "get", "p"]),
+            json!(["agent", "prompt", "--", "p", text])
         ]
     );
 }
@@ -160,7 +173,7 @@ async fn wrong_identity_blocks_read_explain_and_prompt() {
             Err(HerdrError::InvalidResponse(_))
         ));
     }
-    assert!(f.calls().iter().all(|c| c[1] == "get"));
+    assert!(f.calls().iter().all(|c| c[1] == "list" || c[1] == "get"));
 }
 
 #[tokio::test]
@@ -294,7 +307,7 @@ async fn operation_deadline_includes_identity_preflight() {
         f.adapter().run(&f.context(), r).await,
         Err(HerdrError::Timeout { uncertain: true })
     ));
-    assert_eq!(f.calls().len(), 2);
+    assert_eq!(f.calls().len(), 3);
 }
 
 #[tokio::test]
@@ -399,9 +412,28 @@ async fn prompt_arguments_preserve_text_through_the_herdr_parser() -> anyhow::Re
             .map(|argument| argument.as_str().context("string argument").map(str::to_string))
             .collect::<anyhow::Result<_>>()?;
         let (target, parsed_text, wait) = parse_herdr_prompt_contract(&argv)?;
-        assert_eq!(target, "terminal-1");
+        assert_eq!(target, "p", "prompts address the verified hosting pane");
         assert_eq!(parsed_text, text);
         assert!(!wait, "literal prompt must not enable a CLI wait option");
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn stable_terminal_id_follows_its_pane_and_absent_terminal_is_unavailable() {
+    // The pane moved: the configured terminal now lives in pane `moved`.
+    let f = Fixture::with_setup("agent['pane_id']='moved'", NORMAL, BUDGET_MS);
+    let mut r = req(HerdrAction::Read);
+    r.lines = Some(5);
+    assert_eq!(f.adapter().run(&f.context(), r).await.unwrap()["terminal_id"], "terminal-1");
+    assert!(f.calls().contains(&json!(["agent", "get", "moved"])));
+
+    let gone = Fixture::with_setup("agent['terminal_id']='replaced'", NORMAL, BUDGET_MS);
+    let mut r = req(HerdrAction::Prompt);
+    r.text = Some("must not send".into());
+    assert!(matches!(
+        gone.adapter().run(&gone.context(), r).await,
+        Err(HerdrError::Unavailable(_))
+    ));
+    assert_eq!(gone.calls(), vec![json!(["agent", "list"])], "nothing targeted is spawned");
 }
