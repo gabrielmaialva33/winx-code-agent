@@ -118,7 +118,8 @@ pub(super) struct AgentRequest {
     /// Herdr read line limit.
     #[serde(default)]
     pub lines: Option<u32>,
-    /// Herdr lifecycle states; native waits use a receipt or input-ready lifecycle.
+    /// Herdr lifecycle states for wait, or for an atomic Herdr prompt+wait; native waits
+    /// use a receipt or input-ready lifecycle.
     #[serde(default)]
     pub until: Vec<crate::tools::herdr::HerdrStatus>,
 }

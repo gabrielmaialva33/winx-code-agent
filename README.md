@@ -95,7 +95,7 @@ an OpenAI-hosted MCP endpoint.
 - **Agent-native terminal semantics:** foreground and background commands, status polling, interactive input, stable TUI
   snapshots, turn detection, real exit codes, and bounded output.
 - **Execution and agent workflows:** durable scoped history, non-consuming output pages, state explanations, wait-any,
-  and receipt-bound native prompts; an optional Herdr adapter binds explicitly configured targets. See the
+  and receipt-bound native prompts; an optional Herdr socket-API adapter binds explicitly configured targets. See the
   [workflow guide](docs/agent-workflows.md).
 - **Repository tools, not just a shell:** one guarded edit protocol, multi-file planning, undo, token-budgeted reads,
   image input, context handoff, and tree-sitter symbol navigation.

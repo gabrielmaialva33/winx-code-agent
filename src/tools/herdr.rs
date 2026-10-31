@@ -2,26 +2,41 @@
 //!
 //! No action discovers servers or implicitly selects the focused/current terminal.
 //! The public server derives the trusted principal and prompt authority separately.
+//!
+//! The adapter speaks Herdr's socket API: newline-delimited JSON over the Unix
+//! socket named by trusted configuration. Herdr serves exactly one request per
+//! connection, so each request opens its own connection, all bounded by one
+//! operation deadline.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::process::Command;
 use tokio::time::Instant;
 
 const CONFIG_LIMIT: usize = 256 * 1024;
-const STDOUT_LIMIT: usize = 64 * 1024;
-const STDERR_LIMIT: usize = 16 * 1024;
-const ARGV_LIMIT: usize = 32 * 1024;
+const RESPONSE_LIMIT: usize = 64 * 1024;
+/// A maximal prompt with every byte JSON-escaped still fits.
+const REQUEST_LIMIT: usize = 128 * 1024;
 const PROMPT_LIMIT: usize = 16 * 1024;
 const TARGET_LIMIT: usize = 32;
+/// Herdr socket protocol versions whose agent methods this adapter speaks.
+const SUPPORTED_PROTOCOLS: &[u64] = &[22];
+/// `agent.prompt` errors Herdr returns only before any input reaches the pane.
+/// Every other prompt error, including `timeout`, leaves delivery uncertain.
+const PRE_DELIVERY_PROMPT_ERRORS: &[&str] = &[
+    "agent_not_found",
+    "agent_target_ambiguous",
+    "agent_blocked",
+    "agent_not_ready",
+    "empty_agent_prompt",
+    "invalid_request",
+    "unknown_method",
+];
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -45,18 +60,6 @@ pub enum HerdrStatus {
     Unknown,
 }
 
-impl HerdrStatus {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Idle => "idle",
-            Self::Working => "working",
-            Self::Blocked => "blocked",
-            Self::Done => "done",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HerdrRequest {
@@ -64,6 +67,7 @@ pub struct HerdrRequest {
     pub target: Option<String>,
     pub text: Option<String>,
     pub lines: Option<u32>,
+    /// Wait limit; on prompt, it also requests Herdr's atomic submit-and-wait.
     pub timeout_ms: Option<u64>,
     #[serde(default)]
     pub until: Vec<HerdrStatus>,
@@ -88,8 +92,12 @@ pub enum HerdrError {
     Unavailable(String),
     #[error("invalid Herdr request: {0}")]
     InvalidRequest(String),
-    #[error("Herdr command failed: {0}")]
+    #[error("Herdr request failed: {0}")]
     Failed(String),
+    #[error("Herdr agent is blocked and requires interactive input; no input was sent")]
+    AgentBlocked,
+    #[error("Herdr rejected the request ({code}); no input was sent")]
+    Rejected { code: String },
     #[error("invalid Herdr response: {0}")]
     InvalidResponse(String),
     #[error("Herdr output limit exceeded; do not automatically retry prompts")]
@@ -103,7 +111,10 @@ pub enum HerdrError {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HerdrConfig {
-    executable: PathBuf,
+    /// Accepted from configurations written for the former CLI transport and
+    /// still validated when present; the socket transport never runs it.
+    #[serde(default)]
+    executable: Option<PathBuf>,
     socket_path: PathBuf,
     #[serde(default = "default_deadline")]
     deadline_ms: u64,
@@ -133,7 +144,7 @@ impl HerdrAdapter {
     }
 
     /// A configuration hint, not a health probe or a grant of target authority.
-    /// Do not open the configured path or start a process during discovery.
+    /// Do not open the configured path or connect to the socket during discovery.
     pub(crate) fn configuration_hint() -> Value {
         let present = std::env::var_os("WINX_HERDR_CONFIG").is_some();
         json!({
@@ -189,90 +200,73 @@ impl HerdrAdapter {
         let config = self.config.as_ref().ok_or(HerdrError::Disabled)?;
         let binding = config.binding(context)?;
         validate_request(&request, context.allow_prompt)?;
+        // Resolve the alias before connecting: a denied target never reaches Herdr.
+        let id = match request.action {
+            HerdrAction::List => None,
+            _ => Some(binding.resolve(request.target.as_deref())?),
+        };
         let deadline = Instant::now() + Duration::from_millis(config.deadline_ms);
-        if request.action == HerdrAction::List {
-            // One `agent list` call, filtered to the configured stable IDs in
-            // configuration order. Unconfigured agents never leave this function.
-            let live = config.list(context, deadline).await?;
-            let mut agents = Vec::new();
-            let mut seen = BTreeSet::new();
-            let mut aggregate_bytes = 16;
-            for id in binding.targets.values() {
-                if !seen.insert(id) {
-                    continue;
-                }
-                if let Some(agent) = live.iter().find(|agent| agent["terminal_id"] == **id) {
-                    aggregate_bytes += serde_json::to_vec(agent)
-                        .map_err(|_| invalid_response("cannot encode agent"))?
-                        .len()
-                        + 1;
-                    if aggregate_bytes > STDOUT_LIMIT {
-                        return Err(HerdrError::OutputLimit);
-                    }
-                    agents.push(agent.clone());
-                }
-            }
-            let result = json!({ "agents": agents });
-            if serde_json::to_vec(&result)
-                .map_err(|_| invalid_response("cannot encode agents"))?
+        let mut client = Client::connect(&config.socket_path, deadline).await?;
+        let Some(id) = id else {
+            return list_configured(binding, &client.list().await?);
+        };
+
+        // Every targeted action first verifies the stable ID through `agent.get`
+        // on the pane currently hosting it; read and explain return no identity.
+        let (agent, pane) = client.resolve(id).await?;
+        match request.action {
+            HerdrAction::Get => Ok(json!({ "agent": agent })),
+            HerdrAction::Read => client.read(id, &pane, request.lines.unwrap_or(100)).await,
+            HerdrAction::Explain => client.explain(id, &pane).await,
+            HerdrAction::Wait => client.wait(id, &pane, &request).await,
+            HerdrAction::Prompt => client.prompt(id, &pane, request).await,
+            HerdrAction::List => Err(invalid_request("unexpected list action")),
+        }
+    }
+}
+
+/// One `agent.list` result, filtered to the configured stable IDs in
+/// configuration order. Unconfigured agents never leave this function.
+fn list_configured(binding: &Binding, live: &[Value]) -> Result<Value, HerdrError> {
+    let mut agents = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut aggregate_bytes = 16;
+    for id in binding.targets.values() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if let Some(agent) = live.iter().find(|agent| agent["terminal_id"] == **id) {
+            aggregate_bytes += serde_json::to_vec(agent)
+                .map_err(|_| invalid_response("cannot encode agent"))?
                 .len()
-                > STDOUT_LIMIT
-            {
+                + 1;
+            if aggregate_bytes > RESPONSE_LIMIT {
                 return Err(HerdrError::OutputLimit);
             }
-            return Ok(result);
+            agents.push(agent.clone());
         }
-        let target = request
-            .target
-            .as_deref()
-            .ok_or_else(|| invalid_request("an explicit configured target is required"))?;
-        let id = binding
-            .targets
-            .get(target)
-            .or_else(|| binding.targets.values().find(|id| id.as_str() == target))
-            .ok_or_else(|| {
-                HerdrError::Denied("target is not configured for this principal/workspace".into())
-            })?;
-
-        // Every targeted action first verifies the stable ID through `agent get`
-        // on the pane currently hosting it; explain and read return no identity.
-        let (agent, pane) = config.get(context, id, deadline).await?;
-        if request.action == HerdrAction::Get {
-            return Ok(json!({ "agent": agent }));
-        }
-        let action = request.action;
-        let (args, expected_type) = command_args(&pane, request);
-        let output =
-            execute_cli(config, context, &args, deadline, action == HerdrAction::Prompt).await?;
-        parse_output(action, output, id, expected_type)
     }
+    let result = json!({ "agents": agents });
+    if serde_json::to_vec(&result).map_err(|_| invalid_response("cannot encode agents"))?.len()
+        > RESPONSE_LIMIT
+    {
+        return Err(HerdrError::OutputLimit);
+    }
+    Ok(result)
 }
 
 impl HerdrConfig {
     fn validate(&mut self) -> Result<(), HerdrError> {
-        if !self.executable.is_absolute() || !self.socket_path.is_absolute() {
-            return Err(configuration("executable and socket_path must be absolute"));
+        if !self.socket_path.is_absolute() {
+            return Err(configuration("socket_path must be absolute"));
         }
         if self.socket_path.as_os_str().len() > 4096
             || self.socket_path.to_string_lossy().contains('\0')
         {
             return Err(configuration("socket_path is too long or contains NUL"));
         }
-        self.executable = std::fs::canonicalize(&self.executable)
-            .map_err(|_| HerdrError::Unavailable("configured executable does not exist".into()))?;
-        let metadata = std::fs::metadata(&self.executable)
-            .map_err(|_| HerdrError::Unavailable("cannot inspect configured executable".into()))?;
-        if !metadata.is_file() {
-            return Err(HerdrError::Unavailable(
-                "configured executable is not a regular file".into(),
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            if metadata.permissions().mode() & 0o111 == 0 {
-                return Err(HerdrError::Unavailable("configured file is not executable".into()));
-            }
+        if let Some(executable) = &self.executable {
+            validate_executable(executable)?;
         }
         if !(1..=30_000).contains(&self.deadline_ms) {
             return Err(configuration("deadline_ms must be between 1 and 30000"));
@@ -326,33 +320,90 @@ impl HerdrConfig {
             })
             .ok_or_else(|| HerdrError::Denied("principal/workspace binding is absent".into()))
     }
+}
 
-    /// Live agents as reported by `agent list`.
-    async fn list(
-        &self,
-        context: &HerdrContext,
-        deadline: Instant,
-    ) -> Result<Vec<Value>, HerdrError> {
-        let args = vec!["agent".into(), "list".into()];
-        let output = execute_cli(self, context, &args, deadline, false).await?;
-        parse_agent_list(&output)
+fn validate_executable(executable: &Path) -> Result<(), HerdrError> {
+    if !executable.is_absolute() {
+        return Err(configuration("executable must be absolute"));
+    }
+    let executable = std::fs::canonicalize(executable)
+        .map_err(|_| HerdrError::Unavailable("configured executable does not exist".into()))?;
+    let metadata = std::fs::metadata(&executable)
+        .map_err(|_| HerdrError::Unavailable("cannot inspect configured executable".into()))?;
+    if !metadata.is_file() {
+        return Err(HerdrError::Unavailable("configured executable is not a regular file".into()));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return Err(HerdrError::Unavailable("configured file is not executable".into()));
+        }
+    }
+    Ok(())
+}
+
+impl Binding {
+    /// The configured stable terminal ID for an alias or for the ID itself.
+    fn resolve(&self, target: Option<&str>) -> Result<&str, HerdrError> {
+        let target =
+            target.ok_or_else(|| invalid_request("an explicit configured target is required"))?;
+        self.targets
+            .get(target)
+            .or_else(|| self.targets.values().find(|id| id.as_str() == target))
+            .map(String::as_str)
+            .ok_or_else(|| {
+                HerdrError::Denied("target is not configured for this principal/workspace".into())
+            })
+    }
+}
+
+/// Sequential requests against one Herdr server under one operation deadline.
+struct Client<'a> {
+    socket_path: &'a Path,
+    deadline: Instant,
+    nonce: u64,
+    sequence: u64,
+}
+
+impl<'a> Client<'a> {
+    /// Verify the server speaks a supported protocol before any agent request.
+    async fn connect(socket_path: &'a Path, deadline: Instant) -> Result<Self, HerdrError> {
+        let mut client = Self { socket_path, deadline, nonce: rand::random(), sequence: 0 };
+        let pong = client.call("ping", json!({}), false).await?;
+        expect_type(&pong, "pong", false)?;
+        let protocol = pong["protocol"].as_u64();
+        if !protocol.is_some_and(|protocol| SUPPORTED_PROTOCOLS.contains(&protocol)) {
+            let version = pong["version"].as_str().map_or_else(|| "unknown".into(), printable);
+            let protocol = protocol.map_or_else(|| "unknown".into(), |p| p.to_string());
+            return Err(HerdrError::Unavailable(format!(
+                "Herdr {version} speaks socket protocol {protocol}; this adapter supports \
+                 protocol {SUPPORTED_PROTOCOLS:?}"
+            )));
+        }
+        Ok(client)
+    }
+
+    /// Live agents as reported by `agent.list`.
+    async fn list(&mut self) -> Result<Vec<Value>, HerdrError> {
+        let mut result = self.call("agent.list", json!({}), false).await?;
+        expect_type(&result, "agent_list", false)?;
+        match result["agents"].take() {
+            Value::Array(agents) => Ok(agents),
+            _ => Err(invalid_response("agent list is not an array")),
+        }
     }
 
     /// Resolve and verify a configured stable terminal ID.
     ///
-    /// Herdr agent commands address a pane ID or a live agent name, never a
+    /// Herdr agent methods address a pane ID or a live agent name, never a
     /// terminal ID, and pane IDs change when a pane moves. The terminal ID is the
     /// stable handle, so look up the pane hosting it now, then confirm through
-    /// `agent get` on that pane that the same terminal answers. Returns the agent
-    /// and the pane to address follow-up commands to.
-    async fn get(
-        &self,
-        context: &HerdrContext,
-        id: &str,
-        deadline: Instant,
-    ) -> Result<(Value, String), HerdrError> {
+    /// `agent.get` on that pane that the same terminal answers. Returns the agent
+    /// and the pane to address follow-up requests to.
+    async fn resolve(&mut self, id: &str) -> Result<(Value, String), HerdrError> {
         let pane = self
-            .list(context, deadline)
+            .list()
             .await?
             .iter()
             .find(|agent| agent["terminal_id"] == id)
@@ -362,219 +413,272 @@ impl HerdrConfig {
             .ok_or_else(|| {
                 HerdrError::Unavailable("configured terminal hosts no live agent".into())
             })?;
-        let args = vec!["agent".into(), "get".into(), pane.clone()];
-        let output = execute_cli(self, context, &args, deadline, false).await?;
-        Ok((parse_agent(&output, id, "agent_info")?, pane))
+        let result = self.call("agent.get", json!({ "target": pane }), false).await?;
+        Ok((verified_agent(result, id, "agent_info", false)?, pane))
+    }
+
+    async fn read(&mut self, id: &str, pane: &str, lines: u32) -> Result<Value, HerdrError> {
+        let params =
+            json!({ "target": pane, "source": "recent", "lines": lines, "format": "text" });
+        let result = self.call("agent.read", params, false).await?;
+        expect_type(&result, "pane_read", false)?;
+        let read = &result["read"];
+        if read["pane_id"] != pane {
+            return Err(invalid_response("read answered for a different pane"));
+        }
+        let text = read["text"].as_str().ok_or_else(|| invalid_response("read text missing"))?;
+        let truncated = read["truncated"].as_bool().unwrap_or(false);
+        Ok(json!({ "terminal_id": id, "source": "recent", "text": text, "truncated": truncated }))
+    }
+
+    async fn explain(&mut self, id: &str, pane: &str) -> Result<Value, HerdrError> {
+        let mut result = self.call("agent.explain", json!({ "target": pane }), false).await?;
+        expect_type(&result, "agent_explain", false)?;
+        let explain = result["explain"].take();
+        if !explain.is_object() || !explain["state"].is_string() {
+            return Err(invalid_response("explain result is not an explanation object"));
+        }
+        Ok(json!({ "terminal_id": id, "explain": explain }))
+    }
+
+    async fn wait(
+        &mut self,
+        id: &str,
+        pane: &str,
+        request: &HerdrRequest,
+    ) -> Result<Value, HerdrError> {
+        let params = json!({
+            "target": pane,
+            "until": request.until,
+            "timeout_ms": self.wait_budget(request.timeout_ms.unwrap_or(1000)),
+        });
+        let result = self.call("agent.wait", params, false).await?;
+        Ok(json!({ "agent": verified_agent(result, id, "agent_info", false)? }))
+    }
+
+    /// Submit verbatim text; with `until`/`timeout_ms`, Herdr also waits for the
+    /// lifecycle in the same request.
+    async fn prompt(
+        &mut self,
+        id: &str,
+        pane: &str,
+        request: HerdrRequest,
+    ) -> Result<Value, HerdrError> {
+        let mut params = json!({ "target": pane, "text": request.text.unwrap_or_default() });
+        if request.timeout_ms.is_some() || !request.until.is_empty() {
+            let budget = self.deadline.saturating_duration_since(Instant::now()).as_millis();
+            let requested = request.timeout_ms.unwrap_or(u64::try_from(budget).unwrap_or(0));
+            params["wait"] =
+                json!({ "until": request.until, "timeout_ms": self.wait_budget(requested) });
+        }
+        let result = self.call("agent.prompt", params, true).await?;
+        Ok(json!({ "agent": verified_agent(result, id, "agent_prompted", true)? }))
+    }
+
+    /// Cap a server-side wait so Herdr answers before the operation deadline.
+    fn wait_budget(&self, requested_ms: u64) -> u64 {
+        let remaining = self.deadline.saturating_duration_since(Instant::now()).as_millis();
+        let remaining = u64::try_from(remaining).unwrap_or(u64::MAX);
+        let margin = (remaining / 10).clamp(20, 500);
+        requested_ms.min(remaining.saturating_sub(margin)).max(1)
+    }
+
+    /// Send one request and return its `result` object.
+    ///
+    /// `delivers_input` marks a prompt: once its request line is written, any
+    /// failure other than a known pre-delivery rejection is uncertain delivery.
+    async fn call(
+        &mut self,
+        method: &str,
+        params: Value,
+        delivers_input: bool,
+    ) -> Result<Value, HerdrError> {
+        self.sequence += 1;
+        let id = format!("winx:{:016x}:{}", self.nonce, self.sequence);
+        let mut line = serde_json::to_vec(&json!({ "id": id, "method": method, "params": params }))
+            .map_err(|_| invalid_request("cannot encode request"))?;
+        line.push(b'\n');
+        if line.len() > REQUEST_LIMIT {
+            return Err(invalid_request("request exceeds its byte bound"));
+        }
+        let response =
+            transport::exchange(self.socket_path, &line, self.deadline, delivers_input).await?;
+        decode_response(&response, &id, delivers_input)
     }
 }
 
-async fn execute_cli(
-    config: &HerdrConfig,
-    context: &HerdrContext,
-    args: &[String],
-    deadline: Instant,
-    prompt: bool,
-) -> Result<Vec<u8>, HerdrError> {
-    if config.executable.as_os_str().len() + 1 + args.iter().map(|arg| arg.len() + 1).sum::<usize>()
-        > ARGV_LIMIT
-        || args.iter().any(|arg| arg.contains('\0'))
+fn decode_response(bytes: &[u8], id: &str, delivers_input: bool) -> Result<Value, HerdrError> {
+    let uncertain = |error| after_send_error(error, delivers_input);
+    let mut response: Value = serde_json::from_slice(bytes)
+        .map_err(|_| uncertain(invalid_response("response is not JSON")))?;
+    if response["id"].as_str() != Some(id) {
+        return Err(uncertain(invalid_response("response id does not match the request")));
+    }
+    if let Some(error) = response.get("error") {
+        let code = error["code"]
+            .as_str()
+            .ok_or_else(|| uncertain(invalid_response("error response has no code")))?;
+        return Err(remote_error(code, delivers_input));
+    }
+    match response["result"].take() {
+        result @ Value::Object(_) => Ok(result),
+        _ => Err(uncertain(invalid_response("response has no result object"))),
+    }
+}
+
+/// Map a Herdr error code. Herdr messages are not forwarded: they can describe
+/// unconfigured agents (for example ambiguous-target candidates).
+fn remote_error(code: &str, delivers_input: bool) -> HerdrError {
+    let code = if !code.is_empty()
+        && code.len() <= 64
+        && code.bytes().all(|byte| byte.is_ascii_lowercase() || byte == b'_')
     {
-        return Err(invalid_request("argv exceeds its byte bound or contains NUL"));
-    }
-    if Instant::now() >= deadline {
-        return Err(HerdrError::Timeout { uncertain: false });
-    }
-    let mut command = Command::new(&config.executable);
-    command
-        .args(args)
-        .current_dir(&context.workspace_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    // Herdr routing may otherwise inherit session/current-pane/plugin state.
-    for (key, _) in std::env::vars_os() {
-        if key.to_string_lossy().starts_with("HERDR_") {
-            command.env_remove(key);
-        }
-    }
-    command.env("HERDR_SOCKET_PATH", &config.socket_path);
-    let mut child = command
-        .spawn()
-        .map_err(|_| HerdrError::Unavailable("cannot spawn configured executable".into()))?;
-    let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-        return Err(after_spawn_error(
-            HerdrError::Failed("output pipe unavailable".into()),
-            prompt,
-        ));
+        code
+    } else {
+        "unrecognized"
     };
-    let result = tokio::time::timeout_at(deadline, async {
-        tokio::try_join!(
-            async {
-                child
-                    .wait()
-                    .await
-                    .map_err(|_| HerdrError::Failed("cannot wait for subprocess".into()))
-            },
-            read_bounded(stdout, STDOUT_LIMIT),
-            read_bounded(stderr, STDERR_LIMIT)
-        )
-    })
-    .await;
-    match result {
-        Ok(Ok((status, stdout, _stderr))) if status.success() => Ok(stdout),
-        Ok(Ok((status, _, _))) => {
-            if prompt {
-                Err(HerdrError::DeliveryUncertain(format!("CLI exited with {status}")))
-            } else {
-                Err(HerdrError::Failed(format!("CLI exited with {status}")))
-            }
-        }
-        failed => {
-            // Cancellation or a full output pipe must not leave the CLI alive.
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            match failed {
-                Ok(Err(error)) => Err(after_spawn_error(error, prompt)),
-                Err(_) => Err(HerdrError::Timeout { uncertain: prompt }),
-                Ok(Ok(_)) => unreachable!("successful command handled above"),
-            }
-        }
+    if delivers_input && !PRE_DELIVERY_PROMPT_ERRORS.contains(&code) {
+        return HerdrError::DeliveryUncertain(format!("Herdr reported {code}"));
+    }
+    if code == "agent_blocked" {
+        HerdrError::AgentBlocked
+    } else {
+        HerdrError::Rejected { code: code.into() }
     }
 }
 
-async fn read_bounded(
-    mut pipe: impl AsyncRead + Unpin,
-    limit: usize,
-) -> Result<Vec<u8>, HerdrError> {
-    let mut bytes = Vec::new();
-    let mut buffer = [0u8; 4096];
-    loop {
-        let length = pipe
-            .read(&mut buffer)
-            .await
-            .map_err(|_| HerdrError::Failed("cannot read subprocess output".into()))?;
-        if length == 0 {
-            return Ok(bytes);
-        }
-        if bytes.len() + length > limit {
-            return Err(HerdrError::OutputLimit);
-        }
-        bytes.extend_from_slice(&buffer[..length]);
+fn expect_type(result: &Value, expected: &str, delivers_input: bool) -> Result<(), HerdrError> {
+    if result["type"] == expected {
+        Ok(())
+    } else {
+        Err(after_send_error(invalid_response("unexpected result type"), delivers_input))
     }
 }
 
-fn parse_agent_list(output: &[u8]) -> Result<Vec<Value>, HerdrError> {
-    let response: Value = serde_json::from_slice(output)
-        .map_err(|_| invalid_response("stdout is not a JSON success envelope"))?;
-    if !response["id"].is_string()
-        || response.get("error").is_some()
-        || response["result"]["type"] != "agent_list"
-    {
-        return Err(invalid_response("unexpected response envelope/type"));
-    }
-    response["result"]["agents"]
-        .as_array()
-        .cloned()
-        .ok_or_else(|| invalid_response("agent list is not an array"))
-}
-
-fn parse_agent(output: &[u8], id: &str, expected_type: &str) -> Result<Value, HerdrError> {
-    let response: Value = serde_json::from_slice(output)
-        .map_err(|_| invalid_response("stdout is not a JSON success envelope"))?;
-    if !response["id"].is_string()
-        || response.get("error").is_some()
-        || response["result"]["type"] != expected_type
-    {
-        return Err(invalid_response("unexpected response envelope/type"));
-    }
-    let agent = &response["result"]["agent"];
-    if agent["terminal_id"] != id {
-        return Err(invalid_response(
-            "returned terminal identity does not match the configured stable ID",
-        ));
-    }
-    Ok(agent.clone())
-}
-
-fn parse_output(
-    action: HerdrAction,
-    output: Vec<u8>,
+fn verified_agent(
+    mut result: Value,
     id: &str,
     expected_type: &str,
+    delivers_input: bool,
 ) -> Result<Value, HerdrError> {
-    match action {
-        HerdrAction::Read => {
-            let text = String::from_utf8(output)
-                .map_err(|_| invalid_response("read output is not UTF-8"))?;
-            Ok(json!({ "terminal_id": id, "source": "recent", "text": text }))
+    expect_type(&result, expected_type, delivers_input)?;
+    let agent = result["agent"].take();
+    if agent["terminal_id"] != id {
+        return Err(after_send_error(
+            invalid_response("returned terminal identity does not match the configured stable ID"),
+            delivers_input,
+        ));
+    }
+    Ok(agent)
+}
+
+#[cfg(unix)]
+mod transport {
+    use super::{after_send_error, HerdrError, RESPONSE_LIMIT};
+    use std::path::Path;
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+    use tokio::time::{timeout_at, Instant};
+
+    /// One request line in, one bounded response line out, on a fresh connection.
+    pub(super) async fn exchange(
+        socket_path: &Path,
+        line: &[u8],
+        deadline: Instant,
+        delivers_input: bool,
+    ) -> Result<Vec<u8>, HerdrError> {
+        if Instant::now() >= deadline {
+            return Err(HerdrError::Timeout { uncertain: false });
         }
-        HerdrAction::Explain => {
-            let explain: Value = serde_json::from_slice(&output)
-                .map_err(|_| invalid_response("explain output is not JSON"))?;
-            if !explain.is_object()
-                || !explain["state"].is_string()
-                || explain.get("error").is_some()
-            {
-                return Err(invalid_response("explain output is not an explanation object"));
+        check_socket(socket_path)?;
+        let mut stream = match timeout_at(deadline, UnixStream::connect(socket_path)).await {
+            Err(_) => return Err(HerdrError::Timeout { uncertain: false }),
+            Ok(Err(_)) => return Err(unavailable("cannot connect to the configured socket")),
+            Ok(Ok(stream)) => stream,
+        };
+        // The path check above can race a replacement; the peer credential cannot.
+        let peer = stream.peer_cred().map_err(|_| unavailable("cannot verify the socket peer"))?;
+        if peer.uid() != crate::os::unix::effective_uid() {
+            return Err(unavailable("the socket peer is not the current user"));
+        }
+        // Herdr acts only on a complete line, and the newline is the final byte,
+        // so an unfinished write cannot have delivered the request.
+        match timeout_at(deadline, stream.write_all(line)).await {
+            Err(_) => return Err(HerdrError::Timeout { uncertain: false }),
+            Ok(Err(_)) => return Err(HerdrError::Failed("cannot write the request".into())),
+            Ok(Ok(())) => {}
+        }
+        // Keep the write half open: Herdr treats a closed client as cancelling a wait.
+        match timeout_at(deadline, read_line(&mut stream)).await {
+            Err(_) => Err(HerdrError::Timeout { uncertain: delivers_input }),
+            Ok(result) => result.map_err(|error| after_send_error(error, delivers_input)),
+        }
+    }
+
+    /// The configured path must be a private socket owned by the current user.
+    fn check_socket(path: &Path) -> Result<(), HerdrError> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+        let metadata = std::fs::metadata(path)
+            .map_err(|_| unavailable("the configured socket does not exist"))?;
+        if !metadata.file_type().is_socket() {
+            return Err(unavailable("the configured socket_path is not a socket"));
+        }
+        if metadata.uid() != crate::os::unix::effective_uid() {
+            return Err(unavailable("the configured socket is not owned by the current user"));
+        }
+        if metadata.mode() & 0o077 != 0 {
+            return Err(unavailable("the configured socket must be private (mode 0600)"));
+        }
+        Ok(())
+    }
+
+    async fn read_line(stream: &mut (impl AsyncRead + Unpin)) -> Result<Vec<u8>, HerdrError> {
+        let mut bytes = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            let length = stream
+                .read(&mut buffer)
+                .await
+                .map_err(|_| HerdrError::Failed("cannot read the response".into()))?;
+            if length == 0 {
+                return Err(HerdrError::Failed(
+                    "connection closed before a complete response".into(),
+                ));
             }
-            Ok(json!({ "terminal_id": id, "explain": explain }))
+            let chunk = &buffer[..length];
+            let end = chunk.iter().position(|byte| *byte == b'\n');
+            if bytes.len() + end.unwrap_or(length) > RESPONSE_LIMIT {
+                return Err(HerdrError::OutputLimit);
+            }
+            bytes.extend_from_slice(&chunk[..end.unwrap_or(length)]);
+            if end.is_some() {
+                return Ok(bytes);
+            }
         }
-        HerdrAction::Prompt | HerdrAction::Wait => {
-            let agent = parse_agent(&output, id, expected_type)
-                .map_err(|error| after_spawn_error(error, action == HerdrAction::Prompt))?;
-            Ok(json!({ "agent": agent }))
-        }
-        HerdrAction::List | HerdrAction::Get => Err(invalid_request("unexpected response action")),
+    }
+
+    fn unavailable(message: &str) -> HerdrError {
+        HerdrError::Unavailable(message.into())
     }
 }
 
-/// Argv for a targeted action, addressed to the verified hosting `pane`.
-fn command_args(pane: &str, request: HerdrRequest) -> (Vec<String>, &'static str) {
-    let mut args = vec!["agent".into()];
-    let expected_type = match request.action {
-        HerdrAction::Explain => {
-            args.extend(["explain".into(), pane.into(), "--json".into()]);
-            ""
-        }
-        HerdrAction::Read => {
-            args.extend([
-                "read".into(),
-                pane.into(),
-                "--source".into(),
-                "recent".into(),
-                "--lines".into(),
-                request.lines.unwrap_or(100).to_string(),
-                "--format".into(),
-                "text".into(),
-            ]);
-            ""
-        }
-        HerdrAction::Prompt => {
-            // Herdr 0.9 reads `agent prompt <target> <text> [options]` with TEXT
-            // as a raw positional: no leading `--` (it would become the target)
-            // and no escaping. `validate_request` rejects the few exact values
-            // Herdr's global argv scanners would consume before it is reached.
-            args.extend(["prompt".into(), pane.into(), request.text.unwrap_or_default()]);
-            "agent_prompted"
-        }
-        HerdrAction::Wait => {
-            args.extend([
-                "wait".into(),
-                pane.into(),
-                "--timeout".into(),
-                request.timeout_ms.unwrap_or(1000).to_string(),
-            ]);
-            for status in &request.until {
-                args.extend(["--until".into(), status.as_str().into()]);
-            }
-            "agent_info"
-        }
-        HerdrAction::List | HerdrAction::Get => "",
-    };
-    (args, expected_type)
+#[cfg(not(unix))]
+mod transport {
+    use super::HerdrError;
+    use std::path::Path;
+    use tokio::time::Instant;
+
+    // Keeps the Unix transport's async signature for the shared caller.
+    #[allow(clippy::unused_async)]
+    pub(super) async fn exchange(
+        _socket_path: &Path,
+        _line: &[u8],
+        _deadline: Instant,
+        _delivers_input: bool,
+    ) -> Result<Vec<u8>, HerdrError> {
+        Err(HerdrError::Unavailable("the Herdr socket transport requires a Unix socket".into()))
+    }
 }
 
 fn validate_request(request: &HerdrRequest, allow_prompt: bool) -> Result<(), HerdrError> {
@@ -585,11 +689,9 @@ fn validate_request(request: &HerdrRequest, allow_prompt: bool) -> Result<(), He
         return Err(invalid_request("lines is only supported for read"));
     }
     if (request.timeout_ms.is_some() || !request.until.is_empty())
-        && request.action != HerdrAction::Wait
+        && !matches!(request.action, HerdrAction::Wait | HerdrAction::Prompt)
     {
-        return Err(invalid_request(
-            "timeout_ms and until are only supported for wait; prompt is immediate submission",
-        ));
+        return Err(invalid_request("timeout_ms and until are only supported for wait and prompt"));
     }
     if request.action == HerdrAction::List && request.target.is_some() {
         return Err(invalid_request("list does not accept a target"));
@@ -607,12 +709,6 @@ fn validate_request(request: &HerdrRequest, allow_prompt: bool) -> Result<(), He
                 "prompt must be nonempty, at most 16 KiB and contain no NUL",
             ));
         }
-        if herdr_consumes_argument(text) {
-            return Err(invalid_request(
-                "prompt text equal to a Herdr global option (--session, --remote, --handoff, \
-                 --remote-keybindings, --help, -h) would not be delivered literally; rephrase it",
-            ));
-        }
     }
     if request.lines.is_some_and(|lines| !(1..=1000).contains(&lines)) {
         return Err(invalid_request("lines must be between 1 and 1000"));
@@ -627,19 +723,6 @@ fn validate_request(request: &HerdrRequest, allow_prompt: bool) -> Result<(), He
     Ok(())
 }
 
-/// Whether Herdr 0.9's process-wide argv scanners (session and remote
-/// selection, help) would consume `argument` wherever it appears, so a prompt
-/// with exactly this text would be rerouted or dropped instead of delivered.
-/// These scanners match whole arguments, so any longer text is passed through.
-fn herdr_consumes_argument(argument: &str) -> bool {
-    matches!(
-        argument,
-        "--session" | "--remote" | "--handoff" | "--remote-keybindings" | "--help" | "-h"
-    ) || ["--session=", "--remote=", "--remote-keybindings="]
-        .iter()
-        .any(|prefix| argument.starts_with(prefix))
-}
-
 fn valid_target(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 256
@@ -648,6 +731,11 @@ fn valid_target(value: &str) -> bool {
         && value
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b':' | b'.'))
+}
+
+/// A short, printable rendering of server-reported text for diagnostics.
+fn printable(value: &str) -> String {
+    value.chars().filter(char::is_ascii_graphic).take(64).collect()
 }
 fn configuration(message: &str) -> HerdrError {
     HerdrError::Configuration(message.into())
@@ -658,8 +746,8 @@ fn invalid_request(message: &str) -> HerdrError {
 fn invalid_response(message: &str) -> HerdrError {
     HerdrError::InvalidResponse(message.into())
 }
-fn after_spawn_error(error: HerdrError, prompt: bool) -> HerdrError {
-    if prompt {
+fn after_send_error(error: HerdrError, delivers_input: bool) -> HerdrError {
+    if delivers_input {
         HerdrError::DeliveryUncertain(error.to_string())
     } else {
         error

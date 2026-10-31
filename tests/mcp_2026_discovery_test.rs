@@ -50,8 +50,10 @@ fn winx_server_command() -> Command {
     for key in USAGE_LOG_ENV {
         command.env_remove(key);
     }
-    // Result wire shape must not depend on the caller's environment either.
+    // Result wire shape and backend availability must not depend on the
+    // caller's environment either (an operator shell exports WINX_HERDR_CONFIG).
     command.env_remove("WINX_RESULT_TEXT_MIRROR");
+    command.env_remove("WINX_HERDR_CONFIG");
     command
 }
 

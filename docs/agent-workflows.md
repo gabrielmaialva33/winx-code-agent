@@ -318,23 +318,37 @@ sibling-session helpers when runtime protection cannot be established.
 
 ## Optional Herdr backend
 
-Herdr is disabled unless the operator configures an executable, a connection, and target
-bindings for an authenticated principal and canonical workspace. Agents cannot use the
-adapter to select a globally focused terminal. Listing reveals only configured targets.
+Herdr is disabled unless the operator configures a Herdr socket and target bindings for
+an authenticated principal and canonical workspace. Agents cannot use the adapter to
+select a globally focused terminal. Listing reveals only configured targets.
 
 Select `"backend":"herdr"` and an explicit configured target alias for
 `get`, `read`, `explain`, `prompt`, or `wait`. The adapter exposes no server
-startup, agent start, attach, or raw-key operation. It invokes the configured executable
-with literal argument vectors, bounded output, and finite deadlines.
+startup, agent start, attach, or raw-key operation. It speaks Herdr's socket API
+(newline-delimited JSON, one request per connection) with bounded requests and
+responses and one finite operation deadline; it starts no Herdr process.
 
 Herdr `read` returns recent text and accepts a `lines` limit; it does not promise the
 native catalog's retained-output pagination. A successful Herdr prompt acknowledges
 submission; acceptance alone does not establish task completion. Use `get`, `explain`,
-or `wait` to observe the subsequent lifecycle.
+or `wait` to observe the subsequent lifecycle. Prompt `text` travels as a JSON string and
+reaches the agent byte-for-byte, including text that looks like a command-line option.
+
+A prompt that also supplies `until` and/or `timeout_seconds` asks Herdr to submit and wait
+in one request, which avoids the race between a prompt and a separate wait. Success then
+means the agent reached a requested state. A wait timeout after submission is reported
+as uncertain delivery, like any other post-submission failure.
 
 Herdr does not provide native prompt-ID deduplication, so `prompt_id` is rejected for this
-backend. A prompt subprocess timeout is an uncertain outcome, not evidence that no input
-was delivered, and must not trigger an automatic resend.
+backend. Errors Herdr returns before any input reaches the pane (`agent_not_found`,
+`agent_target_ambiguous`, `agent_not_ready`, `empty_agent_prompt`, `invalid_request`)
+are reported as `herdr_rejected` with `herdr_error_code` and `input_sent=false`. A blocked
+agent that needs interactive input is reported as `herdr_agent_blocked` with
+`input_sent=false`. Herdr's error messages are not forwarded. Any other failure after the
+prompt request was written (a timeout, a closed connection, a malformed or oversized
+response, another error code) is `herdr_delivery_uncertain` with
+`input_may_have_been_sent=true`: it is not evidence that no input was delivered and must
+not trigger an automatic resend.
 
 ### Operator configuration
 
@@ -342,8 +356,8 @@ Successful `Initialize` responses, including `type=status`, expose
 `data.agent_backends.herdr`. `configuration_present=false` reports
 `availability=disabled` and `reason=configuration_missing`. Presence of the variable
 reports `availability=unknown` and `reason=configuration_not_validated`: it does not
-prove that the file, executable, server, target or caller's binding is valid.
-This hint performs no configuration-file reads or subprocess calls, never includes
+prove that the file, socket, server, target or caller's binding is valid.
+This hint performs no configuration-file reads or socket connections, never includes
 configuration paths or target identities, and grants no authority. A `herdr_disabled`
 result additionally marks `operator_action_required=true` and `input_sent=false`;
 ask the operator to configure the adapter rather than retrying unchanged requests.
@@ -354,7 +368,6 @@ must be private (mode `0600`); it is limited to 256 KiB and rejects unknown fiel
 
 ```json
 {
-  "executable": "/absolute/path/to/herdr",
   "socket_path": "/absolute/path/to/herdr.sock",
   "deadline_ms": 5000,
   "bindings": [
@@ -369,23 +382,34 @@ must be private (mode `0600`); it is limited to 256 KiB and rejects unknown fiel
 }
 ```
 
-The executable must resolve to an existing executable regular file. The workspace must
-be its canonical absolute path, and the socket path must be absolute. The local principal
-key is `local`; HTTP bindings use `http:<principal-id>`, where the ID is the configured
-`HttpPrincipal.id()` value, not the bearer token or a client-supplied thread ID.
+`socket_path` is Herdr's API socket (`~/.config/herdr/herdr.sock` for the default
+session, `~/.config/herdr/sessions/<name>/herdr.sock` for a named one). Only this
+configured path is used, never `HERDR_SOCKET_PATH`, `HERDR_SESSION` or client input.
+Before connecting, the adapter requires a socket owned by the current user with no group
+or other permissions; after connecting, it requires the peer credential to be the
+current user. Each operation first sends `ping` and continues only when Herdr reports a
+supported socket protocol (currently 22, Herdr 0.9.5). Otherwise it fails as unavailable,
+naming the server version and protocol, before any agent request. The optional `executable`
+field of the former CLI transport is still accepted and validated when present, but never
+run. The socket transport is Unix-only; on Windows the backend reports unavailable.
+
+The workspace must be its canonical absolute path, and the socket path must be absolute.
+The local principal key is `local`; HTTP bindings use `http:<principal-id>`, where the
+ID is the configured `HttpPrincipal.id()` value, not the bearer token or a
+client-supplied thread ID.
 
 `deadline_ms` defaults to 5000 and must be between 1 and 30000. This operation deadline
-also caps Herdr waits; a larger `timeout_seconds` does not extend it. Each subprocess is
-limited to 64 KiB stdout and 16 KiB stderr; listing is capped at 32 configured targets and
-64 KiB total. Read limits default to 100 lines and cap at 1000. The adapter removes inherited
-`HERDR_*` environment variables and sets `HERDR_SOCKET_PATH` from trusted configuration.
-It validates target identity using the configured binding and the CLI response.
+covers every request of one action, including the identity preflight, and also caps
+Herdr waits: a longer `timeout_seconds` is shortened so Herdr answers first. Requests are
+limited to 128 KiB and each response line to 64 KiB; listing is capped at 32 configured
+targets and 64 KiB total. Read limits default to 100 lines and cap at 1000.
 Targets are stable terminal IDs (`terminal_id` in `herdr agent list`). Herdr agent
-commands address panes, not terminals, so each targeted action first resolves the
-configured terminal to the pane hosting it now with `agent list`, verifies it with
-`agent get`, then addresses that pane; a moved pane keeps working and a terminal with
-no live agent fails as unavailable before anything is sent. Terminal IDs do not survive
-a Herdr server restart, so update the configuration after one.
+methods address panes or agent names, not terminals, so each targeted action first
+resolves the configured terminal to the pane hosting it now with `agent.list`, verifies
+it with `agent.get`, then addresses that pane; prompt and wait responses must name the
+same terminal. A moved pane keeps working, and a terminal with no live agent fails as
+unavailable before anything is sent. Terminal IDs do not survive a Herdr server restart,
+so update the configuration after one.
 
 For example, observe the configured target with:
 
@@ -400,10 +424,10 @@ For example, observe the configured target with:
 }
 ```
 
-A Herdr wait can supply `until` with lifecycle states `idle`, `working`, `blocked`,
-`done`, or `unknown`, and a finite `timeout_seconds`. A prompt supplies `text` and
-omits `prompt_id`. Configuration only grants access to existing targets; it does not
-start Herdr or attach a terminal.
+A Herdr wait, or a prompt that waits, can supply `until` with lifecycle states `idle`,
+`working`, `blocked`, `done`, or `unknown`, and a finite `timeout_seconds`. A prompt
+supplies `text` and omits `prompt_id`. Configuration only grants access to existing
+targets; it does not start Herdr or attach a terminal.
 
 ## Usage metrics for plugin workflows
 

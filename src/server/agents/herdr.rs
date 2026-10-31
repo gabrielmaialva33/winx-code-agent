@@ -73,17 +73,19 @@ impl WinxService {
                 &HistoryError::InvalidInput("text is only accepted by prompt".into()),
             );
         }
-        if request.action != AgentOperation::Wait && request.timeout_seconds.is_some() {
-            return history_failure("Agent", &HistoryError::InvalidInput(
-                "Herdr timeout_seconds is a lifecycle wait limit; use a separate wait action after prompt".into(),
-            ));
-        }
-        if request.action != AgentOperation::Wait && !request.until.is_empty() {
+        let waits = matches!(request.action, AgentOperation::Wait | AgentOperation::Prompt);
+        if !waits && (request.timeout_seconds.is_some() || !request.until.is_empty()) {
             return history_failure(
                 "Agent",
-                &HistoryError::InvalidInput("until is only accepted by wait".into()),
+                &HistoryError::InvalidInput(
+                    "Herdr timeout_seconds and until are lifecycle wait limits for wait or prompt"
+                        .into(),
+                ),
             );
         }
+        // A Herdr prompt with either field also waits for the lifecycle atomically.
+        let prompt_waits = request.action == AgentOperation::Prompt
+            && (request.timeout_seconds.is_some() || !request.until.is_empty());
         let timeout = match bounded_timeout(request.timeout_seconds) {
             Ok(timeout) => timeout,
             Err(error) => return history_failure("Agent", &error),
@@ -105,7 +107,7 @@ impl WinxService {
             target: request.target,
             text: request.text,
             lines: request.lines,
-            timeout_ms: (request.action == AgentOperation::Wait)
+            timeout_ms: (request.action == AgentOperation::Wait || prompt_waits)
                 .then(|| u64::try_from(timeout.as_millis()).unwrap_or(30_000)),
             until: request.until,
         };
@@ -113,7 +115,7 @@ impl WinxService {
         let result = run_adapter(&adapter, context, herdr_request, authority).await;
         guard.finish(result.is_ok());
         match result {
-            Ok(value) => herdr_success(action, &value),
+            Ok(value) => herdr_success(action, prompt_waits, &value),
             Err(error) => herdr_failure(&error),
         }
     }
@@ -121,6 +123,7 @@ impl WinxService {
 
 fn herdr_success(
     action: HerdrAction,
+    prompt_waited: bool,
     value: &serde_json::Value,
 ) -> Result<CallToolResult, McpError> {
     let mut data = json!({ "backend": "herdr", "result": value });
@@ -129,7 +132,11 @@ fn herdr_success(
         data["input_sent"] = json!(true);
         data["prompt_correlated"] = json!(false);
         data["automatic_resend_allowed"] = json!(false);
-        "Herdr prompt submitted; completion has not been observed. Use a separate wait action to inspect lifecycle state."
+        if prompt_waited {
+            "Herdr prompt submitted and the agent reached a requested lifecycle state; inspect result.agent before treating the task as complete."
+        } else {
+            "Herdr prompt submitted; completion has not been observed. Use a separate wait action to inspect lifecycle state."
+        }
     } else {
         "Herdr action completed."
     };
@@ -143,6 +150,8 @@ fn herdr_failure(error: &HerdrError) -> Result<CallToolResult, McpError> {
         HerdrError::Denied(_) => (ToolResultStatus::Denied, "herdr_scope_denied"),
         HerdrError::Unavailable(_) => (ToolResultStatus::Failed, "herdr_unavailable"),
         HerdrError::InvalidRequest(_) => (ToolResultStatus::InvalidInput, "invalid_herdr_request"),
+        HerdrError::AgentBlocked => (ToolResultStatus::Failed, "herdr_agent_blocked"),
+        HerdrError::Rejected { .. } => (ToolResultStatus::Failed, "herdr_rejected"),
         HerdrError::InvalidResponse(_) => (ToolResultStatus::Failed, "invalid_herdr_response"),
         HerdrError::OutputLimit => (ToolResultStatus::Failed, "herdr_output_limit"),
         HerdrError::Timeout { uncertain: true } | HerdrError::DeliveryUncertain(_) => {
@@ -156,11 +165,20 @@ fn herdr_failure(error: &HerdrError) -> Result<CallToolResult, McpError> {
         "input_may_have_been_sent": matches!(error, HerdrError::Timeout { uncertain: true } | HerdrError::DeliveryUncertain(_)),
         "automatic_resend_allowed": false,
     });
-    if matches!(error, HerdrError::Disabled) {
-        data["backend_availability"] = json!("disabled");
-        data["operator_action_required"] = json!(true);
-        data["configuration_env"] = json!("WINX_HERDR_CONFIG");
-        data["input_sent"] = json!(false);
+    match error {
+        HerdrError::Disabled => {
+            data["backend_availability"] = json!("disabled");
+            data["operator_action_required"] = json!(true);
+            data["configuration_env"] = json!("WINX_HERDR_CONFIG");
+            data["input_sent"] = json!(false);
+        }
+        // Herdr guarantees these were refused before any input reached the pane.
+        HerdrError::AgentBlocked => data["input_sent"] = json!(false),
+        HerdrError::Rejected { code } => {
+            data["input_sent"] = json!(false);
+            data["herdr_error_code"] = json!(code);
+        }
+        _ => {}
     }
     workflow_envelope("Agent", status, &error.to_string(), Some(code), None, data)
 }
@@ -195,6 +213,7 @@ mod tests {
     fn herdr_prompt_success_confirms_submission_only() -> anyhow::Result<()> {
         let result = herdr_success(
             HerdrAction::Prompt,
+            false,
             &json!({ "agent": { "terminal_id": "terminal-1" } }),
         )?;
         let envelope = result.structured_content.context("envelope")?;
@@ -208,22 +227,39 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn pre_delivery_herdr_rejections_report_input_not_sent() -> anyhow::Result<()> {
+        for (error, code) in [
+            (HerdrError::AgentBlocked, "herdr_agent_blocked"),
+            (HerdrError::Rejected { code: "agent_not_found".into() }, "herdr_rejected"),
+        ] {
+            let result = herdr_failure(&error)?;
+            let envelope = result.structured_content.context("envelope")?;
+            assert_eq!(envelope["status"], "failed");
+            assert_eq!(envelope["errorCode"], code);
+            assert_eq!(envelope["data"]["input_sent"], false);
+            assert_eq!(envelope["data"]["input_may_have_been_sent"], false);
+            assert!(envelope["data"].get("operator_action_required").is_none());
+        }
+        let result = herdr_failure(&HerdrError::Rejected { code: "agent_not_found".into() })?;
+        let envelope = result.structured_content.context("envelope")?;
+        assert_eq!(envelope["data"]["herdr_error_code"], "agent_not_found");
+        Ok(())
+    }
+
     #[tokio::test]
-    async fn stale_herdr_prompt_context_is_denied_before_cli_spawn() -> anyhow::Result<()> {
+    async fn stale_herdr_prompt_context_is_denied_before_connecting() -> anyhow::Result<()> {
         let directory = tempfile::tempdir()?;
         let root = directory.path().canonicalize()?;
-        let executable = root.join("herdr-fixture");
-        let marker = root.join("spawned");
-        fs::write(&executable, format!(
-            "#!/usr/bin/python3\nfrom pathlib import Path\nPath({}).write_text('spawned')\nprint('{{\"id\":\"x\",\"result\":{{\"type\":\"agent_info\",\"agent\":{{\"terminal_id\":\"terminal-1\"}}}}}}')\n",
-            serde_json::to_string(&marker.to_string_lossy())?,
-        ))?;
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700))?;
+        let socket = root.join("herdr.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket)?;
+        listener.set_nonblocking(true)?;
+        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
         let config = root.join("operator.json");
         fs::write(
             &config,
             serde_json::to_vec(&json!({
-                "executable": executable, "socket_path": root.join("fake.sock"), "deadline_ms": 1000,
+                "socket_path": socket, "deadline_ms": 1000,
                 "bindings": [{ "principal_key": "local", "workspace_root": root,
                     "targets": { "writer": "terminal-1" } }],
             }))?,
@@ -265,7 +301,12 @@ mod tests {
                 matches!(result, Err(HerdrError::Denied(_))),
                 "stale {mutation} context must be denied: {result:?}"
             );
-            ensure!(!marker.exists(), "stale {mutation} context spawned an external process");
+            ensure!(
+                listener
+                    .accept()
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
+                "stale {mutation} context connected to Herdr"
+            );
         }
         Ok(())
     }
