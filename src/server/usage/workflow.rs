@@ -21,6 +21,7 @@ pub(super) struct UsageWorkflowResultMetadata {
     pub submission_status: Option<&'static str>,
     pub input_sent: Option<bool>,
     pub input_may_have_been_sent: Option<bool>,
+    pub herdr_error_code: Option<&'static str>,
 }
 
 impl UsageWorkflowRequestMetadata {
@@ -100,6 +101,11 @@ impl UsageWorkflowRequestMetadata {
                 data.and_then(|data| data.get("input_sent")).and_then(Value::as_bool);
             metadata.input_may_have_been_sent =
                 data.and_then(|data| data.get("input_may_have_been_sent")).and_then(Value::as_bool);
+            if self.backend == "herdr" {
+                metadata.herdr_error_code = herdr_error_code(
+                    data.and_then(|data| data.get("herdr_error_code")).and_then(Value::as_str),
+                );
+            }
             if self.backend == "herdr"
                 && self.action == "prompt"
                 && data.and_then(|data| data.get("submission_status")).and_then(Value::as_str)
@@ -110,6 +116,24 @@ impl UsageWorkflowRequestMetadata {
         }
         metadata
     }
+}
+
+/// Herdr's own rejection code as a finite label; anything unexpected is
+/// `other`, so a server cannot write arbitrary strings into telemetry.
+fn herdr_error_code(code: Option<&str>) -> Option<&'static str> {
+    Some(match code? {
+        "agent_not_found" => "agent_not_found",
+        "agent_target_ambiguous" => "agent_target_ambiguous",
+        "agent_blocked" => "agent_blocked",
+        "agent_not_ready" => "agent_not_ready",
+        "agent_not_idle" => "agent_not_idle",
+        "empty_agent_prompt" => "empty_agent_prompt",
+        "invalid_request" => "invalid_request",
+        "unknown_method" => "unknown_method",
+        "timeout" => "timeout",
+        "agent_prompt_failed" => "agent_prompt_failed",
+        _ => "other",
+    })
 }
 
 fn requested_timeout_ms(value: Option<&Value>) -> Option<u64> {

@@ -418,9 +418,18 @@ impl<'a> Client<'a> {
     }
 
     async fn read(&mut self, id: &str, pane: &str, lines: u32) -> Result<Value, HerdrError> {
-        let params =
+        let recent =
             json!({ "target": pane, "source": "recent", "lines": lines, "format": "text" });
-        let result = self.call("agent.read", params, false).await?;
+        let (source, result) = match self.call("agent.read", recent, false).await {
+            // A working full-screen agent's history can only be scrolled out
+            // while idle, so Herdr refuses more lines than its screen holds. The
+            // current screen is still a faithful (shorter) read; say so.
+            Err(HerdrError::Rejected { code }) if code == "agent_not_idle" => {
+                let visible = json!({ "target": pane, "source": "visible", "format": "text" });
+                ("visible", self.call("agent.read", visible, false).await?)
+            }
+            other => ("recent", other?),
+        };
         expect_type(&result, "pane_read", false)?;
         let read = &result["read"];
         if read["pane_id"] != pane {
@@ -428,7 +437,15 @@ impl<'a> Client<'a> {
         }
         let text = read["text"].as_str().ok_or_else(|| invalid_response("read text missing"))?;
         let truncated = read["truncated"].as_bool().unwrap_or(false);
-        Ok(json!({ "terminal_id": id, "source": "recent", "text": text, "truncated": truncated }))
+        let mut response =
+            json!({ "terminal_id": id, "source": source, "text": text, "truncated": truncated });
+        if source == "visible" {
+            response["note"] = json!(
+                "agent is working: only its current screen is readable; read again once it is \
+                 idle for full recent history"
+            );
+        }
+        Ok(response)
     }
 
     async fn explain(&mut self, id: &str, pane: &str) -> Result<Value, HerdrError> {

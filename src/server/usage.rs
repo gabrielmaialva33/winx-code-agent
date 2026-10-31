@@ -749,6 +749,7 @@ impl UsageEvent {
             agent_submission_status = workflow.submission_status,
             agent_input_sent = workflow.input_sent,
             agent_input_may_have_been_sent = workflow.input_may_have_been_sent,
+            herdr_error_code = workflow.herdr_error_code,
             command_kind = self.command_kind,
             ws = %self.ws,
             principal = %self.principal,
@@ -1546,6 +1547,18 @@ pub(super) mod tests {
         assert!(uncertain.get("agent_input_sent").is_none_or(serde_json::Value::is_null));
         assert!(uncertain.get("agent_submission_status").is_none_or(serde_json::Value::is_null));
         assert!(!uncertain.to_string().contains("SECRET-ERROR"));
+        for (code, expected) in [("agent_not_idle", "agent_not_idle"), ("SECRET-CODE", "other")] {
+            let rejected = captured_usage(
+                "Agent",
+                "read",
+                serde_json::json!({
+                    "tool":"Agent", "status":"failed", "errorCode":"herdr_rejected",
+                    "data":{"backend":"herdr", "herdr_error_code":code, "input_sent":false}
+                }),
+            )?;
+            assert_eq!(rejected["herdr_error_code"], expected);
+            assert!(!rejected.to_string().contains("SECRET-CODE"));
+        }
         Ok(())
     }
 

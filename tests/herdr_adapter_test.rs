@@ -574,3 +574,44 @@ async fn rejects_public_config_ambiguous_aliases_and_uncanonical_workspaces() {
     assert!(matches!(HerdrAdapter::from_config_path(&f.config), Err(HerdrError::Configuration(_))));
     assert_eq!(f.connections.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn working_full_screen_agent_read_falls_back_to_its_visible_screen() {
+    // Herdr 0.9.5 refuses `recent` history beyond a working alternate-screen
+    // agent's screen rows (`agent_not_idle`) but serves `visible`.
+    let herdr_real = herdr();
+    let f = Fixture::new(
+        move |request| {
+            let params = &request["params"];
+            if request["method"] == "agent.read" && params["source"] == "recent" {
+                return error("agent_not_idle", "cannot read 200 lines while w1:p1 is working");
+            }
+            if request["method"] == "agent.read" {
+                return ok(json!({"type": "pane_read", "read": {"pane_id": params["target"],
+                    "workspace_id": "w1", "tab_id": "w1:t1", "source": "visible",
+                    "format": "text", "text": "current screen", "revision": 0,
+                    "truncated": false}}));
+            }
+            herdr_real(request)
+        },
+        BUDGET_MS,
+    );
+    let read = f.run(HerdrRequest { lines: Some(200), ..req(HerdrAction::Read) }).await.unwrap();
+    assert_eq!(read["source"], "visible");
+    assert_eq!(read["text"], "current screen");
+    assert!(read["note"].as_str().is_some_and(|note| note.contains("idle")), "{read}");
+    assert_eq!(
+        f.last("agent.read")["params"],
+        json!({"target": "w1:p1", "source": "visible", "format": "text"})
+    );
+    let reads = f.methods().iter().filter(|method| *method == "agent.read").count();
+    assert_eq!(reads, 2, "exactly one recent attempt and one visible fallback");
+
+    // Any other rejection is still reported, not papered over.
+    let other =
+        Fixture::new(herdr_except("agent.read", || error("invalid_request", "bad")), BUDGET_MS);
+    assert!(matches!(
+        other.run(req(HerdrAction::Read)).await,
+        Err(HerdrError::Rejected { code }) if code == "invalid_request"
+    ));
+}

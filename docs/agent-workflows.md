@@ -328,7 +328,10 @@ startup, agent start, attach, or raw-key operation. It speaks Herdr's socket API
 (newline-delimited JSON, one request per connection) with bounded requests and
 responses and one finite operation deadline; it starts no Herdr process.
 
-Herdr `read` returns recent text and accepts a `lines` limit; it does not promise the
+Herdr `read` returns recent text and accepts a `lines` limit. While a full-screen agent
+is working, Herdr cannot scroll out more history than its screen holds and rejects the
+read with `agent_not_idle`; Winx then returns the current screen with `source: "visible"`
+and a `note` to read again once the agent is idle. It does not promise the
 native catalog's retained-output pagination. A successful Herdr prompt acknowledges
 submission; acceptance alone does not establish task completion. Use `get`, `explain`,
 or `wait` to observe the subsequent lifecycle. Prompt `text` travels as a JSON string and
