@@ -164,3 +164,25 @@ pub fn read_files_symbol(input: &[u8]) {
         Err(failure) => debug_assert!(failure.candidates.len() <= 16),
     }
 }
+
+/// Exercise both JSON ingest and checked binary layout, including behind its checksum.
+pub fn call_graph_index(data: &[u8]) {
+    use crate::tools::call_graph::index::GraphIndex;
+    use sha2::{Digest as _, Sha256};
+    let _ = GraphIndex::decode(data);
+    if data.len() > 1024 * 1024 {
+        return;
+    }
+    if data.len() >= 40 {
+        let mut resigned = data.to_vec();
+        let end = resigned.len() - 32;
+        let digest = Sha256::digest(&resigned[..end]);
+        resigned[end..].copy_from_slice(&digest);
+        let _ = GraphIndex::decode(&resigned);
+    }
+    if let Ok(index) = GraphIndex::from_reader(data) {
+        if let Ok(bytes) = index.encode() {
+            debug_assert!(GraphIndex::decode(&bytes).is_ok());
+        }
+    }
+}

@@ -81,3 +81,10 @@ path = "fuzz_targets/cited_code.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "call_graph_index"
+path = "fuzz_targets/call_graph_index.rs"
+test = false
+doc = false
+bench = false

@@ -316,6 +316,42 @@ fn benchmark_symbol_reads(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_call_graph(criterion: &mut Criterion) {
+    use winx_code_agent::tools::call_graph::index::GraphIndex;
+    let functions: Vec<_> = (0..1_000)
+        .map(|id| {
+            serde_json::json!({
+                "id":format!("f{id}"),"name":format!("f{id}"),"line_start":id+1,"line_end":id+1
+            })
+        })
+        .collect();
+    let edges: Vec<_> = (0..999).map(|id| serde_json::json!({
+        "from":format!("f{id}"),"to":format!("f{}",id+1),"edge_type":"call","call_site_line":id+1
+    })).collect();
+    let kb = serde_json::json!({"structure":{"bench.rs":{"functions":functions}},"call_graph":{"edges":edges}}).to_string();
+    let graph = or_abort(GraphIndex::from_reader(kb.as_bytes()));
+    let encoded = or_abort(graph.encode());
+    let directory = or_abort(tempfile::tempdir());
+    let path = directory.path().join("index.wcg");
+    or_abort(std::fs::write(&path, &encoded));
+    let mut group = criterion.benchmark_group("call_graph");
+    group.throughput(Throughput::Bytes(u64::try_from(encoded.len()).unwrap_or(u64::MAX)));
+    group.bench_function("load_1000_symbols", |b| {
+        b.iter(|| {
+            let bytes = or_abort(std::fs::read(black_box(&path)));
+            black_box(or_abort(GraphIndex::decode(&bytes)));
+        });
+    });
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("callers", |b| {
+        b.iter(|| black_box(graph.query(black_box("f500"), true, false, 100)));
+    });
+    group.bench_function("impact", |b| {
+        b.iter(|| black_box(graph.query(black_box("f500"), true, true, 100)));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_thread_ids,
@@ -326,6 +362,7 @@ criterion_group!(
     benchmark_read_files_batch,
     benchmark_execution_history,
     benchmark_tool_catalog,
-    benchmark_symbol_reads
+    benchmark_symbol_reads,
+    benchmark_call_graph
 );
 criterion_main!(benches);

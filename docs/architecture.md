@@ -168,3 +168,83 @@ cargo audit --deny warnings
 Changes to parser inputs should update fuzz targets. Hot-path claims should compile and, when meaningful, update the
 Criterion benchmarks. File changes need success and failure-atomicity coverage; daemon changes need multi-adapter and
 cancellation races; MCP changes need schema plus HTTP integration tests.
+
+## Optional Eulix call graph navigation
+
+`CodeMap` retains its existing `outline` and `references` implementations. On Linux,
+`callers` and `callees` query direct resolved static call edges; `impact` follows reverse
+edges to at most depth 8, 10,000 visited symbols and 1,000 results. The default result
+limit is 100. `name` accepts an exact short name or full Eulix ID. Ambiguous names and
+conditional-compilation variants include all matching definitions. `path` selects the
+starting definitions (a file or directory inside the initialized workspace); neighbors
+can live elsewhere in that workspace. Derived helpers and allowlisted external roots
+use the structured `references` fallback. Exact source remains canonical; Eulix is an
+approximate resolver, not a compiler or a rename/absence oracle.
+
+Build/install the user's compatible Eulix fork separately:
+
+```sh
+cd /path/to/eulix
+cargo install --path eulix-parser --locked
+# Set this in the Winx server's operator environment, then restart that server:
+export WINX_EULIX_PARSER=/absolute/path/to/eulix_parser
+```
+
+An absolute operator-configured executable is preferred. Otherwise Winx searches
+absolute entries of the server's `PATH` for `eulix_parser`. Client parameters and
+workspace configuration cannot select an executable; an executable resolving inside
+the workspace is refused. Missing binaries return `index_status: unavailable` and a
+concrete `next_action` invoking `CodeMap` with `operation: references`. Non-Linux hosts
+return the same fallback with `index_platform_unsupported`; syntax navigation remains
+portable.
+
+Every response reports `index_status` (`fresh`, `stale`, `building`, or `unavailable`),
+`index_age_seconds` (null before the first complete build), `snapshot_hash`,
+`parser_version`, and `index_error` when applicable. `graph_hits` carries definition
+file/line/end-line plus caller-owned `call_site_file` / `call_site_line` and traversal
+depth. A building response may carry the previous generation. Freshness is checked in
+the background at most once a second; it reflects the last completed check, not a
+transactional snapshot of files being edited. Poll a graph operation after the build
+finishes, or use the supplied references action in the meantime.
+
+Winx spawns the parser directly without a shell, clears its inherited environment,
+closes stdin and discards stdout/stderr. It probes `--version` with a two-second limit;
+parsing has a 120-second limit, four Rayon workers, and a four-CPU child affinity mask
+that also bounds the current fork's independent discovery pool. Only one parser build
+runs per Winx process. A directory advisory lock prevents duplicate builds of the same
+workspace across processes. Requests schedule the work and return the available
+cached generation; they never wait for a parser. Rebuild attempts are debounced for
+two seconds. A changed source snapshot during parsing prevents publication. Merge or
+rebase markers defer rebuilding.
+
+This backend executes an operator-trusted program and writes private artifacts under
+`.winx/index/eulix/`, including in read-only navigation modes. Ignore `.winx/` in Git.
+Linux directory-relative, no-follow opens pin storage against symlink replacement;
+a complete checksummed generation is atomically renamed to `index.wcg`. Parser KB,
+sidecars and spill files live in a private per-build directory and are removed after
+success or failure. Existing path/session/tool policies still apply. The parser's
+current CLI disables gitignore; Winx explicitly excludes `.winx` and `.git`, and filters
+returned provenance through its own current gitignore-aware workspace inventory.
+The trusted parser may read additional files inside the workspace; do not configure an
+untrusted executable. The backend does not provide a new OS sandbox for that program.
+
+Conversion streams the KB and graph sidecar with Serde visitors, discarding unused AST
+fields instead of building a JSON DOM. The Winx format has interned strings, u32 symbol
+IDs, file ranges, name lookups and bidirectional CSR adjacency. Its safe decoder checks
+version, checksum, lengths, IDs, paths, sorted rows and reverse-edge consistency.
+Limits are 512 MiB per JSON artifact, 128 MiB compact files, 64 MiB interned strings,
+1,000,000 symbols and 4,000,000 edges. The per-process decoded cache uses an estimated
+64 MiB budget and at most 16 workspace entries, keyed by canonical workspace plus
+file size/mtime and format version. Freshness includes Git HEAD, dirty/untracked file
+content hashes and parser identity; non-Git directories use file size/mtime. Git dirty
+hashing is capped at 20,000 files / 256 MiB. Oversize, corrupt, busy, or unsafe input
+returns a structured reason and fallback. Limits are refusals, not silent partial
+indexes. The batch CLI has no incremental call-graph mode; refreshes currently rebuild
+the full graph. See `examples/call_graph_metrics.rs` and the `call_graph` Criterion group
+for reproducible conversion/load/query measurements.
+
+The backend inherits any Landlock domain already applied to the Winx process; it
+never disables it or adds filesystem grants. Parser and Git subprocesses get their
+own process group; timeout handling kills and reaps the leader and signals the whole
+group. Graph query workers have a 75 ms observation deadline and return a structured
+references fallback when that budget is exhausted.
