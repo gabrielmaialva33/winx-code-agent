@@ -476,6 +476,59 @@ any file and with a concrete `ReadFiles` recovery action. Batched reads run file
 parallel pool (`WINX_READ_PARALLELISM`, default `4`, maximum `32`) but publish results and read coverage in request order.
 MCP Task results retain the same envelope.
 
+### ReadFiles symbol selectors
+
+`ReadFiles.file_paths` accepts `src/tools/read_files.rs#handle_tool_call`,
+`src/server.rs#WinxService::method`, or `parser.py#Parser.parse`. Selectors use the same
+bundled tree-sitter languages and definition queries as CodeMap. Both `::` and `.`
+separate owners; an unqualified name includes every matching definition in that file.
+Owner suffixes such as `Parser.parse` may match a module-qualified definition. This is
+syntax navigation, not type resolution or language-server symbol identity.
+
+Winx resolves a definition's complete line range, including directly attached doc
+comments, attributes and decorators, and reads it through the normal ReadFiles
+pipeline. Blank lines detach leading comments; ordinary unrelated comments and a
+preceding item's trailing comment are excluded. Source, revision hashing, resolution,
+and rendering all use one immutable bounded snapshot. The returned canonical path,
+revision and visible ranges can be used immediately in `EditFiles mode=line_patch`;
+no additional read is needed for a visible line. Unseen, truncated or stale lines keep
+the existing edit guard.
+
+```json
+{
+  "file_paths": ["src/tools/read_files.rs#handle_tool_call", "parser.py#Parser.parse"],
+  "thread_id": "<the initialized thread>",
+  "workspace_root": "<the initialized workspace>"
+}
+```
+
+Precedence preserves existing range parsing: `file#name:2-4` reads numeric lines from
+that literal cleaned filename if it exists. A literal existing `file#name` wins over
+a selector with the same spelling. Otherwise the last `#` separates path and symbol,
+so `part#one.py#parse` selects `parse` in `part#one.py`. A nonliteral selector combined
+with a numeric range is rejected. The ordinary `path:range` parser is unchanged.
+
+At most eight definitions are returned, in source order, as separate normal receipts;
+coverage never spans the unseen gaps between definitions. More matches return
+`errorCode: symbol_ambiguous`, up to 16 candidate objects (`name`, `qualifiedName`,
+`startLine`, `endLine`), and `candidatesTruncated` when needed. Other failures report
+`symbol_not_found`, `symbol_language_unsupported`, `symbol_parse_failed`,
+`symbol_invalid_selector`, `symbol_source_too_large`, or `symbol_resolution_budget`.
+The structured `data.reason` and per-file `data.symbol_errors` identify the failure;
+`nextAction` contains an exact selector-free `ReadFiles` request preserving session
+identity. Following it is an explicit caller decision: failed selectors never dump
+source or create read coverage. Mixed batches preserve successful content and receipts.
+
+Symbol reads retain the per-file and per-call byte/token budgets, truncation,
+continuations, redaction, and optional unchanged compaction. Deferred matches are
+reported as exact numeric ranges. An explicit numeric bounded range still retains
+its existing per-file-cap exemption. Resolution accepts source snapshots up to
+2,000,000 bytes, selectors/qualified names up to 1,024 bytes, at most 128 owner levels,
+and a 100 ms parse/query/metadata deadline after cached grammar-query initialization.
+Malformed syntax fails closed. Only grammar queries are cached; resolved spans are
+recomputed from the current snapshot on every call. Workspace/allowlist, session and
+mode policies remain the same as plain reads. No external parser or service is used.
+
 ## Guardian lifecycle
 
 `winxd` enforces lifecycle across every adapter connected to the same control socket.

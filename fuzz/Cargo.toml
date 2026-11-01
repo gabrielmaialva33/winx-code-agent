@@ -67,3 +67,10 @@ path = "fuzz_targets/agent_resume.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "read_files_symbol"
+path = "fuzz_targets/read_files_symbol.rs"
+test = false
+doc = false
+bench = false

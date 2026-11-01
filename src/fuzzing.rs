@@ -131,3 +131,36 @@ fn check_recovery_advice(record: &crate::state::agent_resume::AgentSessionRecord
         }
     }
 }
+
+/// Exercise selector/range deserialization and exact AST span resolution without I/O.
+pub fn read_files_symbol(input: &[u8]) {
+    use crate::utils::symbols::definitions::{resolve, MAX_MATCHES};
+    if input.len() > 64 * 1024 {
+        return;
+    }
+    let mut fields = input.splitn(3, |byte| *byte == 0);
+    let (Some(ext), Some(selector), Some(source)) = (fields.next(), fields.next(), fields.next())
+    else {
+        return;
+    };
+    let (Ok(ext), Ok(selector), Ok(source)) =
+        (std::str::from_utf8(ext), std::str::from_utf8(selector), std::str::from_utf8(source))
+    else {
+        return;
+    };
+    let value = serde_json::json!({"file_paths":[format!("fixture.{ext}#{selector}")]});
+    if let Ok(request) = serde_json::from_value::<crate::types::ReadFiles>(value) {
+        debug_assert_eq!(request.file_paths.len(), 1);
+        let _ = request.get_clean_path(0);
+    }
+    match resolve(ext, source, selector) {
+        Ok(ranges) => {
+            debug_assert!(!ranges.is_empty() && ranges.len() <= MAX_MATCHES);
+            for range in ranges {
+                debug_assert!(range.start_line > 0 && range.start_line <= range.end_line);
+                debug_assert!(range.end_line <= source.lines().count());
+            }
+        }
+        Err(failure) => debug_assert!(failure.candidates.len() <= 16),
+    }
+}

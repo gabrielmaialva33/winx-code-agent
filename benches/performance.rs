@@ -277,6 +277,45 @@ fn benchmark_tool_catalog(criterion: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_symbol_reads(criterion: &mut Criterion) {
+    use winx_code_agent::config::ReadResponseBudget;
+    use winx_code_agent::utils::symbols::definitions::resolve;
+    let source = generated_lines(1_000, |out, id| {
+        let _ = writeln!(out, "pub fn symbol_{id}() -> usize {{ {id} }}");
+    });
+    let directory = or_abort(tempfile::tempdir());
+    let root = or_abort(directory.path().canonicalize());
+    or_abort(std::fs::write(root.join("symbols.rs"), &source));
+    std::env::set_var("XDG_DATA_HOME", root.join("xdg"));
+    let mut state = BashState::new();
+    state.cwd.clone_from(&root);
+    state.workspace_root = root;
+    let state = Arc::new(Mutex::new(Some(state)));
+    let runtime = or_abort(tokio::runtime::Builder::new_current_thread().enable_all().build());
+    let budget = ReadResponseBudget::parse(Some("262144"), Some("262144"), Some("0"));
+    let mut group = criterion.benchmark_group("read_files_symbol");
+    group.bench_function("resolve_1000_definitions", |b| {
+        b.iter(|| black_box(or_abort(resolve("rs", black_box(&source), "symbol_500"))));
+    });
+    for (name, path) in [("whole_file", "symbols.rs"), ("one_symbol", "symbols.rs#symbol_500")] {
+        let request: ReadFiles =
+            or_abort(serde_json::from_value(serde_json::json!({"file_paths":[path],"force":true})));
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let result = or_abort(runtime.block_on(
+                    winx_code_agent::tools::read_files::handle_tool_call_with_budget(
+                        &state,
+                        request.clone(),
+                        budget,
+                    ),
+                ));
+                black_box(result.text.len());
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_thread_ids,
@@ -286,6 +325,7 @@ criterion_group!(
     benchmark_output_compression,
     benchmark_read_files_batch,
     benchmark_execution_history,
-    benchmark_tool_catalog
+    benchmark_tool_catalog,
+    benchmark_symbol_reads
 );
 criterion_main!(benches);
