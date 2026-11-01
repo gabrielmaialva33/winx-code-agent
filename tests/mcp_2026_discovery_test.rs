@@ -4549,6 +4549,7 @@ async fn http_conversation_affinity_separates_parallel_sessions() -> anyhow::Res
     let workspace = tempfile::tempdir()?;
     let nested = workspace.path().join("conversation-a-cwd");
     std::fs::create_dir_all(&nested)?;
+    let nested = nested.canonicalize()?;
 
     let (address, _server) = spawn_server_on_free_port(|address| {
         spawn_single_token_server_with_affinity(address, "conversation")
@@ -4589,7 +4590,10 @@ async fn http_conversation_affinity_separates_parallel_sessions() -> anyhow::Res
     let parallel_thread = initialized_thread_id(&parallel)?;
     assert_ne!(first_thread, parallel_thread);
     let parallel_pwd = pwd_as(address, TEST_TOKEN, &parallel_thread, "conversation-b-pwd").await?;
-    assert!(parallel_pwd.contains(&workspace.path().display().to_string()), "{parallel_pwd}");
+    assert!(
+        parallel_pwd.contains(&workspace.path().canonicalize()?.display().to_string()),
+        "{parallel_pwd}"
+    );
     assert!(!parallel_pwd.contains(&nested.display().to_string()), "{parallel_pwd}");
 
     let resumed = initialize_modern_with_session_as(
@@ -4680,8 +4684,8 @@ async fn http_principals_isolate_the_same_external_thread_id() -> anyhow::Result
 
     let left_pwd = pwd_as(address, LEFT_TOKEN, shared_thread, "left-client").await?;
     let right_pwd = pwd_as(address, RIGHT_TOKEN, shared_thread, "right-client").await?;
-    let left_path = left_workspace.path().display().to_string();
-    let right_path = right_workspace.path().display().to_string();
+    let left_path = left_workspace.path().canonicalize()?.display().to_string();
+    let right_path = right_workspace.path().canonicalize()?.display().to_string();
     assert!(left_pwd.contains(&left_path), "left principal lost its workspace: {left_pwd}");
     assert!(!left_pwd.contains(&right_path), "left principal reached right workspace: {left_pwd}");
     assert!(right_pwd.contains(&right_path), "right principal lost its workspace: {right_pwd}");
@@ -4924,7 +4928,7 @@ async fn status_probe_reports_the_bound_session_without_mutating_it() -> anyhow:
     // The probe left the session untouched: the same pair keeps working.
     let pwd = pwd_as(address, TEST_TOKEN, &thread_id, "status-seed").await?;
     assert!(pwd.starts_with("HTTP/1.1 200"), "{pwd}");
-    assert!(pwd.contains(&workspace.path().display().to_string()), "{pwd}");
+    assert!(pwd.contains(&workspace.path().canonicalize()?.display().to_string()), "{pwd}");
     Ok(())
 }
 
