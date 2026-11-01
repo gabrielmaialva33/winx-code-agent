@@ -312,7 +312,9 @@ src/main.rs:0:zero line";
     #[test]
     fn absolute_and_dot_relative_paths_resolve() {
         let (_dir, root) = workspace();
-        let absolute = format!("{}:5:x", root.join("app.py").display());
+        // Tools print plain absolute paths, never Windows' verbatim `\\?\` form.
+        let printed = crate::utils::path::simplified(root.join("app.py"));
+        let absolute = format!("{}:5:x", printed.display());
         assert_eq!(read_specs(&absolute, &root), Some(vec![spec(&root, "app.py", 1, 13)]));
         assert_eq!(read_specs("./app.py:5:x", &root), Some(vec![spec(&root, "app.py", 1, 13)]));
     }
