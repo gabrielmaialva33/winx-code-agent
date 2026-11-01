@@ -40,7 +40,20 @@ struct Fixture {
 
 impl Fixture {
     fn new(script: impl Fn(&Value) -> Reply + Send + Sync + 'static, deadline_ms: u64) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        Self::serving(tempfile::tempdir().unwrap(), script, |socket, root| {
+            json!({"socket_path": socket, "deadline_ms": deadline_ms,
+                "bindings": [{"principal_key": "local", "workspace_root": root,
+                    "targets": {"writer": "terminal-1"}}]})
+        })
+    }
+
+    /// Serve `script` on a private socket in `dir`, under the configuration
+    /// `config` builds from that socket and the canonical `dir`.
+    fn serving(
+        dir: TempDir,
+        script: impl Fn(&Value) -> Reply + Send + Sync + 'static,
+        config: impl FnOnce(&PathBuf, &PathBuf) -> Value,
+    ) -> Self {
         let socket = dir.path().join("herdr.sock");
         let listener = UnixListener::bind(&socket).unwrap();
         fs::set_permissions(&socket, fs::Permissions::from_mode(0o600)).unwrap();
@@ -55,18 +68,11 @@ impl Fixture {
                 tokio::spawn(async move { serve(stream, &log, &*script).await });
             }
         });
-        let config = dir.path().join("operator.json");
+        let path = dir.path().join("operator.json");
         let root = fs::canonicalize(dir.path()).unwrap();
-        fs::write(
-            &config,
-            serde_json::to_vec(&json!({"socket_path": socket, "deadline_ms": deadline_ms,
-                "bindings": [{"principal_key": "local", "workspace_root": root,
-                    "targets": {"writer": "terminal-1"}}]}))
-            .unwrap(),
-        )
-        .unwrap();
-        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
-        Self { dir, config, socket, requests, connections }
+        fs::write(&path, serde_json::to_vec(&config(&socket, &root)).unwrap()).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        Self { dir, config: path, socket, requests, connections }
     }
     fn adapter(&self) -> HerdrAdapter {
         HerdrAdapter::from_config_path(&self.config).unwrap()
@@ -632,4 +638,212 @@ async fn working_full_screen_agent_read_falls_back_to_its_visible_screen() {
         other.run(req(HerdrAction::Read)).await,
         Err(HerdrError::Rejected { code }) if code == "invalid_request"
     ));
+}
+
+/// A discovering binding over `<tmp>/projects`, used from the session
+/// workspace `<tmp>/projects/app`, against live agents in and around it.
+struct Discovery {
+    fixture: Fixture,
+    workspace: PathBuf,
+}
+
+/// What `agent.list` reports, and what targeted methods answer from.
+type Fleet = (Vec<Value>, Vec<Value>);
+
+impl Discovery {
+    fn new(agents: impl FnOnce(&Projects) -> Fleet) -> Self {
+        Self::with_binding(agents, |root| {
+            json!({"principal_key": "local", "workspace_root": root,
+                "discover_workspace_agents": true})
+        })
+    }
+
+    fn with_binding(
+        agents: impl FnOnce(&Projects) -> Fleet,
+        binding: impl FnOnce(&PathBuf) -> Value,
+    ) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let projects = Projects(fs::canonicalize(dir.path()).unwrap().join("projects"));
+        for sub in ["app/sub", "other"] {
+            fs::create_dir_all(projects.0.join(sub)).unwrap();
+        }
+        let (listed, current) = agents(&projects);
+        let fixture = Fixture::serving(dir, fleet(listed, current), |socket, _| {
+            json!({"socket_path": socket, "deadline_ms": BUDGET_MS,
+                "bindings": [binding(&projects.0)]})
+        });
+        Self { fixture, workspace: projects.0.join("app") }
+    }
+
+    async fn run(&self, request: HerdrRequest) -> Result<Value, HerdrError> {
+        let context = HerdrContext {
+            principal_key: "local".into(),
+            workspace_root: self.workspace.clone(),
+            allow_prompt: true,
+        };
+        self.fixture.adapter().run(&context, request).await
+    }
+}
+
+struct Projects(PathBuf);
+
+impl Projects {
+    fn path(&self, relative: &str) -> String {
+        self.0.join(relative).to_string_lossy().into_owned()
+    }
+}
+
+fn live(terminal: &str, name: &str, pane: &str, cwd: Option<String>) -> Value {
+    let mut agent = json!({"terminal_id": terminal, "agent": name, "agent_status": "idle",
+        "workspace_id": "w5", "tab_id": "w5:t1", "pane_id": pane, "focused": false,
+        "state_change_seq": 1});
+    if let Some(cwd) = cwd {
+        agent["cwd"] = json!(cwd);
+    }
+    agent
+}
+
+/// Herdr over a fleet: `agent.list` reports `listed`, while targeted methods
+/// answer from `current`, which can differ to model a pane that moved.
+fn fleet(listed: Vec<Value>, current: Vec<Value>) -> impl Fn(&Value) -> Reply + Send + Sync {
+    move |request| {
+        let method = request["method"].as_str().unwrap();
+        match method {
+            "ping" => return ok(json!({"type": "pong", "version": "0.9.5", "protocol": 22})),
+            "agent.list" => return ok(json!({"type": "agent_list", "agents": listed.clone()})),
+            _ => {}
+        }
+        let Some(found) = current.iter().find(|a| a["pane_id"] == request["params"]["target"])
+        else {
+            return error("agent_not_found", "agent target not found");
+        };
+        match method {
+            "agent.get" | "agent.wait" => ok(json!({"type": "agent_info", "agent": found})),
+            "agent.prompt" => ok(json!({"type": "agent_prompted", "agent": found})),
+            _ => error("invalid_request", "unknown method"),
+        }
+    }
+}
+
+fn target(action: HerdrAction, target: &str) -> HerdrRequest {
+    HerdrRequest { action, target: Some(target.into()), ..Default::default() }
+}
+
+/// In-workspace agents (one in a subdirectory) plus agents that must stay
+/// invisible: another project, a `..` escape, and one with no reported cwd.
+fn mixed_fleet(d: &Projects) -> Vec<Value> {
+    vec![
+        live("t-app-claude", "claude", "w5:p1", Some(d.path("app/sub"))),
+        live("t-app-codex", "codex", "w5:p2", Some(d.path("app"))),
+        live("t-other-claude", "claude", "w6:p1", Some(d.path("other"))),
+        live("t-escape", "codex", "w6:p2", Some(d.path("app/../other"))),
+        live("t-nowhere", "codex", "w6:p3", None),
+    ]
+}
+
+#[tokio::test]
+async fn discovery_lists_only_agents_running_inside_the_workspace() {
+    let d = Discovery::new(|d| (mixed_fleet(d), mixed_fleet(d)));
+    let list = d.run(HerdrRequest::default()).await.unwrap();
+    let ids: Vec<&str> = list["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["terminal_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["t-app-claude", "t-app-codex"]);
+}
+
+#[tokio::test]
+async fn discovery_resolves_names_ids_and_panes_within_the_workspace_only() {
+    let d = Discovery::new(|d| (mixed_fleet(d), mixed_fleet(d)));
+    // Names are unique within the workspace even though another project has a claude.
+    let claude = d.run(target(HerdrAction::Get, "claude")).await.unwrap();
+    assert_eq!(claude["agent"]["terminal_id"], "t-app-claude");
+    let codex = d.run(target(HerdrAction::Get, "codex")).await.unwrap();
+    assert_eq!(codex["agent"]["terminal_id"], "t-app-codex");
+    let by_pane = d.run(target(HerdrAction::Get, "w5:p2")).await.unwrap();
+    assert_eq!(by_pane["agent"]["terminal_id"], "t-app-codex");
+
+    let prompt = HerdrRequest { text: Some("hi".into()), ..target(HerdrAction::Prompt, "claude") };
+    d.run(prompt).await.unwrap();
+    assert_eq!(d.fixture.last("agent.prompt")["params"]["target"], "w5:p1");
+
+    for outside in ["t-other-claude", "w6:p1", "t-escape", "t-nowhere", "opencode"] {
+        let before = d.fixture.count("agent.get");
+        let result = d.run(target(HerdrAction::Get, outside)).await;
+        assert!(matches!(result, Err(HerdrError::Denied(_))), "{outside}: {result:?}");
+        assert_eq!(d.fixture.count("agent.get"), before, "{outside} was addressed");
+    }
+}
+
+#[tokio::test]
+async fn discovery_refuses_an_ambiguous_name() {
+    let d = Discovery::new(|d| {
+        let fleet = vec![
+            live("t-a", "claude", "w5:p1", Some(d.path("app"))),
+            live("t-b", "claude", "w5:p2", Some(d.path("app/sub"))),
+        ];
+        (fleet.clone(), fleet)
+    });
+    let result = d.run(target(HerdrAction::Get, "claude")).await;
+    assert!(matches!(result, Err(HerdrError::InvalidRequest(_))), "{result:?}");
+    assert_eq!(
+        d.run(target(HerdrAction::Get, "t-b")).await.unwrap()["agent"]["terminal_id"],
+        "t-b"
+    );
+}
+
+#[tokio::test]
+async fn discovery_rechecks_the_workspace_on_the_verified_identity() {
+    // Listed inside the workspace, but the pane has left it by the time
+    // `agent.get` verifies the identity: nothing may be sent.
+    let d = Discovery::new(|d| {
+        (
+            vec![live("t-move", "codex", "w5:p1", Some(d.path("app")))],
+            vec![live("t-move", "codex", "w5:p1", Some(d.path("other")))],
+        )
+    });
+    let prompt = HerdrRequest { text: Some("hi".into()), ..target(HerdrAction::Prompt, "codex") };
+    assert!(matches!(d.run(prompt).await, Err(HerdrError::Denied(_))));
+    assert_eq!(d.fixture.count("agent.prompt"), 0);
+}
+
+#[tokio::test]
+async fn an_ancestor_binding_covers_subworkspaces_only_when_discovering() {
+    let d = Discovery::with_binding(
+        |d| (mixed_fleet(d), mixed_fleet(d)),
+        |root| {
+            json!({"principal_key": "local", "workspace_root": root,
+            "targets": {"writer": "t-app-codex"}})
+        },
+    );
+    let result = d.run(HerdrRequest::default()).await;
+    assert!(matches!(result, Err(HerdrError::Denied(_))), "{result:?}");
+    assert!(d.fixture.requests().is_empty(), "a denied binding never connects");
+}
+
+#[tokio::test]
+async fn a_binding_needs_targets_unless_it_discovers() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = fs::canonicalize(dir.path()).unwrap();
+    let config = root.join("operator.json");
+    for (binding, accepted) in [
+        (json!({"principal_key": "local", "workspace_root": root}), false),
+        (json!({"principal_key": "local", "workspace_root": root, "targets": {}}), false),
+        (
+            json!({"principal_key": "local", "workspace_root": root,
+                "discover_workspace_agents": true}),
+            true,
+        ),
+    ] {
+        fs::write(
+            &config,
+            serde_json::to_vec(&json!({"socket_path": root.join("s.sock"), "bindings": [binding]}))
+                .unwrap(),
+        )
+        .unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(HerdrAdapter::from_config_path(&config).is_ok(), accepted, "{binding}");
+    }
 }

@@ -64,7 +64,7 @@ impl WinxService {
             || request.source != OutputSource::Output
         {
             return history_failure("Agent", &HistoryError::InvalidInput(
-                "Herdr uses configured target aliases, recent text and lifecycle waits; native prompt receipts, recognizers and output cursors are not supported by this backend".into(),
+                "Herdr uses configured or discovered agent targets, recent text and lifecycle waits; native prompt receipts, recognizers and output cursors are not supported by this backend".into(),
             ));
         }
         if request.action != AgentOperation::Prompt && request.text.is_some() {

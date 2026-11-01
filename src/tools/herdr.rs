@@ -1,5 +1,8 @@
 //! Optional, explicitly bound access to an operator-configured Herdr server.
 //!
+//! A binding grants either configured targets or, with discovery, the live
+//! agents whose working directory lies inside the session's workspace.
+//!
 //! No action discovers servers or implicitly selects the focused/current terminal.
 //! The public server derives the trusted principal and prompt authority separately.
 //!
@@ -130,7 +133,21 @@ const fn default_deadline() -> u64 {
 struct Binding {
     principal_key: String,
     workspace_root: PathBuf,
+    #[serde(default)]
     targets: BTreeMap<String, String>,
+    /// Also expose every live agent whose working directory lies inside the
+    /// session's workspace; the binding then covers each workspace under its root.
+    #[serde(default)]
+    discover_workspace_agents: bool,
+}
+
+/// How a targeted action names its agent before any connection is made.
+enum Target<'a> {
+    /// An operator-configured alias or stable terminal ID.
+    Configured(&'a str),
+    /// A terminal ID, pane ID or agent name to look up among the live agents
+    /// running inside the session's workspace.
+    Discover(&'a str),
 }
 
 #[derive(Debug, Clone)]
@@ -201,19 +218,33 @@ impl HerdrAdapter {
         let binding = config.binding(context)?;
         validate_request(&request, context.allow_prompt)?;
         // Resolve the alias before connecting: a denied target never reaches Herdr.
-        let id = match request.action {
+        let target = match request.action {
             HerdrAction::List => None,
             _ => Some(binding.resolve(request.target.as_deref())?),
         };
+        let root = &context.workspace_root;
         let deadline = Instant::now() + Duration::from_millis(config.deadline_ms);
         let mut client = Client::connect(&config.socket_path, deadline).await?;
-        let Some(id) = id else {
-            return list_configured(binding, &client.list().await?);
+        let Some(target) = target else {
+            return list_visible(binding, root, &client.list().await?);
         };
+        let (id, discovered) = match target {
+            Target::Configured(id) => (id.to_string(), false),
+            Target::Discover(name) => (client.discover(name, root).await?, true),
+        };
+        let id = id.as_str();
 
         // Every targeted action first verifies the stable ID through `agent.get`
         // on the pane currently hosting it; read and explain return no identity.
         let (agent, pane) = client.resolve(id).await?;
+        // A discovered agent is authorized only by where it runs: confirm that
+        // again on the verified identity, so a pane that left the workspace
+        // between the two requests is never addressed.
+        if discovered && !in_workspace(&agent, root) {
+            return Err(HerdrError::Denied(
+                "the agent no longer runs inside this workspace".into(),
+            ));
+        }
         match request.action {
             HerdrAction::Get => Ok(json!({ "agent": agent })),
             HerdrAction::Read => client.read(id, &pane, request.lines.unwrap_or(100)).await,
@@ -226,25 +257,31 @@ impl HerdrAdapter {
 }
 
 /// One `agent.list` result, filtered to the configured stable IDs in
-/// configuration order. Unconfigured agents never leave this function.
-fn list_configured(binding: &Binding, live: &[Value]) -> Result<Value, HerdrError> {
+/// configuration order, then (when discovery is on) to the other agents running
+/// inside the workspace. No other agent ever leaves this function.
+fn list_visible(binding: &Binding, root: &Path, live: &[Value]) -> Result<Value, HerdrError> {
+    let configured =
+        binding.targets.values().filter_map(|id| live.iter().find(|a| a["terminal_id"] == **id));
+    let discovered =
+        live.iter().filter(|agent| binding.discover_workspace_agents && in_workspace(agent, root));
     let mut agents = Vec::new();
     let mut seen = BTreeSet::new();
     let mut aggregate_bytes = 16;
-    for id in binding.targets.values() {
+    for agent in configured.chain(discovered) {
+        let Some(id) = agent["terminal_id"].as_str() else { continue };
         if !seen.insert(id) {
             continue;
         }
-        if let Some(agent) = live.iter().find(|agent| agent["terminal_id"] == **id) {
-            aggregate_bytes += serde_json::to_vec(agent)
-                .map_err(|_| invalid_response("cannot encode agent"))?
-                .len()
-                + 1;
-            if aggregate_bytes > RESPONSE_LIMIT {
-                return Err(HerdrError::OutputLimit);
-            }
-            agents.push(agent.clone());
+        if agents.len() == TARGET_LIMIT {
+            return Err(HerdrError::OutputLimit);
         }
+        aggregate_bytes +=
+            serde_json::to_vec(agent).map_err(|_| invalid_response("cannot encode agent"))?.len()
+                + 1;
+        if aggregate_bytes > RESPONSE_LIMIT {
+            return Err(HerdrError::OutputLimit);
+        }
+        agents.push(agent.clone());
     }
     let result = json!({ "agents": agents });
     if serde_json::to_vec(&result).map_err(|_| invalid_response("cannot encode agents"))?.len()
@@ -287,8 +324,12 @@ impl HerdrConfig {
             if !scopes.insert((&binding.principal_key, &binding.workspace_root)) {
                 return Err(configuration("duplicate principal/workspace binding"));
             }
-            if binding.targets.is_empty() || binding.targets.len() > TARGET_LIMIT {
-                return Err(configuration("each binding must have 1 through 32 targets"));
+            if (binding.targets.is_empty() && !binding.discover_workspace_agents)
+                || binding.targets.len() > TARGET_LIMIT
+            {
+                return Err(configuration(
+                    "each binding must have 1 through 32 targets or discover_workspace_agents",
+                ));
             }
             for (alias, id) in &binding.targets {
                 if !valid_target(alias) || !valid_target(id) {
@@ -312,12 +353,16 @@ impl HerdrConfig {
         {
             return Err(HerdrError::Denied("workspace must be canonical".into()));
         }
+        // An exact binding wins; otherwise the nearest discovering ancestor.
         self.bindings
             .iter()
-            .find(|binding| {
+            .filter(|binding| {
                 binding.principal_key == context.principal_key
-                    && binding.workspace_root == context.workspace_root
+                    && (binding.workspace_root == context.workspace_root
+                        || (binding.discover_workspace_agents
+                            && context.workspace_root.starts_with(&binding.workspace_root)))
             })
+            .max_by_key(|binding| binding.workspace_root.components().count())
             .ok_or_else(|| HerdrError::Denied("principal/workspace binding is absent".into()))
     }
 }
@@ -344,17 +389,21 @@ fn validate_executable(executable: &Path) -> Result<(), HerdrError> {
 }
 
 impl Binding {
-    /// The configured stable terminal ID for an alias or for the ID itself.
-    fn resolve(&self, target: Option<&str>) -> Result<&str, HerdrError> {
-        let target =
-            target.ok_or_else(|| invalid_request("an explicit configured target is required"))?;
-        self.targets
+    /// The configured stable terminal ID for an alias or for the ID itself, or,
+    /// with discovery on, a name to look up among the workspace's live agents.
+    fn resolve<'a>(&'a self, target: Option<&'a str>) -> Result<Target<'a>, HerdrError> {
+        let target = target.ok_or_else(|| invalid_request("an explicit target is required"))?;
+        if let Some(id) = self
+            .targets
             .get(target)
             .or_else(|| self.targets.values().find(|id| id.as_str() == target))
-            .map(String::as_str)
-            .ok_or_else(|| {
-                HerdrError::Denied("target is not configured for this principal/workspace".into())
-            })
+        {
+            return Ok(Target::Configured(id));
+        }
+        if self.discover_workspace_agents && valid_target(target) {
+            return Ok(Target::Discover(target));
+        }
+        Err(HerdrError::Denied("target is not configured for this principal/workspace".into()))
     }
 }
 
@@ -391,6 +440,38 @@ impl<'a> Client<'a> {
         match result["agents"].take() {
             Value::Array(agents) => Ok(agents),
             _ => Err(invalid_response("agent list is not an array")),
+        }
+    }
+
+    /// The stable terminal ID of the one live agent inside `root` that `name`
+    /// identifies: its terminal ID or pane ID, else a unique agent name.
+    async fn discover(&mut self, name: &str, root: &Path) -> Result<String, HerdrError> {
+        let live = self.list().await?;
+        let local: Vec<&Value> = live.iter().filter(|agent| in_workspace(agent, root)).collect();
+        let by_id: Vec<&&Value> = local
+            .iter()
+            .filter(|agent| agent["terminal_id"] == name || agent["pane_id"] == name)
+            .collect();
+        let matches = if by_id.is_empty() {
+            local.iter().filter(|agent| agent["agent"] == name).collect()
+        } else {
+            by_id
+        };
+        match matches.as_slice() {
+            [agent] => agent["terminal_id"]
+                .as_str()
+                .filter(|id| valid_target(id))
+                .map(str::to_string)
+                .ok_or_else(|| invalid_response("agent has no usable terminal ID")),
+            [] => Err(HerdrError::Denied(
+                "no live agent with that target runs inside this workspace; list shows the \
+                 available ones"
+                    .into(),
+            )),
+            _ => Err(invalid_request(
+                "several agents of that name run inside this workspace; target one by its \
+                 terminal_id from list",
+            )),
         }
     }
 
@@ -754,6 +835,16 @@ fn validate_request(request: &HerdrRequest, allow_prompt: bool) -> Result<(), He
         ));
     }
     Ok(())
+}
+
+/// Whether Herdr reports the agent's working directory inside `root`. Both
+/// sides are canonical, so `..` segments and symlinks cannot escape it.
+fn in_workspace(agent: &Value, root: &Path) -> bool {
+    agent["cwd"]
+        .as_str()
+        .filter(|cwd| Path::new(cwd).is_absolute())
+        .and_then(|cwd| std::fs::canonicalize(cwd).ok())
+        .is_some_and(|cwd| cwd.starts_with(root))
 }
 
 fn valid_target(value: &str) -> bool {

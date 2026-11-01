@@ -97,7 +97,8 @@ pub(super) struct AgentRequest {
     #[serde(default)]
     pub backend: AgentBackend,
     pub action: AgentOperation,
-    /// Native execution ID or an explicitly configured Herdr target alias.
+    /// Native execution ID; for Herdr, a configured alias, or a terminal ID,
+    /// pane ID or unique agent name of an agent running in the workspace.
     #[serde(default)]
     pub target: Option<String>,
     /// Required for a new native prompt; reused IDs never resend input.

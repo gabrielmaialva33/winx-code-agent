@@ -331,7 +331,7 @@ const EXECUTION_DESCRIPTION: &str =
     "History: list/get/read/observe/explain/wait. Observe batches state/output; check item errors. Keep cursors; honor gap/resync. Preserves BashCommand output. Never replay; unknown is not success.";
 
 const AGENT_DESCRIPTION: &str =
-    "Observe/prompt explicit native or configured Herdr targets. Native: target, prompt_id, text; same ID/payload returns receipt without resending. Delivery is not completion; never auto-resend uncertain input. Prompts need BashCommand + wcgw. Herdr rejects prompt_id.";
+    "Observe/prompt native targets or Herdr agents from Herdr list. Native: target, prompt_id, text; same ID/payload returns receipt without resending. Delivery is not completion; never auto-resend uncertain input. Prompts need BashCommand + wcgw. Herdr rejects prompt_id.";
 
 /// Every tool in `ToolKind::ALL` order. Descriptions and schemas depend only
 /// on the build, so the catalog is generated once per process; per-principal

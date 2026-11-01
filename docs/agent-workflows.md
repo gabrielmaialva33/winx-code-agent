@@ -1,7 +1,8 @@
 # Execution history and agent workflows
 
 Winx exposes two session-bound workflow tools: `Execution` observes accepted commands,
-and `Agent` observes or prompts a native execution or an explicitly configured Herdr target.
+and `Agent` observes or prompts a native execution or a Herdr agent the operator's
+binding grants (configured targets, or agents discovered inside the workspace).
 Both require the exact `thread_id` and `workspace_root` returned together by `Initialize`.
 HTTP history is also isolated by authenticated principal; an execution ID or cursor is
 not authority to inspect another principal or workspace.
@@ -395,6 +396,28 @@ supported socket protocol (currently 22, Herdr 0.9.5). Otherwise it fails as una
 naming the server version and protocol, before any agent request. The optional `executable`
 field of the former CLI transport is still accepted and validated when present, but never
 run. The socket transport is Unix-only; on Windows the backend reports unavailable.
+
+A binding may instead (or also) set `"discover_workspace_agents": true`, in which case
+`targets` may be omitted:
+
+```json
+{ "principal_key": "local", "workspace_root": "/home/me/Projects",
+  "discover_workspace_agents": true }
+```
+
+A discovering binding covers its `workspace_root` and every workspace beneath it; an exact
+binding for a workspace still wins over a discovering ancestor, and a non-discovering
+binding applies only to its exact workspace. In a session for workspace `W`, `list`
+returns the configured targets plus every live agent whose Herdr-reported `cwd`, once
+canonicalized, lies inside `W`; agents of other projects, panes whose `cwd` is missing,
+and paths that escape through `..` or symlinks stay invisible. A targeted action may then
+name such an agent by its terminal ID, its pane ID, or its agent name (`claude`, `codex`)
+when exactly one agent of that name runs in `W`; an ambiguous name fails with
+`invalid_herdr_request` and asks for the terminal ID. After `agent.get` verifies the
+identity, the workspace check runs again on that answer, so an agent that has left `W`
+in between is denied before anything is sent. Discovery widens which panes an
+authenticated principal may observe and prompt to those running inside its own
+workspace; prompts still require wcgw mode and BashCommand authority.
 
 The workspace must be its canonical absolute path, and the socket path must be absolute.
 The local principal key is `local`; HTTP bindings use `http:<principal-id>`, where the
