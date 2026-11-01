@@ -90,17 +90,28 @@ impl Citation {
     /// never resolves to an unrelated `file.rs` that happens to exist.
     fn resolve(&self, line: &str, cwd: &Path, probes: &mut usize) -> Option<PathBuf> {
         let mut starts = Vec::new();
+        // An opening quote before the spaced words makes the quoted text the
+        // whole path: only it may resolve, never the unquoted suffix.
+        let mut quoted = false;
         if self.extendable {
             let mut words = 0;
+            let mut crossed_space = false;
             let prefix = &line[..self.start];
             for (index, character) in prefix.char_indices().rev() {
                 if character == ' ' {
+                    crossed_space = true;
                     continue;
                 }
                 if !is_path_char(character) {
+                    let opening = prefix[..index]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|before| before.is_whitespace() || "([{=:,".contains(before));
+                    quoted = crossed_space && opening && matches!(character, '"' | '\'' | '`');
                     break;
                 }
-                let at_word_start = index == 0 || prefix[..index].ends_with(' ');
+                let at_word_start = index == 0
+                    || prefix[..index].ends_with([' ', '"', '\'', '`', '(', '[', '<', '=']);
                 if at_word_start {
                     words += 1;
                     starts.push(index);
@@ -110,8 +121,13 @@ impl Citation {
                 }
             }
             starts.reverse();
+            if quoted {
+                starts.truncate(1);
+            }
         }
-        starts.push(self.start);
+        if !quoted {
+            starts.push(self.start);
+        }
         for start in starts {
             if *probes >= MAX_PROBES {
                 return None;
@@ -320,6 +336,17 @@ src/main.rs:0:zero line";
         assert_eq!(
             read_specs("  File \"src/my file.rs\", line 1, in f", &root),
             Some(vec![spec(&root, "src/my file.rs", 1, 9)])
+        );
+        // A quoted spaced path is the whole path: never its suffix, and when
+        // the quoted path does not exist nothing is attached.
+        for quoted in ["\"src/my file.rs:1:error\"", "'src/my file.rs:1:error'"] {
+            assert_eq!(read_specs(quoted, &root), Some(vec![spec(&root, "src/my file.rs", 1, 9)]));
+        }
+        assert_eq!(read_specs("\"src/gone file.rs:1:error\"", &root), None);
+        // A closing quote of an earlier word is not an opening quote.
+        assert_eq!(
+            read_specs("\"x\" in file.rs:1:x", &root),
+            Some(vec![spec(&root, "file.rs", 1, 9)])
         );
         // Prose before an unspaced path still resolves to that path.
         assert_eq!(
