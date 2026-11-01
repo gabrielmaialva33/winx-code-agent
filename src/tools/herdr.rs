@@ -469,8 +469,24 @@ impl<'a> Client<'a> {
             "until": request.until,
             "timeout_ms": self.wait_budget(request.timeout_ms.unwrap_or(1000)),
         });
-        let result = self.call("agent.wait", params, false).await?;
-        Ok(json!({ "agent": verified_agent(result, id, "agent_info", false)? }))
+        match self.call("agent.wait", params, false).await {
+            Ok(result) => Ok(json!({
+                "agent": verified_agent(result, id, "agent_info", false)?,
+                "timed_out": false,
+            })),
+            // An unmet bounded wait is an observation, not a failure: the agent
+            // is simply not there yet. Report its current lifecycle instead.
+            Err(HerdrError::Rejected { code }) if code == "timeout" => {
+                let current = self.call("agent.get", json!({ "target": pane }), false).await?;
+                Ok(json!({
+                    "agent": verified_agent(current, id, "agent_info", false)?,
+                    "timed_out": true,
+                    "note": "the agent did not reach a requested state before the bounded wait \
+                             ended; wait again or read its screen",
+                }))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     /// Submit verbatim text; with `until`/`timeout_ms`, Herdr also waits for the

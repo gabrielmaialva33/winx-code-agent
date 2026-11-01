@@ -284,7 +284,9 @@ async fn targeted_actions_resolve_the_terminal_to_its_pane_and_verify_identity()
         until: vec![HerdrStatus::Idle, HerdrStatus::Done],
         ..req(HerdrAction::Wait)
     };
-    assert_eq!(f.run(wait).await.unwrap()["agent"]["terminal_id"], "terminal-1");
+    let waited = f.run(wait).await.unwrap();
+    assert_eq!(waited["agent"]["terminal_id"], "terminal-1");
+    assert_eq!(waited["timed_out"], false);
     assert_eq!(
         f.last("agent.wait")["params"],
         json!({"target": "w1:p1", "until": ["idle", "done"], "timeout_ms": 123})
@@ -443,9 +445,25 @@ async fn non_prompt_failures_are_clean_and_definite() {
         BUDGET_MS,
     );
     assert!(matches!(huge.run(HerdrRequest::default()).await, Err(HerdrError::OutputLimit)));
-    let wait = Fixture::new(herdr_except("agent.wait", || error("timeout", "")), BUDGET_MS);
+}
+
+#[tokio::test]
+async fn unmet_bounded_wait_reports_the_current_lifecycle_instead_of_failing() {
+    let f = Fixture::new(herdr_except("agent.wait", || error("timeout", "")), BUDGET_MS);
     let r = HerdrRequest { timeout_ms: Some(50), ..req(HerdrAction::Wait) };
-    assert!(matches!(wait.run(r).await, Err(HerdrError::Rejected { code }) if code == "timeout"));
+    let result = f.run(r).await.unwrap();
+    assert_eq!(result["timed_out"], true);
+    assert_eq!(result["agent"]["terminal_id"], "terminal-1");
+    assert_eq!(f.methods(), vec!["ping", "agent.list", "agent.get", "agent.wait", "agent.get"]);
+    assert_eq!(f.last("agent.get")["params"], json!({"target": "w1:p1"}));
+
+    // Other wait rejections stay definite failures.
+    let gone =
+        Fixture::new(herdr_except("agent.wait", || error("agent_not_running", "")), BUDGET_MS);
+    let r = HerdrRequest { timeout_ms: Some(50), ..req(HerdrAction::Wait) };
+    assert!(
+        matches!(gone.run(r).await, Err(HerdrError::Rejected { code }) if code == "agent_not_running")
+    );
 }
 
 #[tokio::test]

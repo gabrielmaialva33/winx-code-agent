@@ -428,7 +428,11 @@ For example, observe the configured target with:
 ```
 
 A Herdr wait, or a prompt that waits, can supply `until` with lifecycle states `idle`,
-`working`, `blocked`, `done`, or `unknown`, and a finite `timeout_seconds`. A prompt
+`working`, `blocked`, `done`, or `unknown`, and a finite `timeout_seconds`. A wait whose
+bound ends first is not a failure: it completes with `result.timed_out: true` and
+`result.agent` set to the agent's current lifecycle from a fresh `agent.get`, so the
+client can wait again or read the screen. A prompt that waits keeps its delivery-uncertain
+semantics on any Herdr error, including `timeout`. A prompt
 supplies `text` and omits `prompt_id`. Configuration only grants access to existing
 targets; it does not start Herdr or attach a terminal.
 

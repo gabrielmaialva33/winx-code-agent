@@ -137,6 +137,8 @@ fn herdr_success(
         } else {
             "Herdr prompt submitted; completion has not been observed. Use a separate wait action to inspect lifecycle state."
         }
+    } else if action == HerdrAction::Wait && value["timed_out"] == true {
+        "Herdr wait ended before the agent reached a requested state; result.agent is its current lifecycle. Wait again or read its screen."
     } else {
         "Herdr action completed."
     };
@@ -224,6 +226,18 @@ mod tests {
         assert!(envelope["message"]
             .as_str()
             .is_some_and(|text| text.contains("completion has not been observed")));
+        Ok(())
+    }
+
+    #[test]
+    fn herdr_wait_timeout_is_a_completed_observation() -> anyhow::Result<()> {
+        let value = json!({ "agent": { "terminal_id": "terminal-1" }, "timed_out": true });
+        let result = herdr_success(HerdrAction::Wait, false, &value)?;
+        assert_ne!(result.is_error, Some(true));
+        let envelope = result.structured_content.context("envelope")?;
+        assert_eq!(envelope["status"], "completed");
+        assert_eq!(envelope["data"]["result"]["timed_out"], true);
+        assert!(envelope["message"].as_str().is_some_and(|text| text.contains("Wait again")));
         Ok(())
     }
 
