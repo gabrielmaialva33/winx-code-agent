@@ -11,6 +11,8 @@ use crate::state::BashState;
 use crate::types::BashCommand;
 
 #[cfg(unix)]
+mod cited_code_tests;
+#[cfg(unix)]
 mod daemon_edit_tests;
 #[cfg(unix)]
 mod session_workflow_tests;

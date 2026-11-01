@@ -7,6 +7,7 @@
 pub mod apply_patch;
 pub mod background_shell;
 pub mod bash_command;
+pub mod cited_code;
 pub mod code_map;
 pub mod context_save;
 pub mod edit_files;

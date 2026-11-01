@@ -636,6 +636,8 @@ fn task_action_options(
         // MCP Task polls are client-paced; they never use profile budgets.
         return_when_awaiting_input: false,
         launch_cancelled: Some(launch_cancelled),
+        // Task results are assembled from polls, not a single command result.
+        attach_cited_code: false,
         #[cfg(test)]
         force_clear_to_run_failure: false,
     }

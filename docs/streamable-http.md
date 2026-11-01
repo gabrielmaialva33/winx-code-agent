@@ -377,6 +377,17 @@ which MCP recommends for backwards compatibility. The profile-specific choice is
 Detection selects wire shape only, never authority. `WINX_RESULT_TEXT_MIRROR=full` restores text mirroring for every client;
 unset or `auto` selects the optimization, and an unrecognized value also keeps the full text mirror.
 
+For the ChatGPT and Codex profiles, a completed `BashCommand` whose output cites a few source
+locations (`path:line[:col]` as printed by `rg -n`, `grep -n`, compilers and linters,
+`File "path", line N` tracebacks, or `path(line,col)`) also carries those lines with eight lines of
+context, read through the ordinary `ReadFiles` path: the same workspace and `WINX_ALLOW_PATHS`
+reach, mode, redaction and budgets apply, and the excerpts total at most 16 KiB.
+`data.cited_code.files` holds their revisions and visible ranges, so an `EditFiles` `line_patch`
+of those lines needs no extra `ReadFiles` round trip. Only the last 64 KiB of output is scanned, a
+listing of more than eight locations or four files attaches nothing, and the principal must be
+allowed `ReadFiles`. Running results and MCP Task results attach nothing.
+`WINX_BASH_CITED_CODE=off` disables it; `on` enables it for every client.
+
 The main fields are:
 
 ```json

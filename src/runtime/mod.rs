@@ -125,6 +125,10 @@ pub struct ShellActionOptions {
     /// represented by the serializable preconditions above.
     #[serde(skip)]
     pub launch_cancelled: Option<Arc<AtomicBool>>,
+    /// Server-side presentation: attach the code a completed command's output
+    /// cites. Never sent to a daemon or guardian, never part of equality.
+    #[serde(skip)]
+    pub attach_cited_code: bool,
     /// Deterministic coverage for the automatic PTY-reset path. Never exists
     /// in production builds or on the daemon wire.
     #[cfg(test)]

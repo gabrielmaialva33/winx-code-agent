@@ -5,6 +5,7 @@
 
 mod agents;
 mod catalog;
+mod cited_code;
 mod client_profile;
 mod coherence;
 mod executions;

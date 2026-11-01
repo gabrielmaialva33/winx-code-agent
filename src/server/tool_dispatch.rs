@@ -374,15 +374,27 @@ impl WinxService {
                 (self.handle_initialize(args).await, None)
             }
             RequestedTool::Public(ToolKind::BashCommand) => {
+                let thread_id = args
+                    .as_ref()
+                    .and_then(|args| args.get("thread_id"))
+                    .and_then(Value::as_str)
+                    .map(normalize_thread_id)
+                    .unwrap_or_default();
+                let attach_cited_code = bash_options.attach_cited_code;
                 match self.handle_bash_command_with_output(args, bash_options.clone()).await {
-                    Ok(execution) => (
-                        Ok(execution.result),
-                        Some((
-                            execution.command_generation,
-                            execution.execution_token,
-                            execution.generation_bound_actions,
-                        )),
-                    ),
+                    Ok(mut execution) => {
+                        if attach_cited_code {
+                            self.attach_cited_code(&mut execution.result, &thread_id).await;
+                        }
+                        (
+                            Ok(execution.result),
+                            Some((
+                                execution.command_generation,
+                                execution.execution_token,
+                                execution.generation_bound_actions,
+                            )),
+                        )
+                    }
                     Err(error) => (Err(error), None),
                 }
             }

@@ -356,6 +356,8 @@ impl ServerHandler for WinxService {
             .map_or_else(ToolPolicy::default, super::super::config::HttpPrincipal::tool_policy);
         // Wire shape only: never consulted for authority.
         let text_delivery = ResultTextDelivery::for_client(ClientProfile::from_context(&context));
+        let attach_cited_code =
+            super::cited_code::enabled_for(ClientProfile::from_context(&context));
 
         // Parse edit arguments once into the typed domain before any capability
         // decision. This avoids policy decisions based on loosely typed/raw
@@ -699,6 +701,8 @@ impl ServerHandler for WinxService {
                     ShellActionOptions {
                         compact_output: compact_bash_output,
                         return_when_awaiting_input,
+                        attach_cited_code: attach_cited_code
+                            && effective_tool_policy.allows_call_kind(ToolKind::ReadFiles),
                         ..ShellActionOptions::default()
                     },
                     effective_tool_policy.edit_permissions(),
