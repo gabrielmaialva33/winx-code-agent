@@ -60,6 +60,14 @@ pub enum WinxError {
     #[error("File not found: {path}")]
     FileNotFound { path: PathBuf },
 
+    /// Symbol navigation failed without exposing or recording any source lines.
+    #[error("Cannot resolve symbol '{symbol}' in {path}: {failure}")]
+    SymbolReadRejected {
+        path: PathBuf,
+        symbol: String,
+        failure: crate::utils::symbols::definitions::ResolutionFailure,
+    },
+
     /// The edit guard requires a fresh or broader read before mutation.
     #[error("Fresh read required for {path}: {message}")]
     FileReadRequired {

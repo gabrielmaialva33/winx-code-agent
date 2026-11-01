@@ -976,6 +976,16 @@ impl WinxService {
                             );
                             data.insert("failed_files".to_string(), json!(outcome.errors.len()));
                             data.insert("files".to_string(), json!(outcome.files));
+                            let symbol_errors: Vec<_> = outcome
+                                .errors
+                                .iter()
+                                .filter_map(|error| {
+                                    outcomes::symbol_read_diagnostic(error, Some(&recovery_args))
+                                })
+                                .collect();
+                            if !symbol_errors.is_empty() {
+                                data.insert("symbol_errors".to_string(), json!(symbol_errors));
+                            }
                         }
                     }
                     Ok(result)

@@ -69,6 +69,14 @@ struct FileReadResult {
     total_lines: usize,
 }
 
+struct ReadSource {
+    content: String,
+    canonical_path: String,
+    file_hash: String,
+}
+
+type ResolvedReads = Vec<(FileReadRequest, FileReadResult)>;
+
 /// Revision receipt for one successful file read. `revision` is opaque to MCP
 /// callers and may be supplied to `ApplyPatch` as a compare-and-swap guard.
 #[derive(Clone, Debug, Serialize)]
@@ -132,13 +140,14 @@ struct FileReadRequest {
     clean_path: String,
     start_line_num: Option<usize>,
     end_line_num: Option<usize>,
+    resolved_symbol: bool,
 }
 
 impl FileReadRequest {
     /// Explicit `start-end` (or `-end`) ranges are deliberate and exempt from
     /// the per-file cap; whole-file and open-ended reads are not.
     fn is_bounded(&self) -> bool {
-        self.end_line_num.is_some()
+        self.end_line_num.is_some() && !self.resolved_symbol
     }
 
     fn spec(&self) -> String {
@@ -552,6 +561,18 @@ fn read_file(
     end_line_num: Option<usize>,
     caps: WorkerCaps,
 ) -> Result<FileReadResult> {
+    let source = read_source(file_path, cwd, workspace_root)?;
+    render_source(
+        &source,
+        max_tokens,
+        file_path,
+        show_line_numbers,
+        (start_line_num, end_line_num),
+        caps,
+    )
+}
+
+fn read_path(file_path: &str, cwd: &Path, workspace_root: &Path) -> Result<PathBuf> {
     let file_path_expanded = expand_user(file_path);
     let path = if Path::new(&file_path_expanded).is_absolute() {
         PathBuf::from(&file_path_expanded)
@@ -580,8 +601,25 @@ fn read_file(
         });
     }
 
+    Ok(path)
+}
+
+fn read_source(file_path: &str, cwd: &Path, workspace_root: &Path) -> Result<ReadSource> {
+    let path = read_path(file_path, cwd, workspace_root)?;
     let content = read_file_to_string(&path, MAX_FILE_SIZE)?;
     let file_hash = hash_content(&content);
+    Ok(ReadSource { content, canonical_path: path.to_string_lossy().into_owned(), file_hash })
+}
+
+fn render_source(
+    source: &ReadSource,
+    max_tokens: Option<usize>,
+    file_path: &str,
+    show_line_numbers: bool,
+    (start_line_num, end_line_num): (Option<usize>, Option<usize>),
+    caps: WorkerCaps,
+) -> Result<FileReadResult> {
+    let content = &source.content;
     let lines: Vec<&str> = content.lines().collect();
     let total_lines = lines.len();
 
@@ -655,8 +693,8 @@ fn read_file(
         last_requested_line: end_idx,
         requested_bytes,
         token_limit,
-        canonical_path: path.to_string_lossy().to_string(),
-        file_hash,
+        canonical_path: source.canonical_path.clone(),
+        file_hash: source.file_hash.clone(),
         total_lines,
     })
 }
@@ -798,21 +836,16 @@ async fn execute_read_requests(
     'batches: for batch in requests.chunks(configured_parallelism()) {
         let mut tasks = Vec::with_capacity(batch.len());
         for request in batch.iter().cloned() {
-            let worker_path = request.clean_path.clone();
+            let worker_request = request.clone();
             let worker_cwd = cwd.to_path_buf();
             let worker_root = workspace_root.to_path_buf();
-            let start_line_num = request.start_line_num;
-            let end_line_num = request.end_line_num;
             let caps = state.budget.worker_caps(&request);
             let task = tokio::task::spawn_blocking(move || {
-                read_file(
-                    &worker_path,
-                    Some(select_max_tokens(&worker_path)),
+                symbol::read_request(
+                    &worker_request,
                     &worker_cwd,
                     &worker_root,
                     show_line_numbers,
-                    start_line_num,
-                    end_line_num,
                     caps,
                 )
             });
@@ -827,9 +860,12 @@ async fn execute_read_requests(
                     request.clean_path
                 )))
             });
-            if state.record_result(&request, result) {
-                // Running blocking jobs cannot be cancelled, but abort prevents
-                // queued work from starting. Only returned content is guarded.
+            let stop = match result {
+                Err(error) => state.record_result(&request, Err(error)),
+                Ok(reads) => record_resolved_reads(&mut state, reads),
+            };
+            if stop {
+                // Only ranges actually returned above enter the read guard.
                 for (_, pending) in tasks {
                     pending.abort();
                 }
@@ -856,6 +892,17 @@ async fn execute_read_requests(
         );
     }
     state
+}
+
+fn record_resolved_reads(state: &mut ReadBatchState, reads: ResolvedReads) -> bool {
+    let mut reads = reads.into_iter();
+    while let Some((request, result)) = reads.next() {
+        if state.record_result(&request, Ok(result)) {
+            state.budget.report.deferred.extend(reads.map(|(request, _)| request.spec()));
+            return true;
+        }
+    }
+    false
 }
 
 async fn persist_read_stats(workspace_root: &Path, stats_paths: Vec<PathBuf>) {
@@ -937,6 +984,7 @@ pub async fn handle_tool_call_with_budget(
             clean_path: read_files.get_clean_path(index),
             start_line_num: read_files.start_line_nums.get(index).copied().flatten(),
             end_line_num: read_files.end_line_nums.get(index).copied().flatten(),
+            resolved_symbol: false,
         })
         .collect::<Vec<_>>();
     let batch = execute_read_requests(
@@ -1031,3 +1079,8 @@ pub async fn handle_tool_call_with_budget(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod symbol_tests;
+
+mod symbol;

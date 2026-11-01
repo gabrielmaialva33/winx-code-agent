@@ -1622,3 +1622,5 @@ mod loom_tests {
         });
     }
 }
+
+mod read_symbol_tests;

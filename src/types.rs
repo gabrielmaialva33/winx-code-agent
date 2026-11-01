@@ -505,6 +505,12 @@ pub struct ReadFiles {
     /// List of file paths to read.
     /// Supports line range syntax: "file.rs:10-20" for lines 10-20,
     /// "file.rs:10-" for line 10 onwards, "file.rs:-20" for first 20 lines.
+    /// Or use `file.rs#symbol`, `file.rs#Type::method`, `file.py#Class.method`
+    /// to read definition ranges including attached docs, attributes and decorators.
+    /// Existing literal filenames containing # win; otherwise the last # selects
+    /// the symbol. Do not combine symbol selection with a numeric range. Up to 8
+    /// definitions are read; more matches return bounded candidates and a plain-file
+    /// nextAction. Failed resolution never silently returns the whole file.
     pub file_paths: Vec<String>,
 
     /// Optional thread ID identifying the shell session to operate on. When

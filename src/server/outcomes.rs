@@ -1207,6 +1207,17 @@ fn error_envelope(
                 arguments: None,
             });
         }
+        WinxError::SymbolReadRejected { path, failure, .. } => {
+            use crate::utils::symbols::definitions::FailureReason;
+            status = match failure.reason {
+                FailureReason::NotFound => ToolResultStatus::NotFound,
+                FailureReason::TooManyMatches => ToolResultStatus::Conflict,
+                _ => ToolResultStatus::InvalidInput,
+            };
+            error_code = failure.reason.to_string();
+            retryable = true;
+            next_action = Some(symbol_read_action(path, arguments));
+        }
         WinxError::PathSecurityError { .. } | WinxError::CommandNotAllowed(_) => {
             status = ToolResultStatus::Denied;
             error_code = "operation_denied".to_string();
@@ -1360,6 +1371,13 @@ fn error_envelope(
         data.insert("unique_files_used".to_string(), json!(unique_files_used));
         data.insert("unique_files_limit".to_string(), json!(unique_files_limit));
     }
+    if let Some(Value::Object(diagnostic)) = symbol_read_diagnostic(classified_error, arguments) {
+        for (key, value) in diagnostic {
+            if key != "nextAction" {
+                data.insert(key, value);
+            }
+        }
+    }
     if error.is_search_match_conflict() {
         data.insert("edit_applied".to_string(), Value::Bool(false));
         data.insert("fresh_read_required".to_string(), Value::Bool(true));
@@ -1390,6 +1408,33 @@ fn error_envelope(
         required_reads,
         data: (!data.is_empty()).then_some(Value::Object(data)),
     }
+}
+
+fn symbol_read_action(path: &std::path::Path, arguments: Option<&Value>) -> ToolNextAction {
+    let mut corrected = json!({"file_paths": [path]});
+    for key in ["thread_id", "workspace_root"] {
+        if let Some(value) = string_argument(arguments, key) {
+            corrected[key] = json!(value);
+        }
+    }
+    ToolNextAction {
+        tool: "ReadFiles".to_string(),
+        instruction: "The selector returned no source. Choose a listed candidate's numeric range or use this explicit plain-file read; do not retry the selector unchanged.".to_string(),
+        arguments: Some(corrected),
+    }
+}
+
+pub(super) fn symbol_read_diagnostic(
+    error: &WinxError,
+    arguments: Option<&Value>,
+) -> Option<Value> {
+    let WinxError::SymbolReadRejected { path, symbol, failure } = error.edit_source() else {
+        return None;
+    };
+    Some(
+        json!({"path":path,"symbol":symbol,"reason":failure.reason,"candidates":failure.candidates,
+        "candidatesTruncated":failure.candidates_truncated,"nextAction":symbol_read_action(path,arguments)}),
+    )
 }
 
 fn status_check_action(arguments: Option<&Value>) -> ToolNextAction {

@@ -171,3 +171,7 @@ mod tests {
         assert!(names.contains(&"traced"), "got {names:?}");
     }
 }
+
+pub mod definitions;
+#[cfg(test)]
+mod definitions_tests;
