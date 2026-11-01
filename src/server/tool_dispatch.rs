@@ -114,6 +114,9 @@ pub(super) struct BashCallExecution {
     command_generation: Option<u64>,
     execution_token: Option<ShellExecutionToken>,
     generation_bound_actions: bool,
+    /// The session that actually ran the command, for follow-up work bound to
+    /// it (an omitted thread ID resolves to the active session at launch).
+    slot: Option<SharedBashState>,
 }
 
 impl BashCallExecution {
@@ -123,6 +126,7 @@ impl BashCallExecution {
             command_generation: None,
             execution_token: None,
             generation_bound_actions: false,
+            slot: None,
         }
     }
 }
@@ -374,17 +378,11 @@ impl WinxService {
                 (self.handle_initialize(args).await, None)
             }
             RequestedTool::Public(ToolKind::BashCommand) => {
-                let thread_id = args
-                    .as_ref()
-                    .and_then(|args| args.get("thread_id"))
-                    .and_then(Value::as_str)
-                    .map(normalize_thread_id)
-                    .unwrap_or_default();
                 let attach_cited_code = bash_options.attach_cited_code;
                 match self.handle_bash_command_with_output(args, bash_options.clone()).await {
                     Ok(mut execution) => {
-                        if attach_cited_code {
-                            self.attach_cited_code(&mut execution.result, &thread_id).await;
+                        if let Some(slot) = execution.slot.take().filter(|_| attach_cited_code) {
+                            self.attach_cited_code(&mut execution.result, &slot).await;
                         }
                         (
                             Ok(execution.result),
@@ -899,6 +897,7 @@ impl WinxService {
                     command_generation,
                     execution_token,
                     generation_bound_actions,
+                    slot: Some(slot.clone()),
                 }
             }
             Err(error) => {

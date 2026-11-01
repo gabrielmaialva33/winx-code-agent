@@ -137,3 +137,93 @@ async fn cited_code_is_opt_in_bounded_by_policy_and_redacted() -> anyhow::Result
     ensure!(running["data"].get("cited_code").is_none(), "{running}");
     session.close().await
 }
+
+/// An omitted thread ID resolves to the active session at launch; switching
+/// the active session while the command runs must not move the read receipt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cited_code_stays_in_the_session_that_ran_the_command() -> anyhow::Result<()> {
+    let session = Session::new().await?;
+    let (ran, _) = session.service.session_for(&session.thread).await;
+    let other_id = format!("cited_other_{:032x}", rand::random::<u128>());
+    let (other, _) = session.service.session_for(&other_id).await;
+    let mut state = crate::state::bash_state::BashState::new();
+    state.cwd.clone_from(&session.root);
+    state.workspace_root.clone_from(&session.root);
+    state.current_thread_id.clone_from(&other_id);
+    state.initialized = true;
+    *other.lock().await = Some(state);
+    let _ = session.service.session_for(&session.thread).await;
+
+    let marker = session.root.join("command-started");
+    let arguments = json!({
+        "action_json": {
+            "type": "command",
+            "command": "touch command-started; sleep 0.4; printf 'src/lib.rs:20:x\\n'",
+            "allow_multi": true
+        },
+        "wait_for_seconds": 5
+    });
+    let request = CallToolRequestParams::new("BashCommand".to_string())
+        .with_arguments(arguments.as_object().context("arguments")?.clone());
+    let execution = session.service.execute_tool_call(
+        request,
+        ShellActionOptions { attach_cited_code: true, ..Default::default() },
+        ToolPolicy::default().edit_permissions(),
+    );
+    let switch = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !marker.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .context("command did not start")?;
+        let _ = session.service.session_for(&other_id).await;
+        Ok::<_, anyhow::Error>(())
+    };
+    let (execution, switched) = tokio::join!(execution, switch);
+    switched?;
+    let result = execution?.result.structured_content.context("structured")?;
+    let path = session.root.join("src/lib.rs").to_string_lossy().into_owned();
+    let covered = |slot: &crate::server::SharedBashState| {
+        let slot = slot.clone();
+        let path = path.clone();
+        async move {
+            slot.lock()
+                .await
+                .as_ref()
+                .is_some_and(|state| state.whitelist_for_overwrite.contains_key(&path))
+        }
+    };
+    let (in_ran, in_other) = (covered(&ran).await, covered(&other).await);
+    session.close().await?;
+    ensure!(result["data"].get("cited_code").is_some(), "{result}");
+    ensure!(in_ran && !in_other, "receipt drifted: ran={in_ran} other={in_other}");
+    Ok(())
+}
+
+/// The receipt covers only the visible excerpt and only that revision.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cited_code_receipt_rejects_unseen_and_stale_lines() -> anyhow::Result<()> {
+    let session = Session::new().await?;
+    let cited = session.command("printf 'src/lib.rs:20:x\\n'", true).await?;
+    let revision = cited["data"]["cited_code"]["files"][0]["revision"].clone();
+    let path = session.root.join("src/lib.rs");
+    let line_patch = |line: usize, text: &str| {
+        json!({"files": [{
+            "file_path": path, "mode": "line_patch", "expected_revision": revision,
+            "patches": [{"start_line": line, "delete_lines": 1, "replacement": text}]
+        }]})
+    };
+    let before = std::fs::read_to_string(&path)?;
+    let unseen = session.call("EditFiles", line_patch(29, "unseen\n"), false).await?;
+    ensure!(unseen["status"] == "needs_read", "{unseen}");
+    ensure!(std::fs::read_to_string(&path)? == before, "unseen line was written");
+
+    std::fs::write(&path, before.replace("line 20\n", "changed outside\n"))?;
+    let changed = std::fs::read_to_string(&path)?;
+    let stale = session.call("EditFiles", line_patch(20, "stale\n"), false).await?;
+    ensure!(stale["status"] == "needs_read", "{stale}");
+    ensure!(std::fs::read_to_string(&path)? == changed, "stale revision was written");
+    session.close().await
+}

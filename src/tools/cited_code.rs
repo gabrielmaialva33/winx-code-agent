@@ -28,6 +28,10 @@ const SCAN_BYTES: usize = 64 * 1024;
 const MAX_LINE_BYTES: usize = 2048;
 /// Ranges closer than this are merged into one excerpt.
 const MERGE_GAP: usize = 3;
+/// Filesystem lookups one output may trigger, resolved or not.
+const MAX_PROBES: usize = 64;
+/// Words a whitespace-delimited path token may be extended by.
+const MAX_SPACED_WORDS: usize = 4;
 
 /// The `ReadFiles` specs (`/abs/path:start-end`) for the code `output` cites,
 /// relative paths resolved against `cwd`. `None` when nothing resolvable is
@@ -35,17 +39,21 @@ const MERGE_GAP: usize = 3;
 pub fn read_specs(output: &str, cwd: &Path) -> Option<Vec<String>> {
     let mut lines_by_file: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
     let mut locations = 0usize;
-    for line in tail(output, SCAN_BYTES).lines().filter(|line| line.len() <= MAX_LINE_BYTES) {
-        for (path, number) in citations(line) {
-            let Some(path) = resolve(path, cwd) else { continue };
+    let mut probes = 0usize;
+    for line in scanned_tail(output).lines().filter(|line| line.len() <= MAX_LINE_BYTES) {
+        for citation in citations(line) {
+            let Some(path) = citation.resolve(line, cwd, &mut probes) else { continue };
             let lines = lines_by_file.entry(path).or_default();
-            if !lines.contains(&number) {
-                lines.push(number);
+            if !lines.contains(&citation.number) {
+                lines.push(citation.number);
                 locations += 1;
             }
             if locations > MAX_LOCATIONS || lines_by_file.len() > MAX_FILES {
                 return None;
             }
+        }
+        if probes >= MAX_PROBES {
+            break;
         }
     }
     let specs: Vec<String> = lines_by_file
@@ -59,27 +67,104 @@ pub fn read_specs(output: &str, cwd: &Path) -> Option<Vec<String>> {
     (!specs.is_empty()).then_some(specs)
 }
 
-/// `(path, line)` pairs one output line cites, in the conventions of common
-/// tools: `path:line[:col]` (rg/grep -n, rustc, gcc, go, eslint, pytest),
-/// `File "path", line N` (Python tracebacks) and `path(line[,col])` (tsc, MSVC).
-fn citations(line: &str) -> impl Iterator<Item = (&str, usize)> {
-    static PATTERNS: OnceLock<[Regex; 3]> = OnceLock::new();
+/// The part of `output` that is scanned: its last [`SCAN_BYTES`], starting at
+/// a line boundary. Diagnostics and the final failure live there.
+pub fn scanned_tail(output: &str) -> &str {
+    tail(output, SCAN_BYTES)
+}
+
+/// One cited location in an output line.
+struct Citation {
+    /// Byte range of the path token as the pattern matched it.
+    start: usize,
+    end: usize,
+    number: usize,
+    /// The token is delimited by whitespace, so it may be the tail of a path
+    /// containing spaces (`src/my file.rs:1`); quoted paths are complete.
+    extendable: bool,
+}
+
+impl Citation {
+    /// The file this citation names. A whitespace-delimited token is first
+    /// extended leftwards across spaces, longest first, so `src/my file.rs:1`
+    /// never resolves to an unrelated `file.rs` that happens to exist.
+    fn resolve(&self, line: &str, cwd: &Path, probes: &mut usize) -> Option<PathBuf> {
+        let mut starts = Vec::new();
+        if self.extendable {
+            let mut words = 0;
+            let prefix = &line[..self.start];
+            for (index, character) in prefix.char_indices().rev() {
+                if character == ' ' {
+                    continue;
+                }
+                if !is_path_char(character) {
+                    break;
+                }
+                let at_word_start = index == 0 || prefix[..index].ends_with(' ');
+                if at_word_start {
+                    words += 1;
+                    starts.push(index);
+                    if words == MAX_SPACED_WORDS {
+                        break;
+                    }
+                }
+            }
+            starts.reverse();
+        }
+        starts.push(self.start);
+        for start in starts {
+            if *probes >= MAX_PROBES {
+                return None;
+            }
+            *probes += 1;
+            let path = &line[start..self.end];
+            if looks_like_source(path) {
+                if let Some(resolved) = resolve(path, cwd) {
+                    return Some(resolved);
+                }
+            }
+        }
+        None
+    }
+}
+
+fn is_path_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || "_./\\~+@-".contains(character)
+}
+
+/// Locations one output line cites, in the conventions of common tools:
+/// `path:line[:col]` (rg/grep -n, rustc, gcc, go, eslint, pytest),
+/// `File "path", line N` (Python tracebacks) and `path(line[,col])` (tsc,
+/// MSVC). Paths may be POSIX, drive-letter (`C:\x\y.rs`) or UNC.
+fn citations(line: &str) -> impl Iterator<Item = Citation> + '_ {
+    static PATTERNS: OnceLock<[(Regex, bool); 3]> = OnceLock::new();
     let patterns = PATTERNS.get_or_init(|| {
-        let path = r"[A-Za-z0-9_./~+@-][A-Za-z0-9_./~+@-]*";
+        let path = r"(?:[A-Za-z]:)?[A-Za-z0-9_./\\~+@-]+";
         [
-            Regex::new(&format!(
-                r#"(?:^|[\s(\[<'"=])({path}):([0-9]{{1,7}})(?::[0-9]{{1,5}})?(?::|$|\s|\))"#
-            )),
-            Regex::new(&format!(r#"File "({path})", line ([0-9]{{1,7}})"#)),
-            Regex::new(&format!(r"(?:^|\s)({path})\(([0-9]{{1,7}})(?:,[0-9]{{1,5}})?\)")),
+            (
+                format!(
+                    r#"(?:^|[\s(\[<'"=])({path}):([0-9]{{1,7}})(?::[0-9]{{1,5}})?(?::|$|\s|\))"#
+                ),
+                true,
+            ),
+            (r#"File "([^"]{1,1024})", line ([0-9]{1,7})"#.to_string(), false),
+            (format!(r"(?:^|\s)({path})\(([0-9]{{1,7}})(?:,[0-9]{{1,5}})?\)"), true),
         ]
-        .map(|pattern| pattern.unwrap_or_else(|_| unreachable!("static citation pattern")))
+        .map(|(pattern, extendable)| {
+            let pattern = Regex::new(&pattern).unwrap_or_else(|_| unreachable!("static pattern"));
+            (pattern, extendable)
+        })
     });
-    patterns.iter().flat_map(move |pattern| {
-        pattern.captures_iter(line).filter_map(|captures| {
-            let path = captures.get(1)?.as_str();
-            let number = captures.get(2)?.as_str().parse::<usize>().ok()?;
-            looks_like_source(path).then_some((path, number)).filter(|(_, n)| *n > 0)
+    patterns.iter().flat_map(move |(pattern, extendable)| {
+        pattern.captures_iter(line).filter_map(move |captures| {
+            let path = captures.get(1)?;
+            let number = captures.get(2)?.as_str().parse::<usize>().ok().filter(|n| *n > 0)?;
+            looks_like_source(path.as_str()).then_some(Citation {
+                start: path.start(),
+                end: path.end(),
+                number,
+                extendable: *extendable,
+            })
         })
     })
 }
@@ -87,7 +172,7 @@ fn citations(line: &str) -> impl Iterator<Item = (&str, usize)> {
 /// A path with a file extension; rejects bare words, versions and times
 /// (`v1.2:3`, `12:30`) that the generic pattern would otherwise accept.
 fn looks_like_source(path: &str) -> bool {
-    let name = path.rsplit('/').next().unwrap_or(path);
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
     let Some((stem, extension)) = name.rsplit_once('.') else { return false };
     !stem.is_empty()
         && (1..=10).contains(&extension.len())
@@ -221,5 +306,50 @@ src/main.rs:0:zero line";
         let (_dir, root) = workspace();
         let output = format!("app.py:5:early\n{}\nsrc/main.rs:50:late", "noise\n".repeat(20_000));
         assert_eq!(read_specs(&output, &root), Some(vec![spec(&root, "src/main.rs", 42, 58)]));
+    }
+
+    #[test]
+    fn a_spaced_path_never_resolves_to_its_suffix_file() {
+        let (_dir, root) = workspace();
+        std::fs::write(root.join("src/my file.rs"), "cited\n").unwrap_or_else(|_| unreachable!());
+        std::fs::write(root.join("file.rs"), "decoy\n").unwrap_or_else(|_| unreachable!());
+        assert_eq!(
+            read_specs("src/my file.rs:1:error", &root),
+            Some(vec![spec(&root, "src/my file.rs", 1, 9)])
+        );
+        assert_eq!(
+            read_specs("  File \"src/my file.rs\", line 1, in f", &root),
+            Some(vec![spec(&root, "src/my file.rs", 1, 9)])
+        );
+        // Prose before an unspaced path still resolves to that path.
+        assert_eq!(
+            read_specs("error in file.rs:1", &root),
+            Some(vec![spec(&root, "file.rs", 1, 9)])
+        );
+    }
+
+    #[test]
+    fn windows_and_unc_diagnostics_are_recognized() {
+        let found = |text: &str| {
+            citations(text)
+                .map(|c| (text[c.start..c.end].to_string(), c.number))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            found(r"C:\work\src\main.rs:20:3: error"),
+            vec![(r"C:\work\src\main.rs".into(), 20)]
+        );
+        assert_eq!(
+            found(r"C:\work\web.ts(20,3): error TS2322"),
+            vec![(r"C:\work\web.ts".into(), 20)]
+        );
+        assert_eq!(found(r"\\server\share\lib.rs:7:1"), vec![(r"\\server\share\lib.rs".into(), 7)]);
+    }
+
+    #[test]
+    fn filesystem_probes_are_bounded_even_when_nothing_resolves() {
+        let (_dir, root) = workspace();
+        let output = (0..500).map(|n| format!("missing{n}.rs:1:x")).collect::<Vec<_>>().join("\n");
+        assert_eq!(read_specs(&output, &root), None);
     }
 }

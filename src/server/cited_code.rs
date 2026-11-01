@@ -11,6 +11,7 @@ use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::{json, Map, Value};
 
 use super::client_profile::ClientProfile;
+use super::SharedBashState;
 use super::WinxService;
 use crate::config::ReadResponseBudget;
 use crate::tools::cited_code;
@@ -38,7 +39,13 @@ fn enabled(profile: ClientProfile, setting: Option<&str>) -> bool {
 impl WinxService {
     /// Append the code a completed `BashCommand` result cites. Best effort:
     /// any failure leaves the command result exactly as it was.
-    pub(super) async fn attach_cited_code(&self, result: &mut CallToolResult, thread_id: &str) {
+    /// `slot` is the session that ran the command, never re-resolved: an
+    /// omitted thread ID must not land the read receipt in another session.
+    pub(super) async fn attach_cited_code(
+        &self,
+        result: &mut CallToolResult,
+        slot: &SharedBashState,
+    ) {
         let Some((output, cwd)) = completed_output(result) else { return };
         let Ok(Some(specs)) = tokio::task::spawn_blocking(move || {
             cited_code::read_specs(&output, std::path::Path::new(&cwd))
@@ -47,27 +54,32 @@ impl WinxService {
         else {
             return;
         };
+        let thread_id = slot
+            .lock()
+            .await
+            .as_ref()
+            .map(|state| state.current_thread_id.clone())
+            .unwrap_or_default();
         let Ok(read_files) = serde_json::from_value::<ReadFiles>(json!({
             "file_paths": specs,
             "thread_id": thread_id,
         })) else {
             return;
         };
-        let (slot, _session_guard) = self.tool_session_for(thread_id).await;
         let budget = ReadResponseBudget {
             call_bytes: Some(cited_code::BUDGET_BYTES),
             file_bytes: Some(cited_code::BUDGET_BYTES),
             unchanged_ttl: std::time::Duration::ZERO,
         };
         let Ok(read) =
-            crate::tools::read_files::handle_tool_call_with_budget(&slot, read_files, budget).await
+            crate::tools::read_files::handle_tool_call_with_budget(slot, read_files, budget).await
         else {
             return;
         };
         if read.successful_files == 0 {
             return;
         }
-        self.persist_state(&slot).await;
+        self.persist_state(slot).await;
         attach(result, &read);
     }
 }
@@ -80,7 +92,7 @@ fn completed_output(result: &CallToolResult) -> Option<(String, String)> {
     }
     let output = envelope.get("output").and_then(Value::as_str)?;
     let cwd = envelope.get("data")?.get("cwd").and_then(Value::as_str)?;
-    (!output.is_empty()).then(|| (output.to_string(), cwd.to_string()))
+    (!output.is_empty()).then(|| (cited_code::scanned_tail(output).to_string(), cwd.to_string()))
 }
 
 /// Add the excerpts as a separate text block and record their revisions.
