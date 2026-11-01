@@ -67,6 +67,27 @@ pub(crate) mod temporary {
         open_at(directory, &name(child)?, libc::O_RDONLY | libc::O_DIRECTORY)
     }
 
+    /// Create or open one directory relative to a pinned parent; never follow a link.
+    pub(crate) fn ensure_directory_child(directory: &File, child: &OsStr) -> io::Result<File> {
+        let child = name(child)?;
+        // SAFETY: live parent descriptor and valid C string. Mode grants only owner access.
+        if unsafe { libc::mkdirat(directory.as_raw_fd(), child.as_ptr(), 0o700) } < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::AlreadyExists {
+                return Err(error);
+            }
+        }
+        open_at(directory, &child, libc::O_RDONLY | libc::O_DIRECTORY)
+    }
+
+    pub(crate) fn directory_alias(directory: &File) -> std::path::PathBuf {
+        std::path::PathBuf::from(format!(
+            "/proc/{}/fd/{}",
+            std::process::id(),
+            directory.as_raw_fd()
+        ))
+    }
+
     pub(crate) struct Opened {
         pub(crate) file: File,
         parent: File,
@@ -863,4 +884,71 @@ pub(crate) fn open_read_nofollow(_path: &std::path::Path) -> std::io::Result<std
         std::io::ErrorKind::Unsupported,
         "safe no-follow record reads are unsupported on this platform",
     ))
+}
+
+/// Bound parser discovery pools as well as Rayon: the current Eulix walker
+/// sizes its independent pool from the child's available CPU affinity.
+#[cfg(target_os = "linux")]
+pub(crate) fn bound_worker_cpus(
+    command: &mut std::process::Command,
+    maximum: usize,
+) -> std::io::Result<()> {
+    use std::os::unix::process::CommandExt as _;
+    // SAFETY: cpu_set_t is a plain C bitmap; zero is its empty representation.
+    let mut available: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    // SAFETY: the writable bitmap is correctly sized and remains live for the call.
+    if unsafe { libc::sched_getaffinity(0, std::mem::size_of_val(&available), &raw mut available) }
+        < 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: same plain C bitmap initialization as above.
+    let mut limited: libc::cpu_set_t = unsafe { std::mem::zeroed() };
+    let mut count = 0;
+    for cpu in 0..libc::CPU_SETSIZE as usize {
+        // SAFETY: cpu lies within the bitmap bounds.
+        if unsafe { libc::CPU_ISSET(cpu, &available) } {
+            // SAFETY: cpu lies within the bitmap bounds.
+            unsafe { libc::CPU_SET(cpu, &mut limited) };
+            count += 1;
+            if count >= maximum.max(1) {
+                break;
+            }
+        }
+    }
+    if count == 0 {
+        return Err(std::io::Error::other("empty worker CPU affinity"));
+    }
+    // SAFETY: the closure invokes only sched_setaffinity and errno retrieval in
+    // the forked child, without allocation, locks, or access to other threads.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::sched_setaffinity(0, std::mem::size_of_val(&limited), &raw const limited) < 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        });
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod worker_cpu_tests {
+    #[test]
+    fn worker_affinity_is_bounded_in_the_child_only() -> std::io::Result<()> {
+        if std::env::var_os("WINX_TEST_WORKER_AFFINITY").is_some() {
+            assert!(std::thread::available_parallelism()?.get() <= 4);
+            return Ok(());
+        }
+        let before = std::thread::available_parallelism()?;
+        let mut child = std::process::Command::new(std::env::current_exe()?);
+        child
+            .args(["--exact", "os::worker_cpu_tests::worker_affinity_is_bounded_in_the_child_only"])
+            .env("WINX_TEST_WORKER_AFFINITY", "1");
+        super::bound_worker_cpus(&mut child, 4)?;
+        assert!(child.status()?.success());
+        assert_eq!(std::thread::available_parallelism()?, before);
+        Ok(())
+    }
 }

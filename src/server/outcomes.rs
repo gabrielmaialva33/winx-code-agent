@@ -144,6 +144,11 @@ pub(super) struct CodeMapToolResultEnvelope {
     pub definitions: Option<usize>,
     pub references: Option<usize>,
     pub hits: Option<Vec<crate::types::ReferenceHit>>,
+    pub graph_hits: Option<Vec<crate::tools::call_graph::index::GraphHit>>,
+    pub index_status: Option<String>,
+    pub index_age_seconds: Option<u64>,
+    pub index_error: Option<String>,
+    pub parser_version: Option<String>,
 }
 
 /// Convert a domain execution failure into a caller-visible MCP tool error.
@@ -282,7 +287,11 @@ pub(super) fn decorate_success(tool: &str, arguments: Option<&Value>, result: &m
     if tool == "CodeMap" {
         if let (Value::Object(target), Some(Value::Object(source))) = (&mut value, existing) {
             for (key, item) in source {
-                target.entry(key).or_insert(item);
+                if key == "next_action" && !item.is_null() {
+                    target.insert("nextAction".to_string(), item);
+                } else {
+                    target.entry(key).or_insert(item);
+                }
             }
         }
     }
@@ -905,7 +914,7 @@ fn mirror_text(result: &mut CallToolResult, redact_joined: bool) {
 /// diagnostic (an unreadable file, an oversized first result, a failure).
 pub(super) fn code_map_symbols_are_structured(tool: &str, structured: &Map<String, Value>) -> bool {
     tool == "CodeMap"
-        && ["files", "hits"].iter().any(|key| {
+        && ["files", "hits", "graph_hits"].iter().any(|key| {
             structured.get(*key).and_then(Value::as_array).is_some_and(|items| !items.is_empty())
         })
 }
@@ -2768,5 +2777,27 @@ mod tests {
         assert!(structured["data"].get("execution_id").is_none());
         assert_eq!(structured["nextAction"]["arguments"]["action_json"]["type"], "status_check");
         assert_eq!(structured["retrySameCall"], false);
+    }
+}
+
+#[cfg(test)]
+mod graph_result_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    #[test]
+    fn graph_fallback_survives_envelope_and_graph_hits_avoid_text_mirroring() {
+        let mut result = CallToolResult::success(vec![ContentBlock::text("graph unavailable")]);
+        result.structured_content = Some(json!({"index_status":"unavailable","truncated":false,
+            "next_action":{"tool":"CodeMap","arguments":{"operation":"references","name":"leaf"},"instruction":"Use references"}}));
+        decorate_success("CodeMap", None, &mut result);
+        finalize_tool_result(&mut result);
+        let data = result.structured_content.unwrap();
+        assert_eq!(data["nextAction"]["arguments"]["operation"], "references");
+        let mut result = CallToolResult::success(vec![ContentBlock::text("graph results")]);
+        result.structured_content =
+            Some(json!({"graph_hits":[{"file":"a.rs","line":1}],"truncated":false}));
+        decorate_success("CodeMap", None, &mut result);
+        finalize_tool_result(&mut result);
+        assert!(result.structured_content.unwrap()["output"].is_null());
     }
 }

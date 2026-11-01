@@ -31,3 +31,5 @@ pub(crate) fn structured_json<T: serde::Serialize>(
         crate::errors::WinxError::SerializationError(format!("structured output: {e}"))
     })
 }
+
+pub mod call_graph;

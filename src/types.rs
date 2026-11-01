@@ -1194,14 +1194,20 @@ pub enum CodeMapOperation {
     Outline,
     /// The definition + reference (call/use) sites of a symbol name across the repo.
     References,
+    /// Direct callers resolved by the optional Eulix backend.
+    Callers,
+    /// Direct callees resolved by the optional Eulix backend.
+    Callees,
+    /// Bounded transitive callers (maximum depth 8).
+    Impact,
 }
 
 /// Parameters for the `CodeMap` tool: tree-sitter code navigation. One tool with
-/// two operations, in place of separate `Outline` / `FindReferences` tools.
+/// syntax navigation plus optional Eulix call graph operations.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CodeMap {
     /// `outline` (symbols in a file, or a ranked repo symbol map for a directory)
-    /// or `references` (the definition + use sites of a symbol name).
+    /// `references` (definition + uses), or optional `callers` / `callees` / `impact`.
     pub operation: CodeMapOperation,
 
     /// For `outline`: the file or directory to map (empty or a directory = a
@@ -1211,8 +1217,8 @@ pub struct CodeMap {
     #[serde(default)]
     pub path: String,
 
-    /// For `references` ONLY: the exact symbol name to find (e.g. `parse_config`).
-    /// Required for `references`, ignored by `outline`.
+    /// Exact symbol name for references; exact name or full Eulix ID for call graphs.
+    /// Required except for outline. Ambiguous graph names include all matches.
     #[serde(default)]
     pub name: String,
 
@@ -1420,6 +1426,11 @@ pub struct CodeMapStructuredOutput {
     pub definitions: Option<usize>,
     pub references: Option<usize>,
     pub hits: Option<Vec<ReferenceHit>>,
+    pub graph_hits: Option<Vec<crate::tools::call_graph::index::GraphHit>>,
+    pub index_status: Option<String>,
+    pub index_age_seconds: Option<u64>,
+    pub index_error: Option<String>,
+    pub parser_version: Option<String>,
 }
 
 #[cfg(test)]

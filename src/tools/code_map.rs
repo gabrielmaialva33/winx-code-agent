@@ -1,6 +1,6 @@
 //! Implementation of the `CodeMap` tool: tree-sitter code navigation.
 //!
-//! One tool with two operations, consolidating what used to be the separate
+//! Syntax operations consolidate what used to be the separate
 //! `Outline` and `FindReferences` tools (to keep the MCP surface small). It is a
 //! thin dispatcher: it builds the corresponding internal request and delegates to
 //! the unchanged `outline` / `references` implementations, so all the tree-sitter
@@ -52,9 +52,22 @@ pub async fn handle_tool_call(
                 .to_string(),
         ));
     }
+    if matches!(
+        code_map.operation,
+        CodeMapOperation::Callers | CodeMapOperation::Callees | CodeMapOperation::Impact
+    ) && (code_map.name.trim().is_empty() || code_map.name.len() > 1_024)
+    {
+        return Err(WinxError::ArgumentParseError(
+            "CodeMap call graphs require a non-empty name of at most 1024 bytes.".into(),
+        ));
+    }
     let scope = reserve_source_scope(bash_state_arc, &code_map.path).await?;
     let payload_max_bytes = scope.payload_max_bytes();
     let result = match code_map.operation {
+        CodeMapOperation::Callers | CodeMapOperation::Callees | CodeMapOperation::Impact => {
+            crate::tools::call_graph::handle_tool_call(bash_state_arc, &code_map, payload_max_bytes)
+                .await
+        }
         CodeMapOperation::Outline => {
             let outline = Outline {
                 path: code_map.path,
@@ -330,5 +343,35 @@ mod tests {
 
         let (_, canonical) = handle_tool_call(&state, outline("main.py")).await.unwrap();
         assert_eq!(canonical["source_kind"], "canonical_source");
+    }
+}
+
+#[cfg(test)]
+mod graph_tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    #[tokio::test]
+    async fn call_graph_operations_require_a_name_and_obey_existing_path_policy() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = BashState::new();
+        state.cwd = temp.path().to_owned();
+        state.workspace_root = temp.path().to_owned();
+        let state = Arc::new(Mutex::new(Some(state)));
+        for operation in ["callers", "callees", "impact"] {
+            let args: CodeMap = serde_json::from_value(json!({"operation":operation})).unwrap();
+            assert!(matches!(
+                handle_tool_call(&state, args).await,
+                Err(WinxError::ArgumentParseError(_))
+            ));
+            let args: CodeMap = serde_json::from_value(
+                json!({"operation":operation,"name":"leaf","path":"../outside"}),
+            )
+            .unwrap();
+            assert!(matches!(
+                handle_tool_call(&state, args).await,
+                Err(WinxError::PathSecurityError { .. } | WinxError::FileNotFound { .. })
+            ));
+        }
     }
 }
