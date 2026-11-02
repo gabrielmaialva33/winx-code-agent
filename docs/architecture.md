@@ -190,8 +190,9 @@ cargo install --path eulix-parser --locked
 export WINX_EULIX_PARSER=/absolute/path/to/eulix_parser
 ```
 
-An absolute operator-configured executable is preferred. Otherwise Winx searches
-absolute entries of the server's `PATH` for `eulix_parser`. Client parameters and
+The backend is opt-in: only an absolute `WINX_EULIX_PARSER` enables it; a parser that
+is merely on `PATH` is ignored, so installing Eulix never starts background parsing by
+itself. Client parameters and
 workspace configuration cannot select an executable; an executable resolving inside
 the workspace is refused. Missing binaries return `index_status: unavailable` and a
 concrete `next_action` invoking `CodeMap` with `operation: references`. Non-Linux hosts
@@ -203,7 +204,7 @@ Every response reports `index_status` (`fresh`, `stale`, `building`, or `unavail
 `parser_version`, and `index_error` when applicable. `graph_hits` carries definition
 file/line/end-line plus caller-owned `call_site_file` / `call_site_line` and traversal
 depth. A building response may carry the previous generation. Freshness is checked in
-the background at most once a second; it reflects the last completed check, not a
+the background at most every five seconds; it reflects the last completed check, not a
 transactional snapshot of files being edited. Poll a graph operation after the build
 finishes, or use the supplied references action in the meantime.
 

@@ -107,7 +107,9 @@ impl Service {
         });
         entry.touched = Instant::now();
         // Tests use zero debounce to inspect every source change immediately.
-        let check_interval = self.debounce.min(Duration::from_secs(1));
+        // A freshness check walks the workspace and hashes dirty files, so it
+        // runs at most every five seconds however often queries arrive.
+        let check_interval = self.debounce.min(Duration::from_secs(5));
         if !entry.checking && entry.checked.is_none_or(|time| time.elapsed() >= check_interval) {
             entry.checking = true;
             let service = self.clone();
@@ -320,7 +322,13 @@ impl Service {
                 result = child.wait() => { if !result.map_err(|_| "parser_failed")?.success() { return Err("parser_failed"); } break; }
                 () = tokio::time::sleep_until(deadline) => { snapshot::terminate(&mut child).await; return Err("parser_timeout"); }
                 () = tokio::time::sleep(Duration::from_millis(100)) => {
-                    if directory_bytes(staging.path())? > MAX_KB_BYTES * 2 { snapshot::terminate(&mut child).await; return Err("index_oversize"); }
+                    // Any early return must take the whole process group down,
+                    // not only the leader that kill_on_drop would reach.
+                    match directory_bytes(staging.path()) {
+                        Ok(bytes) if bytes <= MAX_KB_BYTES * 2 => {}
+                        Ok(_) => { snapshot::terminate(&mut child).await; return Err("index_oversize"); }
+                        Err(code) => { snapshot::terminate(&mut child).await; return Err(code); }
+                    }
                 }
             }
         }
@@ -470,16 +478,12 @@ pub(super) fn global() -> &'static Arc<Service> {
     SERVICE
         .get_or_init(|| Service::new(discover(), Duration::from_secs(120), Duration::from_secs(2)))
 }
+/// Opt-in: only an absolute operator-set `WINX_EULIX_PARSER` enables graph
+/// navigation. A parser merely present on `PATH` does not, so installing the
+/// tool never silently starts background parsing in every workspace.
 fn discover() -> Option<PathBuf> {
-    if let Some(path) = std::env::var_os("WINX_EULIX_PARSER") {
-        let path = PathBuf::from(path);
-        return path.is_absolute().then_some(path);
-    }
-    let name = if cfg!(windows) { "eulix_parser.exe" } else { "eulix_parser" };
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .filter(|path| path.is_absolute())
-        .map(|directory| directory.join(name))
-        .find(|path| path.is_file())
+    let path = PathBuf::from(std::env::var_os("WINX_EULIX_PARSER")?);
+    path.is_absolute().then_some(path)
 }
 
 #[cfg(all(test, target_os = "linux"))]
