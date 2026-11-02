@@ -10,6 +10,9 @@ async fn configured_server(
             .args(["serve", "--http", "--bind", &address.to_string(), "--token", TEST_TOKEN])
             .env("WINX_EMBEDDED", "1")
             .env_remove("WINX_HERDR_CONFIG")
+            // A developer running the suite inside a Herdr pane must not change
+            // what a remote client observes.
+            .env_remove("HERDR_ENV")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -57,6 +60,7 @@ async fn initialize_reports_disabled_herdr_without_enabling_it() -> anyhow::Resu
         assert_eq!(hint["configuration_present"], false);
         assert_eq!(hint["availability"], "disabled");
         assert_eq!(hint["reason"], "configuration_missing");
+        assert!(hint.get("usage").is_none() && hint.get("first_call").is_none(), "{hint}");
     }
     let result = call_tool_json(
         address,
@@ -86,7 +90,57 @@ async fn initialize_never_claims_an_unvalidated_config_is_available() -> anyhow:
         assert_eq!(hint["availability"], "unknown");
         assert_eq!(hint["reason"], "configuration_not_validated");
         assert!(!hint.to_string().contains("SECRET"));
+        // Configured: say how to reach the agents, so clients do not fall back
+        // to the herdr CLI in a shell that is not a Herdr pane.
+        assert_eq!(hint["first_call"]["tool"], "Agent");
+        assert_eq!(hint["first_call"]["arguments"]["backend"], "herdr");
+        assert_eq!(hint["first_call"]["arguments"]["action"], "list");
+        assert!(hint["usage"].as_str().is_some_and(|text| text.contains("HERDR_ENV")), "{hint}");
     }
     assert!(!config.exists(), "discovery must not create configuration");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_shell_herdr_probe_is_pointed_at_the_agent_tool() -> anyhow::Result<()> {
+    let workspace = tempfile::tempdir()?;
+    let config = workspace.path().join("herdr-config.json");
+    let (address, _server) = configured_server(Some(config)).await?;
+    let (thread, _, _) = initialize_and_status_hints(address, workspace.path()).await?;
+    let probe = call_tool_json(
+        address,
+        &modern_request_meta("backend-hint-client", false),
+        "shell-herdr-probe",
+        "BashCommand",
+        json!({
+            "thread_id": thread, "workspace_root": workspace.path(),
+            "action_json": {"type": "command", "command": "printf 'HERDR_ENV=%s\\n' \"${HERDR_ENV:-unset}\""},
+            "wait_for_seconds": 5
+        }),
+    )
+    .await?;
+    let envelope = &probe["result"]["structuredContent"];
+    assert_eq!(envelope["status"], "completed", "{envelope}");
+    assert!(envelope["output"].as_str().is_some_and(|out| out.contains("HERDR_ENV=unset")));
+    assert_eq!(envelope["nextAction"]["tool"], "Agent", "{envelope}");
+    assert_eq!(envelope["nextAction"]["arguments"]["backend"], "herdr");
+    assert_eq!(envelope["nextAction"]["arguments"]["action"], "list");
+    assert_eq!(envelope["nextAction"]["arguments"]["thread_id"], thread);
+
+    let unrelated = call_tool_json(
+        address,
+        &modern_request_meta("backend-hint-client", false),
+        "shell-unrelated",
+        "BashCommand",
+        json!({
+            "thread_id": thread, "workspace_root": workspace.path(),
+            "action_json": {"type": "command", "command": "printf herdr-word-only"},
+            "wait_for_seconds": 5
+        }),
+    )
+    .await?;
+    let envelope = &unrelated["result"]["structuredContent"];
+    assert_eq!(envelope["status"], "completed", "{envelope}");
+    assert!(envelope["data"].get("herdr_access").is_none(), "{envelope}");
     Ok(())
 }

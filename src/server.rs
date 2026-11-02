@@ -10,6 +10,7 @@ mod client_profile;
 mod coherence;
 mod executions;
 mod handler;
+mod herdr_hint;
 mod mutations;
 mod outcomes;
 mod principal;

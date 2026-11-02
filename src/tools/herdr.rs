@@ -22,6 +22,18 @@ use serde_json::{json, Value};
 use tokio::time::Instant;
 
 const CONFIG_LIMIT: usize = 256 * 1024;
+/// How a client reaches Herdr agents through Winx. Shared by the Initialize
+/// hint and the `BashCommand` nudge so both say the same thing.
+pub(crate) const HERDR_USAGE: &str =
+    "Reach Herdr agents with the Agent tool and backend \"herdr\": \
+     action \"list\" first, then get/read/wait/prompt with target set to a listed pane_id or \
+     terminal_id. It talks to Herdr's socket directly, so HERDR_ENV and the herdr CLI are not \
+     needed; Winx shells are not Herdr panes, so the CLI cannot reach the agents from there.";
+
+/// Arguments of the first Agent call (plus the session's thread/workspace pair).
+pub(crate) fn list_arguments() -> Value {
+    json!({ "backend": "herdr", "action": "list" })
+}
 const RESPONSE_LIMIT: usize = 64 * 1024;
 /// A maximal prompt with every byte JSON-escaped still fits.
 const REQUEST_LIMIT: usize = 128 * 1024;
@@ -164,11 +176,18 @@ impl HerdrAdapter {
     /// Do not open the configured path or connect to the socket during discovery.
     pub(crate) fn configuration_hint() -> Value {
         let present = std::env::var_os("WINX_HERDR_CONFIG").is_some();
-        json!({
+        let mut hint = json!({
             "configuration_present": present,
             "availability": if present { "unknown" } else { "disabled" },
             "reason": if present { "configuration_not_validated" } else { "configuration_missing" },
-        })
+        });
+        if present {
+            // Clients otherwise reach for the herdr CLI in BashCommand, which
+            // only works inside a Herdr pane (HERDR_ENV); the Agent tool does not.
+            hint["usage"] = json!(HERDR_USAGE);
+            hint["first_call"] = json!({ "tool": "Agent", "arguments": list_arguments() });
+        }
+        hint
     }
 
     pub fn from_env() -> Result<Self, HerdrError> {

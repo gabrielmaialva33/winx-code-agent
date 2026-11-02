@@ -362,7 +362,15 @@ Successful `Initialize` responses, including `type=status`, expose
 reports `availability=unknown` and `reason=configuration_not_validated`: it does not
 prove that the file, socket, server, target or caller's binding is valid.
 This hint performs no configuration-file reads or socket connections, never includes
-configuration paths or target identities, and grants no authority. A `herdr_disabled`
+configuration paths or target identities, and grants no authority. When the variable is present the
+hint also carries `usage` and `first_call` (`Agent` with `{"backend":"herdr","action":"list"}`):
+Winx shells are not Herdr panes, so clients must not probe `HERDR_ENV` or run the herdr CLI
+through `BashCommand`. If they do anyway, a finished `BashCommand` whose command runs `herdr`
+in command position or mentions `HERDR_ENV`, `HERDR_SOCKET_PATH` or `HERDR_SESSION` gets the
+same guidance, `data.herdr_access`, and (unless it already has one) a `nextAction` for that
+`Agent` list call with the session's thread/workspace pair. This is skipped when the server
+itself runs inside a Herdr pane (`HERDR_ENV=1`), where the CLI works. It grants nothing: the
+`Agent` call keeps its own binding, mode and prompt authority. A `herdr_disabled`
 result additionally marks `operator_action_required=true` and `input_sent=false`;
 ask the operator to configure the adapter rather than retrying unchanged requests.
 The native backend remains separate; Herdr target aliases are not native execution IDs.

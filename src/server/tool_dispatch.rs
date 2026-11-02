@@ -379,8 +379,10 @@ impl WinxService {
             }
             RequestedTool::Public(ToolKind::BashCommand) => {
                 let attach_cited_code = bash_options.attach_cited_code;
+                let hint_args = args.clone();
                 match self.handle_bash_command_with_output(args, bash_options.clone()).await {
                     Ok(mut execution) => {
+                        super::herdr_hint::attach(&mut execution.result, hint_args.as_ref());
                         if let Some(slot) = execution.slot.take().filter(|_| attach_cited_code) {
                             self.attach_cited_code(&mut execution.result, &slot).await;
                         }
