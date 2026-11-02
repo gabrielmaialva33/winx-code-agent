@@ -157,3 +157,38 @@ fn read_usage_uses_resolved_selections_and_preserves_hash_ambiguity() -> anyhow:
     assert!(unknown.get("read_whole_file_requests").is_none_or(Value::is_null));
     Ok(())
 }
+
+#[test]
+fn code_map_usage_emits_operation_and_graph_state_without_names() -> anyhow::Result<()> {
+    // The live path derives the action from the arguments; do the same here.
+    let action = |arguments: &Value| {
+        crate::server::usage::usage_action("CodeMap", arguments.as_object(), None).0
+    };
+    let arguments = json!({"operation":"callers","name":"SECRET_symbol","path":"/SECRET/src"});
+    let fields = captured_usage_request(
+        "CodeMap",
+        &action(&arguments),
+        &arguments,
+        Some(json!({"tool":"CodeMap","status":"completed","data":{
+            "index_status":"stale","index_error":"snapshot_changed",
+            "graph_hits":[{"name":"SECRET_symbol","file":"/SECRET/a.rs"}]
+        }})),
+    )?;
+    assert_eq!(fields["action"], "callers");
+    assert_eq!(fields["code_map_index_status"], "stale");
+    assert_eq!(fields["code_map_index_error"], "snapshot_changed");
+    assert_eq!(fields["code_map_graph_hits"], 1);
+    assert!(!serde_json::to_string(&fields)?.contains("SECRET"));
+
+    let arguments = json!({"operation":"outline","path":"/SECRET/src"});
+    let syntax = captured_usage_request(
+        "CodeMap",
+        &action(&arguments),
+        &arguments,
+        Some(json!({"tool":"CodeMap","status":"completed","data":{"files":[]}})),
+    )?;
+    assert_eq!(syntax["action"], "outline");
+    assert_eq!(syntax["code_map_index_status"], "");
+    assert!(syntax.get("code_map_graph_hits").is_none_or(Value::is_null));
+    Ok(())
+}

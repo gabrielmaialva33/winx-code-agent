@@ -87,7 +87,74 @@ pub(super) struct UsageResultMetadata<'a> {
     pub temporary_stale_pruned_bytes: Option<u64>,
     pub temporary_over_budget: Option<bool>,
     pub edit_file_count: u64,
+    pub code_map: UsageCodeMapMetadata,
 }
+
+/// Call-graph state of a `CodeMap` result, as finite labels and counts only:
+/// never a symbol name, path or free-form parser message.
+#[derive(Default, Debug, PartialEq, Eq)]
+pub(super) struct UsageCodeMapMetadata {
+    /// `fresh`, `stale`, `building`, `unavailable`, `other`, or empty when the
+    /// result carries no call-graph state (syntax operations).
+    pub index_status: &'static str,
+    /// A Winx error code such as `parser_unavailable`; `other` if malformed.
+    pub index_error: &'static str,
+    pub graph_hits: Option<u64>,
+}
+
+fn usage_code_map_metadata(
+    structured: Option<&serde_json::Value>,
+    data: Option<&serde_json::Value>,
+) -> UsageCodeMapMetadata {
+    let field = |key: &str| {
+        structured
+            .and_then(|value| value.get(key))
+            .filter(|value| !value.is_null())
+            .or_else(|| data.and_then(|value| value.get(key)).filter(|value| !value.is_null()))
+    };
+    let index_status = field("index_status").map_or("", |value| match value.as_str() {
+        Some("fresh") => "fresh",
+        Some("stale") => "stale",
+        Some("building") => "building",
+        Some("unavailable") => "unavailable",
+        _ => "other",
+    });
+    let index_error = field("index_error").and_then(serde_json::Value::as_str).map_or("", |code| {
+        // Error codes are a closed set of internal identifiers; keep only
+        // those, never an arbitrary string, so nothing identifying is logged.
+        CODE_MAP_INDEX_ERRORS.iter().copied().find(|known| *known == code).unwrap_or("other")
+    });
+    let graph_hits = field("graph_hits")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|hits| u64::try_from(hits.len()).ok());
+    UsageCodeMapMetadata { index_status, index_error, graph_hits }
+}
+
+/// Index error codes the Eulix call-graph backend reports.
+const CODE_MAP_INDEX_ERRORS: &[&str] = &[
+    "parser_unavailable",
+    "parser_untrusted_path",
+    "parser_failed",
+    "parser_timeout",
+    "parser_version_failed",
+    "parser_version_timeout",
+    "parser_cpu_limit_failed",
+    "index_busy",
+    "index_corrupt",
+    "index_oversize",
+    "index_memory_limit",
+    "index_storage_unsafe",
+    "index_write_failed",
+    "index_platform_unsupported",
+    "snapshot_failed",
+    "snapshot_changed",
+    "snapshot_timeout",
+    "snapshot_oversize",
+    "snapshot_unsafe_path",
+    "repository_busy",
+    "index_scope_unsupported",
+    "query_budget_exceeded",
+];
 
 pub(super) fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageResultMetadata<'_> {
     let structured = result.and_then(|result| result.structured_content.as_ref());
@@ -178,6 +245,7 @@ pub(super) fn usage_result_metadata(result: Option<&CallToolResult>) -> UsageRes
             .and_then(|data| data.get("file_count"))
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(0),
+        code_map: usage_code_map_metadata(structured, data),
     }
 }
 
@@ -393,6 +461,8 @@ fn usage_action(
         (bash_action(arguments), bash_command_kind(arguments))
     } else if tool == "VerifyEdit" {
         ("verification".to_string(), "")
+    } else if tool == "CodeMap" {
+        (code_map_operation(arguments).to_string(), "")
     } else {
         (String::new(), "")
     }
@@ -808,6 +878,9 @@ impl UsageEvent {
             recovery_attempt = metadata.recovery.recovery_attempt,
             recovery_level = metadata.recovery.recovery_level,
             source_kind = metadata.source_kind,
+            code_map_index_status = metadata.code_map.index_status,
+            code_map_index_error = metadata.code_map.index_error,
+            code_map_graph_hits = metadata.code_map.graph_hits,
             payload_bytes = metadata.payload_bytes,
             source_bytes = metadata.source_bytes,
             image_transcoded = metadata.image_transcoded,
@@ -860,6 +933,20 @@ fn conversation_telemetry(context: &RequestContext<RoleServer>) -> (String, Stri
         || ("none".to_string(), String::new()),
         |(source, value)| (source.to_string(), short_fingerprint("c", value)),
     )
+}
+
+/// The requested `CodeMap` operation as a finite label (`other` if unknown).
+fn code_map_operation(arguments: Option<&rmcp::model::JsonObject>) -> &'static str {
+    match arguments.and_then(|arguments| arguments.get("operation")).map(serde_json::Value::as_str)
+    {
+        None => "",
+        Some(Some("outline")) => "outline",
+        Some(Some("references")) => "references",
+        Some(Some("callers")) => "callers",
+        Some(Some("callees")) => "callees",
+        Some(Some("impact")) => "impact",
+        Some(_) => "other",
+    }
 }
 
 /// Classify a `BashCommand` call by action kind without retaining command text.
@@ -2041,5 +2128,65 @@ pub(super) mod tests {
             assert!(!event.to_string().contains("SECRET-"));
         }
         Ok(())
+    }
+
+    #[test]
+    fn code_map_usage_records_the_operation_and_graph_state_without_names() {
+        let arguments = |operation: serde_json::Value| {
+            serde_json::json!({ "operation": operation, "name": "secret_symbol" })
+                .as_object()
+                .cloned()
+                .unwrap_or_default()
+        };
+        for (operation, label) in [
+            ("outline", "outline"),
+            ("references", "references"),
+            ("callers", "callers"),
+            ("callees", "callees"),
+            ("impact", "impact"),
+            ("drop_tables", "other"),
+        ] {
+            let arguments = arguments(serde_json::json!(operation));
+            assert_eq!(usage_action("CodeMap", Some(&arguments), None).0, label);
+        }
+        assert_eq!(
+            usage_action("CodeMap", Some(&arguments(serde_json::json!(7))), None).0,
+            "other"
+        );
+        assert_eq!(usage_action("CodeMap", None, None).0, "");
+
+        let result = |structured: serde_json::Value| {
+            let mut result = CallToolResult::success(Vec::new());
+            result.structured_content = Some(structured);
+            result
+        };
+        let graph = result(serde_json::json!({"data": {
+            "index_status": "building", "index_error": "index_busy",
+            "graph_hits": [{"name": "secret_symbol"}, {"name": "secret_symbol"}]
+        }}));
+        assert_eq!(
+            usage_result_metadata(Some(&graph)).code_map,
+            UsageCodeMapMetadata {
+                index_status: "building",
+                index_error: "index_busy",
+                graph_hits: Some(2)
+            }
+        );
+        let root = result(
+            serde_json::json!({"index_status": "fresh", "index_error": null, "graph_hits": []}),
+        );
+        assert_eq!(
+            usage_result_metadata(Some(&root)).code_map,
+            UsageCodeMapMetadata { index_status: "fresh", index_error: "", graph_hits: Some(0) }
+        );
+        let forged = result(serde_json::json!({"data": {
+            "index_status": "/home/user/secret", "index_error": "parser said /home/user/secret"
+        }}));
+        assert_eq!(
+            usage_result_metadata(Some(&forged)).code_map,
+            UsageCodeMapMetadata { index_status: "other", index_error: "other", graph_hits: None }
+        );
+        let syntax = result(serde_json::json!({"data": {"files": []}}));
+        assert_eq!(usage_result_metadata(Some(&syntax)).code_map, UsageCodeMapMetadata::default());
     }
 }
