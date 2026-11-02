@@ -978,6 +978,7 @@ impl WinxService {
                             );
                             data.insert("failed_files".to_string(), json!(outcome.errors.len()));
                             data.insert("files".to_string(), json!(outcome.files));
+                            data.insert("read_selections".to_string(), json!(outcome.selections));
                             let symbol_errors: Vec<_> = outcome
                                 .errors
                                 .iter()
@@ -1008,6 +1009,7 @@ impl WinxService {
                         CallToolResult::success(vec![ContentBlock::text(outcome.text)]);
                     let mut structured = serde_json::Map::new();
                     structured.insert("files".to_string(), json!(outcome.files));
+                    structured.insert("read_selections".to_string(), json!(outcome.selections));
                     if !missing_files.is_empty() {
                         structured.insert("missing_files".to_string(), json!(missing_files));
                     }

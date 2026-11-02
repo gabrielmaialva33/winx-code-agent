@@ -132,3 +132,28 @@ fn read_usage_does_not_classify_other_tools() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[test]
+fn read_usage_uses_resolved_selections_and_preserves_hash_ambiguity() -> anyhow::Result<()> {
+    let fields = captured_usage_request(
+        "ReadFiles",
+        "",
+        &json!({"file_paths":["/SECRET/a.rs#target","/SECRET/a.rs#literal","/SECRET/missing.rs#target"]}),
+        Some(json!({"tool":"ReadFiles","status":"completed","data":{"read_selections":{
+            "schema":2,"whole_files":1,"bounded_ranges":0,"open_ended_ranges":0,"symbols":1,"unknown":1
+        }}})),
+    )?;
+    assert_eq!(fields["read_request_schema"], 2);
+    assert_eq!(fields["read_whole_file_requests"], 1);
+    assert_eq!(fields["read_symbol_requests"], 1);
+    assert_eq!(fields["read_unknown_requests"], 1);
+    assert!(!serde_json::to_string(&fields)?.contains("SECRET"));
+    let unknown = captured_usage_request(
+        "ReadFiles",
+        "",
+        &json!({"file_paths":["/SECRET/a.rs#target"]}),
+        None,
+    )?;
+    assert!(unknown.get("read_whole_file_requests").is_none_or(Value::is_null));
+    Ok(())
+}

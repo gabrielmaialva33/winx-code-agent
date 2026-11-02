@@ -23,6 +23,7 @@ pub(super) struct UsageObservationRequest {
 pub(super) struct UsageObservationResult {
     pub returned_items: Option<u64>,
     pub items_with_issues: Option<u64>,
+    pub read_selections: Option<crate::tools::read_files::ReadSelectionCounts>,
 }
 
 impl UsageObservationRequest {
@@ -56,6 +57,22 @@ impl UsageObservationRequest {
     }
 
     pub fn result(self, result: Option<&CallToolResult>) -> UsageObservationResult {
+        if self.read_schema.is_some() {
+            let read_selections = result
+                .and_then(|result| result.structured_content.as_ref())
+                .and_then(|envelope| envelope.get("data"))
+                .and_then(|data| data.get("read_selections"))
+                .and_then(|counts| {
+                    serde_json::from_value::<crate::tools::read_files::ReadSelectionCounts>(
+                        counts.clone(),
+                    )
+                    .ok()
+                })
+                .filter(|counts| {
+                    counts.schema == 2 && counts.total() == u64::try_from(self.batch_items).ok()
+                });
+            return UsageObservationResult { read_selections, ..Default::default() };
+        }
         if self.observe_schema.is_none() {
             return UsageObservationResult::default();
         }
@@ -75,6 +92,7 @@ impl UsageObservationRequest {
         UsageObservationResult {
             returned_items: u64::try_from(items.len()).ok(),
             items_with_issues,
+            ..Default::default()
         }
     }
 }
@@ -84,6 +102,10 @@ fn read_shapes(arguments: Option<&JsonObject>) -> Option<ReadShapes> {
     // Parsing performs no filesystem IO and none of the parsed strings are retained.
     let read: crate::types::ReadFiles =
         serde_json::from_value(Value::Object(arguments?.clone())).ok()?;
+    // Only the read pipeline knows whether # names a literal file or a symbol.
+    if read.file_paths.iter().any(|path| path.contains('#')) {
+        return None;
+    }
     let mut shapes = ReadShapes::default();
     for (start, end) in read.start_line_nums.into_iter().zip(read.end_line_nums) {
         match (start, end) {

@@ -74,3 +74,10 @@ path = "fuzz_targets/read_files_symbol.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "cited_code"
+path = "fuzz_targets/cited_code.rs"
+test = false
+doc = false
+bench = false

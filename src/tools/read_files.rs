@@ -247,6 +247,7 @@ struct ReadBatchState {
     successful_files: usize,
     revisions: Vec<ReadFileRevision>,
     errors: Vec<WinxError>,
+    selections: ReadSelectionCounts,
     budget: ReadBudgetState,
 }
 
@@ -261,6 +262,7 @@ impl ReadBatchState {
             successful_files: 0,
             revisions: Vec::new(),
             errors: Vec::new(),
+            selections: ReadSelectionCounts::default(),
             budget,
         }
     }
@@ -517,6 +519,7 @@ pub struct ReadFilesOutcome {
     pub successful_files: usize,
     pub files: Vec<ReadFileRevision>,
     pub errors: Vec<WinxError>,
+    pub selections: ReadSelectionCounts,
     pub budget: ReadBudgetReport,
 }
 
@@ -829,6 +832,7 @@ async fn execute_read_requests(
     budget: ReadBudgetState,
 ) -> ReadBatchState {
     let mut state = ReadBatchState::new(budget);
+    state.selections = ReadSelectionCounts::new(requests.len());
 
     // Files are independent, so perform blocking filesystem/tokenizer work in a
     // bounded pool. Results are still consumed in request order, preserving the
@@ -860,10 +864,17 @@ async fn execute_read_requests(
                     request.clean_path
                 )))
             });
+            let previous_selections = state.selections;
+            let previous_successes = state.successful_files;
+            state.selections.record(&request, &result);
             let stop = match result {
                 Err(error) => state.record_result(&request, Err(error)),
                 Ok(reads) => record_resolved_reads(&mut state, reads),
             };
+            if stop && state.successful_files == previous_successes {
+                // No part of this request was delivered; keep it unknown.
+                state.selections = previous_selections;
+            }
             if stop {
                 // Only ranges actually returned above enter the read guard.
                 for (_, pending) in tasks {
@@ -1005,6 +1016,7 @@ pub async fn handle_tool_call_with_budget(
         mut revisions,
         errors,
         budget,
+        selections,
     } = batch;
     let temporary_workspace = workspace_root.clone();
     revisions = tokio::task::spawn_blocking(move || {
@@ -1073,6 +1085,7 @@ pub async fn handle_tool_call_with_budget(
         successful_files,
         files: revisions,
         errors,
+        selections,
         budget: budget.report,
     })
 }
@@ -1084,3 +1097,6 @@ mod tests;
 mod symbol_tests;
 
 mod symbol;
+
+mod selections;
+pub use selections::ReadSelectionCounts;

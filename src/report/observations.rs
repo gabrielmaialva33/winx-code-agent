@@ -18,6 +18,10 @@ pub struct ReadUsage {
     pub whole_file_requests: u64,
     pub bounded_range_requests: u64,
     pub open_ended_range_requests: u64,
+    pub symbol_requests: u64,
+    pub unknown_requests: u64,
+    pub symbol_counts_known_calls: u64,
+    pub symbol_counts_unknown_calls: u64,
     pub response_bytes: u64,
 }
 
@@ -81,13 +85,24 @@ impl ObservationAccumulator {
         reads.calls = reads.calls.saturating_add(1);
         reads.response_bytes =
             reads.response_bytes.saturating_add(number(fields, "response_bytes"));
+        let symbols = optional_number(fields, "read_symbol_requests");
+        let unknown = optional_number(fields, "read_unknown_requests");
+        let schema = optional_number(fields, "read_request_schema");
+        let resolved = schema == Some(2) && symbols.is_some() && unknown.is_some();
+        if resolved {
+            reads.symbol_counts_known_calls = reads.symbol_counts_known_calls.saturating_add(1);
+            reads.symbol_requests = reads.symbol_requests.saturating_add(symbols.unwrap_or(0));
+            reads.unknown_requests = reads.unknown_requests.saturating_add(unknown.unwrap_or(0));
+        } else {
+            reads.symbol_counts_unknown_calls = reads.symbol_counts_unknown_calls.saturating_add(1);
+        }
         let counts = (
             optional_number(fields, "read_whole_file_requests"),
             optional_number(fields, "read_bounded_range_requests"),
             optional_number(fields, "read_open_ended_range_requests"),
         );
         if let (Some(whole), Some(bounded), Some(open)) = counts {
-            if optional_number(fields, "read_request_schema") == Some(1) {
+            if schema == Some(1) || resolved {
                 reads.classified_calls = reads.classified_calls.saturating_add(1);
                 reads.whole_file_requests = reads.whole_file_requests.saturating_add(whole);
                 reads.bounded_range_requests = reads.bounded_range_requests.saturating_add(bounded);

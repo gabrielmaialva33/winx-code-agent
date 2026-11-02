@@ -44,6 +44,23 @@ mod observation_usage_regressions {
     }
 
     #[test]
+    fn resolved_read_counts_keep_symbols_separate_and_legacy_unknown() -> anyhow::Result<()> {
+        let value = report(&[
+            json!({"event":"tool_call","tool":"ReadFiles","read_request_schema":2,
+                "read_whole_file_requests":1,"read_bounded_range_requests":0,
+                "read_open_ended_range_requests":0,"read_symbol_requests":2,"read_unknown_requests":1}),
+            json!({"event":"tool_call","tool":"ReadFiles","read_request_schema":1,
+                "read_whole_file_requests":3,"read_bounded_range_requests":0,"read_open_ended_range_requests":0}),
+        ])?;
+        assert_eq!(value["reads"]["wholeFileRequests"], 4);
+        assert_eq!(value["reads"]["symbolRequests"], 2);
+        assert_eq!(value["reads"]["unknownRequests"], 1);
+        assert_eq!(value["reads"]["symbolCountsKnownCalls"], 1);
+        assert_eq!(value["reads"]["symbolCountsUnknownCalls"], 1);
+        Ok(())
+    }
+
+    #[test]
     fn observe_counts_requests_and_returned_items_separately_from_partial_calls(
     ) -> anyhow::Result<()> {
         let value = report(&[

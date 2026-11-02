@@ -40,20 +40,50 @@ pub fn read_specs(output: &str, cwd: &Path) -> Option<Vec<String>> {
     let mut lines_by_file: BTreeMap<PathBuf, Vec<usize>> = BTreeMap::new();
     let mut locations = 0usize;
     let mut probes = 0usize;
-    for line in scanned_tail(output).lines().filter(|line| line.len() <= MAX_LINE_BYTES) {
-        for citation in citations(line) {
-            let Some(path) = citation.resolve(line, cwd, &mut probes) else { continue };
+    let mut heading: Option<PathBuf> = None;
+    let clean = crate::state::terminal::strip_ansi_codes(scanned_tail(output));
+    for line in clean.lines() {
+        if probes >= MAX_PROBES {
+            break;
+        }
+        if line.len() > MAX_LINE_BYTES {
+            heading = None;
+            continue;
+        }
+        if heading.is_some() && line == "--" {
+            continue;
+        }
+        let grouped = heading.as_ref().and_then(|path| {
+            grouped_line(line).map(|(number, matched)| (path.clone(), number, matched))
+        });
+        let resolved = if let Some((path, number, matched)) = grouped {
+            // A grouped hit's body is source text, not another diagnostic.
+            if !matched {
+                continue;
+            }
+            vec![(path, number)]
+        } else {
+            heading = None;
+            let resolved = citations(line)
+                .filter_map(|citation| {
+                    citation.resolve(line, cwd, &mut probes).map(|path| (path, citation.number))
+                })
+                .collect::<Vec<_>>();
+            if resolved.is_empty() && probes < MAX_PROBES && looks_like_source(line) {
+                probes += 1;
+                heading = resolve(line, cwd);
+            }
+            resolved
+        };
+        for (path, number) in resolved {
             let lines = lines_by_file.entry(path).or_default();
-            if !lines.contains(&citation.number) {
-                lines.push(citation.number);
+            if !lines.contains(&number) {
+                lines.push(number);
                 locations += 1;
             }
             if locations > MAX_LOCATIONS || lines_by_file.len() > MAX_FILES {
                 return None;
             }
-        }
-        if probes >= MAX_PROBES {
-            break;
         }
     }
     let specs: Vec<String> = lines_by_file
@@ -65,6 +95,21 @@ pub fn read_specs(output: &str, cwd: &Path) -> Option<Vec<String>> {
         })
         .collect();
     (!specs.is_empty()).then_some(specs)
+}
+
+/// A contiguous rg heading group uses line:match and line-context.
+fn grouped_line(line: &str) -> Option<(usize, bool)> {
+    let digits = line.bytes().take_while(u8::is_ascii_digit).count();
+    if !(1..=7).contains(&digits) {
+        return None;
+    }
+    let matched = match line.as_bytes().get(digits)? {
+        b':' => true,
+        b'-' => false,
+        _ => return None,
+    };
+    let number = line[..digits].parse::<usize>().ok().filter(|number| *number > 0)?;
+    Some((number, matched))
 }
 
 /// The part of `output` that is scanned: its last [`SCAN_BYTES`], starting at
@@ -380,5 +425,41 @@ src/main.rs:0:zero line";
         let (_dir, root) = workspace();
         let output = (0..500).map(|n| format!("missing{n}.rs:1:x")).collect::<Vec<_>>().join("\n");
         assert_eq!(read_specs(&output, &root), None);
+    }
+
+    #[test]
+    fn grouped_rg_and_ansi_citations_resolve_without_matching_source_contents() {
+        let (_dir, root) = workspace();
+        let output = "\u{1b}[35msrc/main.rs\u{1b}[0m\r\n\u{1b}[32m20\u{1b}[0m:let message = \"app.py:90:decoy\";\r\n21-context\r\n--\r\n100:let message = \"app.py:90:decoy\";\r\n\r\napp.py\r\n7:target\r\n";
+        assert_eq!(
+            read_specs(output, &root),
+            Some(vec![
+                spec(&root, "app.py", 1, 15),
+                spec(&root, "src/main.rs", 12, 28),
+                spec(&root, "src/main.rs", 92, 108)
+            ])
+        );
+        let flat = "\u{1b}[35msrc/main.rs\u{1b}[0m:\u{1b}[32m20\u{1b}[0m:target";
+        assert_eq!(read_specs(flat, &root), Some(vec![spec(&root, "src/main.rs", 12, 28)]));
+    }
+
+    #[test]
+    fn grouped_rg_does_not_reuse_a_heading_after_unrelated_output() {
+        let (_dir, root) = workspace();
+        for output in [
+            "src/main.rs\n\n20:unrelated",
+            "src/main.rs\nordinary output\n20:unrelated",
+            "src/main.rs\nmissing.rs\n20:unrelated",
+        ] {
+            assert_eq!(read_specs(output, &root), None, "{output}");
+        }
+        let many = format!(
+            "src/main.rs\n{}",
+            (1..=(MAX_LOCATIONS + 1))
+                .map(|n| format!("{}:hit", n * 30))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(read_specs(&many, &root), None);
     }
 }

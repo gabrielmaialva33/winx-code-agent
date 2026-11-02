@@ -151,9 +151,36 @@ async fn call_budget_defers_remaining_symbol_ranges_without_expanding_coverage()
     assert!(outcome.budget.returned_bytes <= 2048);
     assert!(!outcome.budget.deferred.is_empty(), "{}", outcome.text);
     assert!(outcome.budget.deferred.iter().all(|spec| !spec.contains('#') && spec.contains(':')));
+    assert_eq!(outcome.selections.symbols, 1);
+    assert_eq!(outcome.selections.unknown, 0);
     let guard = state.lock().await;
     let coverage = &guard.as_ref().unwrap().whitelist_for_overwrite[&outcome.files[0].path];
     assert!(!coverage.covers_range(1, source.lines().count()));
+}
+
+#[tokio::test]
+async fn completely_deferred_symbol_request_remains_unknown() {
+    let source = format!(
+        "// {}\nfn target() {{\n{}\n}}\n",
+        "x".repeat(3500),
+        " let value = 123456789;\n".repeat(120)
+    );
+    let (_temp, path, state) = setup(&source, "rs");
+    let outcome = handle_tool_call_with_budget(
+        &state,
+        args(vec![format!("{}:1-1", path.display()), format!("{}#target", path.display())]),
+        ReadResponseBudget::parse(Some("4096"), Some("4096"), Some("0")),
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.files.len(), 1);
+    assert_eq!(outcome.selections.bounded_ranges, 1);
+    assert_eq!(
+        outcome.budget.deferred,
+        vec![format!("{}:2-{}", path.display(), source.lines().count())]
+    );
+    assert_eq!(outcome.selections.symbols, 0);
+    assert_eq!(outcome.selections.unknown, 1);
 }
 
 #[tokio::test]

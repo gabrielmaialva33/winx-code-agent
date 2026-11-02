@@ -3562,10 +3562,12 @@ fn assert_usage_entries(contents: &str) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("missing ReadFiles usage event: {contents}"))?;
     assert_eq!(read_call["fields"]["batch_items"], 2);
     assert_eq!(read_call["fields"]["worker_limit"], 3);
-    assert_eq!(read_call["fields"]["read_request_schema"], 1);
+    assert_eq!(read_call["fields"]["read_request_schema"], 2);
     assert_eq!(read_call["fields"]["read_whole_file_requests"], 2);
     assert_eq!(read_call["fields"]["read_bounded_range_requests"], 0);
     assert_eq!(read_call["fields"]["read_open_ended_range_requests"], 0);
+    assert_eq!(read_call["fields"]["read_symbol_requests"], 0);
+    assert_eq!(read_call["fields"]["read_unknown_requests"], 0);
     assert_eq!(read_call["fields"]["workspace_coherence"], "validated");
     assert_eq!(read_call["fields"]["conversation_source"], "none");
     assert!(

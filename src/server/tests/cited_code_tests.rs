@@ -103,6 +103,45 @@ async fn cited_code_arms_a_line_patch_without_another_read() -> anyhow::Result<(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn read_selection_metadata_uses_resolved_paths_not_hash_guesses() -> anyhow::Result<()> {
+    let session = Session::new().await?;
+    std::fs::write(session.root.join("src/select.rs"), "fn target() {}\nfn other() {}\n")?;
+    std::fs::write(session.root.join("src/select.rs#literal"), "literal file\n")?;
+    let result = session
+        .call(
+            "ReadFiles",
+            json!({"file_paths":[
+                "src/select.rs#target", "src/select.rs#literal", "src/select.rs:1-1"
+            ]}),
+            false,
+        )
+        .await?;
+    let counts = &result["data"]["read_selections"];
+    ensure!(counts["schema"] == 2 && counts["symbols"] == 1, "{result}");
+    ensure!(counts["whole_files"] == 1 && counts["bounded_ranges"] == 1, "{result}");
+    ensure!(counts["unknown"] == 0, "{result}");
+    let failed =
+        session.call("ReadFiles", json!({"file_paths":["src/select.rs#missing"]}), false).await?;
+    ensure!(failed["data"]["read_selections"]["symbols"] == 1, "{failed}");
+    session.close().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn grouped_cited_code_is_attached_through_the_real_pty() -> anyhow::Result<()> {
+    let session = Session::new().await?;
+    let result = session
+        .command("printf '\\033[35msrc/lib.rs\\033[0m\\n\\033[32m20\\033[0m:line 20\\n'", true)
+        .await?;
+    ensure!(
+        result["data"]["cited_code"]["files"][0]["path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("src/lib.rs")),
+        "{result}"
+    );
+    session.close().await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn cited_code_is_opt_in_bounded_by_policy_and_redacted() -> anyhow::Result<()> {
     let session = Session::new().await?;
     // Disabled: the result is exactly an ordinary command result.
