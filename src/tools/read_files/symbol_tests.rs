@@ -175,10 +175,12 @@ async fn completely_deferred_symbol_request_remains_unknown() {
     .unwrap();
     assert_eq!(outcome.files.len(), 1);
     assert_eq!(outcome.selections.bounded_ranges, 1);
-    assert_eq!(
-        outcome.budget.deferred,
-        vec![format!("{}:2-{}", path.display(), source.lines().count())]
-    );
+    // The deferred spec names the canonical path, which differs from the temp
+    // path when the temp root is reached through an alias (e.g. /proc fds).
+    let expected_tail = format!("source.rs:2-{}", source.lines().count());
+    assert_eq!(outcome.budget.deferred.len(), 1, "{:?}", outcome.budget.deferred);
+    assert!(outcome.budget.deferred[0].ends_with(&expected_tail), "{:?}", outcome.budget.deferred);
+    assert!(!outcome.budget.deferred[0].contains('#'));
     assert_eq!(outcome.selections.symbols, 0);
     assert_eq!(outcome.selections.unknown, 1);
 }
