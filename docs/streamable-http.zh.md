@@ -4,6 +4,9 @@
   <a href="streamable-http.md">English</a> • <a href="streamable-http.pt.md">Português</a> • <b>中文</b>
 </p>
 
+> [!NOTE]
+> 本文译自[英文指南](streamable-http.md)，英文版为权威参考，内容可能更新。
+
 Winx 通过经过身份验证的 **Streamable HTTP** 端点向 ChatGPT、云端智能体、远程自动化流程以及无法直接启动本地 stdio 进程的客户端公开可配置的 MCP 工具集。端点统一为 `/mcp`，默认监听在 `127.0.0.1:8000`，默认工具配置仍为 `full`。
 
 由于该端点提供了真实的 Shell 和文件系统控制能力，Winx 采取了**安全失败（Fail-Closed）**的设计策略：强制要求强凭证、除非显式声明否则拒绝非回环绑定、对请求资源消耗设置严格上限，并在不同主体之间进行严格的安全隔离。

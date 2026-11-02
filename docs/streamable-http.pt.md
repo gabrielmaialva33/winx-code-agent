@@ -4,6 +4,9 @@
   <a href="streamable-http.md">English</a> • <b>Português</b> • <a href="streamable-http.zh.md">中文</a>
 </p>
 
+> [!NOTE]
+> Tradução do [guia em inglês](streamable-http.md), que é a referência canônica e pode estar mais atualizado.
+
 O Winx expõe um conjunto configurável de ferramentas MCP através de um endpoint autenticado **Streamable HTTP** para ChatGPT, agentes hospedados na nuvem, automação remota e clientes que não podem iniciar um processo stdio local. O endpoint é `/mcp`; o listener padrão é `127.0.0.1:8000` e o perfil de ferramentas padrão continua sendo `full`.
 
 Como esse endpoint concede recursos reais de shell e acesso ao sistema de arquivos, o Winx adota a postura de segurança **fail-closed**: exige credenciais fortes, recusa conexões fora do loopback a menos que explicitamente autorizado, impõe limites de custo de requisição e isola rigorosamente cada principal autenticado.

@@ -2,9 +2,9 @@
   <img src=".github/assets/fairy.png" alt="Winx Logo" width="150" />
 
   # 🪄 Winx
-  ### *Runtime MCP remoto de alta performance para agentes autônomos de código*
+  ### *Your environment. Any agent.*
 
-  **Sessões PTY Duráveis • Streamable HTTP • Operações de Arquivo Protegidas • Feito em Rust Nativo 🦀**
+  **Execução persistente • Contexto eficiente • Operações de arquivo seguras • Controle de sessão e recuperação**
 
   <p align="center">
     <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/linguagem-Rust_2021-orange?style=flat&logo=rust" alt="Rust 2021" /></a>
@@ -16,13 +16,13 @@
   </p>
 
   <p align="center">
-    <em>"Dê aos LLMs remotos e locais mãos duráveis e autenticadas no seu ambiente de desenvolvimento."</em>
+    <em>Um runtime MCP que conecta agentes de IA remotos aos ambientes de desenvolvimento que eles não alcançam sozinhos.</em>
   </p>
 
   <p align="center">
-    <a href="#mcp-remoto-em-60-segundos">⚡ <b>Início Rápido</b></a> &nbsp;•&nbsp;
-    <a href="#o-que-você-obtém">✨ <b>Recursos</b></a> &nbsp;•&nbsp;
-    <a href="#arquitetura-remota">🏗️ <b>Arquitetura</b></a> &nbsp;•&nbsp;
+    <a href="#mcp-remoto-em-60-segundos">⚡ <b>Início rápido</b></a> &nbsp;•&nbsp;
+    <a href="#onde-a-winx-se-encaixa">🧭 <b>Onde se encaixa</b></a> &nbsp;•&nbsp;
+    <a href="#o-que-a-winx-oferece-a-agentes-remotos">✨ <b>Recursos</b></a> &nbsp;•&nbsp;
     <a href="docs/streamable-http.pt.md">🌐 <b>Guia HTTP</b></a> &nbsp;•&nbsp;
     <a href="SECURITY.md">🛡️ <b>Segurança</b></a>
   </p>
@@ -32,12 +32,31 @@
   </p>
 </div>
 
-O Winx é um **runtime MCP focado em execução remota** para agentes que precisam de um shell real, primitivas protegidas de edição de arquivos, navegação de código consciente do repositório e sessões que sobrevivem a quedas de conexão. Seu caminho primário de implantação é um endpoint **Streamable HTTP** blindado para ChatGPT e outros clientes MCP na nuvem ou em rede; o transporte **stdio** permanece totalmente suportado para Claude Code, Codex CLI, Cursor, VS Code e outros clientes locais.
+> [!NOTE]
+> Esta página traduz a visão geral da Winx. A **referência técnica canônica está em inglês**, no
+> [README.md](README.md) e em [docs/](docs/); em caso de divergência, vale a versão em inglês.
 
-No Unix, o Winx separa o adaptador MCP dos processos que controlam cada PTY. O `winxd` gerencia o plano de controle e um processo `winx-guardian` dedicado por sessão lógica mantém o shell vivo durante desconexões HTTP, reinicializações de clientes e atualizações do adaptador. Começou como uma reescrita em Rust do [WCGW](https://github.com/rusiaaman/wcgw), mas não é um wrapper Python: `cd` persiste, `Ctrl+C` interrompe o processo real, TUIs interativas funcionam e saídas volumosas de terminal são renderizadas e orçadas em tokens antes de chegarem ao modelo.
+A Winx é um **runtime MCP que conecta agentes de IA remotos** (ChatGPT e outros clientes MCP) a ambientes de
+desenvolvimento locais ou remotos que eles não acessam diretamente. Ela oferece execução persistente, leituras e saídas
+de comando econômicas em contexto, operações de arquivo protegidas e sessões que sobrevivem a quedas de conexão. O
+caminho principal de implantação é um endpoint **Streamable HTTP** endurecido; o stdio continua totalmente suportado para
+clientes MCP locais.
+
+**Para quem é.** A Winx é para o agente que *não* está na sua máquina. Se você já trabalha com Claude Code ou Codex no
+seu terminal, continue usando-os diretamente: a Winx não os substitui. Ela permite que um agente remoto trabalhe nesse
+mesmo ambiente, coordene os agentes que rodam ali e use ferramentas locais opcionais, como descrito em
+[onde a Winx se encaixa](#onde-a-winx-se-encaixa).
+
+No Linux, no macOS e no Windows nativo, a Winx separa o adaptador MCP dos processos que controlam cada PTY: o `winxd`
+gerencia o plano de controle e um `winx-guardian` por sessão lógica mantém o shell vivo entre desconexões HTTP,
+reinícios do cliente e atualizações do adaptador. A Winx começou como um port em Rust do
+[WCGW](https://github.com/rusiaaman/wcgw), mas não é um wrapper de Python: o `cd` persiste, `Ctrl+C` interrompe o
+processo real, TUIs interativas funcionam e saídas grandes são renderizadas e orçadas em tokens antes de chegar ao modelo.
 
 > [!IMPORTANT]
-> **Streamable HTTP é o principal método de implantação.** O Winx o vincula ao loopback por padrão, exige um bearer token forte, suporta múltiplos principals autenticados independentes e mantém por padrão uma sessão durável por principal/workspace. Chamadas repetidas e stateless de `Initialize` reconectam à sessão existente em vez de instanciar um novo guardian.
+> **Streamable HTTP é o principal método de implantação.** A Winx o vincula ao loopback por padrão, exige um bearer
+> token forte, suporta principals autenticados independentes e mantém por padrão uma sessão durável por
+> principal/workspace.
 
 ## MCP remoto em 60 segundos
 
@@ -62,17 +81,60 @@ Authorization: Bearer <conteúdo de ~/.config/winx-http-token>
 
 Clientes em nuvem precisam de um endpoint HTTPS acessível. Mantenha o Winx em loopback e use um túnel MCP privado, VPN ou proxy reverso HTTPS autenticado à frente. Para produtos OpenAI, o [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) mantém o Winx privado enquanto expõe um endpoint hospedado pela OpenAI.
 
-**A seguir:** [guia completo de implantação Streamable HTTP](docs/streamable-http.pt.md) · [modelo de segurança](SECURITY.md) · [configuração local via stdio](#instalação)
+**A seguir:** [guia completo de implantação Streamable HTTP](docs/streamable-http.pt.md) · [modelo de segurança](SECURITY.md) · [configuração local via stdio](README.md#install)
 
-## Por que o Winx para agentes remotos
+## Onde a Winx se encaixa
 
-- **Sessões duráveis:** O HTTP é stateless do ponto de vista do cliente, mas os PTYs no Unix residem em guardians por sessão e podem ser retomados com o mesmo `thread_id`.
-- **Isolamento consciente de identidade:** Um token por principal; IDs de thread e tarefas MCP (Tasks) são isolados internamente e traduzidos antes que a resposta saia do servidor. A afinidade de workspace absorve IDs de thread instáveis gerados por modelos.
-- **Catálogos na medida certa:** Os perfis `full`, `coding`, `read-only` e `terminal` — ou uma allowlist exata por principal — reduzem o payload de descoberta/schema e bloqueiam chamadas fora da política.
-- **Um protocolo de mutação:** As ferramentas públicas de edição são fachadas compatíveis sobre um único motor tipado de planejamento/commit; evidência de leitura, identidade canônica do caminho, escrita atômica, undo, verificação e recuperação seguem as mesmas regras em todos os formatos.
-- **Padrões de rede com fail-closed:** Vinculação estrita a loopback por padrão, tokens de no mínimo 32 bytes, arquivos de token com permissão `chmod 600`, validação de Host contra DNS rebinding, limites de corpo/tempo/concorrência, rate limiting por IP e atraso deliberado em respostas de autenticação inválida.
-- **Semântica de terminal nativa para agentes:** Comandos em primeiro e segundo plano, polling de status, entrada interativa, snapshots estáveis de TUI, detecção de turnos, códigos de saída reais e saída limitada.
-- **Ferramentas de repositório completas:** Edições seguras via SEARCH/REPLACE, planejamento multi-arquivos atômico, desfazer (undo), leituras orçadas em tokens, entrada de imagens, handoff de contexto e navegação de símbolos via Tree-sitter.
+A Winx se integra às ferramentas que você já usa em vez de competir com elas.
+
+| Ferramenta | Relação com a Winx |
+|------------|--------------------|
+| **Claude Code, Codex e outros agentes de terminal** | Agentes locais com ferramentas próprias. Use-os diretamente no seu terminal. A Winx expõe o ambiente a agentes que não rodam ali e pode servir um mesmo ambiente a vários clientes MCP. |
+| **Herdr** | Gerenciador de workspaces de terminal para agentes de código. O backend Herdr opcional da ferramenta `Agent` fala com a API de socket do Herdr, para que um agente remoto liste, leia, aguarde e envie prompts aos agentes do seu workspace. Configurado pelo operador. |
+| **[Eulix](https://github.com/Nurysso/eulix)** | Motor local de inteligência de código. Backend opcional para `CodeMap` `callers`, `callees` e `impact` quando o operador define `WINX_EULIX_PARSER`. |
+| **[WCGW](https://github.com/rusiaaman/wcgw)** | Origem da Winx: um port em Rust do WCGW. Seus modos e sua sintaxe de intervalos de linhas continuam. |
+
+## O que a Winx oferece a agentes remotos
+
+### Execução persistente
+
+- **Sessões duráveis:** o HTTP é stateless para o cliente, mas os PTYs vivem em guardians por sessão e podem ser
+  retomados com o mesmo `thread_id`.
+- **Semântica de terminal para agentes:** comandos em primeiro e segundo plano, polling de status, entrada interativa,
+  snapshots estáveis de TUI, detecção de turnos, códigos de saída reais e saída limitada.
+- **Histórico de execuções e fluxos de agentes:** histórico durável e isolado, páginas de saída que não consomem,
+  explicação de estado, wait-any e prompts nativos com recibo; o backend Herdr opcional alcança alvos configurados ou
+  descobre os agentes que rodam no workspace da sessão. Veja o [guia de fluxos](docs/agent-workflows.md).
+
+### Contexto eficiente
+
+- **Catálogos na medida:** os perfis `full`, `coding`, `read-only` e `terminal`, ou uma allowlist exata por principal,
+  reduzem o payload de descoberta e recusam chamadas sem autoridade equivalente.
+- **Leituras e saídas limitadas:** intervalos de linhas e leitura de definições por `caminho#símbolo`, saída de terminal
+  renderizada e compactada sem perdas, e orçamentos por chamada com continuações exatas. Para clientes ChatGPT e Codex,
+  um comando concluído cuja saída cita poucos `caminho:linha` (resultados de busca, erros de compilação, tracebacks) já
+  traz esses trechos com revisões prontas para edição, economizando uma ida e volta.
+- **Ferramentas de repositório, não só um shell:** um protocolo único de edição, planejamento multi-arquivo, undo,
+  leituras orçadas em tokens, entrada de imagens, handoff de contexto e navegação por símbolos com tree-sitter.
+
+### Operações de arquivo seguras
+
+- **Uma ferramenta de mutação:** `EditFiles` cria, edita, agrupa, aplica patches, verifica e desfaz por um único motor
+  tipado de planejamento e commit, preservando evidência de leitura, caminho canônico, escritas atômicas, recibos e
+  recuperação.
+- **Protegido por padrão:** redação de segredos em toda saída de ferramenta, modos `architect` (somente leitura) e
+  `code_writer` (allowlist), política de caminhos em toda ferramenta de arquivo e sandbox Landlock opcional no Linux.
+
+### Controle de sessão e recuperação
+
+- **Isolamento por identidade:** um token por principal; IDs de thread e de MCP Tasks são isolados internamente e
+  traduzidos antes da resposta sair do servidor. A afinidade por workspace absorve thread IDs instáveis do modelo.
+- **Rede com fail-closed:** loopback por padrão, tokens de no mínimo 32 bytes, arquivo de token `chmod 600`, validação
+  de Host contra DNS rebinding, limites de corpo, tempo e concorrência, autenticação antes de qualquer capacidade
+  compartilhada e limitação de falhas por IP.
+- **Recuperável por design:** todo resultado traz um `status` autoritativo e, quando a Winx consegue inferir com
+  segurança, um `nextAction` concreto; sessões persistidas são recuperadas após reinícios do daemon ou do adaptador, e
+  um shell que para de responder é reiniciado no mesmo diretório e modo.
 
 ## Escolha seu transporte
 
@@ -108,492 +170,57 @@ Secure MCP Tunnel / VPN / proxy reverso HTTPS autenticado
                           └─ winx-guardian por sessão ── PTY real / shell / TUI
 ```
 
-## O que você obtém
-
-- Sessão bash persistente com estado por thread com semântica de PTY real: foreground, background, checagem de status, envio de texto, Enter/Ctrl-C/Ctrl-D e caracteres ASCII puros. Scripts multilinha e atalhos de comando funcionam; bytes NUL são rejeitados antes de alcançar o shell.
-- Workspaces com três modos de segurança: `wcgw` (acesso total), `architect` (somente leitura), `code_writer` (allowlist de comandos e globs de escrita). A allowlist de comandos é analisada via Tree-sitter, verificando **cada** comando na linha (pipelines, `&&`/`||`/`;`, substituição de comandos `$(...)`, subshells) e não apenas a primeira palavra, impossibilitando bypasses como `ls && curl … | sh` ou `ls $(rm …)`.
-- PTY resiliente: um shell que não retorna ao prompt (mesmo após Ctrl-C) é automaticamente reiniciado no mesmo cwd/modo, processos filhos são eliminados ao encerrar e a detecção de prompt é robusta a `PS1` customizados. Suporte opcional ao `zsh` com `WINX_SHELL=zsh`.
-- Leitura de arquivos com intervalos de linhas estilo WCGW (`file.rs:10-40`, `file.rs:10-`, `file.rs:-40`). Arquivos ativos são rastreados e priorizados no contexto do repositório.
-- Uma única ferramenta pública `EditFiles` para substituição integral, SEARCH/REPLACE, patch de linhas vinculado à revisão, lote atômico, verificação e undo. Todos os modos compartilham preflight canônico, evidência de leitura/frescor, planejamento limitado, substituição atômica por arquivo, diffs compactos, recuperação tipada e recibos. Falha de planejamento não grava nada; uma rara falha durante o commit relata exatamente o prefixo já persistido.
-- Navegação de código via `CodeMap` com Tree-sitter: mapa de símbolos orçado em tokens de um arquivo ou do repositório inteiro, ou busca de definições/referências para um símbolo em 13 linguagens.
-- `ContextSave` para exportar um resumo da tarefa e seus arquivos para a próxima sessão, incluindo contexto do workspace, arquivos ativos, git status/diff e estado do terminal para retomada limpa.
-- `ReadImage` para que modelos multimodais possam receber capturas de tela, mockups e imagens de erro em blocos de imagem nativos do MCP.
-- Saída de shell limpa e orçada em tokens: ruídos de cursor/ANSI de programas interativos (REPLs, barras de progresso) são renderizados através de um emulador de terminal, e repetições mecânicas são compactadas sem perdas (`linha  [winx: ×N]`) para economizar contexto. Desative a compactação com `WINX_NO_COMPRESS=1`. Quando a saída excede o limite, o excesso inicial é gravado em um arquivo scratch em `.winx/scratch/` que o agente pode ler posteriormente.
-- Redação automática de segredos ativa por padrão: chaves de API, JWTs, blocos de chaves privadas PEM e URLs no formato `user:pass@` são mascarados de **todas** as saídas de ferramentas e memória salva antes de chegarem ao modelo (desative com `WINX_NO_REDACT=1`). Um sandbox opcional com Landlock (`WINX_SANDBOX=1`, Linux) adiciona uma camada de proteção a nível de kernel que confina escritas ao workspace e oculta o diretório home.
-- Endpoint **Streamable HTTP** blindado (`winx-code-agent serve --http`) para clientes remotos, mantendo stdio para ferramentas locais.
-
 ## Ferramentas MCP
 
-O catálogo exposto ao modelo é intencionalmente pequeno. `EditFiles` substitui cinco escolhas de mutação sobrepostas por
-uma chamada e um modo explícito por arquivo. Os nomes antigos continuam chamáveis como aliases ocultos para clientes em
-cache ou conversas já abertas, mas clientes novos veem e devem usar somente `EditFiles`.
-
-Escolha o menor catálogo que cubra o cliente. A política vale tanto na descoberta quanto no dispatch, e o wire interno
-fica limitado à autoridade de mutação equivalente já concedida. Para um agente de código comum, `coding` é o ponto de
-partida recomendado; use `full` quando também precisar de imagens ou handoff de contexto.
-
-| Perfil | Ferramentas | Capacidades |
-| :--- | ---: | :--- |
-| `terminal` | 2 | `Initialize` e `BashCommand` |
-| `read-only` | 4 | Inicialização, leitura exata de arquivos/imagens e `CodeMap` |
-| `coding` | 5 | `Initialize`, `BashCommand`, `ReadFiles`, `CodeMap` e `EditFiles` |
-| `full` | 7 | Padrão; adiciona `ContextSave` e `ReadImage` ao fluxo compacto de código |
-
-```bash
-winx-code-agent serve --http \
-  --token-file ~/.config/winx-http-token \
-  --tool-profile coding
-```
-
-Uma lista exata repetindo `--allow-tool NOME` substitui o perfil. O catálogo reduz a superfície MCP; ele não altera a
-autoridade de shell/arquivos concedida pelo modo inicializado.
-
 | Ferramenta | O que faz |
-| :--- | :--- |
-| `Initialize` | Inicializa o workspace, define o modo de operação e retorna um `thread_id`. Deve ser chamada primeiro, a menos que o cliente exponha MCP Roots. Sem caminho especificado, cria um ambiente scratch temporário; retomar uma tarefa (`task_id_to_resume`) reabre a raiz do projeto salva. |
-| `BashCommand` | Executa comandos, monitora processos longos, envia Enter/Ctrl-C e opera TUIs. A política `wait_policy` suporta: `adaptive` (padrão, mantém chamadas curtas inline e promove comandos longos para Task se suportado); `until_complete` (inicia uma Task imediatamente); `return_early` (retorna imediatamente). Suporta `is_background`, `status_check`, ações de input, `screen` e `wait_for_turn`. |
-| `ReadFiles` | Lê um ou múltiplos arquivos com numeração de linhas e devolve revisão opaca e intervalos realmente visíveis. Adicione `:10-40` ao caminho; truncamento nunca registra linhas não exibidas. |
-| `EditFiles` | Cria, altera ou desfaz um ou vários arquivos. Um `apply` aceita até 100 alvos únicos e valida o lote inteiro antes de gravar. Cada entrada usa um modo explícito: `search_replace` para mudanças exatas pequenas, `line_patch` com revisão e coordenadas visíveis de `ReadFiles`, `replace` para arquivo novo ou substituição integral intencional e `undo` com o `undo_id` exato retornado. `verify_command` opcional roda uma vez após o commit; uma falha nunca repete a edição. |
-| `ContextSave` | Salva descrição da tarefa + arquivos em um único documento estruturado com contexto do workspace, arquivos ativos e git diff/status para transferência rápida de contexto entre sessões. |
-| `ReadImage` | Retorna um bloco nativo de imagem MCP (não base64 como texto comum), permitindo que modelos multimodais processem a imagem visualmente. Confinado ao workspace. |
-| `CodeMap` | Navegação de código com Tree-sitter em uma ferramenta com duas operações: `outline` (mapa de símbolos de classes, funções e tipos com orçamento de tokens) e `references` (busca semântica de definições e referências em 13 linguagens). |
-
-O Winx anuncia a especificação MCP `2026-07-28`. Cada ferramenta publica um `outputSchema` e retorna um envelope estruturado `structuredContent`, mantendo compatibilidade de texto/imagem com clientes mais antigos.
-Edições recebem recibos persistidos por 30 minutos: chamadas idênticas não escrevem nem verificam duas vezes enquanto os hashes finais coincidirem. Falhas de verificação retornam `completed_with_issues` e uma ação vinculada a recibo em `BashCommand`; três conflitos SEARCH repetidos escalam para `recovery_exhausted`.
-
-O cancelamento de MCP Tasks é vinculado à geração exata. Se o cancelamento vencer durante o intervalo entre reserva e
-lançamento, o Winx aguarda a identidade exata da execução ou a prova de que nenhum processo iniciou. Um fallback limitado
-encerra a sessão afetada antes de confirmar o cancelamento; um interrupt tardio nunca pode atingir o comando seguinte.
-
-## Edição com Busca/Substituição (Search/Replace)
-
-Sintaxe padrão de blocos:
-
-```text
-<<<<<<< SEARCH
-conteúdo original
-=======
-novo conteúdo
->>>>>>> REPLACE
-```
-
-Tolerâncias automáticas aplicadas pelo buscador:
-
-- **Atômico:** correspondências ausentes ou ambíguas cancelam a operação sem tocar no arquivo.
-- Ajusta a indentação do conteúdo de substituição se o LLM errar os espaços iniciais.
-- Remove numerações de linha vazadas do `ReadFiles` dentro do bloco SEARCH.
-- Normaliza aspas curvas ("smart quotes"), travessões (em-dash) e reticências unicode.
-- Usa blocos adjacentes para desambiguar trechos idênticos que aparecem mais de uma vez.
-- Suporta edições de substrings dentro de uma única linha.
-- Tenta desescapar aspas `\"` se o modelo incluir escapes em excesso.
-- Permite ancorar o bloco a uma linha ou intervalo (`<<<<<<< SEARCH @42` ou `@42-50`).
-- Em caso de sucesso, detalha as tolerâncias aplicadas; em caso de falha, exibe a correspondência mais próxima marcando com `~` as linhas divergentes.
-
-## Instalação
-
-O início rápido remoto está [no topo deste documento](#mcp-remoto-em-60-segundos). Esta seção detalha a instalação e configurações para clientes locais via stdio.
-
-```bash
-cargo install winx-code-agent
-```
-
-No Linux/macOS/WSL2, isso instala os três binários juntos em `~/.cargo/bin`: `winx-code-agent`, `winxd` e `winx-guardian`. Mantenha os três no mesmo diretório.
-
-Requisitos: Rust 1.88+, bash e um terminal real. O runtime de daemon durável é suportado em Linux/macOS/WSL2. O Windows nativo utiliza o runtime embutido (embedded).
-
-<details>
-<summary><b>Claude Code (CLI)</b></summary>
-
-Via linha de comando:
-
-```bash
-claude mcp add winx -- winx-code-agent
-```
-
-Ou adicione um `.mcp.json` na raiz do projeto:
-
-```json
-{
-  "mcpServers": {
-    "winx": {
-      "command": "winx-code-agent",
-      "env": { "RUST_LOG": "winx_code_agent=info" }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Claude Desktop</b></summary>
-
-Adicione ao arquivo de configuração (`~/Library/Application Support/Claude/claude_desktop_config.json` no macOS, `%APPDATA%\Claude\claude_desktop_config.json` no Windows):
-
-```json
-{
-  "mcpServers": {
-    "winx": {
-      "command": "winx-code-agent",
-      "env": { "RUST_LOG": "winx_code_agent=info" }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Codex (CLI OpenAI)</b></summary>
-
-Comando direto:
-
-```bash
-codex mcp add winx -- winx-code-agent
-```
-
-Ou edite `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.winx]
-command = "winx-code-agent"
-env = { RUST_LOG = "winx_code_agent=info" }
-```
-</details>
-
-<details>
-<summary><b>Cursor</b></summary>
-
-Adicione a `~/.cursor/mcp.json` (ou `.cursor/mcp.json` no projeto):
-
-```json
-{
-  "mcpServers": {
-    "winx": {
-      "command": "winx-code-agent",
-      "env": { "RUST_LOG": "winx_code_agent=info" }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>VS Code (Copilot Chat / MCP)</b></summary>
-
-Adicione a `.vscode/mcp.json`:
-
-```json
-{
-  "servers": {
-    "winx": {
-      "type": "stdio",
-      "command": "winx-code-agent"
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Zed</b></summary>
-
-Adicione às configurações do Zed (`~/.config/zed/settings.json`):
-
-```json
-{
-  "context_servers": {
-    "winx": {
-      "source": "custom",
-      "command": "winx-code-agent",
-      "args": [],
-      "env": { "RUST_LOG": "winx_code_agent=info" }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Windsurf</b></summary>
-
-Adicione a `~/.codeium/windsurf/mcp_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "winx": {
-      "command": "winx-code-agent",
-      "env": { "RUST_LOG": "winx_code_agent=info" }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>OpenCode</b></summary>
-
-Adicione a `opencode.json`:
-
-```json
-{
-  "mcp": {
-    "winx": {
-      "type": "local",
-      "command": ["winx-code-agent"],
-      "enabled": true,
-      "environment": { "RUST_LOG": "winx_code_agent=info" }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Gemini CLI</b></summary>
-
-Adicione a `~/.gemini/settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "winx": {
-      "command": "winx-code-agent",
-      "args": [],
-      "env": { "RUST_LOG": "winx_code_agent=info" }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>agy (Google Antigravity CLI)</b></summary>
-
-Edite `~/.gemini/config/mcp_config.json` (ou `~/.gemini/antigravity/mcp_config.json`):
-
-```json
-{
-  "mcpServers": {
-    "winx": {
-      "command": "winx-code-agent",
-      "env": { "RUST_LOG": "winx_code_agent=info" }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Continue.dev</b></summary>
-
-Adicione ao `~/.continue/config.yaml`:
-
-```yaml
-mcpServers:
-  - name: winx
-    command: winx-code-agent
-    env:
-      RUST_LOG: winx_code_agent=info
-```
-</details>
-
-<details>
-<summary><b>Kiro</b></summary>
-
-Adicione a `~/.kiro/settings/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "winx": {
-      "command": "winx-code-agent",
-      "env": { "RUST_LOG": "winx_code_agent=info" }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Warp</b></summary>
-
-**Settings → MCP Servers → Add MCP Server**:
-
-```json
-{
-  "winx": {
-    "command": "winx-code-agent",
-    "env": { "RUST_LOG": "winx_code_agent=info" }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Roo Code</b></summary>
-
-Adicione à configuração MCP do Roo Code:
-
-```json
-{
-  "mcpServers": {
-    "winx": {
-      "type": "stdio",
-      "command": "winx-code-agent"
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Compilação a partir do código-fonte</b></summary>
-
-```bash
-git clone https://github.com/gabrielmaialva33/winx-code-agent.git
-cd winx-code-agent
-cargo install --path .
-```
-
-Ou compile o pacote Unix completo sem instalar:
-
-```bash
-cargo build --release --locked --bins
-./target/release/winx-code-agent
-```
-
-Para desenvolvimento rápido in-process (ignorando `winxd` e `winx-guardian`):
-
-```bash
-WINX_EMBEDDED=1 cargo run --release
-```
-</details>
-
-## Ciclo de vida de sessões duráveis (Unix)
-
-O runtime com daemon limita guardians ativos a 32 por padrão e usa retenção em camadas: um shell que nunca executou um comando expira após 30 minutos; um shell utilizado expira após 24 horas. Comandos em execução ativa nunca são descartados.
-
-```bash
-# Inspecionar e conectar a uma sessão
-winx-code-agent list
-winx-code-agent attach <thread_id> --follow
-
-# Limpeza explícita
-winx-code-agent kill <thread_id>
-winx-code-agent kill --all
-
-# Aplicar a limpeza padrão (30 min não usados / 24 h usados)
-winx-code-agent prune
-
-# Forçar limpeza de todas as sessões inativas (preserva comandos ativos)
-winx-code-agent prune --idle-seconds 0
-
-# Recarregar winxd após alterar variáveis de ambiente (guardians permanecem vivos)
-winx-code-agent restart-daemon
-
-# Relatório de diagnóstico e ambiente
-winx-code-agent doctor
-
-# Agregar telemetria sem modificar os logs e auditar invariantes de recuperação
-winx-code-agent report --last 10000 --since-minutes 120
-```
-
-## Implantação Streamable HTTP
-
-Streamable HTTP é a interface primária do Winx para ChatGPT, agentes na nuvem e automações remotas. O endpoint é sempre `/mcp` e o listener padrão é `127.0.0.1:8000`.
-
-Por padrão, utiliza-se `--session-affinity workspace`: a chave de sessão interna é `(principal, workspace canônico)`, portanto reconexões com IDs cosméticos diferentes compartilham o mesmo guardian e PTY. Para conversas paralelas separadas no mesmo repositório, utilize `--session-affinity conversation`.
-
-> [!TIP]
-> O guia completo cobre cabeçalhos, configuração multi-principal, túneis privados, limites operacionais, códigos de status e modelo de segurança:
-> **[docs/streamable-http.pt.md](docs/streamable-http.pt.md)**.
-
-### Perfis de implantação
-
-| Perfil | Modelo de Credenciais | Exposição Recomendada |
-| :--- | :--- | :--- |
-| Agente remoto pessoal | Arquivo `--token-file` com `chmod 600` | Loopback + túnel privado ou VPN |
-| Múltiplos clientes ou automações | `--principal-config` com um token por cliente | Loopback + proxy HTTPS autenticado |
-| ChatGPT / Produtos OpenAI | Um principal dedicado por app | [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) ou proxy HTTPS |
-| IDE ou CLI Local | Sem servidor HTTP; use stdio | Processo local |
-
-### Configuração multi-principal
-
-```toml
-# ~/.config/winx-principals.toml
-[[principals]]
-name = "chatgpt"
-token_file = "/home/alice/.config/winx-chatgpt-token"
-
-[[principals]]
-name = "automacao"
-token_env = "WINX_AUTOMATION_TOKEN"
-```
-
-```bash
-chmod 600 ~/.config/winx-principals.toml ~/.config/winx-chatgpt-token
-winx-code-agent serve --http \
-  --principal-config ~/.config/winx-principals.toml
-```
-
-### Padrões HTTP
-
-| Controle | Padrão |
-| :--- | :--- |
-| Endereço de Bind | `127.0.0.1:8000`; endereços externos exigem `--allow-non-loopback` |
-| Autenticação | `Authorization: Bearer <token>` |
-| Tamanho mínimo do token | 32 bytes (exceto com `--allow-weak-token`) |
-| Limite de corpo da requisição | 16 MiB |
-| Timeout de requisição | 120 segundos |
-| Concorrência global | 32 requisições |
-| Limite de falhas de autenticação | 120 tentativas/minuto por IP de origem |
-| Atraso em autenticação inválida | 100 ms |
-
-> [!WARNING]
-> Um principal autenticado no Winx possui privilégios de execução de shell e modificação de arquivos como o usuário do sistema operacional. Mantenha o serviço em loopback, use VPNs/túneis seguros e restrinja as permissões via modos `architect` ou `code_writer` quando apropriado.
-
-## Variáveis de ambiente
-
-Todas são opcionais. Variáveis booleanas aceitam `1/true/yes/on` e `0/false/no/off`.
-
-| Variável | Efeito |
-| :--- | :--- |
-| `RUST_LOG` | Verbosidade dos logs, ex: `winx_code_agent=info`. |
-| `WINX_LOG_FORMAT` | Defina como `json` para logs operacionais JSONL no stderr; deixe ausente para formato legível. É separado do log de eventos de uso. |
-| `WINX_USAGE_LOG` | Caminho para gravação de eventos de uso em JSONL assíncrono. Enquanto definido, os eventos não são duplicados no stderr, salvo se `RUST_LOG` citar `winx::usage`. Shells de agente não herdam `WINX_USAGE_LOG*` nem `WINX_HTTP_TOKEN`. |
-| `WINX_HTTP_TOKEN` | Bearer token HTTP para modo single-principal quando argumentos CLI não são informados. |
-| `WINX_RUNTIME` | Seleção de runtime no Unix: `daemon` (padrão) ou `embedded`. |
-| `WINX_EMBEDDED` | Valor verdadeiro (`1`, `true`) força o runtime in-process. |
-| `WINX_MAX_GUARDIANS` | Limite de sessões simultâneas no daemon (padrão: `32`). |
-| `WINX_NO_COMPRESS` | Defina como `1` para desativar a compactação de linhas repetidas no shell. |
-| `WINX_NO_REDACT` | Defina como `1` para desativar o mascaramento automático de segredos. |
-| `WINX_ALLOW_PATHS` | Caminhos absolutos separados por `:` permitidos para ferramentas de arquivo fora do workspace. |
-| `WINX_SANDBOX` | Defina como `1` para ativar o sandbox Landlock no Linux (Linux 5.13+). |
-| `WINX_SHELL` | Defina como `zsh` para usar o zsh em vez do bash. |
-
-## Verificação de releases
-
-Cada release no GitHub contém o binário da plataforma, seu arquivo `.sha256`, o agregado `SHA256SUMS` e o SBOM CycloneDX JSON.
-
-```bash
-sha256sum --check winx-linux-amd64.tar.gz.sha256
-sha256sum --check SHA256SUMS
-```
-
-## Desenvolvimento e Testes
-
-```bash
-cargo fmt --all -- --check
-cargo check --all-features --locked
-cargo clippy --all-targets --all-features --locked -- -D warnings
-cargo test --all-features --locked
-cargo +1.88.0 check --all-features --locked
-cargo package --locked
-cargo bench --bench performance --locked --no-run
-cargo deny --all-features check
-cargo audit --deny warnings
-cargo +nightly fuzz build
-```
+|------------|-----------|
+| `Initialize` | Inicia o workspace, escolhe o modo e devolve o par inseparável `thread_id`/`workspace_root`. |
+| `BashCommand` | Executa comandos, acompanha os longos, envia teclas e controla TUIs. |
+| `ReadFiles` | Lê arquivos com números de linha, intervalos (`arquivo.rs:10-40`) ou definições (`arquivo.rs#simbolo`). |
+| `EditFiles` | Cria, altera ou desfaz um ou vários arquivos com `line_patch`, `search_replace`, `replace` ou `undo`. |
+| `CodeMap` | Navegação por sintaxe (`outline`, `references`) e, com Eulix, `callers`, `callees` e `impact`. |
+| `Execution` | Observa o histórico de comandos aceitos, com cursores e wait-any. |
+| `Agent` | Observa ou envia prompts a execuções nativas ou a agentes do Herdr. |
+| `ContextSave` | Salva a descrição da tarefa e os arquivos relevantes para retomar em outra sessão. |
+| `ReadImage` | Devolve imagens validadas como conteúdo MCP nativo. |
+
+Os perfis `terminal` (4 ferramentas), `read-only` (5), `coding` (7) e `full` (9, padrão) limitam o catálogo. Detalhes,
+schemas e regras de cada ferramenta estão em [MCP Tools](README.md#mcp-tools).
+
+## Referência técnica (em inglês)
+
+- [Instalação e configuração de clientes stdio](README.md#install)
+- [Edição com SEARCH/REPLACE](README.md#searchreplace-editing)
+- [Ciclo de vida de sessões duráveis](README.md#durable-session-lifecycle)
+- [Implantação Streamable HTTP](README.md#streamable-http-deployment) e o [guia completo](docs/streamable-http.md)
+  ([tradução](docs/streamable-http.pt.md), possivelmente defasada)
+- [Variáveis de ambiente](README.md#environment-variables)
+- [Verificação de releases](README.md#verifying-releases)
+- [Desenvolvimento e testes](README.md#hacking-on-it)
+- [Arquitetura e invariantes](docs/architecture.md) e [fluxos de agentes](docs/agent-workflows.md)
+
+## Escopo e princípios
+
+A Winx é um projeto de entusiasta construído em torno de problemas observados no uso real, não de uma lista de recursos.
+
+- **Integrar, não substituir.** A Winx complementa agentes de terminal, Herdr e Eulix em vez de reimplementá-los. As
+  integrações são opcionais e configuradas pelo operador.
+- **Evidência antes de recursos.** As mudanças vêm de atritos medidos em sessões reais (telemetria de uso sem dados
+  sensíveis e `winx-code-agent report`) e entram com testes de regressão.
+- **Uma superfície pequena e estável.** Nove ferramentas, perfis para reduzi-las e aliases de compatibilidade ocultos
+  em vez de renomeações que quebram clientes.
+- **Seguro por padrão.** Loopback, tokens fortes, redação e edições protegidas são o padrão; ampliar o acesso é uma
+  escolha explícita do operador.
+
+A Winx não é um agente, uma IDE, um multiplexador de terminal nem um indexador de código.
+
+## Uma nota sobre segurança
+
+A Winx suporta stdio local e Streamable HTTP remoto. Qualquer cliente conectado pode ler e editar arquivos e executar
+comandos com a capacidade concedida pelo modo selecionado: o mesmo alcance de dar um terminal ao cliente. O HTTP leva
+esse alcance além do limite do processo local; leia o [guia de implantação](docs/streamable-http.md) e o
+[SECURITY.md](SECURITY.md) antes de expô-lo. Para restringir: modo `architect` (sem escritas), `code_writer`
+(allowlist de comandos e globs de escrita) e `WINX_SANDBOX=1` (sandbox Landlock no Linux).
 
 ## Licença
 

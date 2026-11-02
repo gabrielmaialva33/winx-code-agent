@@ -2,9 +2,9 @@
   <img src=".github/assets/fairy.png" alt="Winx Logo" width="150" />
 
   # 🪄 Winx
-  ### *The High-Performance, Remote-First MCP Runtime for AI Coding Agents*
+  ### *Your environment. Any agent.*
 
-  **Durable PTY Sessions • Streamable HTTP • Guarded File Operations • Blazing Fast Rust 🦀**
+  **Persistent execution • Efficient context • Safe file operations • Session control & recovery**
 
   <p align="center">
     <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/language-Rust_2021-orange?style=flat&logo=rust" alt="Rust 2021" /></a>
@@ -16,11 +16,12 @@
   </p>
 
   <p align="center">
-    <em>"Give remote and local LLMs durable, authenticated hands on your development machine."</em>
+    <em>An MCP runtime that connects remote AI agents to the development environments they cannot reach on their own.</em>
   </p>
 
   <p align="center">
     <a href="#remote-mcp-in-60-seconds">⚡ <b>Quickstart</b></a> &nbsp;•&nbsp;
+    <a href="#where-winx-fits">🧭 <b>Where it fits</b></a> &nbsp;•&nbsp;
     <a href="#what-you-get">✨ <b>Features</b></a> &nbsp;•&nbsp;
     <a href="#remote-architecture">🏗️ <b>Architecture</b></a> &nbsp;•&nbsp;
     <a href="docs/streamable-http.md">🌐 <b>HTTP Guide</b></a> &nbsp;•&nbsp;
@@ -32,10 +33,15 @@
   </p>
 </div>
 
-Winx is a **remote-first MCP runtime** for agents that need a real shell, guarded file-editing primitives, repository-aware
-code navigation, and sessions that survive dropped connections. Its primary deployment path is a hardened
-**Streamable HTTP** endpoint for ChatGPT and other cloud or networked MCP clients; stdio remains fully supported for
-Claude Code, Codex CLI, Cursor, VS Code, and other local clients.
+Winx is an **MCP runtime that connects remote AI agents** (ChatGPT and other MCP clients) to local or remote
+development environments they cannot reach directly. It gives them persistent execution, context-efficient reads and
+command output, guarded file operations, and sessions that survive dropped connections. The primary deployment path is
+a hardened **Streamable HTTP** endpoint; stdio remains fully supported for local MCP clients.
+
+**Who it is for.** Winx is for the agent that is *not* already on your machine. If you work with Claude Code or Codex in
+your own terminal, keep using them directly: Winx does not replace them. It lets a remote agent work in that same
+environment, coordinate the agents running there, and use optional local tools, as described in
+[where Winx fits](#where-winx-fits).
 
 On Linux, macOS, and native Windows, Winx separates the MCP adapter from the processes that own each PTY. `winxd`
 manages the control plane and one `winx-guardian` per logical session keeps the shell alive across HTTP disconnects,
@@ -78,27 +84,58 @@ an OpenAI-hosted MCP endpoint.
 **Next:** [complete Streamable HTTP deployment guide](docs/streamable-http.md) ·
 [security model](SECURITY.md) · [local stdio setup](#install)
 
-## Why Winx for remote agents
+## Where Winx fits
+
+Winx integrates with the tools you already use instead of competing with them.
+
+| Tool | How it relates to Winx |
+|------|------------------------|
+| **Claude Code, Codex, and other terminal agents** | Local agents with their own tools. Use them directly in your terminal. Winx exposes the environment to agents that cannot run there, and can serve one environment to several MCP clients. |
+| **Herdr** | Terminal workspace manager for coding agents. The `Agent` tool's optional Herdr backend talks to Herdr's socket API, so a remote agent can list, read, wait for, and prompt the agents running in its workspace. Operator-configured. |
+| **[Eulix](https://github.com/Nurysso/eulix)** | Local code-intelligence engine. Optional backend for `CodeMap` `callers`, `callees`, and `impact` when the operator sets `WINX_EULIX_PARSER`. |
+| **[WCGW](https://github.com/rusiaaman/wcgw)** | Where Winx started: a Rust port of WCGW. Its modes and line-range syntax live on. |
+
+## What Winx gives remote agents
+
+### Persistent execution
 
 - **Durable sessions:** HTTP is stateless from the client's point of view, but PTYs live in per-session guardians and
   can be resumed with the same `thread_id`.
-- **Identity-aware isolation:** one token per principal; thread IDs and MCP Task IDs are scoped internally and translated
-  back before the response leaves the server. Workspace affinity absorbs unstable model-generated thread IDs.
-- **Right-sized tool catalogs:** `full`, `coding`, `read-only`, and `terminal` profiles—or an exact per-principal
-  allowlist—reduce discovery/schema payloads and reject calls without equivalent effective authority.
-- **One mutation tool:** `EditFiles` creates, edits, batches, patches, verifies, and undoes through one typed
-  plan/commit engine, removing overlapping choices while preserving read evidence, canonical path binding, atomic writes,
-  receipts, and recovery.
-- **Fail-closed network defaults:** loopback-only binding, 32-byte minimum tokens, chmod-600 token files, DNS-rebinding
-  host checks, body/time/concurrency limits, auth-first admission with per-IP failed-auth limiting, and delayed
-  invalid-auth responses.
 - **Agent-native terminal semantics:** foreground and background commands, status polling, interactive input, stable TUI
   snapshots, turn detection, real exit codes, and bounded output.
 - **Execution and agent workflows:** durable scoped history, non-consuming output pages, state explanations, wait-any,
-  and receipt-bound native prompts; an optional Herdr socket-API adapter binds explicitly configured targets. See the
-  [workflow guide](docs/agent-workflows.md).
+  and receipt-bound native prompts; an optional Herdr socket-API backend reaches operator-configured targets or
+  discovers the agents running inside the session's workspace. See the [workflow guide](docs/agent-workflows.md).
+
+### Efficient context
+
+- **Right-sized tool catalogs:** `full`, `coding`, `read-only`, and `terminal` profiles—or an exact per-principal
+  allowlist—reduce discovery/schema payloads and reject calls without equivalent effective authority.
+- **Bounded reads and output:** line ranges and `path#symbol` definition reads, rendered and losslessly collapsed
+  terminal output, and per-call read budgets with exact continuations. For ChatGPT and Codex clients, a finished command
+  whose output cites a few `path:line` locations (search hits, compiler errors, tracebacks) also carries those lines
+  with edit-ready revisions, saving a read round trip.
 - **Repository tools, not just a shell:** one guarded edit protocol, multi-file planning, undo, token-budgeted reads,
   image input, context handoff, and tree-sitter symbol navigation.
+
+### Safe file operations
+
+- **One mutation tool:** `EditFiles` creates, edits, batches, patches, verifies, and undoes through one typed
+  plan/commit engine, removing overlapping choices while preserving read evidence, canonical path binding, atomic writes,
+  receipts, and recovery.
+- **Guarded by default:** secret redaction on all tool output, `architect` (read-only) and `code_writer` (allowlisted)
+  modes, path policy enforced on every file tool, and an opt-in Landlock sandbox on Linux.
+
+### Session control and recovery
+
+- **Identity-aware isolation:** one token per principal; thread IDs and MCP Task IDs are scoped internally and translated
+  back before the response leaves the server. Workspace affinity absorbs unstable model-generated thread IDs.
+- **Fail-closed network defaults:** loopback-only binding, 32-byte minimum tokens, chmod-600 token files, DNS-rebinding
+  host checks, body/time/concurrency limits, auth-first admission with per-IP failed-auth limiting, and delayed
+  invalid-auth responses.
+- **Recoverable by design:** every result carries an authoritative `status` and, when Winx can infer one safely, a
+  concrete `nextAction`; persisted sessions are recovered after daemon or adapter restarts, and a shell that stops
+  answering is reset in place at the same working directory and mode.
 
 ## Choose your transport
 
@@ -906,6 +943,21 @@ Robustness is also fuzzed and model-checked:
   ```bash
   cargo test --features loom --lib loom_
   ```
+
+## Scope and principles
+
+Winx is an enthusiast project built around problems observed in real use, not a feature checklist.
+
+- **Integrate, don't replace.** Winx complements terminal agents, Herdr, and Eulix instead of reimplementing them.
+  Integrations are optional and configured by the operator.
+- **Evidence before features.** Changes come from friction measured in real sessions (privacy-safe usage telemetry and
+  `winx-code-agent report`) and land with regression tests.
+- **A small, stable surface.** Nine tools, profiles to trim them, and hidden compatibility aliases instead of breaking
+  renames.
+- **Safe by default.** Loopback binding, strong tokens, redaction, and guarded edits are defaults; widening access is an
+  explicit operator choice.
+
+Winx is not an agent, an IDE, a terminal multiplexer, or a code indexer.
 
 ## A note on security
 
